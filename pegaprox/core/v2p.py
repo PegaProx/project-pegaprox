@@ -162,18 +162,33 @@ class V2PMigrationTask:
 
     def log(self, msg):
         ts = datetime.now().strftime('%H:%M:%S')
-        self.log_lines.append(f"[{ts}] {msg}")
-        logging.info(f"[V2P:{self.id}] {msg}")
+        # Redact credentials from log messages before storing
+        redacted_msg = self._redact_credentials(msg)
+        self.log_lines.append(f"[{ts}] {redacted_msg}")
+        logging.info(f"[V2P:{self.id}] {redacted_msg}")
         # Stream log line via SSE (throttled -- batch every 1s)
         try:
             now = time.time()
             if not hasattr(self, '_last_sse_log') or now - self._last_sse_log > 1:
                 self._last_sse_log = now
                 broadcast_sse('vmware_migration_log', {
-                    'id': self.id, 'line': f"[{ts}] {msg}",
+                    'id': self.id, 'line': f"[{ts}] {redacted_msg}",
                     'progress': self.progress, 'phase': self.phase
                 })
         except: pass
+    
+    def _redact_credentials(self, text):
+        """Redact ESXi credentials from any text (URLs, config lines, etc.)"""
+        if not isinstance(text, str):
+            return text
+        # Redact HTTP(S) basic auth in URLs: https://user:pass@host -> https://[REDACTED]@host
+        text = re.sub(r'(https?://)[^:@\s]+:[^@\s]+@', r'\1[REDACTED]@', text)
+        # Redact password parameters in QEMU args
+        text = re.sub(r'file\.password=[^,\s]+', 'file.password=[REDACTED]', text)
+        # Redact sshpass password arguments
+        text = re.sub(r'sshpass\s+-p\s+[^\s]+', 'sshpass -p [REDACTED]', text)
+        text = re.sub(r'SSHPASS=[^\s]+', 'SSHPASS=[REDACTED]', text)
+        return text
     
     def _scrub_credentials(self):
         """Wipe sensitive fields from the task object once they're no longer
@@ -318,6 +333,8 @@ class V2PMigrationTask:
         self.log("=== Operator confirmed — proceeding with the switchover now. ===")
 
     def to_dict(self):
+        # Redact credentials from log lines before exposing via API
+        redacted_logs = [self._redact_credentials(line) for line in self.log_lines[-20:]]
         return {
             'id': self.id, 'vmware_id': self.vmware_id, 'vm_id': self.vm_id,
             'vm_name': self.vm_name, 'target_cluster': self.target_cluster,
@@ -332,13 +349,14 @@ class V2PMigrationTask:
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'disk_progress': self.disk_progress, 'phase_times': self.phase_times,
             'total_downtime_seconds': self.total_downtime_seconds,
-            'log': self.log_lines[-20:],  # Last 20 log lines
+            'log': redacted_logs,  # Last 20 log lines (credentials redacted)
             'config': {
                 'network_bridge': self.network_bridge,
                 'start_after': self.start_after,
                 'remove_source': self.remove_source,
                 'esxi_host': self.esxi_host,
                 'esxi_datastore': self.esxi_datastore,
+                # Never expose esxi_password in API responses
             },
         }
 
@@ -4566,13 +4584,16 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         f"echo 'args: {escaped_args}' >> {conf_path}", timeout=5)
     # No boot: line needed -- args: -device bootindex=0 controls boot order
     
-    # Log config
+    # Log config (redact credentials from args line)
     rc_cf, out_cf, _ = _pve_node_exec(pve_mgr, task.target_node,
         f"cat {conf_path} 2>&1", timeout=5)
     task.log(f"VM config ({len(str(out_cf or '').split(chr(10)))} lines):")
     for line in str(out_cf or '').strip().split('\n'):
         if 'args:' in line:
-            task.log(f"  {line[:120]}...")
+            # Redact any credentials from the args line before logging
+            redacted = re.sub(r'(https?://)[^:@]+:[^@]+@', r'\1[REDACTED]@', line)
+            redacted = re.sub(r'file\.password=[^,\s]+', 'file.password=[REDACTED]', redacted)
+            task.log(f"  {redacted[:120]}...")
         elif line.strip() and not line.startswith('#'):
             task.log(f"  {line.strip()}")
     
@@ -4961,6 +4982,22 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     vm_running_on_ssh = True
                     task.log(f"VM {task.proxmox_vmid} STARTED via {boot_method} - DOWNTIME ENDS")
                     task.log(f"(Running on {boot_method}-backed storage with writeback cache)")
+                    
+                    # Security: For HTTPS boot, remove credentials from config immediately after VM starts
+                    # QEMU has already read the config into memory, so removing the args line from the
+                    # file won't affect the running VM, but prevents credential exposure in the config file
+                    if boot_method == "https":
+                        try:
+                            # Read current config to preserve non-args lines
+                            rc_read, out_read, _ = _pve_node_exec(pve_mgr, task.target_node,
+                                f"grep '^args:' {conf_path} 2>/dev/null", timeout=5)
+                            if rc_read == 0 and out_read:
+                                # Args line exists and contains credentials - remove it
+                                _pve_node_exec(pve_mgr, task.target_node,
+                                    f"sed -i '/^args:/d' {conf_path}", timeout=5)
+                                task.log("Removed credential-bearing args from config (VM running in memory)")
+                        except Exception as e:
+                            task.log(f"Warning: Could not remove args line: {e}")
                 else:
                     task.log(f"VM failed to stay running (status: {vm_st})")
                     # Check QEMU logs for the reason -- multiple sources
@@ -6111,7 +6148,13 @@ exit $((S + R))
     for cline in cfg_text.split('\n'):
         cs = cline.strip()
         if cs and not cs.startswith('#'):
-            task.log(f"    {cs[:120]}")
+            # Redact credentials from args lines before logging
+            if 'args:' in cs:
+                cs_redacted = re.sub(r'(https?://)[^:@]+:[^@]+@', r'\1[REDACTED]@', cs)
+                cs_redacted = re.sub(r'file\.password=[^,\s]+', 'file.password=[REDACTED]', cs_redacted)
+                task.log(f"    {cs_redacted[:120]}")
+            else:
+                task.log(f"    {cs[:120]}")
     
     # Cleanup
     # Kill NBD bridge processes
