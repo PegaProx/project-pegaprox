@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -9631,8 +9631,11 @@ def _cluster_checks(st, layout):
         from pegaprox.globals import cluster_managers
         todo = [(str(cid), mgr) for cid, mgr in sorted(list(cluster_managers.items()), key=lambda x: str(x[0]))
                 if getattr(mgr, 'ha_enabled', False) is True]
-    except Exception:
-        return [], []
+    except Exception as e:
+        logging.warning(f"[HA] split safety: cluster manager enumeration failed: {e}")
+        return [], [_finding('CLUSTER_CHECK_FAILED', 'block',
+                            'Cluster manager enumeration failed: automatic failover cannot be enabled '
+                            'until cluster safety can be verified.')]
     if not todo:
         return [], []
     rt, now, me = _rt(), time.monotonic(), st['instance_id']
@@ -9650,7 +9653,11 @@ def _cluster_checks(st, layout):
         try:
             row, said = _cluster_row(st, cid, mgr, layout, reach_of, url_ids)
         except Exception as e:
-            logging.debug(f"[HA] split safety: cluster {cid}: {e}")
+            logging.warning(f"[HA] split safety: cluster {cid}: {e}")
+            name = getattr(mgr, 'name', None) or str(cid)
+            found.append(dict(_finding('CLUSTER_CHECK_FAILED', 'block',
+                                      f'Cluster {name} safety inspection failed: automatic failover '
+                                      'cannot be enabled until this cluster can be verified.'), cluster=cid))
             continue
         rows.append(row)
         found += said

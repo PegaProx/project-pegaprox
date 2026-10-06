@@ -11499,7 +11499,7 @@
             ['zone', ['ZONE_UNREADABLE', 'NO_GROUP_ZONE', 'TZ_MISMATCH']],
             ['sites', ['NO_SITE_LABELS', 'ALL_ONE_SITE', 'SITE_HOLDS_MAJORITY', 'TWO_SITES_NO_THIRD_VOTE',
                        'CANDIDATES_ONE_SITE', 'NO_CANDIDATE']],
-            ['clusters', ['CLUSTER_ONE_SITE', 'RECOVERY_NOT_READY', 'TWO_NODE_NO_FENCE', 'NO_CLAIM', 'FOREIGN_CLAIM']],
+            ['clusters', ['CLUSTER_CHECK_FAILED', 'CLUSTER_ONE_SITE', 'RECOVERY_NOT_READY', 'TWO_NODE_NO_FENCE', 'NO_CLAIM', 'FOREIGN_CLAIM']],
         ];
         const HA_AUTO_CHECK_LABEL = {
             votes: 'haAutoCheckVotes', release: 'haAutoCheckRelease', answer: 'haAutoCheckAnswer',
