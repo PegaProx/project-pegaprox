@@ -2454,3 +2454,96 @@ def _run_esxi_to_xcpng(task):
         task.set_phase('failed', f'Migration error: {e}')
 
 
+
+def _xcpng_attach_vdi(xapi, vm_ref, vdi_ref, device, bootable):
+    """Attach a VDI to an XCP-ng VM as a VBD."""
+    vbd_rec = {
+        'VM': vm_ref,
+        'VDI': vdi_ref,
+        'userdevice': str(device),
+        'bootable': bool(bootable),
+        'mode': 'RW',
+        'type': 'Disk',
+        'empty': False,
+        'other_config': {},
+        'qos_algorithm_type': '',
+        'qos_algorithm_params': {},
+    }
+    xapi.VBD.create(vbd_rec)
+
+
+def _is_management_network_xhm(xapi, net_ref):
+    """Check if a network is a management network (XHM helper).
+    
+    Security: Management networks are protected infrastructure segments that should not be
+    accessible to tenant VMs. Returns True if any PIF attached to this network has the
+    management flag set.
+    """
+    try:
+        pifs = xapi.network.get_PIFs(net_ref)
+        for pif_ref in pifs:
+            try:
+                if xapi.PIF.get_management(pif_ref):
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        # Fail closed: if we cannot determine management status, block the attachment
+        logger.warning(f"Could not determine management status for network {net_ref}, blocking attachment")
+        return True
+
+
+def _xcpng_attach_network(xapi, vm_ref, net_ref):
+    """Attach a network to an XCP-ng VM as a VIF.
+    
+    Security: Validates that the target network is not a management network before
+    creating the VIF. Management networks are infrastructure segments that must not
+    be accessible to tenant VMs. During migration, we select the first non-management
+    network available.
+    """
+    # Security: Block attachment to management networks
+    if _is_management_network_xhm(xapi, net_ref):
+        logger.warning(f"Skipping management network during migration, searching for non-management network")
+        # Try to find a non-management network
+        all_nets = xapi.network.get_all()
+        for candidate_ref in all_nets:
+            try:
+                rec = xapi.network.get_record(candidate_ref)
+                # Skip internal xapi networks
+                if rec.get('name_label', '').startswith('xapi'):
+                    continue
+                # Check if it's not a management network
+                if not _is_management_network_xhm(xapi, candidate_ref):
+                    net_ref = candidate_ref
+                    logger.info(f"Selected non-management network: {rec.get('name_label', 'unknown')}")
+                    break
+            except Exception:
+                continue
+        else:
+            # No non-management network found, skip network attachment
+            logger.warning("No non-management network available, VM will be created without network")
+            return
+    
+    # Find next available device index
+    existing_vifs = xapi.VM.get_VIFs(vm_ref)
+    used_devices = set()
+    for vif_ref in existing_vifs:
+        try:
+            used_devices.add(int(xapi.VIF.get_device(vif_ref)))
+        except Exception:
+            pass
+    device = str(next((i for i in range(10) if i not in used_devices), 0))
+    
+    vif_rec = {
+        'VM': vm_ref,
+        'network': net_ref,
+        'device': device,
+        'MTU': '1500',
+        'MAC': '',  # auto-generate
+        'other_config': {},
+        'qos_algorithm_type': '',
+        'qos_algorithm_params': {},
+    }
+    xapi.VIF.create(vif_rec)
+

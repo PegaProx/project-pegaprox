@@ -1398,8 +1398,34 @@ class XcpngManager:
                 # LW: non-fatal, disk stays on original SR
                 self.logger.warning(f"Failed to move VDI to target SR: {e}")
 
+    def _is_management_network(self, api, net_ref):
+        """Check if a network is a management network by examining its PIFs.
+        
+        Management networks are protected infrastructure segments that should not be
+        accessible to tenant VMs. Returns True if any PIF attached to this network
+        has the management flag set.
+        """
+        try:
+            pifs = api.network.get_PIFs(net_ref)
+            for pif_ref in pifs:
+                try:
+                    if api.PIF.get_management(pif_ref):
+                        return True
+                except Exception:
+                    continue
+            return False
+        except Exception:
+            # Fail closed: if we cannot determine management status, block the attachment
+            self.logger.warning(f"Could not determine management status for network {net_ref}, blocking attachment")
+            return True
+
     def _attach_network(self, api, vm_ref, net_ident):
-        """Attach a VIF to the VM for the specified network."""
+        """Attach a VIF to the VM for the specified network.
+        
+        Security: Validates that the target network is not a management network before
+        creating the VIF. Management networks are infrastructure segments that must not
+        be accessible to tenant VMs.
+        """
         net_ref = None
         try:
             net_ref = api.network.get_by_uuid(net_ident)
@@ -1414,6 +1440,11 @@ class XcpngManager:
         if not net_ref:
             self.logger.warning(f"Network {net_ident} not found, skipping VIF attach")
             return
+
+        # Security: Block attachment to management networks
+        if self._is_management_network(api, net_ref):
+            self.logger.warning(f"Blocked VIF attachment to management network {net_ident}")
+            raise ValueError(f"Cannot attach to management network {net_ident}")
 
         # find next available device index
         existing_vifs = api.VM.get_VIFs(vm_ref)
@@ -2194,7 +2225,12 @@ class XcpngManager:
     # ──────────────────────────────────────────
 
     def add_network(self, node, vmid, vm_type='qemu', net_config=None):
-        """Create a VIF and attach to VM."""
+        """Create a VIF and attach to VM.
+        
+        Security: Validates that the target network is not a management network before
+        creating the VIF. Management networks are infrastructure segments that must not
+        be accessible to tenant VMs.
+        """
         if not net_config:
             return {'success': False, 'error': 'No network config'}
         api = self._api()
@@ -2211,6 +2247,11 @@ class XcpngManager:
             net_ref = self._find_network(api, net_ident)
             if not net_ref:
                 return {'success': False, 'error': f'Network {net_ident} not found'}
+
+            # Security: Block attachment to management networks
+            if self._is_management_network(api, net_ref):
+                self.logger.warning(f"Blocked VIF attachment to management network {net_ident} for VM {vmid}")
+                return {'success': False, 'error': f'Cannot attach to management network {net_ident}'}
 
             # next free VIF device
             existing = api.VM.get_VIFs(ref)
@@ -2253,7 +2294,12 @@ class XcpngManager:
             return {'success': False, 'error': str(e)}
 
     def update_network(self, node, vmid, vm_type='qemu', net_id=None, net_config=None):
-        """Update VIF config. XAPI VIFs are immutable - must destroy and recreate."""
+        """Update VIF config. XAPI VIFs are immutable - must destroy and recreate.
+        
+        Security: When changing the network, validates that the new target network is not
+        a management network. Management networks are infrastructure segments that must not
+        be accessible to tenant VMs.
+        """
         if not net_config:
             return {'success': True, 'message': 'Nothing to update'}
         api = self._api()
@@ -2281,6 +2327,10 @@ class XcpngManager:
                 ident = net_config.get('bridge') or net_config['network']
                 found = self._find_network(api, ident)
                 if found:
+                    # Security: Block switching to management networks
+                    if self._is_management_network(api, found):
+                        self.logger.warning(f"Blocked VIF update to management network {ident} for VM {vmid}")
+                        return {'success': False, 'error': f'Cannot switch to management network {ident}'}
                     new_net = found
 
             if power == 'Running':
