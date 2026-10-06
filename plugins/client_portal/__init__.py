@@ -974,34 +974,35 @@ def _destroy_guest():
     if not mgr or not mgr.is_connected:
         return {'error': 'Cluster is currently unavailable'}, 503
 
+    # SECURITY: Delete the VM ACL BEFORE deleting the provider guest. VMIDs are recycled
+    # (Proxmox allocates the lowest free one), so a stale ACL row keyed by (cluster_id, vmid)
+    # would authorize the old user against a replacement guest that lands on the same numeric
+    # VMID, potentially crossing tenant boundaries. Fail closed: if ACL cleanup fails, refuse
+    # the deletion entirely so the VMID cannot be recycled with a lingering grant.
+    try:
+        from pegaprox.core.db import get_db
+        get_db().delete_vm_acl(cluster_id, vmid_int)
+        # Invalidate cache unconditionally - even if the row didn't exist (rowcount=0), the
+        # cached snapshot may still hold it from a previous read. The 30s TTL means a failed
+        # invalidation leaves the grant reachable until expiry.
+        from pegaprox.utils.rbac import invalidate_vm_acls_cache
+        invalidate_vm_acls_cache()
+    except Exception as e:
+        logging.error(f'[client_portal] Cannot destroy {vm_type} {vmid_int}: VM ACL cleanup '
+                      f'failed ({e}). Refusing deletion to prevent recycled-VMID authorization bypass.')
+        try:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.acl_cleanup_blocked',
+                      f'Blocked teardown of {vm_type} {vmid_int} on {cluster_id}/{node} '
+                      f'because ACL cleanup failed ({e}) - security precaution')
+        except Exception:
+            pass
+        return {'error': 'Pre-deletion ACL cleanup failed - VM not deleted to prevent '
+                         'security issue. Contact administrator.'}, 500
+
     res = mgr.delete_vm(node, vmid_int, vm_type, purge=True, destroy_unreferenced=True)
     if not res.get('success'):
         return {'error': res.get('error', 'Teardown failed')}, 500
-
-    # drop the stale VM-ACL row so a recycled VMID doesn't inherit this grant.
-    try:
-        from pegaprox.core.db import get_db
-        if get_db().delete_vm_acl(cluster_id, vmid_int):
-            # MK Sep 2026 - the row went but the cached snapshot did not: load_vm_acls
-            # keeps a 30s TTL copy and every write path is supposed to invalidate it, so
-            # until this the grant outlived the row it was read from.
-            from pegaprox.utils.rbac import invalidate_vm_acls_cache
-            invalidate_vm_acls_cache()
-    except Exception as e:
-        # ACL cleanup failed AFTER the guest was already purged (irreversible). A
-        # lingering vm_acls row would grant the old owner access if PVE recycles this
-        # VMID for a different guest (BOLA-adjacent) — so log LOUD (error) + audit it
-        # so ops can remove the stale row manually. (CodeAnt review 2026-07-11.)
-        logging.error(f'[client_portal] destroyed {vm_type} {vmid_int} on {cluster_id} but '
-                      f'VM-ACL cleanup FAILED: {e} — remove the stale vm_acls row manually '
-                      f'to avoid a recycled-VMID access grant')
-        try:
-            from pegaprox.utils.audit import log_audit
-            log_audit(username, 'portal.acl_cleanup_failed',
-                      f'ORPHANED VM-ACL after teardown of {vm_type} {vmid_int} on '
-                      f'{cluster_id}/{node} — manual cleanup required ({e})')
-        except Exception:
-            pass
 
     from pegaprox.utils.audit import log_audit
     log_audit(username, 'portal.guest_destroyed',

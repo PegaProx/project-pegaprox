@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12220,27 +12220,29 @@ def delete_vm_api(cluster_id, node, vm_type, vmid):
     purge = data.get('purge', False)
     destroy_unreferenced = data.get('destroyUnreferenced', False)
     
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    
+    # SECURITY: Delete the VM ACL BEFORE deleting the provider guest. VMIDs are recycled
+    # (Proxmox allocates the lowest free one), so a stale ACL row keyed by (cluster_id, vmid)
+    # would authorize the old user against a replacement guest that lands on the same numeric
+    # VMID, potentially crossing tenant boundaries. Fail closed: if ACL cleanup fails, refuse
+    # the deletion entirely so the VMID cannot be recycled with a lingering grant.
+    try:
+        get_db().delete_vm_acl(cluster_id, vmid)
+        # Invalidate cache unconditionally - even if the row didn't exist (rowcount=0), the
+        # cached snapshot may still hold it from a previous read. The 30s TTL means a failed
+        # invalidation leaves the grant reachable until expiry.
+        from pegaprox.utils.rbac import invalidate_vm_acls_cache
+        invalidate_vm_acls_cache()
+    except Exception as e:
+        logging.error(f"Cannot delete {vm_type.upper()} {vmid}: VM ACL cleanup failed ({e}). "
+                      f"Refusing deletion to prevent recycled-VMID authorization bypass.")
+        return jsonify({'error': f'Pre-deletion ACL cleanup failed - VM not deleted to prevent '
+                                 f'security issue. Contact administrator.'}), 500
+    
     result = manager.delete_vm(node, vmid, vm_type, purge, destroy_unreferenced)
     
     if result.get('success'):
-        usr = getattr(request, 'session', {}).get('user', 'system')
-        # MK Sep 2026 - drop the per-VM ACL with the VM. The row is keyed by the NUMERIC
-        # vmid, and Proxmox hands out the lowest free one, so a recycled id is the normal
-        # case rather than a corner: leave the grant behind and the next guest to land on
-        # this number is reachable by the previous one's users, across tenants. The portal's
-        # own teardown route has done this since #556 for exactly this reason; the main
-        # delete path, which is where almost every VM actually goes, never did.
-        # Only on success, so a refused delete does not strip a live VM's grants.
-        try:
-            if get_db().delete_vm_acl(cluster_id, vmid):
-                # the ACL snapshot is cached behind a 30s TTL and every write path is
-                # expected to invalidate it - without this the grant outlives the row
-                from pegaprox.utils.rbac import invalidate_vm_acls_cache
-                invalidate_vm_acls_cache()
-        except Exception as e:
-            logging.error(f"{vm_type.upper()} {vmid} deleted but its VM ACL was NOT removed: {e} "
-                          f"- remove the stale vm_acls row by hand, a recycled VMID would "
-                          f"inherit the grant")
         log_audit(usr, 'vm.deleted', f"{vm_type.upper()} {vmid} deleted from {node}" + (" (purged)" if purge else ""), cluster=manager.config.name)
         broadcast_action('delete', vm_type, str(vmid), {'node': node, 'purge': purge}, cluster_id, usr)
         

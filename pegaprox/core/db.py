@@ -4410,17 +4410,16 @@ class PegaProxDB:
     def delete_vm_acl(self, cluster_id: str, vmid: int) -> bool:
         """Delete a VM ACL entry from the database
         
+        Returns True if a row was deleted, False if no row existed.
+        Raises an exception if the database operation fails.
+        
         NS: This was missing! save_all_vm_acls only adds/updates, never deletes.
         """
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute('DELETE FROM vm_acls WHERE cluster_id = ? AND vmid = ?',
-                          (cluster_id, str(vmid)))
-            self.conn.commit()
-            return cursor.rowcount > 0
-        except Exception as e:
-            logging.error(f"Failed to delete VM ACL: {e}")
-            return False
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM vm_acls WHERE cluster_id = ? AND vmid = ?',
+                      (cluster_id, str(vmid)))
+        self.conn.commit()
+        return cursor.rowcount > 0
     
     # ========================================
     # POOL PERMISSIONS - MK Jan 2026
