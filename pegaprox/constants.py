@@ -142,11 +142,20 @@ def _migrate_to_config():
                 except Exception:
                     pass
         # login background: images/login_bg.<ext> → config/branding/login_bg.<ext>
-        for ext in ('.png', '.jpg', '.jpeg', '.webp', '.svg'):
+        # SVG excluded: stored XSS risk when served under application origin.
+        for ext in ('.png', '.jpg', '.jpeg', '.webp'):
             src = os.path.join('images', 'login_bg' + ext)
             dst = os.path.join(BRANDING_DIR, 'login_bg' + ext)
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.copy2(src, dst)
+        # Remove any legacy SVG login backgrounds from both locations
+        for location in ('images', BRANDING_DIR):
+            svg_path = os.path.join(location, 'login_bg.svg')
+            if os.path.exists(svg_path):
+                try:
+                    os.unlink(svg_path)
+                except Exception:
+                    pass
     except Exception:
         # never let migration kill the import — log-only at app boot would be
         # nicer but constants.py runs pre-logging setup.

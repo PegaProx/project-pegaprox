@@ -8001,7 +8001,7 @@
 
                                         <input
                                             type="file"
-                                            accept=".png,.jpg,.jpeg,.webp,.svg"
+                                            accept=".png,.jpg,.jpeg,.webp"
                                             onChange={e => {
                                                 const file = e.target.files[0];
                                                 if (file && file.size > 2 * 1024 * 1024) {

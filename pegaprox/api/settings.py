@@ -1311,9 +1311,22 @@ def serve_images(filename):
     send_from_directory.
     """
     if filename.startswith('login_bg.'):
+        # Defense-in-depth: block SVG login backgrounds even if one exists from
+        # a previous version. SVG can execute script when navigated to directly,
+        # creating a stored XSS vector under the application origin.
+        if filename.lower().endswith('.svg'):
+            logging.warning(f"Blocked attempt to serve SVG login background: {_sl(filename)} from {request.remote_addr}")
+            return jsonify({'error': 'SVG login backgrounds are not supported'}), 403
         branding_path = os.path.join(BRANDING_DIR, filename)
         if os.path.exists(branding_path):
-            return send_from_directory(BRANDING_DIR, filename)
+            # Force Content-Disposition: inline to prevent browsers from executing
+            # the image as a document when navigated to directly. Combined with
+            # X-Content-Type-Options: nosniff, this ensures the file is treated
+            # strictly as an image resource, not as executable content.
+            resp = send_from_directory(BRANDING_DIR, filename)
+            resp.headers['X-Content-Type-Options'] = 'nosniff'
+            resp.headers['Content-Disposition'] = 'inline'
+            return resp
     # sponsor logos are redundant — self-heal a missing one from mirror/GitHub
     if filename.startswith('sponsors/') and not os.path.exists(os.path.join(IMAGES_DIR, filename)):
         _content, _ctype = _get_healed_sponsor(filename)
@@ -1322,8 +1335,11 @@ def serve_images(filename):
         if _content is not None and not os.path.exists(os.path.join(IMAGES_DIR, filename)):
             resp = Response(_content, mimetype=_ctype)
             resp.headers['Cache-Control'] = 'public, max-age=86400'
+            resp.headers['X-Content-Type-Options'] = 'nosniff'
             return resp
-    return send_from_directory(IMAGES_DIR, filename)
+    resp = send_from_directory(IMAGES_DIR, filename)
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    return resp
 
 
 # MK May 2026 — bundled offline assets (currently only the world-countries SVG
@@ -1941,11 +1957,14 @@ def update_server_settings():
                     if len(bg_content) > 2 * 1024 * 1024:
                         return jsonify({'error': 'Login background too large (max 2MB)'}), 400
                     ext = os.path.splitext(bg_file.filename)[1].lower()
-                    if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.svg'):
+                    # SVG excluded: stored XSS risk when served under application origin
+                    # with CSP allowing 'unsafe-inline'. Raster formats are sufficient
+                    # for login backgrounds and cannot execute script.
+                    if ext not in ('.png', '.jpg', '.jpeg', '.webp'):
                         return jsonify({'error': 'Invalid image format'}), 400
                     # NS: validate magic bytes to prevent disguised executables
                     _magic = {'.png': b'\x89PNG', '.jpg': b'\xff\xd8\xff', '.jpeg': b'\xff\xd8\xff', '.webp': b'RIFF'}
-                    if ext in _magic and not bg_content[:4].startswith(_magic[ext]):
+                    if not bg_content[:4].startswith(_magic[ext]):
                         return jsonify({'error': 'File content does not match extension'}), 400
                     from pathlib import Path as _Path
                     _Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
@@ -2234,7 +2253,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2441,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
