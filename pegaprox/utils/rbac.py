@@ -306,47 +306,22 @@ _AMBIGUOUS_ROLE_TENANT = '\x00ambiguous'
 
 
 def _tenant_defining_role(role: str, tenant_id: str) -> str:
-    """The tenant whose custom-role table defines `role`, or `tenant_id` unchanged.
+    """Return the tenant_id unchanged - no cross-namespace remapping.
 
-    A user — or an API token — can sit in the default tenant while carrying a tenant-scoped
-    custom role; get_user_clusters has remapped for that since Dec 2025. get_user_permissions
-    never did, so the role resolved to nothing there and fell through to the VIEWER defaults:
-    a custom role written to grant three permissions handed out the full viewer set of 31
-    instead, which is the opposite of what someone builds a restrictive role for.
-
-    Deliberately narrow, matching the remap it is factored out of: only a caller sitting in
-    the DEFAULT tenant is remapped. A user placed in tenant A keeps tenant A's answer even if
-    some other tenant happens to define a role by the same name. A name defined by two or
-    more tenants has no single answer and is refused outright rather than guessed at."""
-    if not role or role in BUILTIN_ROLES or tenant_id != DEFAULT_TENANT_ID:
+    sec (pentest Oct 2026): this used to search tenant role tables when a default-tenant user
+    held a custom role, and remap them to whichever tenant defined a role by that name. That
+    was a namespace-confusion primitive: a global role "ops" and a tenant role "ops" are
+    different roles, but the resolver treated them as the same and switched the user's
+    authorization context from global to tenant. With role creation now refusing namespace
+    collisions, this function is a no-op passthrough; it is kept to avoid changing every
+    call site, and because the collision check is not retroactive (existing collisions remain
+    until an operator renames one)."""
+    if not role or role in BUILTIN_ROLES:
         return tenant_id
-    owners = [tid for tid, roles in get_custom_roles().get('tenants', {}).items()
-              if role in roles]
-    if len(owners) == 1:
-        return owners[0]
-    if owners:
-        # MK Sep 2026 — more than one tenant defines this name, so "the tenant that
-        # defines it" has no answer. The loop this replaces took whichever one dict
-        # iteration happened to reach first, which made both the caller's permissions
-        # and their cluster list depend on insertion order: the same account could
-        # resolve into tenant A today and tenant B after a restart. Two tenants each
-        # having an "ops" role is an ordinary thing for an MSP to do, so this is a
-        # configuration to report, not a case to guess at.
-        #
-        # Answering with the DEFAULT tenant would be the wrong direction: an empty
-        # cluster list there means "all clusters", so the ambiguous caller would come
-        # out wider than either candidate. Hand back an id no tenant can hold instead —
-        # the role then fails to resolve (get_role_permissions_for_user grants nothing
-        # and says so) and the cluster lookup lands on the non-default empty branch,
-        # which is []. The operator's fix is to put the account in the tenant they
-        # meant; that takes the early return above and resolves cleanly.
-        logging.warning(
-            f"[RBAC] custom role {role!r} is defined by {len(owners)} tenants "
-            f"({', '.join(sorted(owners))}) — refusing to guess which one a "
-            f"default-tenant caller meant. Granting nothing; place the account in "
-            f"the intended tenant to resolve it."
-        )
-        return _AMBIGUOUS_ROLE_TENANT
+    # sec: do NOT remap based on role name - the user's tenant_id is their authorization
+    # namespace, and a role is resolved in that namespace only. A default-tenant user holding
+    # a global custom role stays in the default tenant; they do not inherit a tenant role's
+    # permissions or cluster scope just because the names happen to match.
     return tenant_id
 
 

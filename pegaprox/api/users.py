@@ -1691,12 +1691,22 @@ def create_custom_role():
     if 'global' not in custom:
         custom['global'] = {}
     
+    # sec (pentest Oct 2026): prevent namespace collision - a role name must be unique across
+    # BOTH the global and tenant namespaces. _tenant_defining_role used to remap a default-tenant
+    # user holding a global role to a tenant role with the same name, causing cross-tenant
+    # authorization bypass. Refusing the collision at creation time is the earliest enforcement.
     if tenant_id:
-        # tenant-specific role
+        # tenant-specific role - check it doesn't collide with global
+        if role_id in custom['global']:
+            return jsonify({'error': f'Role name "{role_id}" is already used by a global role'}), 400
         if tenant_id not in custom['tenants']:
             custom['tenants'][tenant_id] = {}
         if role_id in custom['tenants'][tenant_id]:
             return jsonify({'error': 'Role already exists in this tenant'}), 400
+        # also check other tenants - a name used by two tenants is ambiguous
+        for other_tid, other_roles in custom['tenants'].items():
+            if other_tid != tenant_id and role_id in other_roles:
+                return jsonify({'error': f'Role name "{role_id}" is already used by tenant {other_tid}'}), 400
         custom['tenants'][tenant_id][role_id] = {
             'name': name,
             'permissions': permissions,
@@ -1704,9 +1714,12 @@ def create_custom_role():
             'created': datetime.now().isoformat()
         }
     else:
-        # global role
+        # global role - check it doesn't collide with any tenant role
         if role_id in custom['global']:
             return jsonify({'error': 'Global role already exists'}), 400
+        for tid, tenant_roles in custom['tenants'].items():
+            if role_id in tenant_roles:
+                return jsonify({'error': f'Role name "{role_id}" is already used by tenant {tid}'}), 400
         custom['global'][role_id] = {
             'name': name,
             'permissions': permissions,
