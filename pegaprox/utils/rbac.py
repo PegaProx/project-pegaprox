@@ -320,7 +320,21 @@ def _tenant_defining_role(role: str, tenant_id: str) -> str:
     more tenants has no single answer and is refused outright rather than guessed at."""
     if not role or role in BUILTIN_ROLES or tenant_id != DEFAULT_TENANT_ID:
         return tenant_id
-    owners = [tid for tid, roles in get_custom_roles().get('tenants', {}).items()
+    custom = get_custom_roles()
+    # sec (pentest Oct 2026): when the custom-role store is unavailable, or when a non-builtin
+    # role has been deleted, returning the caller's default tenant lets them inherit that
+    # tenant's empty cluster list, which get_user_clusters interprets as None (all clusters).
+    # An API token can retain a deleted role name because role deletion checks user accounts
+    # but not token assignments. Treat an unavailable store or a missing role the same way we
+    # treat an ambiguous one: refuse to resolve it, so the cluster lookup lands on the
+    # non-default empty branch ([]) instead of the default-tenant all-cluster path (None).
+    if store_unavailable(custom):
+        logging.warning(
+            f"[RBAC] custom role {role!r} cannot be resolved (store unavailable) — "
+            f"granting nothing until the role table loads successfully."
+        )
+        return _AMBIGUOUS_ROLE_TENANT
+    owners = [tid for tid, roles in custom.get('tenants', {}).items()
               if role in roles]
     if len(owners) == 1:
         return owners[0]
@@ -347,7 +361,15 @@ def _tenant_defining_role(role: str, tenant_id: str) -> str:
             f"the intended tenant to resolve it."
         )
         return _AMBIGUOUS_ROLE_TENANT
-    return tenant_id
+    # sec (pentest Oct 2026): no tenant defines this role. It was either deleted or never
+    # existed. Returning the default tenant here would grant all-cluster access via the
+    # empty-list-means-all backwards-compatibility path. Return the sentinel instead.
+    logging.warning(
+        f"[RBAC] custom role {role!r} is not defined by any tenant — granting nothing. "
+        f"Either the role was deleted while accounts/tokens still held it, or it never "
+        f"existed. Reassign the account to a valid role."
+    )
+    return _AMBIGUOUS_ROLE_TENANT
 
 
 def get_user_permissions(user: dict, tenant_id: str = None) -> list:

@@ -1861,6 +1861,35 @@ def delete_custom_role(role_id):
             'users': _holders[:20],
         }), 409
 
+    # sec (pentest Oct 2026): role deletion checked user accounts but not API tokens, so a
+    # token could retain a deleted role name and continue to authenticate. The token then
+    # resolved to the default tenant's empty cluster list (all clusters) via the
+    # _tenant_defining_role fallback. Check tokens too and refuse deletion if any are bound.
+    from pegaprox.utils.auth import ensure_api_tokens_table
+    try:
+        ensure_api_tokens_table()
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute('SELECT username, name FROM api_tokens WHERE role = ? AND revoked = 0',
+                       (role_id,))
+        token_holders = cursor.fetchall()
+        if token_holders:
+            token_list = [f"{row['username']}:{row['name']}" for row in token_holders[:20]]
+            return jsonify({
+                'error': 'Role still assigned to API tokens',
+                'detail': f"{len(token_holders)} API token(s) still hold '{role_id}' — "
+                          f"revoke them before deleting, or they would retain the deleted role name.",
+                'tokens': token_list,
+            }), 409
+    except Exception as e:
+        logging.error(f"[RBAC] Failed to check API tokens for role {role_id}: {e}")
+        # fail closed: if we can't verify tokens are clear, don't delete the role
+        return jsonify({
+            'error': 'Cannot verify API token assignments',
+            'detail': 'The role cannot be deleted until token assignments can be verified. '
+                      'Check the server logs.',
+        }), 500
+
     if tenant_id:
         del custom['tenants'][tenant_id][role_id]
     else:
