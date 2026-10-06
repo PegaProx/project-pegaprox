@@ -1109,7 +1109,7 @@ def _user_can_access_vm_uncapped(user: dict, cluster_id: str, vmid: int, permiss
     MK: Jan 2026 - Added Pool Permission support
     
     Logic:
-    1. Admin always has access
+    1. Admin always has access (unless tenant-capped)
     2. If user has VM-specific ACL entry:
        - inherit_role=True: User can do ALL VM operations (full access)
        - inherit_role=False: User can ONLY do operations listed in permissions
@@ -1121,7 +1121,8 @@ def _user_can_access_vm_uncapped(user: dict, cluster_id: str, vmid: int, permiss
     """
     # MK: effective_role (token-scoped) wins over the stored role so an admin-owned
     # restricted token doesn't get the admin VM bypass below
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return True
 
     username = user.get('username', '')
@@ -1320,7 +1321,8 @@ def get_user_vms(user: dict, cluster_id: str) -> list:
     
     Returns None if user can access all VMs (admin or no restrictions)
     """
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return None
 
     username = user.get('username', '')
@@ -1359,7 +1361,7 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
     Implements VM-level authorization for VMware VMs similar to Proxmox.
     
     Logic:
-    1. Admin always has access
+    1. Admin always has access (unless tenant-capped)
     2. If user has VM-specific ACL entry for this VMware server:
        - inherit_role=True: User can do ALL VM operations (full access)
        - inherit_role=False: User can ONLY do operations listed in permissions
@@ -1377,7 +1379,8 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
     # NS Aug 2026 (Aikido pentest) — effective_role (token-scoped) wins over the stored role,
     # exactly like the Proxmox twin user_can_access_vm above; otherwise an admin-owned but
     # viewer-scoped API token gets the full-admin VMware VM bypass here.
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return True
 
     username = user.get('username', '')

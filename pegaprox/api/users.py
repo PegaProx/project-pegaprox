@@ -124,13 +124,15 @@ def _authz_object_write(cluster_id, subjects=(), permissions=(), groups=()):
     other grant path in this file already asks these questions; these routes asked none of them.
     Returns an error response, or None when the write is allowed.
 
-    Global admins pass. Otherwise the caller must not be confined on this cluster (a pool-/ACL-
-    scoped caller has no business authoring grants at all), the subjects must be inside their
-    tenant, and they may not hand out permissions they do not hold themselves."""
+    Global admins pass (unless tenant-capped). Otherwise the caller must not be confined on this
+    cluster (a pool-/ACL-scoped caller has no business authoring grants at all), the subjects must
+    be inside their tenant, and they may not hand out permissions they do not hold themselves."""
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     caller = build_authz_user(request.session.get('user', ''), request.session)
-    if caller.get('effective_role', caller.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators
+    if caller.get('effective_role', caller.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(caller):
         return None
     if caller_is_scoped(caller, cluster_id):
         return jsonify({'error': 'Access denied: you cannot manage access rules on this cluster'}), 403

@@ -450,10 +450,13 @@ def caller_is_scoped(user, cluster_id):
     here so the rule can't drift between call sites again."""
     from pegaprox.models.permissions import ROLE_ADMIN
     from pegaprox.utils.rbac import (get_user_clusters, user_has_any_pool_access, get_vm_acls,
-                                     acls_unavailable, acl_grants_user)
+                                     acls_unavailable, acl_grants_user, _admin_is_capped_in_own_tenant)
     if not user:
         return True   # unknown identity → treat as confined (fail closed)
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators. An admin whose tenant override
+    # downgrades them in their own tenant must not bypass confinement checks — they are no longer
+    # an unrestricted admin and must be evaluated like any other role.
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return False
     tenant_clusters = get_user_clusters(user, include_pools=False)
     if tenant_clusters is not None and cluster_id not in tenant_clusters:
@@ -535,8 +538,9 @@ def check_pbs_access(pbs_id):
     # check_cluster_access). get_user_clusters() already honors effective_role.
     user = build_authz_user(request.session.get('user', ''), request.session)
 
-    # Admins have full access
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # Admins have full access — unless tenant-capped (sec pentest Dec 2026)
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return True, None
     
     # Get PBS linked clusters
@@ -617,7 +621,9 @@ def check_vmware_access(vmware_id):
         return False, (jsonify({'error': 'VMware server not found'}), 404)
     # #491 — floor an admin-owned scoped API token to its effective_role (mirrors check_cluster_access).
     user = build_authz_user(request.session.get('user', ''), request.session)
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec (pentest Dec 2026): honor tenant-capped administrators
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN and not _admin_is_capped_in_own_tenant(user):
         return True, None
     linked = getattr(vmware_managers[vmware_id], 'linked_clusters', None) or []
     if not linked:
