@@ -33,6 +33,12 @@ def _mask_channel(ch):
         c['url'] = '********'
     if c.get('token'):
         c['token'] = '********'
+    # MK Oct 2026 (pentest) - ntfy topics are bearer capabilities. The dispatcher appends
+    # the topic to the server URL and sends without Authorization when token is empty, and
+    # sanitization.py explicitly documents that possession of the topic URL permits publishing
+    # to and reading the ntfy feed. Mask it the same way we mask tokens.
+    if c.get('topic'):
+        c['topic'] = '********'
     return c
 
 
@@ -990,13 +996,13 @@ def update_alert_channel(cid):
     for i, ch in enumerate(channels):
         if ch.get('id') != cid:
             continue
-        # Merge the allowed fields. Skip url/token if caller sent the masked placeholder
+        # Merge the allowed fields. Skip url/token/topic if caller sent the masked placeholder
         # (admin UI shows dots; don't wipe secret because of a round-trip).
         updated = dict(ch)
         for k in ('name', 'type', 'enabled', 'topic', 'url', 'token'):
             if k in data:
                 v = data[k]
-                if k in ('url', 'token') and isinstance(v, str) and ('…' in v or v == '********'):
+                if k in ('url', 'token', 'topic') and isinstance(v, str) and ('…' in v or v == '********'):
                     continue  # untouched
                 updated[k] = v
         channels[i] = updated
