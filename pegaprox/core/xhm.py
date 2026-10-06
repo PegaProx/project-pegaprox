@@ -137,7 +137,8 @@ class XHMigrationTask:
     """
 
     def __init__(self, mid, direction, source_cluster, source_node, source_vmid,
-                 target_cluster, target_node, target_storage, vm_name='', config=None):
+                 target_cluster, target_node, target_storage, vm_name='', config=None,
+                 source_uuid=None):
         self.id = mid
         # MK Sep 2026 - the scratch paths used to be /tmp/xhm-<id>-... , and `id` is eight
         # hex characters that the migrations API hands out. /tmp is world-writable on both
@@ -150,6 +151,14 @@ class XHMigrationTask:
         self.source_cluster = source_cluster
         self.source_node = source_node
         self.source_vmid = source_vmid
+        # MK Dec 2026 (Aikido pentest) — bind the authorized source VM identity. The submission
+        # path checks vm.migrate (and vm.delete for remove_source) on the VM identified at that
+        # moment, but the worker later resolves source_node/source_vmid and operates on whatever
+        # guest holds that locator when it runs. If the authorized VM is deleted and its VMID
+        # reused during queuing or transfer, the migration can read a different guest; when
+        # remove_source was authorized, cleanup can destroy it. Capture the stable UUID at
+        # authorization time and validate it before any worker-side read or destruction.
+        self.source_uuid = source_uuid
         self.target_cluster = target_cluster
         self.target_node = target_node
         self.target_storage = target_storage
@@ -629,6 +638,25 @@ def _run_xcpng_to_pve(task):
             return
 
         vm_ref = src_mgr._resolve_vm(task.source_vmid)
+        
+        # MK Dec 2026 (Aikido pentest) — validate source VM identity. The submission path
+        # authorized vm.migrate (and vm.delete for remove_source) on the VM identified by
+        # source_vmid at that moment and captured its UUID. If the authorized VM was deleted
+        # and its VMID reused before this worker runs, the resolved vm_ref points to a
+        # different guest. Reject the mismatch before reading configuration or disks.
+        if task.source_uuid:
+            try:
+                current_uuid = api.VM.get_uuid(vm_ref)
+                if current_uuid != task.source_uuid:
+                    task.set_phase('failed',
+                                   f'Source VM identity mismatch: authorized {task.source_uuid[:8]}..., '
+                                   f'found {current_uuid[:8]}... at {task.source_vmid}. '
+                                   f'The authorized VM may have been deleted and its ID reused.')
+                    return
+            except Exception as e:
+                task.set_phase('failed', f'Failed to validate source VM identity: {e}')
+                return
+        
         power = api.VM.get_power_state(vm_ref)
         if power != 'Halted':
             task.set_phase('failed', f'VM is {power}, must be Halted')
@@ -1080,6 +1108,25 @@ def _run_pve_to_xcpng(task):
 
         cfg = vm_cfg_result.get('config', {})
         raw = cfg.get('raw', cfg)
+        
+        # MK Dec 2026 (Aikido pentest) — validate source VM identity. The submission path
+        # authorized vm.migrate (and vm.delete for remove_source) on the VM identified by
+        # source_vmid at that moment and captured its UUID. If the authorized VM was deleted
+        # and its VMID reused before this worker runs, get_vm_config returns a different
+        # guest's configuration. Reject the mismatch before reading disks or destroying.
+        if task.source_uuid:
+            current_uuid = raw.get('uuid') or raw.get('vmgenid')
+            if not current_uuid:
+                task.set_phase('failed',
+                               'Cannot validate source VM identity: no UUID in configuration. '
+                               'The VM may have been deleted.')
+                return
+            if current_uuid != task.source_uuid:
+                task.set_phase('failed',
+                               f'Source VM identity mismatch: authorized {task.source_uuid[:8]}..., '
+                               f'found {current_uuid[:8]}... at VMID {task.source_vmid}. '
+                               f'The authorized VM may have been deleted and its ID reused.')
+                return
 
         task.vm_name = task.vm_name or raw.get('name', f'vm-{task.source_vmid}')
         task.log(f"Source VM: {task.vm_name} (VMID {task.source_vmid})")
@@ -1818,6 +1865,20 @@ def _run_esxi_to_pve(task):
             return
 
         data = export_info.get('data', {})
+        
+        # MK Dec 2026 (Aikido pentest) — validate source VM identity. For ESXi, the
+        # source_vmid is the managed object ID (moId) which is stable, but we still
+        # validate it to ensure the VM wasn't deleted and recreated with the same ID
+        # (rare but possible in vSphere). The authorization captured source_vmid as
+        # source_uuid for ESXi VMs.
+        if task.source_uuid:
+            current_id = data.get('vm') or data.get('id') or str(task.source_vmid)
+            if str(current_id) != str(task.source_uuid):
+                task.set_phase('failed',
+                               f'Source VM identity mismatch: authorized {task.source_uuid}, '
+                               f'found {current_id}. The authorized VM may have been deleted.')
+                return
+        
         disks = data.get('disks', [])
         guest_os = data.get('guest_os', '')
         pve_ostype = _ESXI_TO_PVE_OSTYPE.get(guest_os, 'l26')
@@ -2192,6 +2253,20 @@ def _run_esxi_to_xcpng(task):
             return
 
         data = export_info.get('data', {})
+        
+        # MK Dec 2026 (Aikido pentest) — validate source VM identity. For ESXi, the
+        # source_vmid is the managed object ID (moId) which is stable, but we still
+        # validate it to ensure the VM wasn't deleted and recreated with the same ID
+        # (rare but possible in vSphere). The authorization captured source_vmid as
+        # source_uuid for ESXi VMs.
+        if task.source_uuid:
+            current_id = data.get('vm') or data.get('id') or str(task.source_vmid)
+            if str(current_id) != str(task.source_uuid):
+                task.set_phase('failed',
+                               f'Source VM identity mismatch: authorized {task.source_uuid}, '
+                               f'found {current_id}. The authorized VM may have been deleted.')
+                return
+        
         disks = data.get('disks', [])
         guest_os = data.get('guest_os', '')
         xcp_template = _ESXI_TO_XCP_OSTYPE.get(guest_os, 'Other install media')

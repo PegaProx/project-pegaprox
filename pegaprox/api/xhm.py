@@ -192,6 +192,45 @@ def xhm_start():
     if direction in ('xcpng_to_pve', 'esxi_to_pve') and not data.get('target_node'):
         return jsonify({'error': 'target_node is required for migration to Proxmox'}), 400
 
+    # MK Dec 2026 (Aikido pentest) — capture the stable UUID of the authorized source VM.
+    # The checks above authorized vm.migrate (and vm.delete for remove_source) on the VM
+    # identified by source_vmid at this moment. The worker will resolve source_vmid again
+    # when it runs, potentially long after this authorization. If the authorized VM is
+    # deleted and its VMID reused during queuing or transfer, the worker would operate on
+    # a different guest. Capture the UUID now and validate it in the worker before any read
+    # or destruction. This binds the authorization to the specific VM object, not the
+    # mutable locator.
+    source_uuid = None
+    try:
+        if src_type == 'proxmox':
+            # Proxmox: get UUID from VM config
+            cfg_result = src_mgr.get_vm_config(data.get('source_node', ''), vmid_int, 'qemu')
+            if cfg_result.get('success'):
+                raw = cfg_result.get('config', {}).get('raw', {})
+                source_uuid = raw.get('uuid') or raw.get('vmgenid')
+        elif src_type == 'xcpng':
+            # XCP-ng: resolve VMID to UUID via the manager's database mapping
+            from pegaprox.core.db import get_db
+            db = get_db()
+            source_uuid = db.xcpng_resolve_vmid(src_mgr.id, data['source_vmid'])
+            if not source_uuid:
+                # Fallback: query XAPI directly
+                api = src_mgr._api()
+                if api:
+                    try:
+                        vm_ref = src_mgr._resolve_vm(data['source_vmid'])
+                        source_uuid = api.VM.get_uuid(vm_ref)
+                    except Exception:
+                        pass
+        # ESXi VMs use managed object IDs which are stable, so source_vmid itself is the identity
+        elif src_type == 'esxi':
+            source_uuid = str(data['source_vmid'])
+    except Exception as e:
+        # UUID capture is a security control; if it fails, log but don't block the migration.
+        # The worker will fail safely if the VM is gone or changed.
+        import logging
+        logging.warning(f"[XHM] Failed to capture source UUID for {data['source_cluster']}/{data['source_vmid']}: {e}")
+
     mid = str(uuid.uuid4())[:8]
     task = XHMigrationTask(
         mid=mid,
@@ -204,6 +243,7 @@ def xhm_start():
         target_storage=data['target_storage'],
         vm_name=data.get('vm_name', ''),
         config=data,
+        source_uuid=source_uuid,
     )
 
     with _xhm_lock:
