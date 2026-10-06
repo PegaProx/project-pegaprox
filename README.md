@@ -38,6 +38,8 @@
 
 PegaProx is a powerful web-based management interface for Proxmox VE and XCP-ng clusters. Manage multiple clusters from a single dashboard with features like live monitoring, VM management, automated tasks, and more.
 
+The [central image library](docs/IMAGE_LIBRARY.md) lets administrators upload an ISO or Cloud-init image once and create VMs on any connected Proxmox node, including independent hosts, without shared PVE storage.
+
 <p align="center">
   <img src="https://pegaprox.com/pictures/pegaprox.png" alt="Dashboard Screenshot" width="800"/>
 </p>

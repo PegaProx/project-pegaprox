@@ -315,6 +315,8 @@ SYNC_TABLES = (
     'ha_recovery_journal',
 )
 LOCAL_TABLES = (
+    # Image files are instance-local; never sync metadata without the corresponding files.
+    'image_library', 'image_provision_jobs',
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
     'active_alerts', 'site_recovery_events', 'cve_history', 'backup_verifications',
     'status_uptime', 'cloud_init_deployments', 'dr_drills', 'dr_drill_checks',
