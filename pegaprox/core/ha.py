@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -11631,6 +11631,11 @@ def force_leader_view(st=None, probe=False):
     reached, said = set(), []
     for mid, (value, err) in answers.items():
         if value is None and not isinstance(err, PeerRefused):
+            continue
+        # A voter that refuses with HA_CLOCK cannot be fenced: the same clock skew that
+        # prevents status calls from succeeding will prevent step-down from reaching it.
+        # It must be cut out, not counted as reached.
+        if isinstance(err, PeerRefused) and err.code == 'HA_CLOCK':
             continue
         reached.add(mid)
         if value is None:
