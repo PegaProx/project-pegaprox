@@ -5351,13 +5351,13 @@ def get_vm_guest_fsinfo_api(cluster_id, node, vm_type, vmid):
 # can stream large files in chunks without dragging the whole thing through
 # memory. We pass them through; older PVE silently ignores extras.
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/guest-file-read', methods=['POST'])
-@require_auth(perms=['vm.view'])
+@require_auth(perms=['vm.console'])
 def get_vm_guest_file_read_api(cluster_id, node, vm_type, vmid):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    denied = _require_vm_access(cluster_id, vmid, 'vm.console', vm_type)
     if denied: return denied
     if vm_type != 'qemu':
         return jsonify({'error': 'Guest-agent file-read is QEMU-only'}), 400
@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
