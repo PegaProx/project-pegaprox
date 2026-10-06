@@ -84,14 +84,20 @@ def load_schedules():
         row_keys = [d[0] for d in cursor.description] if cursor.description else []
         has_name = 'name' in row_keys
         has_vm_type = 'vm_type' in row_keys
+        valid_vm_types = ['qemu', 'lxc']
         for row in cursor.fetchall():
             if row['id'] > last_id:
                 last_id = row['id']
+            # Sanitize vm_type from legacy data - reject invalid values to prevent URL injection
+            raw_vm_type = row['vm_type'] if has_vm_type and row['vm_type'] else 'qemu'
+            vm_type = raw_vm_type if raw_vm_type in valid_vm_types else 'qemu'
+            if raw_vm_type != vm_type:
+                logging.warning(f"[SCHEDULES] Sanitized invalid vm_type '{raw_vm_type}' to 'qemu' for schedule {row['id']}")
             actions.append({
                 'id': row['id'],
                 'cluster_id': row['cluster_id'],
                 'vmid': row['vmid'],
-                'vm_type': (row['vm_type'] if has_vm_type and row['vm_type'] else 'qemu'),
+                'vm_type': vm_type,
                 'action': row['action'],
                 'schedule_type': row['schedule_type'],
                 'time': row['schedule_time'],
@@ -110,7 +116,15 @@ def load_schedules():
         try:
             if os.path.exists(SCHEDULES_FILE):
                 with open(SCHEDULES_FILE, 'r') as f:
-                    return _ScheduleSnapshot(json.load(f))
+                    data = json.load(f)
+                    # Sanitize vm_type from legacy JSON file
+                    if 'actions' in data:
+                        for action in data['actions']:
+                            raw_vm_type = action.get('vm_type', 'qemu')
+                            if raw_vm_type not in valid_vm_types:
+                                logging.warning(f"[SCHEDULES] Sanitized invalid vm_type '{raw_vm_type}' to 'qemu' for schedule {action.get('id')}")
+                                action['vm_type'] = 'qemu'
+                    return _ScheduleSnapshot(data)
         except Exception:
             pass
     # NOT an empty schedule table - we do not know what is in it.
@@ -352,6 +366,12 @@ def execute_scheduled_action(action):
     vm_type = action.get('vm_type', 'qemu')
     action_type = action.get('action')
     
+    # Validate vm_type against exact allowlist to prevent URL injection
+    valid_vm_types = ['qemu', 'lxc']
+    if vm_type not in valid_vm_types:
+        logging.error(f"[SCHEDULER] Invalid vm_type '{vm_type}' for VM {vmid} - rejecting execution")
+        return
+    
     logging.info(f"[SCHEDULER] Executing {action_type} on {vm_type}/{vmid} in {cluster_id}")
     
     if cluster_id not in cluster_managers:
@@ -375,6 +395,15 @@ def execute_scheduled_action(action):
         
         if not vm:
             logging.error(f"[SCHEDULER] VM {vmid} not found")
+            return
+        
+        # Verify the actual VM type matches the stored vm_type to prevent type confusion attacks
+        actual_vm_type = vm.get('type', 'qemu')
+        if actual_vm_type not in valid_vm_types:
+            logging.error(f"[SCHEDULER] VM {vmid} has invalid type '{actual_vm_type}' - rejecting execution")
+            return
+        if actual_vm_type != vm_type:
+            logging.error(f"[SCHEDULER] VM {vmid} type mismatch: stored={vm_type}, actual={actual_vm_type} - rejecting execution")
             return
         
         node = vm.get('node')
@@ -735,6 +764,12 @@ def create_schedule():
     except ValueError:
         return jsonify({'error': 'Time must be in HH:MM format'}), 400
     
+    # Validate vm_type against exact allowlist to prevent URL injection
+    valid_vm_types = ['qemu', 'lxc']
+    vm_type = data.get('vm_type', 'qemu')
+    if vm_type not in valid_vm_types:
+        return jsonify({'error': f'vm_type must be one of: {valid_vm_types}'}), 400
+    
     # Validate action
     valid_actions = ['start', 'stop', 'shutdown', 'reboot', 'snapshot']
     if data['action'] not in valid_actions:
@@ -754,7 +789,7 @@ def create_schedule():
     from pegaprox.utils.rbac import user_can_access_vm
     if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
                               data['cluster_id'], _sv, _perm_for_action(data['action']),
-                              data.get('vm_type', 'qemu')):
+                              vm_type):
         return jsonify({'error': 'Permission denied for this VM'}), 403
 
     # Validate schedule type
@@ -787,7 +822,7 @@ def create_schedule():
         'id': new_id,
         'cluster_id': data['cluster_id'],
         'vmid': int(data['vmid']),
-        'vm_type': data.get('vm_type', 'qemu'),
+        'vm_type': vm_type,
         'action': data['action'],
         'schedule_type': data['schedule_type'],
         'time': time_str,
@@ -835,6 +870,12 @@ def update_schedule(schedule_id):
     # NS: Feb 2026 - verify tenant has access to this schedule's cluster
     ok, err = check_cluster_access(schedule.get('cluster_id', ''))
     if not ok: return err
+
+    # Validate vm_type against exact allowlist to prevent URL injection
+    if 'vm_type' in data:
+        valid_vm_types = ['qemu', 'lxc']
+        if data['vm_type'] not in valid_vm_types:
+            return jsonify({'error': f'vm_type must be one of: {valid_vm_types}'}), 400
 
     # Validate action if being updated
     if 'action' in data:
