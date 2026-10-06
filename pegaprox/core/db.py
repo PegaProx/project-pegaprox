@@ -2432,6 +2432,13 @@ class PegaProxDB:
                 self.conn.commit()
                 migrated_any = True
 
+        # Prevent re-migration if the legacy file was already retired after a previous migration.
+        # Once SQLite becomes authoritative, the legacy file is stale and must never be restored.
+        if needs_user_remigration and os.path.exists(USERS_FILE_ENCRYPTED + '.migrated'):
+            logging.warning("Legacy user file was already migrated and retired — "
+                          "refusing to restore stale data. Keeping current accounts.")
+            needs_user_remigration = False
+        
         if needs_user_remigration and not self._read_legacy_users():
             # MK: the DELETE below used to run unconditionally, and _migrate_users() writes
             # nothing when the legacy file is gone or no longer decrypts — which is every
@@ -2666,6 +2673,18 @@ class PegaProxDB:
                 logging.error(f"Failed to migrate user {username}: {e}")
 
         logging.info(f"Migrated {written}/{len(data)} users to SQLite")
+        
+        # Retire the legacy file after successful migration to prevent stale data from
+        # being restored. save_user() and delete_user() only update SQLite, so the
+        # legacy file becomes outdated immediately and must never be used again.
+        if written > 0 and os.path.exists(USERS_FILE_ENCRYPTED):
+            try:
+                backup_path = USERS_FILE_ENCRYPTED + '.migrated'
+                os.rename(USERS_FILE_ENCRYPTED, backup_path)
+                logging.info(f"Retired legacy user file to {backup_path}")
+            except Exception as e:
+                logging.error(f"Failed to retire legacy user file: {e}")
+        
         return written > 0
     
     def _migrate_sessions(self) -> bool:

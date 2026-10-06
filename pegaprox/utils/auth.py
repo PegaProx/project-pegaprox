@@ -485,6 +485,13 @@ def _load_users_legacy() -> dict:
     """old json loader, just for migration"""
     fernet = get_fernet()
     
+    # Refuse to load a legacy file that was already migrated and retired. Once SQLite
+    # becomes authoritative, the legacy file is stale (save_user/delete_user don't
+    # update it) and must never be restored.
+    if os.path.exists(USERS_FILE_ENCRYPTED + '.migrated'):
+        logging.warning("Legacy user file was already migrated and retired — refusing to load stale data")
+        return {}
+    
     if fernet and os.path.exists(USERS_FILE_ENCRYPTED):
         try:
             with open(USERS_FILE_ENCRYPTED, 'rb') as f:
