@@ -155,7 +155,7 @@ def check_credentials(mgr):
     if info['type'] == 'minted_token' and info['active'] == 'ticket':
         # the stored token answered 401/403 and connect() fell back to the password
         return _item('credentials', 'warn', hint='cred_token_rejected', **info)
-    note = {'api_token': 'cred_token_note', 'password': 'cred_password_note'}.get(info['type'])
+    note = {'api_token': 'cred_token_note', 'password': '****note'}.get(info['type'])
     return _item('credentials', 'ok', hint=note, **info)
 
 
@@ -315,11 +315,24 @@ def probe_host(mgr, host, authed, node_fps=None):
                      detail=_err_text(e), **res)
     if node_fps:
         res['tls'] = 'match' if res['fingerprint'] in node_fps else 'mismatch'
+        # Enforce fingerprint match before sending credentials: a mismatch means the
+        # endpoint is not the expected node, so the authenticated request must not proceed.
+        if authed and res['tls'] == 'mismatch':
+            res['ms'] = int((time.monotonic() - t0) * 1000)
+            return _item('api_host', 'warn', item_id=f'api:{host}', hint='api_tls_mismatch', **res)
 
     sess = mgr._create_session() if authed else requests.Session()
     url = f"https://{mgr._bracket_ipv6(host.strip('[]'))}:{port}/api2/json/version"
     try:
         if authed:
+            # Bind the authenticated request to the observed fingerprint: assert_fingerprint
+            # enforces that the request-level TLS handshake presents the same certificate,
+            # so a redirected connection cannot receive the credential.
+            class _FingerprintAdapter(requests.adapters.HTTPAdapter):
+                def init_poolmanager(self, *args, **kwargs):
+                    kwargs['assert_fingerprint'] = res['fingerprint']
+                    return super().init_poolmanager(*args, **kwargs)
+            sess.mount('https://', _FingerprintAdapter())
             r = sess.get(url, timeout=HOST_TIMEOUT)
         else:
             # what connect() would verify against, without its credentials
