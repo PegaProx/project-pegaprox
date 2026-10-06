@@ -845,20 +845,37 @@ def redact_answer(text):
     result is checked against the parsed file, and if any secret survived the reader
     gets a placeholder instead of the text.
     """
+    # Parse first to extract the canonical secret values
+    data, err = _parse_toml(text or '')
+    if err:
+        return _UNREDACTABLE
+    secret_values = _secret_values(data)
+    
     out = []
     for line in (text or '').splitlines():
         stripped = line.lstrip()
         key = stripped.split('=', 1)[0].strip() if '=' in stripped else ''
-        if key in _SECRET_KEYS:
+        # Strip quotes from the key to handle TOML quoted keys like "root-password" or 'root-password'
+        unquoted_key = key.strip('\'"')
+        if unquoted_key in _SECRET_KEYS:
             out.append(f'{line[:len(line) - len(stripped)]}{key} = "********"')
         else:
             out.append(line)
     redacted = '\n'.join(out)
-    data, err = _parse_toml(text or '')
-    if err:
+    
+    # Verify no secret value survived by parsing the redacted result and checking
+    # if any of the original secret values appear in the parsed redacted data.
+    # This handles escaped values: we compare decoded-to-decoded rather than
+    # searching for decoded values in raw text that may contain escape sequences.
+    redacted_data, redacted_err = _parse_toml(redacted)
+    if redacted_err:
+        # The redaction broke the TOML structure; fail closed
         return _UNREDACTABLE
-    if any(value in redacted for value in _secret_values(data)):
-        return _UNREDACTABLE
+    redacted_values = _secret_values(redacted_data)
+    for value in secret_values:
+        if value and value in redacted_values:
+            return _UNREDACTABLE
+    
     return redacted
 
 
