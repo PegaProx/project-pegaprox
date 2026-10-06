@@ -265,6 +265,24 @@ def update_pbs_server(pbs_id):
 
     save_pbs_server(pbs_id, data)
 
+    # MK (pentest finding) — linked_clusters is authorization-bearing: check_pbs_access treats an
+    # empty list as unrestricted. save_pbs_server preserves the stored linkage when the field is
+    # omitted, but PBSManager.__init__ defaults it to [], so a partial update that did not mention
+    # linked_clusters installed an unrestricted manager while the DB row stayed restricted. Populate
+    # the omitted field from storage (in-memory manager or DB row) before rebuilding the manager so
+    # the active instance matches the persisted authorization state.
+    if 'linked_clusters' not in data:
+        if old_mgr is not None:
+            data['linked_clusters'] = getattr(old_mgr, 'linked_clusters', [])
+        else:
+            # old_mgr is None (disabled server): read from the DB row we already fetched above
+            try:
+                import json
+                _lc_json = row.get('linked_clusters', '[]') if row else '[]'
+                data['linked_clusters'] = json.loads(_lc_json or '[]')
+            except Exception:
+                data['linked_clusters'] = []
+
     try:
         mgr = PBSManager(pbs_id, data)
     except ValueError as e:
