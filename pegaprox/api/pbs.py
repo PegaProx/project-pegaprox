@@ -124,6 +124,30 @@ def add_pbs_server():
     if not data.get('user') and not data.get('api_token_id'):
         return jsonify({'error': 'Username or API token is required'}), 400
     
+    # Validate linked_clusters scope: a tenant-scoped user may not create a globally-accessible
+    # PBS server (empty linked_clusters) or link it to clusters outside their authorization.
+    # This prevents the creation-time scope bypass where check_pbs_access treats an empty list
+    # as unrestricted access.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    caller_role = caller.get('effective_role', caller.get('role'))
+    
+    if caller_role != ROLE_ADMIN:
+        # Non-admin: linked_clusters must be present, non-empty, and within caller's scope
+        submitted_links = data.get('linked_clusters')
+        if not submitted_links:
+            return jsonify({'error': 'Access denied: only a global admin may create a PBS server '
+                                     'with no linked clusters'}), 403
+        
+        caller_clusters = get_user_clusters(caller)
+        # caller_clusters is None for admins (already handled), [] for no access, or a list
+        if caller_clusters is not None:
+            unauthorized = [c for c in submitted_links if c not in set(caller_clusters)]
+            if unauthorized:
+                return jsonify({'error': f'Access denied: cannot link this PBS server to '
+                                         f'{", ".join(unauthorized)}'}), 403
+    
     pbs_id = str(uuid.uuid4())[:8]
     
     # Test connection first
