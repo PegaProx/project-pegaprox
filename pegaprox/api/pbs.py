@@ -2908,6 +2908,16 @@ def auto_attach_pbs_to_clusters(pbs_id):
     cluster_ids = cluster_ids or list(pbs_mgr.linked_clusters or [])
     if not cluster_ids:
         return jsonify({'error': 'no clusters specified or linked'}), 400
+    # NS Jan 2027 (Aikido retest) — when the caller supplies an explicit cluster list, confine it
+    # to the PBS's linked_clusters. check_pbs_access above authorizes based on access to at least
+    # one linked cluster; an explicit body['clusters'] must not escape that policy by naming an
+    # accessible but unlinked cluster. Admins are not exempt: the PBS manager's linked-cluster
+    # list is the authoritative policy for where these credentials may be deployed.
+    _linked = set(pbs_mgr.linked_clusters or [])
+    if body.get('clusters') is not None:
+        _unlinked = [_c for _c in cluster_ids if _c not in _linked]
+        if _unlinked:
+            return jsonify({'error': f'Clusters not linked to this PBS: {", ".join(_unlinked)}'}), 403
     # NS Aug 2026 (Aikido 469089213) — this injects the PBS's stored (often root@pam) credentials
     # into a PVE storage config, so check_cluster_access (which passes on the #555 pool / #248 ACL
     # fallback) is not enough: confine to clusters the caller's TENANT owns, like the storage
