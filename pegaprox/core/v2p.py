@@ -1035,6 +1035,12 @@ def _run_v2p_migration(task):
                     rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
                     sshfs_d = f"{mnt_path}/{rel}"
                     sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
+                    
+                    # Security: validate delta descriptor before passing to qemu-img map
+                    if not _validate_vmdk_descriptor_extents(pve_mgr, task.target_node, sshfs_d, vm_dir):
+                        task.log(f"  Disk {di}: final delta descriptor rejected (unsafe extent paths)")
+                        continue
+                    
                     extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
                     deltas_top = [e for e in extents if e.get('data') and (e.get('depth', 0) == 0)]
                     for e in deltas_top:
@@ -1678,6 +1684,12 @@ def _run_v2p_migration(task):
                     rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
                     sshfs_d = f"{mnt_path}/{rel}"
                     sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
+                    
+                    # Security: validate delta descriptor before passing to qemu-img map
+                    if not _validate_vmdk_descriptor_extents(pve_mgr, task.target_node, sshfs_d, vm_dir):
+                        task.log(f"  Disk {di}: final delta descriptor rejected (unsafe extent paths)")
+                        continue
+                    
                     extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
                     deltas_top = [e for e in extents if e.get('data') and (e.get('depth', 0) == 0)]
                     for e in deltas_top:
@@ -2742,6 +2754,100 @@ def _esxi_rm_clone(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, clone_bas
         timeout=30)
 
 
+def _validate_vmdk_descriptor_extents(pve_mgr, node, descriptor_path, vm_dir):
+    """Validate that a VMDK descriptor's extent paths are confined to the source VM directory.
+    
+    Security: A source-controlled VMDK descriptor is passed to qemu-img convert on the target
+    node. VMDK extent and backing-file references are interpreted by qemu-img and can reference
+    files outside the mounted source directory. This function parses the descriptor and ensures
+    all extent paths are relative and confined to the VM directory, preventing path traversal
+    attacks that could read arbitrary host files.
+    
+    Returns True if all extent paths are safe, False otherwise.
+    """
+    # Read the full descriptor content
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"cat {shlex.quote(descriptor_path)} 2>/dev/null", timeout=10)
+    if rc != 0 or not out:
+        return False
+    
+    descriptor_content = str(out or '').strip()
+    
+    # Parse extent lines: format is typically "RW <size> <type> "<path>" [<offset>]"
+    # or "RDONLY <size> <type> "<path>"" for read-only extents
+    # Also check for parentFileNameHint (backing file reference in snapshots)
+    for line in descriptor_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        
+        # Check extent lines (RW/RDONLY/NOACCESS followed by size, type, and quoted path)
+        if line.startswith(('RW ', 'RDONLY ', 'NOACCESS ')):
+            # Extract the quoted path from the extent line
+            # Format: RW <size> <type> "<path>" [<offset>]
+            parts = line.split('"')
+            if len(parts) >= 2:
+                extent_path = parts[1]
+                if not _is_safe_vmdk_path(extent_path, vm_dir):
+                    logging.warning(f"[V2P] Unsafe extent path in VMDK descriptor: {extent_path!r}")
+                    return False
+        
+        # Check backing file references (parentFileNameHint)
+        if line.lower().startswith('parentfilenamehint'):
+            # Format: parentFileNameHint="<path>"
+            if '="' in line or "='" in line:
+                quote_char = '"' if '="' in line else "'"
+                parts = line.split(quote_char)
+                if len(parts) >= 2:
+                    backing_path = parts[1]
+                    if not _is_safe_vmdk_path(backing_path, vm_dir):
+                        logging.warning(f"[V2P] Unsafe backing file path in VMDK descriptor: {backing_path!r}")
+                        return False
+    
+    return True
+
+
+def _is_safe_vmdk_path(path, vm_dir):
+    """Check if a VMDK extent/backing path is safe (relative and confined to VM directory).
+    
+    Rejects:
+    - Absolute paths (starting with /)
+    - Parent directory references (..)
+    - Paths that would escape the VM directory
+    
+    Returns True if the path is safe, False otherwise.
+    """
+    if not path or not isinstance(path, str):
+        return False
+    
+    # Reject absolute paths
+    if path.startswith('/'):
+        return False
+    
+    # Reject Windows absolute paths (C:\, \\server\share, etc.)
+    if len(path) >= 2 and path[1] == ':':
+        return False
+    if path.startswith('\\\\'):
+        return False
+    
+    # Normalize the path and check for parent directory traversal
+    # Split on both forward and back slashes (VMDK can use either)
+    path_normalized = path.replace('\\', '/')
+    path_parts = [p for p in path_normalized.split('/') if p and p != '.']
+    
+    # Reject any path containing '..'
+    if '..' in path_parts:
+        return False
+    
+    # Additional safety: reject paths with suspicious characters that could be used
+    # for shell injection or path manipulation
+    suspicious_chars = ['$', '`', ';', '|', '&', '\n', '\r', '\0']
+    if any(c in path for c in suspicious_chars):
+        return False
+    
+    return True
+
+
 def _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass, datastore, vm_dir, descriptor_files):
     """For each disk in descriptor_files, return list of -delta.vmdk paths
     (on ESXi-side path /vmfs/volumes/<ds>/<vm_dir>/<basename>-NNNNNN-delta.vmdk),
@@ -2846,6 +2952,11 @@ def _snapshot_zero_v2p_delta_loop(pve_mgr, task, vmware_mgr, esxi_host, esxi_use
             esxi_relative = desc_on_esxi.replace(f"/vmfs/volumes/{datastore}/", "")
             sshfs_desc = f"{mnt_path}/{esxi_relative}"
             sshfs_data = sshfs_desc.replace('.vmdk', '-delta.vmdk')
+
+            # Security: validate delta descriptor before passing to qemu-img map
+            if not _validate_vmdk_descriptor_extents(pve_mgr, task.target_node, sshfs_desc, vm_dir):
+                task.log(f"  Disk {di}: delta descriptor rejected (unsafe extent paths)")
+                continue
 
             extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_desc)
             if extents is None:
@@ -5265,8 +5376,15 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"test -f {qdesc} && head -5 {qdesc} 2>/dev/null", timeout=10)
                 d_head = str(out_d or '').strip().lower()
                 if rc_d == 0 and any(kw in d_head for kw in ['descriptor', 'vmdk', 'extent', 'version=']):
-                    sshfs_src = desc_path
-                    task.log(f"  Disk {di}: using descriptor VMDK ({desc_file})")
+                    # Security: validate that all extent paths in the descriptor are confined
+                    # to the source VM directory before passing to qemu-img
+                    if _validate_vmdk_descriptor_extents(pve_mgr, task.target_node, desc_path, vm_dir):
+                        sshfs_src = desc_path
+                        task.log(f"  Disk {di}: using descriptor VMDK ({desc_file})")
+                    else:
+                        task.log(f"  Disk {di}: descriptor VMDK rejected (unsafe extent paths)")
+                        import_ok = False
+                        continue
                 else:
                     quoted_mnt = shlex.quote(mnt_path)
                     rc_root, out_root, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -5610,7 +5728,13 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                         f"test -f {qdesc} && head -5 {qdesc} 2>/dev/null", timeout=10)
                     d_head = str(out_d or '').strip().lower()
                     if rc_d == 0 and any(kw in d_head for kw in ['descriptor', 'vmdk', 'extent', 'version=']):
-                        import_path = desc_path
+                        # Security: validate that all extent paths in the descriptor are confined
+                        # to the source VM directory before passing to qm importdisk
+                        if _validate_vmdk_descriptor_extents(pve_mgr, task.target_node, desc_path, vm_dir):
+                            import_path = desc_path
+                        else:
+                            task.log(f"  Disk {di}: descriptor VMDK rejected (unsafe extent paths)")
+                            # Fall through to use raw link instead
                 
                 if not import_path:
                     raw_link = sshfs_path.replace('.vmdk', '.raw')
