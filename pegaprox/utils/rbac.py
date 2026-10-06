@@ -506,7 +506,18 @@ def get_user_clusters(user: dict, include_pools: bool = True) -> list:
     # MK: If user has default tenant but a tenant-specific role, use the role's tenant.
     # Shared with get_user_permissions — the two answered this differently for years, and the
     # permission side silently fell back to the viewer defaults because of it.
-    role = user.get('effective_role', user.get('role', ROLE_VIEWER))
+    # 
+    # sec (pentest): must check tenant_permissions for an override, matching what
+    # get_user_permissions does. A default-tenant user with a tenant-scoped custom role
+    # granted via tenant_permissions was resolving permissions through that role but
+    # cluster scope through their global role, so the permission check and the scope
+    # check disagreed. The default tenant's empty cluster list means "all clusters",
+    # so such a caller passed both gates and reached global-scope data.
+    tenant_perms = user.get('tenant_permissions', {})
+    if tenant_id in tenant_perms:
+        role = tenant_perms[tenant_id].get('role', user.get('role', ROLE_VIEWER))
+    else:
+        role = user.get('effective_role', user.get('role', ROLE_VIEWER))
     tenant_id = _tenant_defining_role(role, tenant_id)
     
     tenant = tenants_db.get(tenant_id, {})
