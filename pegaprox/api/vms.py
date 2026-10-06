@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -8526,6 +8526,33 @@ def _execute_replication_incremental(job):
             if not ok_rm:
                 _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
                 _update_repl_status(db, job_id, 'error', rm_err); return True
+        elif not rebuild:
+            # Incremental update to an existing replica: verify ownership before writing
+            # to its storage. Without this gate, a target tenant able to create or replace
+            # a VM at the configured VMID can cause the replication service to write
+            # another VM's source contents into that tenant's storage.
+            tgt_node = None
+            try:
+                r = target_mgr._api_get(f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
+                if r.status_code == 200:
+                    for x in r.json().get('data', []):
+                        if int(x.get('vmid', 0)) == int(tgt_vmid):
+                            tgt_node = x.get('node'); break
+            except Exception:
+                pass
+            if not tgt_node:
+                _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
+                _update_repl_status(db, job_id, 'error',
+                                    f'Target VM {tgt_vmid} disappeared between existence check and replication')
+                return True
+            if not _is_replica_of_job(target_mgr, tgt_node, tgt_vmid, vm_type, job_id):
+                _cleanup_snapshot(source_mgr, source_node, vmid, vm_type, new_snap)
+                err_msg = (f"Target VM {tgt_vmid} on {tgt_node} is not tagged as this job's replica "
+                           f"({_job_tag(job_id)} missing) — refusing to overwrite. Pick a free target VMID "
+                           f"or tag it if it really is a stranded replica.")
+                _update_repl_status(db, job_id, 'error', err_msg)
+                logging.error(f"[XCINCR] Job {job_id}: ABORT — {err_msg}")
+                return True
 
         # 3. replicate each disk (seed when rebuilding, else the base..new delta)
         base_for_disk = None if rebuild else (last_snap or None)
