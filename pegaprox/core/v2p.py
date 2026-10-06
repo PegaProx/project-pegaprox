@@ -846,6 +846,10 @@ def _run_v2p_migration(task):
                 task.log(f"Resolved datastore symlink: {datastore} → {ds_mount_path}")
         else:
             ds_mount_path = f"/vmfs/volumes/{datastore}"
+        
+        # Security: Mount only the specific VM directory, not the entire datastore.
+        # This limits FUSE allow_other exposure to the migrating VM's files only.
+        ds_mount_path = f"{ds_mount_path}/{vm_dir}"
 
         # SSHFS SSH options -- include legacy algorithms for ESXi compatibility
         # Performance options (each one matters for drive-mirror speed):
@@ -911,7 +915,7 @@ def _run_v2p_migration(task):
         
         # Verify files visible
         rc, out, err = _pve_node_exec(pve_mgr, task.target_node,
-            f"ls {shlex.quote(mnt_path + '/' + vm_dir)}/*.vmdk 2>/dev/null | head -20", timeout=15)
+            f"ls {shlex.quote(mnt_path)}/*.vmdk 2>/dev/null | head -20", timeout=15)
         task.log(f"VMDK files via SSHFS: {len([l for l in out.strip().split(chr(10)) if l.strip()])}")
         
         # ================================================================
@@ -1032,7 +1036,7 @@ def _run_v2p_migration(task):
                         continue
                     final_delta = deltas[-2] if len(deltas) >= 2 else deltas[-1]
                     desc_e = final_delta.replace('-delta.vmdk', '.vmdk')
-                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
+                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/{vm_dir}/", "")
                     sshfs_d = f"{mnt_path}/{rel}"
                     sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
                     extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
@@ -1675,7 +1679,7 @@ def _run_v2p_migration(task):
                         continue
                     final_delta = deltas[-2] if len(deltas) >= 2 else deltas[-1]
                     desc_e = final_delta.replace('-delta.vmdk', '.vmdk')
-                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/", "")
+                    rel = desc_e.replace(f"/vmfs/volumes/{datastore}/{vm_dir}/", "")
                     sshfs_d = f"{mnt_path}/{rel}"
                     sshfs_data = sshfs_d.replace('.vmdk', '-delta.vmdk')
                     extents = _qemu_map_extents_via_sshfs(pve_mgr, task, sshfs_d) or []
@@ -4713,7 +4717,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         sshfs_ok = True
         for di, desc_file in enumerate(descriptor_files):
             flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
-            local_fuse_path = f"{mnt_path}/{vm_dir}/{flat_file}"
+            local_fuse_path = f"{mnt_path}/{flat_file}"
             
             rc_chk, out_chk, err_chk = _pve_node_exec(pve_mgr, task.target_node,
                 f"for i in 1 2 3 4 5 6 7 8 9 10; do "
@@ -4723,7 +4727,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 f"echo NOTFOUND; "
                 f"echo '--- mount ---'; mount | grep '{mnt_path}' 2>&1 || true; "
                 f"echo '--- mnt_path ---'; ls -la '{mnt_path}' 2>&1 || true; "
-                f"echo '--- vm_dir ---'; ls -la '{mnt_path}/{vm_dir}' 2>&1 || true; "
                 f"echo '--- target_file ---'; ls -lh '{local_fuse_path}' 2>&1 || true; "
                 f"exit 1",
                 timeout=20, ignore_node_backoff=True)
@@ -4887,6 +4890,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         if resolved2 and not resolved2.startswith('/'):
             resolved2 = f"/vmfs/volumes/{resolved2}"
         ds_remount = resolved2 if resolved2 and resolved2.startswith('/vmfs/') else f"/vmfs/volumes/{datastore}"
+        # Security: Mount only the specific VM directory, not the entire datastore
+        ds_remount = f"{ds_remount}/{vm_dir}"
         rc_remount, _, _ = _pve_node_exec(pve_mgr, task.target_node,
             f"fusermount -u {mnt_path} 2>/dev/null; "
             f"mkdir -p {mnt_path} && "
@@ -4899,8 +4904,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         if rc_remount == 0:
             # Retry with NBD after remount
             for di, desc_file in enumerate(descriptor_files):
-                flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
-                fp = f"{mnt_path}/{vm_dir}/{flat_file}"
+                flat_file = desc_file.replace('.vmdk', '-flat.vmdk')\n                fp = f"{mnt_path}/{flat_file}"
                 rc_t, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f '{fp}'", timeout=5)
                 if rc_t == 0:
                     sshfs_flat_paths.append(fp)
@@ -5043,7 +5047,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                         if not vm_running_on_ssh:
                             # Last try: chmod + AppArmor fix + retry original method
                             _pve_node_exec(pve_mgr, task.target_node,
-                                f"chmod -R a+r {shlex.quote(mnt_path + '/' + vm_dir)}/ 2>/dev/null; "
+                                f"chmod -R a+r {shlex.quote(mnt_path)}/ 2>/dev/null; "
                                 f"aa-complain /etc/apparmor.d/usr.bin.kvm 2>/dev/null",
                                 timeout=5)
                             try:
@@ -5252,14 +5256,14 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             # Source: flat file on SSHFS mount (raw format)
             flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
-            sshfs_src = f"{mnt_path}/{vm_dir}/{flat_file}"
+            sshfs_src = f"{mnt_path}/{flat_file}"
 
             qsshfs_src = shlex.quote(sshfs_src)
             rc_chk, out_chk, err_chk = _pve_node_exec(pve_mgr, task.target_node,
                 f"test -f {qsshfs_src} && stat --format='%s' {qsshfs_src} 2>&1", timeout=10)
             if rc_chk != 0:
                 # Try descriptor VMDK as source (qemu-img can read VMDK descriptors)
-                desc_path = f"{mnt_path}/{vm_dir}/{desc_file}"
+                desc_path = f"{mnt_path}/{desc_file}"
                 qdesc = shlex.quote(desc_path)
                 rc_d, out_d, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"test -f {qdesc} && head -5 {qdesc} 2>/dev/null", timeout=10)
@@ -5601,7 +5605,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 disk_gb = disk_total / (1024**3)
                 
                 desc_file = descriptor_files[di] if di < len(descriptor_files) else ''
-                desc_path = f"{mnt_path}/{vm_dir}/{desc_file}" if desc_file else ''
+                desc_path = f"{mnt_path}/{desc_file}" if desc_file else ''
                 import_path = None
                 
                 if desc_path:
@@ -6663,7 +6667,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         # METHOD 3: SSHFS dd (FUSE mount)
         # ================================================================
         if not dl_success:
-            sshfs_src = f"/tmp/v2p-{task.id}/{vm_dir}/{flat_file}"
+            sshfs_src = f"/tmp/v2p-{task.id}/{flat_file}"
             task.log(f"  SSHFS dd from {sshfs_src}...")
             rc_chk, out_chk, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"ls -la '{sshfs_src}' 2>&1", timeout=10)
