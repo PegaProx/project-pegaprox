@@ -1079,6 +1079,28 @@ class Node:
         # active with an automatic config and no lead would neither act nor follow
         leaves = (not pre and chain is not None and self.st['role'] == ROLE_ACTIVE
                   and view.mode == MODE_AUTO)
+        # Authenticate the candidate's claimed cfg_id and cv against the validated chain
+        # or view. A compromised member must not win an election by claiming forged future
+        # metadata without proving possession of the corresponding state.
+        claimed_cfg = pair(body.get('cfg_id'))
+        if claimed_cfg is not None:
+            if chain is not None:
+                # With a validated chain, cfg_id must match the chain's newest config
+                if claimed_cfg != view.id:
+                    return self._no('CFG_MISMATCH')
+            else:
+                # Without a chain, cfg_id must not exceed the voter's view
+                if claimed_cfg > view.id:
+                    return self._no('CFG_UNPROVEN')
+        # The cv's epoch component must not exceed the candidate's claimed election epoch
+        # or the config's epoch, as cv is bumped at the leader's epoch and the config's
+        # epoch is at least the leader's epoch when it was created.
+        claimed_cv = pair(body.get('cv'))
+        if claimed_cv is not None:
+            if claimed_cv[0] > T:
+                return self._no('CV_INVALID')
+            if claimed_cfg is not None and claimed_cv[0] > claimed_cfg[0]:
+                return self._no('CV_INVALID')
         reason = self._vote_rules(frm, T, pre, why, body, view, now)
         if reason:
             if chain and not pre:
