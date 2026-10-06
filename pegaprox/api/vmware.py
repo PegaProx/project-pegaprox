@@ -1295,6 +1295,17 @@ def confirm_vmware_cutover(mid):
     task = _vmware_migrations[mid]
     if not _migration_reachable(task):
         return jsonify({'error': 'Migration not found'}), 404
+    # sec (pentest): confirming the cutover releases the worker into the final switchover, which
+    # stops the source VM and may delete it when remove_source was requested. That destructive
+    # state transition creates a guest in the target scope, so the caller must hold the same
+    # target-scope creation authority that start_vmware_migration enforces. Reject callers who
+    # are scoped to the target cluster (reached it via pool/ACL fallback but lack cluster-wide
+    # guest-creation authority), matching the gate at migration start.
+    target_cid = getattr(task, 'target_cluster', None)
+    if target_cid:
+        _cutover_u = build_authz_user(request.session.get('user', ''), request.session)
+        if caller_is_scoped(_cutover_u, target_cid):
+            return jsonify({'error': 'Access denied to the target cluster'}), 403
     if getattr(task, 'phase', None) != 'awaiting_confirmation':
         return jsonify({'error': 'Migration is not waiting for cutover confirmation',
                         'phase': getattr(task, 'phase', None)}), 409
@@ -1316,6 +1327,14 @@ def cancel_vmware_cutover(mid):
     task = _vmware_migrations[mid]
     if not _migration_reachable(task):
         return jsonify({'error': 'Migration not found'}), 404
+    # sec (pentest): cancelling the cutover is a control action on a migration that would create
+    # a guest in the target scope. Apply the same target-scope authority check as confirmation
+    # and migration start: reject callers scoped to the target cluster.
+    target_cid = getattr(task, 'target_cluster', None)
+    if target_cid:
+        _cancel_u = build_authz_user(request.session.get('user', ''), request.session)
+        if caller_is_scoped(_cancel_u, target_cid):
+            return jsonify({'error': 'Access denied to the target cluster'}), 403
     if getattr(task, 'phase', None) != 'awaiting_confirmation':
         return jsonify({'error': 'Migration is not waiting for cutover confirmation',
                         'phase': getattr(task, 'phase', None)}), 409
