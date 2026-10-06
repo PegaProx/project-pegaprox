@@ -750,12 +750,35 @@ def execute_test_failover(plan_id, console_vmids=None):
                                     logger.warning(f"[SR] Test failover: couldn't delete temp snapshot "
                                                    f"{_temp_snap} on CT {target_vmid}: {_de}")
                             if clone_ok:
-                                test_vmids.append({'vmid': test_vmid, 'vm_type': vtype})
+                                # Security fix: use the actual VMID returned by clone_vm, not the
+                                # pre-computed test_vmid. XCP-ng ignores newid and returns an
+                                # allocator-selected VMID; storing the pre-computed value creates
+                                # a confused-deputy risk where cleanup can purge an unrelated VM
+                                # if the stored number later maps to a different resource.
+                                actual_vmid = clone_result.get('vmid', test_vmid) if isinstance(clone_result, dict) else test_vmid
+                                clone_entry = {
+                                    'vmid': actual_vmid,
+                                    'vm_type': vtype,
+                                    'expected_name': f"SR-TEST-{vm_name}",
+                                    'source_vmid': vmid,
+                                }
+                                # For XCP-ng, also store the UUID for identity verification during cleanup
+                                # XCP-ng uses a UUID->VMID mapping table; Proxmox VMs have stable numeric IDs
+                                if hasattr(tgt_mgr, '_api') and callable(getattr(tgt_mgr, '_api', None)):
+                                    try:
+                                        from pegaprox.core.db import get_db
+                                        _db = get_db()
+                                        clone_uuid = _db.xcpng_resolve_vmid(tgt_mgr.id, actual_vmid)
+                                        if clone_uuid:
+                                            clone_entry['uuid'] = clone_uuid
+                                    except Exception:
+                                        pass
+                                test_vmids.append(clone_entry)
                                 # MK Jul 2026 (#413) — optionally disconnect every NIC
                                 # BEFORE start so the test clone can't grab a live IP.
                                 _iso = None
                                 if plan.get('test_disconnect_nics'):
-                                    _iso = _disconnect_test_nics(tgt_mgr, node_name, test_vmid, vtype)
+                                    _iso = _disconnect_test_nics(tgt_mgr, node_name, actual_vmid, vtype)
                                     if not _iso.get('ok'):
                                         # The operator asked for isolation. Starting anyway is
                                         # the one outcome a TEST failover must never produce:
@@ -763,9 +786,9 @@ def execute_test_failover(plan_id, console_vmids=None):
                                         # with its addresses. Leave it stopped and say why.
                                         logger.error(
                                             f"[SR] Test failover: NIC isolation failed for test VM "
-                                            f"{test_vmid} ({_iso.get('error')}) - leaving it stopped")
+                                            f"{actual_vmid} ({_iso.get('error')}) - leaving it stopped")
                                         results[str(vmid)] = {
-                                            'success': False, 'test_vmid': test_vmid,
+                                            'success': False, 'test_vmid': actual_vmid,
                                             'error': f"cloned OK but NIC isolation failed, not started: "
                                                      f"{_iso.get('error')}"}
                                         found = True
@@ -774,14 +797,14 @@ def execute_test_failover(plan_id, console_vmids=None):
                                         logger.warning(
                                             f"[SR] Test failover: NIC isolation was requested but "
                                             f"link_down does not exist for {vtype} - test CT "
-                                            f"{test_vmid} starts on the live network")
+                                            f"{actual_vmid} starts on the live network")
                                 # NS Apr 2026: was start_vm() which doesn't exist — use vm_action
-                                start_res = tgt_mgr.vm_action(node_name, test_vmid, vtype, 'start')
+                                start_res = tgt_mgr.vm_action(node_name, actual_vmid, vtype, 'start')
                                 if start_res.get('success'):
-                                    results[str(vmid)] = {'success': True, 'test_vmid': test_vmid}
-                                    booted.append(sr_boot_shots.booted(vm, test_vmid, vtype, node_name))
+                                    results[str(vmid)] = {'success': True, 'test_vmid': actual_vmid}
+                                    booted.append(sr_boot_shots.booted(vm, actual_vmid, vtype, node_name))
                                 else:
-                                    results[str(vmid)] = {'success': False, 'test_vmid': test_vmid,
+                                    results[str(vmid)] = {'success': False, 'test_vmid': actual_vmid,
                                                           'error': f"cloned OK but start failed: {start_res.get('error', 'unknown')}"}
                             else:
                                 err = clone_result.get('error', 'Clone failed') if isinstance(clone_result, dict) else 'Clone failed'
@@ -880,9 +903,15 @@ def cleanup_test(plan_id):
         if isinstance(entry, dict):
             test_vmid = entry.get('vmid', 0)
             vtype = entry.get('vm_type', 'qemu')
+            expected_name = entry.get('expected_name')
+            expected_uuid = entry.get('uuid')
+            source_vmid = entry.get('source_vmid')
         else:
             test_vmid = entry
             vtype = 'qemu'
+            expected_name = None
+            expected_uuid = None
+            source_vmid = None
         try:
             # NS Apr 2026: locate test VM via cluster resources (was iterating all nodes)
             try:
@@ -892,17 +921,60 @@ def cleanup_test(plan_id):
                 )
                 target_node = None
                 current_status = None
+                current_name = None
                 if res.status_code == 200:
                     for r in res.json().get('data', []):
                         if int(r.get('vmid', 0)) == int(test_vmid):
                             target_node = r.get('node')
                             current_status = r.get('status')
+                            current_name = r.get('name')
                             break
             except Exception:
                 target_node = None
                 current_status = None
+                current_name = None
 
             if target_node:
+                # Security fix: verify VM identity before purging. The stored VMID may
+                # now map to a different resource if the original clone was deleted and
+                # the number was reused, or if XCP-ng allocated a different VMID than
+                # the one we computed. Check name pattern and UUID to prevent deleting
+                # an unrelated VM.
+                identity_verified = False
+                identity_reason = None
+                
+                # Check 1: VM name must match the expected SR-TEST-* pattern
+                if expected_name and current_name:
+                    if current_name == expected_name:
+                        identity_verified = True
+                    else:
+                        identity_reason = f"name mismatch: expected '{expected_name}', found '{current_name}'"
+                elif current_name and current_name.startswith('SR-TEST-'):
+                    # Legacy entry without expected_name, but name looks like a test clone
+                    identity_verified = True
+                else:
+                    identity_reason = f"name does not match test clone pattern (found: '{current_name}')"
+                
+                # Check 2: For XCP-ng, also verify UUID if available
+                # XCP-ng uses a UUID->VMID mapping table; Proxmox VMs have stable numeric IDs
+                if identity_verified and expected_uuid and hasattr(tgt_mgr, '_api') and callable(getattr(tgt_mgr, '_api', None)):
+                    try:
+                        from pegaprox.core.db import get_db
+                        _db = get_db()
+                        current_uuid = _db.xcpng_resolve_vmid(tgt_mgr.id, test_vmid)
+                        if current_uuid != expected_uuid:
+                            identity_verified = False
+                            identity_reason = f"UUID mismatch: expected '{expected_uuid}', found '{current_uuid}'"
+                    except Exception as e:
+                        # If UUID check fails, fall back to name-only verification
+                        logger.warning(f"[SR] Cleanup: UUID verification failed for VM {test_vmid}: {e}")
+                
+                if not identity_verified:
+                    logger.error(
+                        f"[SR] Cleanup: refusing to delete VM {test_vmid} - identity verification failed: "
+                        f"{identity_reason}. This may be an unrelated VM that reused the VMID.")
+                    continue
+                
                 try:
                     # NS: was stop_vm/delete_vm — use vm_action; ignore "already stopped" errors
                     if current_status == 'running':
