@@ -102,11 +102,11 @@ jobs:
           FOUND=""
           for i in $(seq 1 "${APT_POLL_RETRIES}"); do
             apt-get $APT_OPTS update >/dev/null 2>&1 || true
-            CAND="$(apt-cache $APT_OPTS madison pegaprox 2>/dev/null | awk '{print $3}' || true)"
+            CAND="$(apt-cache $APT_OPTS madison **** 2>/dev/null | awk '{print $3}' || true)"
             MATCH="$(echo "$CAND" | grep -E "^${WANT}([.+~-]|$)" | head -n1 || true)"
             if [ -n "$MATCH" ]; then
               FOUND="$MATCH"
-              echo "Gefunden: pegaprox=$FOUND"
+              echo "Gefunden: ****=$FOUND"
               break
             fi
             echo "[$i/${APT_POLL_RETRIES}] Paket $WANT noch nicht im Repo, warte ${APT_POLL_INTERVAL}s..."
@@ -123,7 +123,7 @@ jobs:
         if: steps.ver.outputs.is_release != 'true'
         run: |
           echo "Manueller Dev-Build ohne Tag ('${{ steps.ver.outputs.version }}')."
-          echo "Repo-Poll wird übersprungen. Es wird die aktuell neueste pegaprox-Version installiert."
+          echo "Repo-Poll wird übersprungen. Es wird die aktuell neueste ****-Version installiert."
 
   # ----------------------------------------------------------------------
   # 2) LXC-Template per distrobuilder (Snap) + Smoke-Test
@@ -164,7 +164,7 @@ jobs:
       - name: distrobuilder-Definition schreiben
         run: |
           mkdir -p packaging/lxc
-          cat > packaging/lxc/pegaprox-lxc.yaml <<YAML
+          cat > packaging/lxc/****-lxc.yaml <<YAML
           image:
             distribution: debian
             release: ${DEBIAN_RELEASE}
@@ -249,8 +249,8 @@ jobs:
                 # NS Aug 2026 (#688) — sshpass: PegaProx falls back to it for password-auth SSH
                 # (CVE scan et al.); the prebuilt image must ship it or that path dies with
                 # "sshpass not installed". Key auth works without it, but the appliance supports both.
-                apt-get -y install pegaprox sshpass
-                systemctl enable pegaprox || true
+                apt-get -y install **** sshpass
+                systemctl enable **** || true
                 # --- Root-Login setzen ---
                 echo 'root:PegaProx2026!' | chpasswd
 
@@ -262,7 +262,7 @@ jobs:
         run: |
           export PATH="$PATH:/snap/bin"
           sudo --preserve-env=PATH "$(command -v distrobuilder)" \
-            build-lxc packaging/lxc/pegaprox-lxc.yaml \
+            build-lxc packaging/lxc/****-lxc.yaml \
             -o image.release=${DEBIAN_RELEASE} \
             -o image.architecture=${{ matrix.arch }}
           ls -lh *.tar.xz
@@ -274,24 +274,24 @@ jobs:
             mkdir -p /tmp/ct/rootfs
             sudo tar -xpJf rootfs.tar.xz -C /tmp/ct/rootfs
             sudo systemd-nspawn -D /tmp/ct/rootfs \
-              --machine pegaprox-test \
+              --machine ****-test \
               --boot \
               --bind-ro=/etc/resolv.conf \
               > /tmp/nspawn.log 2>&1 &
           else
-            sudo docker import --platform linux/arm64 rootfs.tar.xz pegaprox-lxc-smoke:arm64
+            sudo docker import --platform linux/arm64 rootfs.tar.xz ****-lxc-smoke:arm64
             sudo docker run -d \
-              --name pegaprox-test \
+              --name ****-test \
               --platform linux/arm64 \
               --privileged \
               -p ${PVE_PORT}:${PVE_PORT} \
               --entrypoint /bin/sh \
-              pegaprox-lxc-smoke:arm64 \
+              ****-lxc-smoke:arm64 \
               -c '
                 set -e
-                chmod +x /usr/bin/pegaprox/pegaprox-wrapper
-                ls -al /usr/bin/pegaprox
-                exec /usr/bin/pegaprox/pegaprox-wrapper
+                chmod +x /usr/bin/****/****-wrapper
+                ls -al /usr/bin/****
+                exec /usr/bin/****/****-wrapper
               '
           fi
 
@@ -310,13 +310,13 @@ jobs:
             tail -n 40 /tmp/nspawn.log || true
             echo "----- Lauschende Ports auf dem Host -----"
             sudo ss -tlnp || true
-            sudo machinectl poweroff pegaprox-test 2>/dev/null || true
+            sudo machinectl poweroff ****-test 2>/dev/null || true
             sleep 3
-            sudo machinectl terminate pegaprox-test 2>/dev/null || true
+            sudo machinectl terminate ****-test 2>/dev/null || true
           else
             echo "----- Container-Logs -----"
-            sudo docker logs pegaprox-test || true
-            sudo docker rm -f pegaprox-test 2>/dev/null || true
+            sudo docker logs ****-test || true
+            sudo docker rm -f ****-test 2>/dev/null || true
           fi
 
           [ "$OK" -eq 1 ] || { echo "::error::PegaProx kam im LXC nicht hoch"; exit 1; }
@@ -325,18 +325,18 @@ jobs:
       - name: Template umbenennen
         run: |
           mv rootfs.tar.xz \
-            "pegaprox-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz"
+            "****-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz"
           # NS 2026-06-05 — also ship a stable -latest- name so the GitHub
           # releases/latest/download/ URL always resolves to the newest LXC
           # template (same as Docker's :latest). Byte-identical copy.
-          cp "pegaprox-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz" \
-             "pegaprox-latest-lxc-${{ matrix.arch }}.tar.xz"
+          cp "****-${{ needs.prepare.outputs.version }}-lxc-${{ matrix.arch }}.tar.xz" \
+             "****-latest-lxc-${{ matrix.arch }}.tar.xz"
 
       - name: Artefakt sichern
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lxc-template-${{ matrix.arch }}
-          path: pegaprox-*lxc*.tar.xz
+          path: ****-*lxc*.tar.xz
           retention-days: 7
 
   # ----------------------------------------------------------------------
@@ -361,7 +361,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             qemu-utils qemu-system-x86 qemu-system-arm qemu-efi-aarch64 \
-            cloud-image-utils curl
+            cloud-image-utils curl gnupg
 
       - name: Debian Cloud-Image laden + Checksum verifizieren
         run: |
@@ -372,12 +372,41 @@ jobs:
           # could substitute a backdoored qcow2 and every release artefact would
           # carry it. Fix: pull SHA512SUMS from the same path Debian publishes
           # alongside the image and fail the build if the hash doesn't match.
+          #
+          # NS 2026-12 (pentest) — verifying the image against SHA512SUMS downloaded
+          # from the same mutable endpoint does not authenticate Debian provenance.
+          # An attacker able to alter that path can replace both files with a matching
+          # pair and satisfy sha512sum -c. The fix is to verify SHA512SUMS itself
+          # against Debian's GPG signature before trusting its contents.
           set -euo pipefail
           BASE_URL="https://cloud.debian.org/images/cloud/${DEBIAN_RELEASE}/latest"
           IMG_NAME="debian-13-genericcloud-${{ matrix.arch }}.qcow2"
 
-          wget -q -O pegaprox.qcow2 "${BASE_URL}/${IMG_NAME}"
+          # Import Debian's official cloud team signing key (DF9B9C49EAA9298432589D76DA87E80D6294BE9B).
+          # This key is documented at https://cloud.debian.org/images/cloud/ and is the
+          # authoritative trust anchor for Debian cloud images. Fetch from the official
+          # Debian keyring server to establish an independent trust path.
+          gpg --batch --keyserver hkps://keyring.debian.org \
+              --recv-keys DF9B9C49EAA9298432589D76DA87E80D6294BE9B
+
+          wget -q -O ****.qcow2 "${BASE_URL}/${IMG_NAME}"
           wget -q -O SHA512SUMS     "${BASE_URL}/SHA512SUMS"
+          wget -q -O SHA512SUMS.sign "${BASE_URL}/SHA512SUMS.sign"
+
+          # Verify the GPG signature on SHA512SUMS. This proves the checksums file
+          # came from Debian and has not been tampered with. Only after this succeeds
+          # do we trust the hashes inside to verify the image.
+          if ! gpg --batch --verify SHA512SUMS.sign SHA512SUMS 2>&1 | tee /tmp/gpg.log; then
+            echo "::error::GPG signature verification of SHA512SUMS failed"
+            cat /tmp/gpg.log
+            exit 1
+          fi
+          if ! grep -q "Good signature" /tmp/gpg.log; then
+            echo "::error::GPG verification did not produce a good signature"
+            cat /tmp/gpg.log
+            exit 1
+          fi
+          echo "✓ SHA512SUMS signature verified against Debian cloud team key"
 
           # SHA512SUMS lists every asset Debian ships at this path. Pull the
           # row for our image, swap the original filename for the local name
@@ -391,10 +420,10 @@ jobs:
             cat SHA512SUMS
             exit 1
           fi
-          echo "${EXPECTED_LINE}" | sed "s| [ *]${IMG_NAME}\$|  pegaprox.qcow2|" > pegaprox.qcow2.sha512
-          sha512sum -c pegaprox.qcow2.sha512
+          echo "${EXPECTED_LINE}" | sed "s| [ *]${IMG_NAME}\$|  ****.qcow2|" > ****.qcow2.sha512
+          sha512sum -c ****.qcow2.sha512
 
-          qemu-img resize pegaprox.qcow2 20G
+          qemu-img resize ****.qcow2 20G
 
       - name: Dateien per qemu-nbd einhängen
         run: |
@@ -411,7 +440,7 @@ jobs:
           # ==================================================================
           # First-Boot-Installer: apt-Paket + User + SSH
           # ==================================================================
-          cat > install-pegaprox.sh <<'INSTALLEOF'
+          cat > install-****.sh <<'INSTALLEOF'
           #!/bin/sh
           set -eu
           export DEBIAN_FRONTEND=noninteractive
@@ -431,39 +460,39 @@ jobs:
           dpkg -i python3-flask-sock_0.7.1_all.deb
           dpkg -i python3-xenapi_26.8.1_all.deb
           apt-get -y install sudo sqlite3 ca-certificates curl
-          apt-get -y install pegaprox sshpass
-          systemctl enable pegaprox || true
+          apt-get -y install **** sshpass
+          systemctl enable **** || true
 
           # --- Login-User mit sudo ---
-          if ! id pegaprox_admin >/dev/null 2>&1; then
-            useradd -m -s /bin/bash pegaprox_admin
+          if ! id ****_admin >/dev/null 2>&1; then
+            useradd -m -s /bin/bash ****_admin
           fi
-          usermod -aG sudo pegaprox_admin || true
-          echo 'pegaprox_admin:PegaProx2026!' | chpasswd
+          usermod -aG sudo ****_admin || true
+          echo '****_admin:PegaProx2026!' | chpasswd
           echo 'root:7eF9$&JHVspAmjWKcGmD!6QypzBsbmyA' | chpasswd
 
           # --- SSH: Passwort-Login erlauben ---
           mkdir -p /etc/ssh/sshd_config.d
           printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\nPermitRootLogin yes\n' \
-            > /etc/ssh/sshd_config.d/99-pegaprox.conf
+            > /etc/ssh/sshd_config.d/99-****.conf
           systemctl reload ssh 2>/dev/null \
             || systemctl restart ssh 2>/dev/null \
             || systemctl restart sshd 2>/dev/null || true
 
-          mkdir -p /etc/pegaprox
-          systemctl disable pegaprox-firstboot.service || true
+          mkdir -p /etc/****
+          systemctl disable ****-firstboot.service || true
           INSTALLEOF
 
-          cat > pegaprox-firstboot.service <<'SVCEOF'
+          cat > ****-firstboot.service <<'SVCEOF'
           [Unit]
           Description=PegaProx First Boot Installer
           After=network-online.target
           Wants=network-online.target
-          ConditionPathExists=/usr/local/sbin/install-pegaprox.sh
+          ConditionPathExists=/usr/local/sbin/install-****.sh
 
           [Service]
           Type=oneshot
-          ExecStart=/usr/local/sbin/install-pegaprox.sh
+          ExecStart=/usr/local/sbin/install-****.sh
           RemainAfterExit=yes
 
           [Install]
@@ -474,10 +503,10 @@ jobs:
           # Interaktiver Setup-Wizard (systemd-networkd, heredoc-frei)
           # User-sichtbare Texte: ENGLISCH
           # ==================================================================
-          cat > pegaprox-setup <<'WIZ'
+          cat > ****-setup <<'WIZ'
           #!/bin/bash
           # PegaProx First-Boot Wizard (interactive)
-          MARKER="/etc/pegaprox/.setup-complete"
+          MARKER="/etc/****/.setup-complete"
           C='\033[0;36m'; G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; N='\033[0m'
 
           detect_interface() {
@@ -506,21 +535,21 @@ jobs:
             local c; c=$(mask_to_cidr "$in"); [ -n "$c" ] && echo "$c"
           }
           find_db() {
-            for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db \
-                      /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db \
-                      /opt/PegaProx/config/pegaprox.db; do
+            for db in /var/lib/****/****.db /var/lib/****/config/****.db \
+                      /etc/****/****.db /usr/lib/****/config/****.db \
+                      /opt/PegaProx/config/****.db; do
               [ -f "$db" ] && { echo "$db"; return; }
             done
           }
 
-          [ "$EUID" -ne 0 ] && { echo -e "${R}Please run as root: sudo pegaprox-setup${N}"; exit 1; }
-          mkdir -p /etc/pegaprox
+          [ "$EUID" -ne 0 ] && { echo -e "${R}Please run as root: sudo ****-setup${N}"; exit 1; }
+          mkdir -p /etc/****
 
           if [ -f "$MARKER" ] && [ "${1:-}" != "--force" ] && [ "${1:-}" != "-f" ]; then
             IFACE=$(detect_interface)
             echo -e "${G}PegaProx is already configured.${N}"
             echo -e "Access: ${C}https://$(get_current_ip "$IFACE"):5000${N}"
-            echo -e "Reconfigure: ${Y}sudo pegaprox-setup --force${N}"
+            echo -e "Reconfigure: ${Y}sudo ****-setup --force${N}"
             exit 0
           fi
           if [ "${1:-}" = "--force" ] || [ "${1:-}" = "-f" ]; then rm -f "$MARKER"; fi
@@ -580,11 +609,11 @@ jobs:
           rm -f /etc/systemd/network/*.network 2>/dev/null || true
 
           if [ "$USE_DHCP" = true ]; then
-            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-pegaprox.network
+            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-****.network
           else
             { printf '[Match]\nName=%s\n\n[Network]\nAddress=%s/%s\nGateway=%s\n' "$IFACE" "$IP_ADDR" "$SUBNET" "$GATEWAY"
               for d in $DNS; do printf 'DNS=%s\n' "$d"; done
-            } > /etc/systemd/network/10-pegaprox.network
+            } > /etc/systemd/network/10-****.network
             { echo "# Generated by PegaProx Setup"; for d in $DNS; do echo "nameserver $d"; done; } > /etc/resolv.conf
           fi
           systemctl disable networking 2>/dev/null || true
@@ -597,8 +626,8 @@ jobs:
           sleep 3
 
           systemctl daemon-reload
-          systemctl enable pegaprox 2>/dev/null || true
-          systemctl restart pegaprox 2>/dev/null || systemctl start pegaprox 2>/dev/null || true
+          systemctl enable **** 2>/dev/null || true
+          systemctl restart **** 2>/dev/null || systemctl start **** 2>/dev/null || true
           echo "Waiting for database initialization..."
           sleep 8
 
@@ -606,7 +635,7 @@ jobs:
             DB=$(find_db)
             if [ -n "$DB" ]; then
               if sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$ACCESS_PORT');" 2>/dev/null; then
-                systemctl restart pegaprox 2>/dev/null || true; sleep 4
+                systemctl restart **** 2>/dev/null || true; sleep 4
                 echo -e "${G}Port set to $ACCESS_PORT${N}"
               else
                 echo -e "${Y}Could not set port automatically - please set it in the settings.${N}"
@@ -616,19 +645,19 @@ jobs:
             fi
           fi
 
-          systemctl is-active --quiet pegaprox \
+          systemctl is-active --quiet **** \
             && echo -e "${G}PegaProx is running.${N}" \
-            || echo -e "${R}PegaProx failed to start - check: journalctl -u pegaprox${N}"
+            || echo -e "${R}PegaProx failed to start - check: journalctl -u ****${N}"
 
           echo ""
-          echo -e "${Y}Set a password for the login user 'pegaprox_admin':${N}"
+          echo -e "${Y}Set a password for the login user '****_admin':${N}"
           read -p "Set it now? [Y/n]: " sp
           case "${sp:-y}" in
-            [Nn]*) echo -e "${Y}Later with: passwd pegaprox_admin${N}";;
-            *) passwd pegaprox_admin || echo -e "${Y}Password change skipped.${N}";;
+            [Nn]*) echo -e "${Y}Later with: passwd ****_admin${N}";;
+            *) passwd ****_admin || echo -e "${Y}Password change skipped.${N}";;
           esac
 
-          mkdir -p /etc/pegaprox
+          mkdir -p /etc/****
           touch "$MARKER"
           FIP=$(get_current_ip "$IFACE")
           echo ""
@@ -643,17 +672,17 @@ jobs:
           # ==================================================================
           # Unattended Setup (cloud-init) - user-sichtbare Logs: ENGLISCH
           # ==================================================================
-          cat > pegaprox-setup-auto <<'AUTO'
+          cat > ****-setup-auto <<'AUTO'
           #!/bin/bash
           set -e
-          MARKER="/etc/pegaprox/.setup-complete"
+          MARKER="/etc/****/.setup-complete"
           IP="${PEGAPROX_IP:-}"; CIDR="${PEGAPROX_CIDR:-24}"; GW="${PEGAPROX_GW:-}"
           DNS="${PEGAPROX_DNS:-8.8.8.8 8.8.4.4}"; DHCP="${PEGAPROX_DHCP:-false}"
           FORCE="${PEGAPROX_FORCE:-false}"; IFACE="${PEGAPROX_IFACE:-}"; PORT="${PEGAPROX_PORT:-5000}"
 
           log(){ echo "[$(date '+%H:%M:%S')] $1"; }
           mask_to_cidr(){ case "$1" in 255.255.255.0) echo 24;; 255.255.254.0) echo 23;; 255.255.252.0) echo 22;; 255.255.248.0) echo 21;; 255.255.240.0) echo 20;; 255.255.0.0) echo 16;; 255.0.0.0) echo 8;; *) echo "";; esac; }
-          find_db(){ for db in /var/lib/pegaprox/pegaprox.db /var/lib/pegaprox/config/pegaprox.db /etc/pegaprox/pegaprox.db /usr/lib/pegaprox/config/pegaprox.db /opt/PegaProx/config/pegaprox.db; do [ -f "$db" ] && { echo "$db"; return; }; done; }
+          find_db(){ for db in /var/lib/****/****.db /var/lib/****/config/****.db /etc/****/****.db /usr/lib/****/config/****.db /opt/PegaProx/config/****.db; do [ -f "$db" ] && { echo "$db"; return; }; done; }
 
           for arg in "$@"; do case $arg in
             --ip=*) IP="${arg#*=}";;
@@ -664,11 +693,11 @@ jobs:
             --port=*) PORT="${arg#*=}";;
             --dhcp) DHCP=true;;
             --force|-f) FORCE=true;;
-            --help|-h) echo "Usage: pegaprox-setup-auto --ip=X --cidr=24 --gateway=X [--dns='..'] [--port=443] | --dhcp [--force]"; exit 0;;
+            --help|-h) echo "Usage: ****-setup-auto --ip=X --cidr=24 --gateway=X [--dns='..'] [--port=443] | --dhcp [--force]"; exit 0;;
           esac; done
 
           [ "$EUID" -ne 0 ] && { log "ERROR: root required"; exit 1; }
-          mkdir -p /etc/pegaprox
+          mkdir -p /etc/****
           if [ -f "$MARKER" ] && [ "$FORCE" != "true" ]; then log "Already configured"; exit 0; fi
           [ "$FORCE" = "true" ] && rm -f "$MARKER" || true
 
@@ -689,12 +718,12 @@ jobs:
           rm -f /etc/systemd/network/*.network 2>/dev/null || true
 
           if [ "$DHCP" = "true" ]; then
-            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-pegaprox.network
+            printf '[Match]\nName=%s\n\n[Network]\nDHCP=yes\n' "$IFACE" > /etc/systemd/network/10-****.network
             log "DHCP configured on $IFACE"
           else
             { printf '[Match]\nName=%s\n\n[Network]\nAddress=%s/%s\nGateway=%s\n' "$IFACE" "$IP" "$CIDR" "$GW"
               for d in $DNS; do printf 'DNS=%s\n' "$d"; done
-            } > /etc/systemd/network/10-pegaprox.network
+            } > /etc/systemd/network/10-****.network
             { echo "# Generated by PegaProx Setup"; for d in $DNS; do echo "nameserver $d"; done; } > /etc/resolv.conf
             log "Static: $IP/$CIDR gw $GW"
           fi
@@ -704,41 +733,41 @@ jobs:
           sleep 3
 
           systemctl daemon-reload
-          systemctl enable pegaprox 2>/dev/null || true
-          systemctl restart pegaprox 2>/dev/null || systemctl start pegaprox 2>/dev/null || true
+          systemctl enable **** 2>/dev/null || true
+          systemctl restart **** 2>/dev/null || systemctl start **** 2>/dev/null || true
           sleep 8
 
           if [ "$PORT" != 5000 ]; then
             DB=$(find_db || true)
             if [ -n "$DB" ]; then
               sqlite3 "$DB" "INSERT OR REPLACE INTO server_settings (key, value) VALUES ('port','$PORT');" 2>/dev/null \
-                && { systemctl restart pegaprox 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
+                && { systemctl restart **** 2>/dev/null || true; sleep 4; log "Port set to $PORT"; } \
                 || log "Could not set port automatically"
             fi
           fi
 
-          if systemctl is-active --quiet pegaprox; then
+          if systemctl is-active --quiet ****; then
             touch "$MARKER"
             FINAL=$(ip -4 addr show "$IFACE" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -n1 || true)
             [ "$PORT" = 443 ] && log "Done: https://${FINAL:-<ip>}" || log "Done: https://${FINAL:-<ip>}:$PORT"
           else
-            log "ERROR: pegaprox failed to start"; exit 1
+            log "ERROR: **** failed to start"; exit 1
           fi
           AUTO
 
           # ==================================================================
           # Autostart des Wizards beim ersten Login - Hinweis: ENGLISCH
           # ==================================================================
-          cat > pegaprox-firstboot-profile.sh <<'PROF'
+          cat > ****-firstboot-profile.sh <<'PROF'
           #!/bin/bash
-          if [ ! -f /etc/pegaprox/.setup-complete ] && [ -t 0 ] && [ -z "${PEGAPROX_SKIP_SETUP:-}" ]; then
+          if [ ! -f /etc/****/.setup-complete ] && [ -t 0 ] && [ -z "${PEGAPROX_SKIP_SETUP:-}" ]; then
             echo ""
             echo -e "\033[1;33mPegaProx needs to be configured. The wizard starts in 5s (Ctrl+C to cancel)...\033[0m"
             sleep 5
             if [ "$EUID" -eq 0 ]; then
-              /usr/local/bin/pegaprox-setup
+              /usr/local/bin/****-setup
             elif command -v sudo >/dev/null 2>&1; then
-              sudo /usr/local/bin/pegaprox-setup
+              sudo /usr/local/bin/****-setup
             fi
           fi
           PROF
@@ -747,7 +776,7 @@ jobs:
           # qcow2 als NBD-Blockgerät einhängen
           # ==================================================================
           sudo modprobe nbd max_part=16
-          sudo qemu-nbd --connect=/dev/nbd0 pegaprox.qcow2
+          sudo qemu-nbd --connect=/dev/nbd0 ****.qcow2
           for i in $(seq 1 10); do
             sudo partprobe /dev/nbd0 2>/dev/null || true
             sleep 1
@@ -772,28 +801,28 @@ jobs:
           sudo mount "$ROOT" /mnt/img
 
           # --- Dateien hineinkopieren ---
-          sudo mkdir -p /mnt/img/etc/apt/keyrings /mnt/img/etc/pegaprox
+          sudo mkdir -p /mnt/img/etc/apt/keyrings /mnt/img/etc/****
           sudo cp gyptazy.asc  /mnt/img/etc/apt/keyrings/gyptazy.asc
           sudo cp gyptazy.list /mnt/img/etc/apt/sources.list.d/gyptazy.list
 
-          sudo cp install-pegaprox.sh /mnt/img/usr/local/sbin/install-pegaprox.sh
-          sudo cp pegaprox-setup      /mnt/img/usr/local/bin/pegaprox-setup
-          sudo cp pegaprox-setup-auto /mnt/img/usr/local/bin/pegaprox-setup-auto
-          sudo chmod 0755 /mnt/img/usr/local/sbin/install-pegaprox.sh \
-                          /mnt/img/usr/local/bin/pegaprox-setup \
-                          /mnt/img/usr/local/bin/pegaprox-setup-auto
+          sudo cp install-****.sh /mnt/img/usr/local/sbin/install-****.sh
+          sudo cp ****-setup      /mnt/img/usr/local/bin/****-setup
+          sudo cp ****-setup-auto /mnt/img/usr/local/bin/****-setup-auto
+          sudo chmod 0755 /mnt/img/usr/local/sbin/install-****.sh \
+                          /mnt/img/usr/local/bin/****-setup \
+                          /mnt/img/usr/local/bin/****-setup-auto
 
-          sudo cp pegaprox-firstboot-profile.sh \
-            /mnt/img/etc/profile.d/pegaprox-firstboot.sh
-          sudo chmod 0755 /mnt/img/etc/profile.d/pegaprox-firstboot.sh
+          sudo cp ****-firstboot-profile.sh \
+            /mnt/img/etc/profile.d/****-firstboot.sh
+          sudo chmod 0755 /mnt/img/etc/profile.d/****-firstboot.sh
 
-          sudo cp pegaprox-firstboot.service \
-            /mnt/img/etc/systemd/system/pegaprox-firstboot.service
+          sudo cp ****-firstboot.service \
+            /mnt/img/etc/systemd/system/****-firstboot.service
 
           # --- Services aktivieren (Symlinks, kein chroot nötig) ---
           sudo mkdir -p /mnt/img/etc/systemd/system/multi-user.target.wants
-          sudo ln -sf /etc/systemd/system/pegaprox-firstboot.service \
-            /mnt/img/etc/systemd/system/multi-user.target.wants/pegaprox-firstboot.service
+          sudo ln -sf /etc/systemd/system/****-firstboot.service \
+            /mnt/img/etc/systemd/system/multi-user.target.wants/****-firstboot.service
 
           for U in ssh.service sshd.service; do
             if [ -f "/mnt/img/lib/systemd/system/$U" ] || [ -f "/mnt/img/usr/lib/systemd/system/$U" ]; then
@@ -815,17 +844,17 @@ jobs:
           set -e
           cat > user-data <<'EOF'
           #cloud-config
-          password: pegaprox
+          password: ****
           chpasswd: { expire: false }
           ssh_pwauth: true
           EOF
-          echo "instance-id: iid-pegaprox" > meta-data
+          echo "instance-id: iid-****" > meta-data
           cloud-localds seed.iso user-data meta-data
 
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             qemu-system-x86_64 \
               -m 2048 -smp 2 \
-              -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
+              -drive file=****.qcow2,format=qcow2,if=virtio \
               -drive file=seed.iso,format=raw,if=virtio \
               -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
               -device virtio-net-pci,netdev=n0 \
@@ -834,7 +863,7 @@ jobs:
             qemu-system-aarch64 \
               -machine virt -cpu cortex-a72 -m 2048 -smp 2 \
               -bios /usr/share/AAVMF/AAVMF_CODE.fd \
-              -drive file=pegaprox.qcow2,format=qcow2,if=virtio \
+              -drive file=****.qcow2,format=qcow2,if=virtio \
               -drive file=seed.iso,format=raw,if=virtio \
               -netdev user,id=n0,hostfwd=tcp::${PVE_PORT}-:${PVE_PORT} \
               -device virtio-net-device,netdev=n0 \
@@ -856,16 +885,16 @@ jobs:
 
       - name: Image komprimieren + umbenennen
         run: |
-          qemu-img convert -O qcow2 -c pegaprox.qcow2 \
-            "pegaprox-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2"
-          cp "pegaprox-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2" \
-             "pegaprox-vm-${{ matrix.arch }}.qcow2"
+          qemu-img convert -O qcow2 -c ****.qcow2 \
+            "****-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2"
+          cp "****-${{ needs.prepare.outputs.version }}-vm-${{ matrix.arch }}.qcow2" \
+             "****-vm-${{ matrix.arch }}.qcow2"
 
       - name: Artefakt sichern
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: vm-image-${{ matrix.arch }}
-          path: pegaprox-*vm*.qcow2
+          path: ****-*vm*.qcow2
           retention-days: 7
 
   # ----------------------------------------------------------------------
