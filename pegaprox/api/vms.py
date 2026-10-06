@@ -418,23 +418,13 @@ def get_join_info(cluster_id):
                     if isinstance(node_entry, dict) and node_entry.get('pve_fp'):
                         data['fingerprint'] = node_entry['pve_fp']
                         break
-            # Still no fingerprint? Get from SSL cert.
-            # MK Sep 2026 (#956) - on the cluster's own API port. This read the cert from a
-            # literal 8006 two lines after unpacking manager.api_port for the request above,
-            # so a cluster reached on any other port silently produced no fingerprint and the
-            # join command could not be built.
+            # SECURITY: Do not fall back to unauthenticated SSL certificate extraction.
+            # An attacker with network access could present their own certificate, and we would
+            # hash it and provide it as the "trusted" fingerprint, defeating the peer authentication
+            # boundary. The fingerprint must come from the authenticated API channel.
             if not data.get('fingerprint'):
-                try:
-                    context = ssl.create_default_context()
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                    with socket.create_connection((host, port), timeout=5) as sock:
-                        with context.wrap_socket(sock, server_hostname=host) as ssock:
-                            cert_der = ssock.getpeercert(binary_form=True)
-                            fp_hex = hashlib.sha256(cert_der).hexdigest()
-                            data['fingerprint'] = ':'.join(fp_hex[i:i+2].upper() for i in range(0, len(fp_hex), 2))
-                except:
-                    pass
+                logging.warning(f"[Join-Info] No fingerprint available from authenticated API for {host}")
+                data['fingerprint'] = f'Run "pvecm status" on {host} to get the cluster fingerprint'
             return jsonify(data)
         
         # fallback
@@ -469,22 +459,14 @@ def get_join_info(cluster_id):
                         n['ring0_addr'] = node.get('ring0_addr')
                         n['pve_addr'] = node.get('pve_addr')
         
-        # Try to get fingerprint via SSL certificate
-        try:
-            import socket
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            
-            with socket.create_connection((host, port), timeout=5) as sock:
-                with context.wrap_socket(sock, server_hostname=host) as ssock:
-                    cert_der = ssock.getpeercert(binary_form=True)
-                    fingerprint = hashlib.sha256(cert_der).hexdigest()
-                    # Format as colon-separated uppercase
-                    result['fingerprint'] = ':'.join(fingerprint[i:i+2].upper() for i in range(0, len(fingerprint), 2))
-        except Exception as e:
-            logging.debug(f"Could not get SSL fingerprint: {e}")
-            result['fingerprint'] = f'Run "pvecm status" on {host} to get fingerprint'
+        # SECURITY: Do not fall back to unauthenticated SSL certificate extraction.
+        # An attacker with network access could present their own certificate, and we would
+        # hash it and provide it as the "trusted" fingerprint, defeating the peer authentication
+        # boundary. The fingerprint must come from the authenticated API channel or from an
+        # operator-supplied trusted source.
+        if not result.get('fingerprint'):
+            logging.warning(f"[Join-Info] No fingerprint available from authenticated API for {host}")
+            result['fingerprint'] = f'Run "pvecm status" on {host} to get the cluster fingerprint'
         
         return jsonify(result)
 
@@ -3138,27 +3120,12 @@ def join_node_to_cluster(cluster_id):
             join_addr = mgr.config.host
         
         if not fingerprint:
-            # Fallback: extract fingerprint from Proxmox SSL certificate
-            # Same method as get_join_info uses - this is the cert fingerprint
-            # that pvecm add --fingerprint expects
-            logging.warning(f"[Join] No pve_fp in API response, extracting from SSL certificate of {host}")
-            try:
-                import ssl
-                import socket
-                import hashlib
-                
-                context = ssl.create_default_context()
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
-                
-                with socket.create_connection((host, port), timeout=5) as sock:
-                    with context.wrap_socket(sock, server_hostname=host) as ssock:
-                        cert_der = ssock.getpeercert(binary_form=True)
-                        fp_hex = hashlib.sha256(cert_der).hexdigest()
-                        fingerprint = ':'.join(fp_hex[i:i+2].upper() for i in range(0, len(fp_hex), 2))
-                        logging.info(f"[Join] Got SSL fingerprint: {fingerprint[:20]}...")
-            except Exception as ssl_err:
-                logging.error(f"[Join] SSL fingerprint extraction failed: {ssl_err}")
+            # SECURITY: Do not fall back to unauthenticated SSL certificate extraction.
+            # An attacker with network access could present their own certificate, and we would
+            # hash it and use it as the "trusted" fingerprint for pvecm add, defeating the
+            # peer authentication boundary. The fingerprint must come from the authenticated
+            # API channel or from an operator-supplied trusted source.
+            logging.error(f"[Join] No fingerprint available from authenticated API response for {host}")
         
         if not fingerprint:
             logging.error(f"[Join] No fingerprint found! join_info type={type(join_info).__name__}, "
@@ -6114,7 +6081,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
