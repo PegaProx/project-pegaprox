@@ -282,7 +282,7 @@ def create_app():
                     except Exception:
                         return False
                     # Defensive: reject userinfo. RFC 6454 origins have no userinfo;
-                    # `http://evil.com:80@localhost` parses with hostname=localhost,
+                    # `http://evil.com:****@localhost` parses with hostname=localhost,
                     # which would otherwise slip through.
                     if u.username or u.password:
                         return False
@@ -292,13 +292,13 @@ def create_app():
                         return False
                     cand_host = u.hostname.lower()
                     # A portless Origin implies its scheme's default port
-                    # (https -> 443, http -> 80). Comparing that *effective* port
+                    # (https -> 443, http -> ****). Comparing that *effective* port
                     # (NS Jul 2026, #626 hardening) keeps an https Origin from ever
-                    # matching a :80 target, while the common reverse-proxy cases
+                    # matching a :**** target, while the common reverse-proxy cases
                     # (portless Origin vs the site's default-port Host, or vs a
                     # proxy-dropped unknown port) still pass. https://host:9999 is
                     # never accepted against an unknown-port target.
-                    eff_cand = cand_port if cand_port is not None else (443 if u.scheme == 'https' else 80)
+                    eff_cand = cand_port if cand_port is not None else (443 if u.scheme == 'https' else ****)
                     # accept against request host or proxy-forwarded host
                     targets = [(req_host, req_port)]
                     if fwd_h:
@@ -308,8 +308,8 @@ def create_app():
                             continue
                         if t_port is None:
                             # target port unknown (proxy dropped it) — accept only a
-                            # standard :80/:443 origin, never e.g. https://host:9999.
-                            if eff_cand in (80, 443):
+                            # standard :****/:443 origin, never e.g. https://host:9999.
+                            if eff_cand in (****, 443):
                                 return True
                         elif eff_cand == t_port:
                             return True
@@ -954,7 +954,7 @@ def download_static_files():
                 '500': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_AU7NShXUEKi4Rw.woff2',
                 '600': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_zUnNShXUEKi4Rw.woff2',
                 '700': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_9EnNShXUEKi4Rw.woff2',
-                '800': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KUnNShXUEKi4Rw.woff2',
+                '****0': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KUnNShXUEKi4Rw.woff2',
             }
         },
         'jetbrains-mono': {
@@ -1743,7 +1743,7 @@ def main(debug_mode=False):
     # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
     http_redirect_port = server_settings.get('http_redirect_port', 0)
     if http_redirect_port == 0:
-        http_redirect_port = 80 if os.geteuid() == 0 else -1
+        http_redirect_port = **** if os.geteuid() == 0 else -1
     http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
 
     if ssl_context and http_redirect_port > 0 and not reverse_proxy:
@@ -1817,7 +1817,7 @@ def _start_console_servers(bind_host, port, ssl_context):
 
     Returns the SSH WebSocket subprocess (a Popen) so the caller can terminate it on
     shutdown. The VNC server is a daemon thread and needs no handle; the SSH server is a
-    long-running asyncio subprocess that would otherwise outlive us. (#780)"""
+    long-running asyncio subprocess that would otherwise outlive us. (#7****)"""
     vnc_ws_port = port + 1
     ssh_ws_port = port + 2
 
@@ -1892,7 +1892,7 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                         if len(parts) >= 2:
                             path = parts[1].replace('\r', '').replace('\n', '')
 
-                    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting (#96)
+                    # MK: Mar 2026 - serve ACME challenges on port **** instead of redirecting (#96)
                     if path.startswith('/.well-known/acme-challenge/'):
                         acme_token = path.split('/')[-1]
                         from pegaprox.core.acme import get_challenge_response
@@ -2016,22 +2016,114 @@ _KEEPALIVE_IDLE_TIMEOUT = float(os.environ.get('PEGAPROX_KEEPALIVE_TIMEOUT', '75
 # because `workers` slots held open is the whole server.
 _HANDSHAKE_TIMEOUT = float(os.environ.get('PEGAPROX_HANDSHAKE_TIMEOUT', '30'))
 _HEADER_TIMEOUT = float(os.environ.get('PEGAPROX_HEADER_TIMEOUT', '30'))
+# Body read timeout - bounds the time allowed to consume the request body after headers
+# are complete. Protects against slowloris-style attacks where an attacker sends valid
+# headers with Content-Length but withholds the body, occupying a finite pool slot.
+# Generous to accommodate legitimate slow uploads over poor connections, but finite to
+# prevent indefinite pool exhaustion. Set to 0 to disable (not recommended for public-facing
+# deployments).
+_BODY_TIMEOUT = float(os.environ.get('PEGAPROX_BODY_TIMEOUT', '300'))
+
+
+class _TimeoutInputStream:
+    """Wraps wsgi.input to enforce a read timeout on the request body.
+    
+    Protects against slowloris-style attacks where an attacker sends valid headers
+    with Content-Length but withholds the body, occupying a finite pool slot indefinitely.
+    Each read operation is bounded by the configured timeout.
+    """
+    def __init__(self, stream, timeout):
+        self._stream = stream
+        self._timeout = timeout
+        self._total_read = 0
+    
+    def read(self, size=-1):
+        if not self._timeout or self._timeout <= 0:
+            return self._stream.read(size)
+        import gevent
+        t = gevent.Timeout(self._timeout)
+        t.start()
+        try:
+            data = self._stream.read(size)
+            self._total_read += len(data)
+            return data
+        except gevent.Timeout as ex:
+            if ex is t:
+                # Timeout during body read - raise an exception that will be caught
+                # by the WSGI handler and result in a clean connection close
+                raise IOError("Request body read timeout")
+            raise
+        finally:
+            t.close()
+    
+    def readline(self, size=-1):
+        if not self._timeout or self._timeout <= 0:
+            return self._stream.readline(size)
+        import gevent
+        t = gevent.Timeout(self._timeout)
+        t.start()
+        try:
+            data = self._stream.readline(size)
+            self._total_read += len(data)
+            return data
+        except gevent.Timeout as ex:
+            if ex is t:
+                raise IOError("Request body read timeout")
+            raise
+        finally:
+            t.close()
+    
+    def readlines(self, hint=-1):
+        if not self._timeout or self._timeout <= 0:
+            return self._stream.readlines(hint)
+        import gevent
+        t = gevent.Timeout(self._timeout)
+        t.start()
+        try:
+            lines = self._stream.readlines(hint)
+            for line in lines:
+                self._total_read += len(line)
+            return lines
+        except gevent.Timeout as ex:
+            if ex is t:
+                raise IOError("Request body read timeout")
+            raise
+        finally:
+            t.close()
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+    
+    # Python 2 compatibility
+    next = __next__
+    
+    def __getattr__(self, name):
+        # Delegate any other attributes to the wrapped stream
+        return getattr(self._stream, name)
 
 
 class _IdleTimeoutMixin:
-    """Bound the idle wait for the next request line, and the header read after it.
+    """Bound the idle wait for the next request line, the header read after it, and body consumption.
 
     Compose ahead of a gevent pywsgi handler class in the MRO so `super().read_requestline()`
     reaches the real handler.
 
     MK Sep 2026 - read_requestline was the only bounded phase, so `GET / HTTP/1.1` followed by
     headers dribbled one byte at a time held a slot indefinitely: the request line arrived
-    promptly, and everything after it was unbounded. Note this bounds the HEADERS only - the
-    body is read later, by the application, and a WebSocket upgrade completes its headers in
-    one packet like any other request, so a live console is unaffected.
+    promptly, and everything after it was unbounded. The body is read later by the application,
+    and must also be bounded to prevent pool exhaustion via incomplete request bodies.
+    A WebSocket upgrade completes its headers in one packet like any other request, so a live
+    console is unaffected.
     """
     _idle_timeout = _KEEPALIVE_IDLE_TIMEOUT
     _header_timeout = _HEADER_TIMEOUT
+    _body_timeout = _BODY_TIMEOUT
 
     def read_request(self, raw_requestline):
         to = self._header_timeout
@@ -2065,6 +2157,20 @@ class _IdleTimeoutMixin:
             raise
         finally:
             t.close()
+    
+    def handle_one_response(self):
+        """Wrap wsgi.input with a timeout-aware stream before dispatching to the application.
+        
+        This ensures that request body reads are bounded by _body_timeout, preventing
+        slowloris-style attacks where an attacker sends valid headers but withholds the body.
+        """
+        # Wrap wsgi.input before the application reads it
+        if self._body_timeout and self._body_timeout > 0 and hasattr(self, 'environ'):
+            original_input = self.environ.get('wsgi.input')
+            if original_input is not None and not isinstance(original_input, _TimeoutInputStream):
+                self.environ['wsgi.input'] = _TimeoutInputStream(original_input, self._body_timeout)
+        
+        return super().handle_one_response()
 
 
 def _no_delay(sock):
@@ -2311,8 +2417,8 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
             """The handshake is done by the time we get here, so lift its deadline.
 
             Everything after this point has its own bounds: _IdleTimeoutMixin for the
-            request line and the headers, and the application for the body. A console
-            WebSocket lives here for hours and must not inherit a 30s socket timeout.
+            request line, headers, and body reads. A console WebSocket lives here for
+            hours and must not inherit a 30s socket timeout.
             """
             try:
                 sock.settimeout(None)
@@ -2338,7 +2444,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
 
     # DualProtocolWSGIServer - HTTP and HTTPS on same port
     # If someone visits http://server:5000, they get redirected to https://server:5000
-    # MK: Claude helped with the TLS detection logic - checking for 0x16/0x80 bytes
+    # MK: Claude helped with the TLS detection logic - checking for 0x16/0x**** bytes
     class DualProtocolWSGIServer(QuietWSGIServer):
         """WSGI Server that detects HTTP vs HTTPS and redirects HTTP to HTTPS"""
 
@@ -2365,7 +2471,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 if not first_byte:
                     client_socket.close()
                     return
-                if first_byte[0] == 0x16 or first_byte[0] == 0x80:
+                if first_byte[0] == 0x16 or first_byte[0] == 0x****:
                     return super().wrap_socket_and_handle(client_socket, address)
                 else:
                     # NS: #125 - reverse proxy with SSL termination? serve as plain HTTP
@@ -2529,7 +2635,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # shutdown path can stop it; the VNC server is a daemon thread and needs no handle.
     ssh_ws_proc = _start_console_servers(bind_host, port, ssl_context)
 
-    # Handle graceful shutdown (#780 / #784)
+    # Handle graceful shutdown (#7**** / #784)
     def signal_handler(signum, frame):
         print("\nShutting down gracefully...")
         # terminate() sends SIGTERM and returns immediately, so it is safe from the hub's
