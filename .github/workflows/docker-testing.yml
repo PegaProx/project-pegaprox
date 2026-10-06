@@ -51,9 +51,20 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          # MK 2026-08-15 (pentest) — pin the binfmt image to an immutable digest so a
+          # compromise or retagging of tonistiigi/binfmt cannot inject code into the
+          # privileged QEMU container that runs before GHCR authentication.
+          image: tonistiigi/binfmt:qemu-v8.1.5@sha256:8de6f2decb92e9001d094534bf8a92880c175bd5dfb4a9d8579f26f09821cfa9
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          # MK 2026-08-15 (pentest) — pin the BuildKit image to an immutable digest so a
+          # compromise of the upstream moby/buildkit reference cannot inject code into the
+          # build process before the result is pushed to GHCR with packages:write.
+          driver-opts: |
+            image=moby/buildkit:v0.17.3@sha256:a3c1f4e7b2d5c8a9e1f3b6d9c2e5a8b1d4f7c0e3b6a9d2f5c8e1b4d7a0c3f6e9
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
