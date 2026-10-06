@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -9930,7 +9930,22 @@ def _switch_back_again():
             return []
         with _lock:
             st = _load()
-            back = _switch_taken_back(st) if st['role'] == ROLE_STANDBY else None
+            if st['role'] != ROLE_STANDBY:
+                return []
+            # Revalidate source mode after lock: the cached observation used above may be stale.
+            # The source could have transitioned to automatic mode between the initial check and
+            # acquiring the lock. Recheck using current cached data and verify the source is still
+            # in manual mode and active, binding the commit to the current peer state.
+            src = st.get('source')
+            known_now = st.get('members') or {}
+            rt_now = _rt()
+            now_mono = time.monotonic()
+            src_seen = rt_now.seen.get(src) or {}
+            if not (src_seen.get('mode') == ha_vote.MODE_MANUAL
+                    and now_mono - src_seen.get('at', -1e9) <= LEASE_SEEN_FRESH
+                    and (known_now.get(src) or {}).get('role_seen') == ROLE_ACTIVE):
+                return []
+            back = _switch_taken_back(st)
             if back is None:
                 return []
             _commit_locked(dict(st, lease=back))
