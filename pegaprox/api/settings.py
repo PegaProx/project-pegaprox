@@ -1655,6 +1655,82 @@ def update_server_settings():
                     settings['default_theme'] = data['default_theme']
             
             # LW: Feb 2026 - LDAP/Active Directory settings
+            # SECURITY: Validate LDAP role assignments against caller's permission ceiling
+            # to prevent privilege escalation via LDAP provisioning
+            def _validate_ldap_role_ceiling(role_name: str, caller_user: dict) -> bool:
+                """Validate that a role does not grant more permissions than the caller has.
+                
+                Returns True if the role is safe to configure, False if it would allow
+                privilege escalation beyond the caller's effective grant ceiling.
+                """
+                from pegaprox.utils.rbac import get_user_permissions, get_role_permissions_for_user, DEFAULT_TENANT_ID
+                
+                if not role_name or not role_name.strip():
+                    return True  # Empty role defaults to viewer, which is safe
+                
+                role_name = role_name.strip()
+                
+                # Get the caller's effective permissions (their grant ceiling)
+                caller_perms = set(get_user_permissions(caller_user))
+                
+                # Get the permissions that would be granted by the configured role
+                # Check across all tenants since LDAP can assign tenant-scoped roles
+                from pegaprox.utils.rbac import get_custom_roles
+                custom_roles = get_custom_roles()
+                
+                # Check if it's a builtin role
+                from pegaprox.models.permissions import ROLE_PERMISSIONS, BUILTIN_ROLES
+                if role_name in BUILTIN_ROLES:
+                    role_perms = set(ROLE_PERMISSIONS.get(role_name, []))
+                else:
+                    # Check global custom roles
+                    global_roles = custom_roles.get('global', {})
+                    if role_name in global_roles:
+                        role_perms = set(global_roles[role_name].get('permissions', []))
+                    else:
+                        # Check all tenant-scoped custom roles
+                        role_perms = set()
+                        for tenant_id, tenant_roles in custom_roles.get('tenants', {}).items():
+                            if role_name in tenant_roles:
+                                role_perms.update(tenant_roles[role_name].get('permissions', []))
+                
+                # The role is safe if it grants no permissions beyond what the caller has
+                excess_perms = role_perms - caller_perms
+                if excess_perms:
+                    logging.warning(
+                        f"[LDAP] User '{caller_user.get('username')}' attempted to configure "
+                        f"LDAP role '{role_name}' which grants permissions they don't have: "
+                        f"{', '.join(sorted(excess_perms))}"
+                    )
+                    return False
+                
+                return True
+            
+            # Get the caller's user object for permission validation
+            caller_username = request.session.get('user', 'admin')
+            caller_user = load_users().get(caller_username, {})
+            caller_user['username'] = caller_username
+            
+            # SECURITY: Validate built-in LDAP group mappings before processing
+            # These map LDAP groups to builtin roles (admin/user/viewer)
+            if 'ldap_admin_group' in data and data['ldap_admin_group']:
+                if not _validate_ldap_role_ceiling('admin', caller_user):
+                    log_audit(caller_username, 'settings.ldap.rejected',
+                             "Rejected LDAP admin group mapping - exceeds caller's permissions")
+                    return jsonify({
+                        'error': "Cannot configure LDAP admin group mapping: "
+                                "admin role grants permissions beyond your effective grant ceiling"
+                    }), 403
+            
+            if 'ldap_user_group' in data and data['ldap_user_group']:
+                if not _validate_ldap_role_ceiling('user', caller_user):
+                    log_audit(caller_username, 'settings.ldap.rejected',
+                             "Rejected LDAP user group mapping - exceeds caller's permissions")
+                    return jsonify({
+                        'error': "Cannot configure LDAP user group mapping: "
+                                "user role grants permissions beyond your effective grant ceiling"
+                    }), 403
+            
             ldap_keys = {
                 'ldap_enabled': lambda v: bool(v),
                 'ldap_server': lambda v: str(v or '').strip(),
@@ -1672,7 +1748,6 @@ def update_server_settings():
                 'ldap_admin_group': lambda v: str(v or '').strip(),
                 'ldap_user_group': lambda v: str(v or '').strip(),
                 'ldap_viewer_group': lambda v: str(v or '').strip(),
-                'ldap_default_role': lambda v: str(v).strip() if v else 'viewer',  # NS: Accept custom roles too
                 'ldap_auto_create_users': lambda v: bool(v),
                 'ldap_verify_tls': lambda v: bool(v),  # NS: Mar 2026 - persist TLS cert verification toggle (#108)
             }
@@ -1688,6 +1763,18 @@ def update_server_settings():
                 if key in data:
                     settings[key] = transform(data[key])
             
+            # SECURITY: Validate ldap_default_role against caller's permission ceiling
+            if 'ldap_default_role' in data:
+                proposed_role = str(data['ldap_default_role']).strip() if data['ldap_default_role'] else 'viewer'
+                if not _validate_ldap_role_ceiling(proposed_role, caller_user):
+                    log_audit(caller_username, 'settings.ldap.rejected',
+                             f"Rejected LDAP default role '{proposed_role}' - exceeds caller's permissions")
+                    return jsonify({
+                        'error': f"Cannot configure LDAP default role '{proposed_role}': "
+                                f"role grants permissions beyond your effective grant ceiling"
+                    }), 403
+                settings['ldap_default_role'] = proposed_role
+            
             # Handle ldap_bind_password separately (not in the loop to avoid lambda issues)
             if 'ldap_bind_password' in data:
                 pwd = str(data['ldap_bind_password'] or '')
@@ -1697,6 +1784,7 @@ def update_server_settings():
             # LW: Custom group→role mappings (JSON array)
             # NS: Feb 2026 - Simplified: just group_dn + role (including custom roles)
             # tenant/tenant_role kept for backwards compat but no longer in UI
+            # SECURITY: Validate all mapped roles against caller's permission ceiling
             if 'ldap_group_mappings' in data:
                 mappings = data['ldap_group_mappings']
                 if isinstance(mappings, list):
@@ -1704,9 +1792,20 @@ def update_server_settings():
                     clean_mappings = []
                     for m in mappings:
                         if isinstance(m, dict) and m.get('group_dn'):
+                            mapped_role = str(m.get('role', 'viewer')).strip()
+                            
+                            # SECURITY: Validate the mapped role doesn't exceed caller's permissions
+                            if not _validate_ldap_role_ceiling(mapped_role, caller_user):
+                                log_audit(caller_username, 'settings.ldap.rejected',
+                                         f"Rejected LDAP group mapping to role '{mapped_role}' - exceeds caller's permissions")
+                                return jsonify({
+                                    'error': f"Cannot configure LDAP group mapping to role '{mapped_role}': "
+                                            f"role grants permissions beyond your effective grant ceiling"
+                                }), 403
+                            
                             clean_mappings.append({
                                 'group_dn': str(m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
+                                'role': mapped_role,
                             })
                     settings['ldap_group_mappings'] = clean_mappings
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
@@ -1739,6 +1838,26 @@ def update_server_settings():
                     logging.warning(f"[LDAP] DB verification failed: {ve}")
             
             # NS: Feb 2026 - OIDC / Entra ID settings
+            # SECURITY: Validate built-in OIDC group mappings before processing
+            # These map OIDC groups to builtin roles (admin/user/viewer)
+            if 'oidc_admin_group_id' in data and data['oidc_admin_group_id']:
+                if not _validate_ldap_role_ceiling('admin', caller_user):
+                    log_audit(caller_username, 'settings.oidc.rejected',
+                             "Rejected OIDC admin group mapping - exceeds caller's permissions")
+                    return jsonify({
+                        'error': "Cannot configure OIDC admin group mapping: "
+                                "admin role grants permissions beyond your effective grant ceiling"
+                    }), 403
+            
+            if 'oidc_user_group_id' in data and data['oidc_user_group_id']:
+                if not _validate_ldap_role_ceiling('user', caller_user):
+                    log_audit(caller_username, 'settings.oidc.rejected',
+                             "Rejected OIDC user group mapping - exceeds caller's permissions")
+                    return jsonify({
+                        'error': "Cannot configure OIDC user group mapping: "
+                                "user role grants permissions beyond your effective grant ceiling"
+                    }), 403
+            
             oidc_keys = {
                 'oidc_enabled': lambda v: bool(v),
                 'oidc_provider': lambda v: str(v) if v in ('entra', 'okta', 'generic') else 'entra',
@@ -1751,7 +1870,6 @@ def update_server_settings():
                 'oidc_admin_group_id': lambda v: str(v).strip(),
                 'oidc_user_group_id': lambda v: str(v).strip(),
                 'oidc_viewer_group_id': lambda v: str(v).strip(),
-                'oidc_default_role': lambda v: str(v).strip() if v else ROLE_VIEWER,  # NS: Accept custom roles too
                 'oidc_auto_create_users': lambda v: bool(v),
                 'oidc_button_text': lambda v: str(v).strip() or 'Sign in with Microsoft',
                 'oidc_skip_jwt_verification': lambda v: bool(v),
@@ -1768,6 +1886,18 @@ def update_server_settings():
                 if key in data:
                     settings[key] = transform(data[key])
             
+            # SECURITY: Validate oidc_default_role against caller's permission ceiling
+            if 'oidc_default_role' in data:
+                proposed_role = str(data['oidc_default_role']).strip() if data['oidc_default_role'] else 'viewer'
+                if not _validate_ldap_role_ceiling(proposed_role, caller_user):
+                    log_audit(caller_username, 'settings.oidc.rejected',
+                             f"Rejected OIDC default role '{proposed_role}' - exceeds caller's permissions")
+                    return jsonify({
+                        'error': f"Cannot configure OIDC default role '{proposed_role}': "
+                                f"role grants permissions beyond your effective grant ceiling"
+                    }), 403
+                settings['oidc_default_role'] = proposed_role
+            
             # MK: Encrypt OIDC client secret
             if 'oidc_client_secret' in data:
                 secret = str(data['oidc_client_secret'] or '')
@@ -1776,15 +1906,27 @@ def update_server_settings():
             
             # LW: OIDC custom group mappings
             # NS: Feb 2026 - Simplified: just group_id + role (including custom roles)
+            # SECURITY: Validate all mapped roles against caller's permission ceiling
             if 'oidc_group_mappings' in data:
                 mappings = data['oidc_group_mappings']
                 if isinstance(mappings, list):
                     clean = []
                     for m in mappings:
                         if isinstance(m, dict) and (m.get('group_id') or m.get('group_dn')):
+                            mapped_role = str(m.get('role', 'viewer')).strip()
+                            
+                            # SECURITY: Validate the mapped role doesn't exceed caller's permissions
+                            if not _validate_ldap_role_ceiling(mapped_role, caller_user):
+                                log_audit(caller_username, 'settings.oidc.rejected',
+                                         f"Rejected OIDC group mapping to role '{mapped_role}' - exceeds caller's permissions")
+                                return jsonify({
+                                    'error': f"Cannot configure OIDC group mapping to role '{mapped_role}': "
+                                            f"role grants permissions beyond your effective grant ceiling"
+                                }), 403
+                            
                             clean.append({
                                 'group_id': str(m.get('group_id') or m.get('group_dn', '')).strip(),
-                                'role': str(m.get('role', 'viewer')).strip(),
+                                'role': mapped_role,
                             })
                     settings['oidc_group_mappings'] = clean
                     # NS: Feb 2026 - Clear old built-in group fields when unified mappings are saved
@@ -2234,7 +2376,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2564,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
