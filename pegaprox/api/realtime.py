@@ -81,15 +81,23 @@ def ws_live_updates(ws):
             from pegaprox.core.db import get_db as _gdb
             _user_data = _gdb().get_user(username)
         except Exception:
-            _user_data = load_users().get(username, {})
-        _allowed = get_user_clusters(_user_data or {})  # None = admin (all clusters)
+            _user_data = load_users().get(username)
+        
+        # sec: fail closed if the account cannot be resolved. A missing account or lookup failure
+        # must not be converted to {} and then mapped to the default tenant's unrestricted scope.
+        # Mirrors the SSE token endpoint's `if user_data is None: return 401` guard.
+        if not _user_data:
+            ws.send(json.dumps({'type': 'error', 'message': 'Account not found'}))
+            return
+        
+        _allowed = get_user_clusters(_user_data)  # None = admin (all clusters)
         subscribed_clusters = _scope_ws_clusters(_allowed, auth_data.get('clusters', None))
 
         # sec (audit): the delivery loop now filters per-VM 'action' frames for non-admins, and
         # `subscribed is None` does NOT mean admin (get_user_clusters returns None for a
         # default-tenant scoped user too) — capture the real role once, like the SSE path does.
         # Fail closed: an unresolvable identity is treated as non-admin and gets filtered.
-        _is_admin = (_user_data or {}).get('role') == ROLE_ADMIN
+        _is_admin = _user_data.get('role') == ROLE_ADMIN
 
         with ws_clients_lock:
             ws_clients[client_id] = {
@@ -103,8 +111,7 @@ def ws_live_updates(ws):
                 # so the account's own role IS the effective one. Named explicitly rather than
                 # left None, so the per-frame filters get a definite answer and a custom role
                 # resolves as itself instead of falling back to the stored-role default.
-                'effective_role': (_user_data or {}).get('effective_role')
-                                  or (_user_data or {}).get('role'),
+                'effective_role': _user_data.get('effective_role') or _user_data.get('role'),
                 'connected_at': datetime.now().isoformat()
             }
 
@@ -519,13 +526,17 @@ def sse_updates():
     # _stream_identity carries the floored role require_auth published.
     try:
         _ident = _stream_identity(user)
+        # sec: fail closed if the account cannot be resolved. A missing account must not be
+        # allowed to connect with a token that was minted when the account existed. Mirrors
+        # the WebSocket handshake's account-not-found rejection.
+        if _ident is None:
+            return jsonify({'error': 'Account not found'}), 401
         # the token's minted role wins — this route has no session, so the stored role would
         # hand an admin-owned scoped token the admin flag again
-        _eff = _token_role or (_ident or {}).get('effective_role') or (_ident or {}).get('role')
-        _is_admin = bool(_ident) and _eff == ROLE_ADMIN
+        _eff = _token_role or _ident.get('effective_role') or _ident.get('role')
+        _is_admin = _eff == ROLE_ADMIN
     except Exception:
-        _eff = _token_role
-        _is_admin = False
+        return jsonify({'error': 'Authorization check failed'}), 500
 
     with sse_clients_lock:
         _supersede_oldest_streams(user)

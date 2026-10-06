@@ -117,8 +117,17 @@ def broadcast_update(update_type: str, data: dict, cluster_id: str = None):
         for client_id, client_info in candidates:
             # Only send if client is subscribed to this cluster or all clusters
             subscribed = client_info.get('clusters')
-            if not (cluster_id is None or subscribed is None or cluster_id in subscribed):
-                continue
+            # sec: subscribed=None means "all clusters", but that should only apply to verified
+            # admin accounts. A missing or unresolved account must not receive unrestricted updates.
+            # The handshake now rejects unresolvable accounts, but defense in depth: treat None
+            # subscription as unrestricted only when is_admin is explicitly True.
+            if subscribed is None:
+                if not client_info.get('is_admin', False):
+                    continue  # non-admin with None subscription: reject
+            elif cluster_id is not None and cluster_id not in subscribed:
+                continue  # not subscribed to this specific cluster
+            # cluster_id is None (global broadcast) or client is subscribed: proceed
+            
             # sec (audit): the WS path had cluster-level scoping only, while its SSE twin
             # filters per VM. 'action' frames name the vmid, the VM's NAME and the operator
             # (create/delete/migrate/power), so a pool-/ACL-scoped client watching a cluster
@@ -583,16 +592,21 @@ def broadcast_sse(update_type: str, data: dict, cluster_id: str = None, target_c
                     if not target_clusters:
                         should_send = True
                     elif subscribed is None:
-                        should_send = True   # admin / all-access
+                        # sec: subscribed=None means "all clusters", but that should only apply
+                        # to verified admin accounts. Defense in depth: treat None subscription
+                        # as unrestricted only when is_admin is explicitly True.
+                        if client_info.get('is_admin', False):
+                            should_send = True   # admin / all-access
                     elif subscribed and any(c in subscribed for c in target_clusters):
                         should_send = True
                 elif not is_cluster_specific:
                     # Global event - send to everyone
                     should_send = True
                 elif cluster_id and subscribed is None:
-                    # NS: subscribed=None means admin/all-access -> send everything
-                    # Was previously blocking ALL SSE events for admin users!
-                    should_send = True
+                    # sec: subscribed=None means admin/all-access, but only for verified admins.
+                    # Defense in depth: non-admin with None subscription should not receive updates.
+                    if client_info.get('is_admin', False):
+                        should_send = True
                 elif cluster_id and subscribed and cluster_id in subscribed:
                     # Cluster-specific event and client is subscribed
                     should_send = True
