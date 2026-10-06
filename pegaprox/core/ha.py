@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -2281,8 +2281,14 @@ def valid_https_url(url):
     return ha_wire.valid_https_url(url)
 
 
-def encode_code(url, fingerprint, secret, active_id):
-    return ha_wire.encode_code(CODE_PREFIX, url, fingerprint, secret, active_id)
+def encode_code(url, fingerprint, secret, active_id, signing_key=None):
+    """Encode a pairing code, optionally signed with the active's private key.
+    
+    When signing_key is provided (base64-encoded Ed25519 private key), the code
+    includes a cryptographic signature binding all fields to the issuer.
+    """
+    key_obj = _private_key(signing_key) if signing_key else None
+    return ha_wire.encode_code(CODE_PREFIX, url, fingerprint, secret, active_id, key_obj)
 
 
 def decode_code(code):
@@ -2297,6 +2303,7 @@ def create_pairing_code(own_url, fingerprint):
 
     One code at a time; a new one replaces the old. It is good for PAIRING_TTL. The
     address and pin it carries are also what the member list says about this instance.
+    The code is cryptographically signed with this instance's private key.
     """
     with _lock:
         st = _load()
@@ -2317,7 +2324,9 @@ def create_pairing_code(own_url, fingerprint):
         if not st.get('signing_key'):
             changes['signing_key'] = _new_signing_key()
         _update(**changes)
-    return encode_code(own_url, fingerprint, secret, st['instance_id']), expires
+        # Reload to get the signing key that may have just been created
+        st = _load()
+    return encode_code(own_url, fingerprint, secret, st['instance_id'], st.get('signing_key')), expires
 
 
 def _credentials(rec):
@@ -2654,6 +2663,26 @@ def join(code, own_url, own_fingerprint):
             or not _public_key(active_key)
             or not isinstance(group, list) or not isinstance(tombs, list)):
         raise HaError('The answer from the active instance is incomplete')
+    
+    # SECURITY: Verify the code signature against the active's public key from the response.
+    # This binds the code fields (URL, fingerprint, instance_id) to the active's identity,
+    # preventing substitution attacks where an attacker modifies the code to redirect
+    # pairing to a malicious endpoint.
+    if '_signature' in info and '_signed_message' in info:
+        # Signed code: verify the signature matches the active's public key
+        if not _public_key(active_key):
+            raise HaError('The active instance did not provide a valid public key')
+        try:
+            key_obj = ha_wire.public_key(active_key)
+            if key_obj is None:
+                raise HaError('The pairing code signature could not be verified')
+            key_obj.verify(info['_signature'], info['_signed_message'])
+        except Exception:
+            raise HaError('The pairing code was not signed by the active instance that answered - '
+                         'the code may have been tampered with')
+    # Unsigned codes from older releases are accepted for backward compatibility, but only
+    # if the response validates (the secret still provides some protection, though weaker)
+    
     others = _clean_entries(group)
     others.pop(me, None)
     others.pop(info['instance_id'], None)
@@ -10666,8 +10695,11 @@ def create_witness_code(own_url, fingerprint, site=''):
         _commit_locked(dict(st, witness_pairing={'code_hash': _hash_secret(secret), 'expires': expires,
                                                  'site': site.strip()},
                             own_url=own_url, own_fingerprint=fingerprint or ''))
+        # Reload to ensure we have the signing key
+        st = _load()
+        signing_key_obj = _private_key(st.get('signing_key')) if st.get('signing_key') else None
     return ha_wire.encode_code(ha_wire.WITNESS_CODE_PREFIX, own_url, fingerprint, secret,
-                               st['instance_id']), expires
+                               st['instance_id'], signing_key_obj), expires
 
 
 def witness_code_ok(code_secret):

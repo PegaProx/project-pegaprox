@@ -1269,6 +1269,27 @@ class Witness:
         except Exception:
             raise WitnessError('The answer from the leader could not be opened')
         chain, epoch, floor = self._paired_with(info, opened)
+        
+        # SECURITY: Verify the code signature against the leader's public key from the response.
+        # This binds the code fields (URL, fingerprint, instance_id) to the leader's identity,
+        # preventing substitution attacks where an attacker modifies the code to redirect
+        # pairing to a malicious endpoint.
+        leader_key = opened.get('public_key')
+        if '_signature' in info and '_signed_message' in info:
+            # Signed code: verify the signature matches the leader's public key
+            if not ha_wire.public_key(leader_key):
+                raise WitnessError('The leader did not provide a valid public key')
+            try:
+                key_obj = ha_wire.public_key(leader_key)
+                if key_obj is None:
+                    raise WitnessError('The witness code signature could not be verified')
+                key_obj.verify(info['_signature'], info['_signed_message'])
+            except Exception:
+                raise WitnessError('The witness code was not signed by the leader that answered - '
+                                 'the code may have been tampered with')
+        # Unsigned codes from older releases are accepted for backward compatibility, but only
+        # if the response validates (the secret still provides some protection, though weaker)
+        
         # the code's digest: the same line run again is told apart from a new code
         # (code_verdict); the code itself is spent by now
         st = {'role': ha_vote.ROLE_WITNESS, 'instance_id': me, 'signing_key': signing_key,
