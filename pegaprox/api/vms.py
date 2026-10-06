@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -13001,11 +13001,21 @@ def create_vm_api(cluster_id, node):
     manager = cluster_managers[cluster_id]
 
     # NS Mar 2026: XCP-ng clusters need xapi.vm.create permission
+    # sec (pentest Dec 2026): XCP-ng VM creation accepts caller-selected template, SR, network,
+    # and ISO UUIDs that are resolved and used with privileged XAPI credentials. These infrastructure
+    # objects have no per-object authorization tied to tenant/pool/ACL scope, so a confined caller
+    # could specify resources outside their grant. Restrict XCP-ng VM creation to unconfined
+    # cluster operators who may legitimately select any pool resource.
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         u = build_authz_user(request.session.get('user', ''), request.session)
         from pegaprox.utils.rbac import has_permission
         if not has_permission(u, 'xapi.vm.create'):
             return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403
+        # Confined users (tenant/pool/ACL-scoped) cannot create XCP-ng VMs because they could
+        # select infrastructure resources (templates, SRs, networks, ISOs) outside their scope
+        denied = require_unconfined(cluster_id)
+        if denied:
+            return denied
 
     vm_config = request.json or {}
 
