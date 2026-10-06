@@ -4577,8 +4577,9 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     _api_port = getattr(mgr, 'api_port', 8006) or 8006
     tunnel_endpoint = None
     target_host, target_port = host, _api_port
-    try:
-        if bool(getattr(mgr.config, 'vnc_tunnel', False)):
+    _tunnel_required = bool(getattr(mgr.config, 'vnc_tunnel', False))
+    if _tunnel_required:
+        try:
             from pegaprox.utils import vnc_tunnel as _vt
             _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
             _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
@@ -4590,10 +4591,9 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
                 target_host='127.0.0.1', target_port=_api_port,
             )
             target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
-    except Exception as te:
-        logging.warning(f"[Screenshot] RFB tunnel setup failed ({te}) — direct")
-        tunnel_endpoint = None
-        target_host, target_port = host, _api_port
+        except Exception as te:
+            logging.error(f"[Screenshot] SSH tunnel required but setup failed: {te}")
+            raise IOError(f"SSH tunnel required but unavailable: {te}")
 
     encoded_ticket = url_quote(vnc_ticket, safe='')
     pve_ws_path = f"/api2/json/nodes/{node}/{vm_type}/{vmid}/vncwebsocket?port={vnc_port}&vncticket={encoded_ticket}"
@@ -4803,8 +4803,9 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         tunnel_endpoint = None
         target_host = host
         target_port = port          # MK Sep 2026 (#956): the cluster's API port
-        try:
-            if bool(getattr(mgr.config, 'vnc_tunnel', False)):
+        _tunnel_required = bool(getattr(mgr.config, 'vnc_tunnel', False))
+        if _tunnel_required:
+            try:
                 from pegaprox.utils import vnc_tunnel as _vt
                 _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
                 _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
@@ -4818,11 +4819,9 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                 target_host = '127.0.0.1'
                 target_port = tunnel_endpoint.local_port
                 logging.info(f"[VncPoll] tunnel routed via 127.0.0.1:{target_port} → SSH → {host}:{port}")
-        except Exception as te:
-            logging.warning(f"[VncPoll] tunnel setup failed ({te}) — direct WSS to PVE")
-            tunnel_endpoint = None
-            target_host = host
-            target_port = port
+            except Exception as te:
+                logging.error(f"[VncPoll] SSH tunnel required but setup failed: {te}")
+                return jsonify({'error': f'SSH tunnel required but unavailable: {te}'}), 502
 
         pve_ws_url = f"wss://{target_host}:{target_port}{pve_ws_path}"
         try:
@@ -6114,7 +6113,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -10163,14 +10162,11 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                         f"WSS routed via 127.0.0.1:{tunnel_target_port} → SSH → {host}:{port}"
                     )
                 except Exception as _tun_err:
-                    logging.warning(
-                        f"[VNC] SSH tunnel setup failed ({_tun_err}) — falling back "
-                        f"to direct WSS to {host}:{port}. Customer may still see "
-                        "TLS-inspection issues until SSH is fixed."
+                    logging.error(
+                        f"[VNC] SSH tunnel required but setup failed for cluster={cluster_id}: {_tun_err}"
                     )
-                    tunnel_endpoint = None
-                    tunnel_target_host = host
-                    tunnel_target_port = port
+                    await websocket.close(1011, f"SSH tunnel required but unavailable: {_tun_err}")
+                    return
 
             pve_ws_url = f"wss://{tunnel_target_host}:{tunnel_target_port}{pve_ws_path}"
 
