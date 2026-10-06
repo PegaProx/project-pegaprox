@@ -356,11 +356,16 @@ def assign_cluster_to_group(cluster_id):
             return jsonify({'error': 'Group not found'}), 404
         
         # Check tenant access to target group
+        # NS Dec 2026 (pentest) — the old `if group['tenant_id'] and ...` let a tenant-scoped
+        # admin.groups holder assign their cluster to a global (tenant_id NULL) group, bypassing
+        # authorization. Global groups are admin-only for writes (same rule as update/delete);
+        # the background balancer then loads group members without tenant filtering and can
+        # migrate cross-tenant with delete_source=True. Use _group_denied_as_missing to treat
+        # NULL tenant_id as admin-only, matching the other write operations in this file.
         if not _is_admin(user):
-            user_tenant = _user_tenant(user)
-            if group['tenant_id'] and group['tenant_id'] != user_tenant:
+            if _group_denied_as_missing(group, user):
                 log_audit(usr, 'cluster.group_assign_denied', f"Access denied to assign cluster {cluster_id} to group '{group['name']}' - tenant mismatch", ip_address=ip)
-                return jsonify({'error': 'Access denied - group belongs to different tenant'}), 403
+                return jsonify(_GROUP_MISSING[0]), _GROUP_MISSING[1]
         
         group_name = group['name']
     else:
