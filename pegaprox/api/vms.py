@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12320,8 +12320,9 @@ def bulk_migrate_api(cluster_id):
     # bulk twin only had the cluster gate, so a VM-ACL/pool-scoped user could relocate foreign VMs
     # by listing their vmids. Build the authz user once and skip (don't abort on) each VM the caller
     # isn't scoped to.
-    _authz_user = load_users().get(request.session['user'], {})
-    _authz_user['username'] = request.session['user']
+    # SECURITY: Use build_authz_user to apply effective_role for API tokens, preventing admin-owned
+    # restricted tokens from bypassing VM scoping via the stored administrator role.
+    _authz_user = build_authz_user(request.session['user'], request.session)
     
     # LW: Feb 2026 - enforced violations skip that VM but don't abort the whole batch
     from pegaprox.api.history import check_affinity_violation
