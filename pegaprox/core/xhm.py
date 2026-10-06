@@ -685,7 +685,7 @@ def _run_xcpng_to_pve(task):
 
         session_ref = src_mgr._session._session
         host_url = f"https://{src_mgr.host}"
-        ssl_verify = getattr(src_mgr.config, 'ssl_verification', False)
+        ssl_verify = getattr(src_mgr.config, 'ssl_verification', True)
 
         imported_volumes = []
 
@@ -1175,7 +1175,7 @@ def _run_pve_to_xcpng(task):
             return
 
         xcp_host_url = f"https://{tgt_mgr.host}"
-        ssl_verify = getattr(tgt_mgr.config, 'ssl_verification', False)
+        ssl_verify = getattr(tgt_mgr.config, 'ssl_verification', True)
 
         # find target SR
         target_sr_ref = None
@@ -2217,7 +2217,7 @@ def _run_esxi_to_xcpng(task):
             return
 
         xcp_host_url = f"https://{tgt_mgr.host}"
-        ssl_verify = getattr(tgt_mgr.config, 'ssl_verification', False)
+        ssl_verify = getattr(tgt_mgr.config, 'ssl_verification', True)
 
         # find target SR
         target_sr_ref = None

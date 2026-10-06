@@ -202,6 +202,9 @@ class XcpngManager:
         # NS: allow both bare hostname and full URL
         if not host.startswith('http'):
             host = f"https://{host}"
+        # Security: reject http:// URLs - XCP-ng management must use TLS
+        if host.startswith('http://'):
+            raise ValueError('XCP-ng management connections must use HTTPS, not HTTP')
         return host
 
     def connect(self) -> bool:
@@ -2635,7 +2638,7 @@ class XcpngManager:
 
                 # HTTP PUT to import endpoint — URL built via defensive helper
                 url = _build_xapi_import_vdi_url(host_url, session_ref, vdi_uuid, "raw")
-                _ssl_verify = getattr(self.config, 'ssl_verification', False)
+                _ssl_verify = getattr(self.config, 'ssl_verification', True)
                 resp = ha_transport.http('PUT', url, data=file_stream, verify=_ssl_verify,
                                          headers={'Content-Type': 'application/octet-stream'})
                 if resp.status_code in (200, 204):
@@ -2679,7 +2682,7 @@ class XcpngManager:
 
         try:
             url = _build_xapi_rrd_url(host_url, path)
-            _ssl_verify = getattr(self.config, 'ssl_verification', False)
+            _ssl_verify = getattr(self.config, 'ssl_verification', True)
             resp = _req.get(url, params=p, verify=_ssl_verify, timeout=15)
             if resp.status_code != 200:
                 return None, None
