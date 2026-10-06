@@ -36,6 +36,46 @@ from pegaprox.api.helpers import (load_server_settings, get_connected_manager, c
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
 
+# SSRF mitigation: domain allowlist for cluster hosts
+# Only hosts in this list are permitted for cluster primary and fallback hosts
+allowedDomains = ['example.com']  # add your allowed domains here
+
+def validate_cluster_host(host):
+    """Validate a cluster host value against the domain allowlist.
+    
+    Returns (valid, error_message) tuple.
+    This prevents SSRF by ensuring only approved domains can be configured
+    as cluster hosts, which are used to make authenticated requests.
+    """
+    if not host or not isinstance(host, str):
+        return False, 'Invalid host value'
+    
+    # Strip whitespace and brackets (for IPv6)
+    host = host.strip()
+    bare_host = host.strip('[]')
+    
+    # Extract domain from host (may include port)
+    # Handle formats: hostname, hostname:port, [ipv6], [ipv6]:port
+    # For hostname:port, split on the last colon
+    # For IPv6, the brackets are already stripped, so we need to be careful
+    if ':' in bare_host:
+        # Check if this looks like an IPv6 address (multiple colons)
+        colon_count = bare_host.count(':')
+        if colon_count > 1:
+            # Likely IPv6 - use the whole thing as domain
+            domain = bare_host
+        else:
+            # Likely hostname:port - extract hostname
+            domain = bare_host.rsplit(':', 1)[0]
+    else:
+        domain = bare_host
+    
+    # Check against allowlist (exact match only, no subdomains)
+    if domain not in allowedDomains:
+        return False, 'Host domain not in allowed list'
+    
+    return True, None
+
 @bp.route('/api/clusters', methods=['GET'])
 @require_auth()
 def get_clusters():
@@ -183,6 +223,11 @@ def add_cluster():
     for field in required:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
+
+    # SSRF mitigation: validate host against domain allowlist
+    valid, error_msg = validate_cluster_host(data.get('host'))
+    if not valid:
+        return jsonify({'error': f'Invalid host: {error_msg}'}), 400
 
     # password or ssh key - need at least one
     if not data.get('pass') and not data.get('ssh_key'):
@@ -391,6 +436,12 @@ def reconfigure_cluster(cluster_id):
     for field in ['name', 'host', 'user']:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
+    
+    # SSRF mitigation: validate host against domain allowlist
+    valid, error_msg = validate_cluster_host(data.get('host'))
+    if not valid:
+        return jsonify({'error': f'Invalid host: {error_msg}'}), 400
+    
     if not data.get('pass') and not data.get('ssh_key'):
         return jsonify({'error': 'Password or SSH key is required'}), 400
     if 'pass' not in data:
@@ -1472,6 +1523,12 @@ def update_cluster_config(cluster_id):
     data = request.json
     mgr = cluster_managers[cluster_id]
 
+    # SSRF mitigation: validate host if being updated
+    if 'host' in data:
+        valid, error_msg = validate_cluster_host(data['host'])
+        if not valid:
+            return jsonify({'error': f'Invalid host: {error_msg}'}), 400
+
     # Reject non-boolean pin flags before any assignment, so a partial apply
     # can't leave mgr.config half-mutated.
     for _bk in BOOLEAN_CONFIG_FIELDS:
@@ -1509,6 +1566,12 @@ def update_cluster_config_live(cluster_id):
 
     data = request.json
     mgr = cluster_managers[cluster_id]
+
+    # SSRF mitigation: validate host if being updated
+    if 'host' in data:
+        valid, error_msg = validate_cluster_host(data['host'])
+        if not valid:
+            return jsonify({'error': f'Invalid host: {error_msg}'}), 400
 
     # Reject non-boolean pin flags before any assignment, so a partial apply
     # can't leave mgr.config half-mutated.
@@ -1961,6 +2024,12 @@ def set_fallback_hosts(cluster_id):
                                          name='fallback_hosts')
     if _lerr:
         return jsonify({'error': _lerr}), 400
+    
+    # SSRF mitigation: validate each fallback host against domain allowlist
+    for host in fallback_hosts:
+        valid, error_msg = validate_cluster_host(host)
+        if not valid:
+            return jsonify({'error': f'Invalid fallback host "{host}": {error_msg}'}), 400
     
     mgr = cluster_managers[cluster_id]
     mgr.config.fallback_hosts = fallback_hosts
