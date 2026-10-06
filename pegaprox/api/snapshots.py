@@ -699,24 +699,41 @@ def update_policy(cluster_id, pid):
     if not row0:
         return jsonify({'error': 'not found'}), 404
     cur = _row_to_policy(row0)
+
+    # sec (pentest Dec 2026): ownership check — only the policy creator or an admin may update a
+    # policy. Without this a scoped user could retarget an admin-created policy to an empty or
+    # future tag, bypassing the target-VM authorization below (empty denied list), then wait for
+    # the scheduler to re-resolve the tag and execute the policy as the admin creator against
+    # newly matching out-of-scope VMs. The target validation alone is insufficient because it is
+    # vacuous when _resolve_targets returns no rows, and created_by is never updated.
+    # Legacy policies with no recorded creator can be updated by anyone with vm.snapshot on the
+    # cluster (matching their unscoped execution behavior), but this is acceptable because they
+    # predate the scoped execution model and are not exploitable for privilege escalation.
+    current_username = _current_user()
+    policy_creator = cur.get('created_by', '')
+    caller = build_authz_user(current_username, request.session)
+    if policy_creator:  # only enforce ownership for policies that have a creator
+        if caller.get('effective_role', caller.get('role')) != ROLE_ADMIN and current_username != policy_creator:
+            logging.warning(f"[SNAP-POLICY] {current_username} denied updating policy {pid}@{cluster_id} "
+                           f"(created by {policy_creator})")
+            return jsonify({'error': 'Permission denied: only the policy creator or an admin may update this policy'}), 403
     tt = body.get('target_type', cur['target_type'])
     tv = body.get('target_value', cur['target_value'])
-    creator = build_authz_user(request.session.get('user', ''), request.session)
     mgr = cluster_managers.get(cluster_id)
     if mgr:
         try:
             denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
                           'target_type': tt, 'target_value': tv, 'cluster_id': cluster_id})
-                      if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
+                      if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
         except Exception as e:
             return jsonify({'error': f'failed to resolve targets: {e}'}), 400
     else:
         _tv = str(tv).strip()
         if str(tt).lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
-            denied = [] if user_can_access_vm(creator, cluster_id, int(_tv), 'vm.snapshot') else [_tv]
+            denied = [] if user_can_access_vm(caller, cluster_id, int(_tv), 'vm.snapshot') else [_tv]
         else:
             from pegaprox.api.helpers import caller_is_scoped
-            denied = ['<unresolved: cluster offline>'] if caller_is_scoped(creator, cluster_id) else []
+            denied = ['<unresolved: cluster offline>'] if caller_is_scoped(caller, cluster_id) else []
     if denied:
         logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
         return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
