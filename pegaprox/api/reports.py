@@ -19,9 +19,9 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 
-from pegaprox.utils.auth import require_auth, load_users
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.rbac import get_user_clusters
-from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.background.metrics import load_metrics_history, start_metrics_collector
 from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
 from pegaprox.api.schedules import start_scheduler
@@ -412,10 +412,20 @@ def get_integrated_syslog_events():
     # clusters they can actually reach, independent of the syslog_filter_by_selected_cluster flag and
     # of whether a cluster_id filter was supplied. Omitting cluster_id previously returned EVERY
     # cluster's syslog to a tenant-scoped admin.audit holder.
-    from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import get_user_clusters
-    _acc = get_user_clusters(build_authz_user(request.session.get('user', ''), request.session))
+    #
+    # sec (pentest retest) — syslog is a whole-cluster operation with no per-VM/per-pool row filter.
+    # get_user_clusters includes pool-derived clusters by default, so a caller with only VM-ACL or
+    # pool-scoped access can reach a cluster, then the hostname expansion below hands them every log
+    # from that cluster. require_unconfined exists to distinguish confined access from whole-cluster
+    # authority; deny confined callers here.
+    _user = build_authz_user(request.session.get('user', ''), request.session)
+    _acc = get_user_clusters(_user)
     if _acc is not None:  # None = global-admin / all-cluster; a list = confine to it
+        # Check if the user is confined (VM/pool-scoped) to any reachable cluster. Syslog has no
+        # per-resource granularity, so a confined caller must not reach it at all.
+        for _cid in _acc:
+            if caller_is_scoped(_user, _cid):
+                return jsonify({'error': 'Access denied: syslog access requires whole-cluster authority'}), 403
         _allowed_hosts = set()
         for _cid in _acc:
             _allowed_hosts.update(_syslog_cluster_hostnames(_cid))
