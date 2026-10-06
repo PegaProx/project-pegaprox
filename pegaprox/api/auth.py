@@ -2136,6 +2136,16 @@ def create_api_token_endpoint():
         except (ValueError, TypeError):
             return jsonify({'error': 'Invalid expires_days value'}), 400
     
+    # sec (pentest): when role is omitted, default to the AUTHENTICATING credential's
+    # effective role, not the user's stored global role. This prevents a race where a
+    # viewer-scoped token self-revokes and immediately creates a replacement: the
+    # active-token check sees zero tokens after the concurrent DELETE commits, but the
+    # old code let create_api_token() default to user.role (admin), escalating the new
+    # token. The effective_role already floors API-token auth to min(token, owner) and
+    # refreshes session auth from the DB, so it is the correct ceiling here.
+    if role is None:
+        role = request.session.get('effective_role', request.session.get('role', ROLE_VIEWER))
+    
     result = create_api_token(username, token_name, role=role, expires_days=expires_days)
     
     if 'error' in result:
