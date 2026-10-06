@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12588,6 +12588,46 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
     
     if not all([target_endpoint, target_storage, target_bridge]):
         return jsonify({'error': 'target_endpoint, target_storage, and target_bridge are required'}), 400
+    
+    # Pentest Dec 2026 (credential disclosure) — XCP-ng remote_migrate_vm connects to
+    # target_endpoint with the SOURCE cluster's configured XAPI credentials. A VM-scoped
+    # actor with vm.migrate can submit an attacker-controlled URL and receive the source
+    # pool's root password in the login attempt. Proxmox remote_migrate embeds target
+    # credentials IN the endpoint string (apitoken=...), so the source never sends its own.
+    # Require that XCP-ng migrations name a configured target cluster the caller may reach.
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        # Extract hostname/IP from target_endpoint (format: https://host or https://host:port)
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(target_endpoint if target_endpoint.startswith(('http://', 'https://')) 
+                            else f'https://{target_endpoint}')
+            target_host = parsed.hostname
+            target_port = parsed.port or 443
+        except Exception:
+            return jsonify({'error': 'Invalid target_endpoint format'}), 400
+        
+        if not target_host:
+            return jsonify({'error': 'Could not parse target_endpoint'}), 400
+        
+        # Find a configured cluster matching this endpoint
+        target_cluster_id = None
+        for cid, cmgr in cluster_managers.items():
+            if getattr(cmgr, 'cluster_type', 'proxmox') != 'xcpng':
+                continue
+            # Match by host (and optionally port)
+            mgr_host = getattr(cmgr.config, 'host', '')
+            mgr_port = getattr(cmgr.config, 'port', 443)
+            if mgr_host == target_host and (target_port == 443 or target_port == mgr_port):
+                target_cluster_id = cid
+                break
+        
+        if not target_cluster_id:
+            return jsonify({'error': 'target_endpoint does not match any configured XCP-ng cluster'}), 400
+        
+        # Verify caller has access to the target cluster
+        ok, err = check_cluster_access(target_cluster_id)
+        if not ok:
+            return jsonify({'error': 'Access denied to target cluster'}), 403
     
     result = manager.remote_migrate_vm(
         node, vmid, vm_type, 
