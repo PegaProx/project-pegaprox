@@ -1606,9 +1606,11 @@ def get_cluster_creds_internal(cluster_id):
     # so this silently reported False and the console subprocess pinned CERT_NONE even when the
     # admin had enabled verification. The ws-token twin (realtime.py) always had it right.
     verify_pve_tls = bool(getattr(mgr, '_ssl_verify', False))
-    # NS 2026-06-05 (C-1): the termproxy WS proxy gets the PVE session cookie
-    # from here (server-side) instead of the browser. Mint fresh; None for
-    # token-only clusters. Other consumers (SSH) ignore the field.
+    # Security fix: pve_auth_ticket is NO LONGER returned in the HTTP response.
+    # The termproxy subprocess mints it directly from cluster_managers when needed,
+    # preventing exposure of the cluster-wide root-equivalent PVE bearer token to
+    # the HTTP client. The ticket is effectively root on pve:8006 and must never
+    # transit the browser or be visible in API responses.
     # MK Sep 2026 (#956) - the termproxy subprocess builds its own wss:// URL to PVE and
     # used to pin 8006. One port per cluster is all PegaProx models, so a multi-node cluster
     # reached on a non-default port needs the same port on every node; that is still better
@@ -1620,12 +1622,6 @@ def get_cluster_creds_internal(cluster_id):
         'api_port': int(cluster_port or 8006),
         'verify_pve_tls': verify_pve_tls,
     }
-    try:
-        _tk = mgr.mint_console_auth_ticket()
-        if _tk:
-            resp['pve_auth_ticket'] = _tk
-    except Exception:
-        pass
     return jsonify(resp)
 
 

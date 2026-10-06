@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -11513,9 +11513,11 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
     if ctx.get('host'):
         allowed_hosts.add(ctx['host'])
     allowed_hosts.update(v for v in (ctx.get('node_ips') or {}).values() if v)
-    # C-1: server-side PVE session cookie (ws-token flow)
-    if ctx.get('pve_auth_ticket'):
-        pve_auth = ctx['pve_auth_ticket']
+    # Security fix: pve_auth_ticket is NO LONGER read from the HTTP response.
+    # Instead, mint it directly from cluster_managers here in the termproxy subprocess.
+    # This prevents exposure of the cluster-wide root-equivalent PVE bearer token in
+    # HTTP responses where it could be extracted by authenticated users.
+    pve_auth = None
     # MK 2026-06-04: pull per-cluster ssl_verify out of the same context for
     # the PVE wss-proxy below. Defaults to False because PVE ships self-signed
     # certs and most labs run them. Admins toggle on once they've installed
@@ -11546,9 +11548,6 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
                         pve_api_port = int(cr_data['api_port'])
                     except (TypeError, ValueError):
                         pass
-                # C-1: server-side PVE session cookie (session-cookie flow)
-                if cr_data.get('pve_auth_ticket'):
-                    pve_auth = cr_data['pve_auth_ticket']
             else:
                 print(f"[TERMPROXY] cluster-creds non-200 ({cr.status_code}); allow-list empty")
         except Exception as e:
@@ -11563,9 +11562,19 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         await client_ws.close(1008, "host not allowed")
         return
 
-    # C-1: the PVE session cookie must have come from the server-side
-    # cluster_context (not the browser). If it's missing the cluster has no
-    # password auth (termproxy can't work) or the mint failed — fail closed.
+    # Security fix: Mint the PVE auth ticket directly from cluster_managers here in the
+    # termproxy subprocess, rather than receiving it through the HTTP API response.
+    # This prevents exposure of the cluster-wide root-equivalent PVE bearer token.
+    try:
+        from pegaprox.globals import cluster_managers
+        mgr = cluster_managers.get(cluster_id)
+        if mgr is not None:
+            pve_auth = mgr.mint_console_auth_ticket()
+    except Exception as e:
+        print(f"[TERMPROXY] failed to mint PVE auth ticket: {e}")
+
+    # The PVE session cookie must be available for termproxy to work. If it's missing
+    # the cluster has no password auth (termproxy can't work) or the mint failed — fail closed.
     if not pve_auth:
         print(f"[TERMPROXY] no server-side PVE auth ticket for cluster {cluster_id}")
         await client_ws.send('{"status":"error","message":"Console auth unavailable for this cluster (needs user/password auth)"}')

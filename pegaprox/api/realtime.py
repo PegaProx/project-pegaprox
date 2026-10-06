@@ -433,16 +433,11 @@ def validate_ws_token_api():
                         # MitM between PegaProx and PVE could intercept the console + its auth ticket.
                         'verify_pve_tls': bool(getattr(mgr, '_ssl_verify', False)),
                     }
-                    # NS 2026-06-05 (C-1): hand the PVE session cookie to the WS
-                    # subprocess server-side (it used to come from the browser).
-                    # Mint fresh; None for token-only clusters. termproxy is the
-                    # only consumer — VNC/SSH ignore it.
-                    try:
-                        _tk = mgr.mint_console_auth_ticket()
-                        if _tk:
-                            cluster_context['pve_auth_ticket'] = _tk
-                    except Exception:
-                        pass
+                    # Security fix: pve_auth_ticket is NO LONGER returned in the HTTP response.
+                    # The termproxy subprocess mints it directly from cluster_managers when needed,
+                    # preventing exposure of the cluster-wide root-equivalent PVE bearer token to
+                    # the HTTP client. The ticket is effectively root on pve:8006 and must never
+                    # transit the browser or be visible in API responses.
             except Exception as e:
                 logging.debug(f"[WS-TOKEN] cluster-context build soft-fail: {e}")
         except Exception as e:
