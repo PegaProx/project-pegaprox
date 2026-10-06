@@ -485,6 +485,21 @@ _setup_attempts_by_ip = _SlidingWindow(limit=5, window=60, max_keys=2048, name='
 
 @bp.route('/api/auth/setup', methods=['POST'])
 def auth_setup():
+    # Pentest 2026-10 — first-run setup must only be reachable from localhost.
+    # The endpoint is unauthenticated and CSRF-exempt by design (no session yet),
+    # so a network attacker can race the operator and claim the first admin account.
+    # Requiring local-origin proof closes the network path while preserving the
+    # intended operator workflow (browser on the same host, or SSH tunnel).
+    client_ip = get_client_ip()
+    from pegaprox.utils.audit import _is_loopback
+    if not _is_loopback(client_ip):
+        logging.warning(f"[SETUP] rejected non-localhost setup attempt from {client_ip}")
+        return jsonify({
+            'error': 'First-run setup is only accessible from localhost. '
+                     'Access PegaProx from the server itself, or create an SSH tunnel.',
+            'code': 'SETUP_LOCALHOST_ONLY',
+        }), 403
+
     state = initialization_state()
     if state == INIT_UNKNOWN:
         # MK Sep 2026 - the user store did not answer. That used to read as "fresh
@@ -503,11 +518,8 @@ def auth_setup():
             'code': 'ALREADY_INITIALIZED',
         }), 409
 
-    client_ip = get_client_ip()
-    now = time.time()
     # crude per-IP rate-limit: max 5 attempts / 60s. Mostly hygiene; the real
-    # race-window protection is the operator firewalling 5000 until setup
-    # completes. Document that in the install guide.
+    # race-window protection is now the localhost-only gate above.
     if not _setup_attempts_by_ip.allow(client_ip):
         logging.warning(f"[SETUP] rate-limited setup attempt from {client_ip}")
         return jsonify({'error': 'Too many attempts, slow down'}), 429
