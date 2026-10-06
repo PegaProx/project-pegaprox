@@ -2199,9 +2199,32 @@ def _inject_virtio_drivers(pve_mgr, task):
                      f"{str(out_hv or '').strip()[-300:]}")
 
     # 2) Locate ISO. User-set path wins.
+    # SECURITY (pentest finding): Restrict custom ISO paths to trusted directories.
+    # The migration flow previously accepted arbitrary caller-provided ISO paths,
+    # allowing an attacker to upload a malicious ISO and reference it, leading to
+    # privilege escalation when the MSI is executed as LocalSystem.
+    # Fix: Validate custom paths against an allowlist of trusted prefixes.
     iso_candidates = []
-    if getattr(task, 'virtio_iso_path', ''):
-        iso_candidates.append(task.virtio_iso_path)
+    custom_iso_path = getattr(task, 'virtio_iso_path', '') or ''
+    if custom_iso_path:
+        # Trusted ISO directory prefixes (standard Proxmox template locations)
+        trusted_prefixes = [
+            "/var/lib/vz/template/iso/",
+            "/mnt/pve/",  # PVE storage mounts
+            "/var/lib/pegaprox/",
+        ]
+        # Normalize path to prevent directory traversal
+        normalized_path = os.path.normpath(custom_iso_path)
+        # Check if custom path starts with a trusted prefix
+        is_trusted = any(normalized_path.startswith(prefix) for prefix in trusted_prefixes)
+        if is_trusted:
+            iso_candidates.append(normalized_path)
+            task.log(f"[VirtIO] Using custom ISO path: {normalized_path}")
+        else:
+            task.log(f"[VirtIO] ⚠ Custom ISO path rejected (not in trusted directory): {custom_iso_path}")
+            task.log("[VirtIO]   Trusted prefixes: " + ", ".join(trusted_prefixes))
+            task.log("[VirtIO]   Place virtio-win.iso in a standard template directory.")
+            return False
     iso_candidates += [
         "/var/lib/vz/template/iso/virtio-win.iso",
         f"/mnt/pve/{task.target_storage}/template/iso/virtio-win.iso",
@@ -2489,19 +2512,66 @@ def _inject_virtio_drivers(pve_mgr, task):
         # ran into "registry corrupt" because RunOnce executes with the
         # logged-in user's standard token (no elevation), even for admins.
         # SYSTEM service has full token, no UAC.
+        #
+        # SECURITY (pentest finding): MSI runs as LocalSystem. Defense-in-depth:
+        # validate MSI hash against an allowlist. Primary control is ISO path
+        # validation (above), which restricts to trusted directories only.
         "PEGADIR=\"$WIN_MNT/$WDIR/../PegaProx\"\n"
         "mkdir -p \"$PEGADIR\"\n"
         "MSI_OK=0\n"
+        # Known-good SHA256 hashes for official Red Hat virtio-win-gt MSI releases.
+        # Source: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/
+        # Operators: Download official ISO, mount it, compute sha256sum of the MSI,
+        # and add the hash here for defense-in-depth validation.
+        # Format: <sha256> <filename>
+        "cat > /tmp/virtio-msi-hashes.txt << 'HASHEOF'\n"
+        "# Add SHA256 hashes of trusted virtio-win-gt MSI files here (optional but recommended).\n"
+        "# Example format (one per line):\n"
+        "# a1b2c3d4e5f6...  virtio-win-gt-x64.msi\n"
+        "#\n"
+        "# To obtain the hash from an official ISO:\n"
+        "#   mount -o loop /path/to/virtio-win.iso /mnt\n"
+        "#   sha256sum /mnt/virtio-win-gt-x64.msi\n"
+        "#   umount /mnt\n"
+        "#\n"
+        "# Official ISOs: https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/\n"
+        "# Verify ISO authenticity before extracting hashes.\n"
+        "HASHEOF\n"
         # Pick the right MSI by host arch — almost always x64 these days
         "for cand in virtio-win-gt-x64.msi virtio-win-gt-x86.msi; do "
         "  if [ -f \"$ISO_MNT/$cand\" ]; then "
-        "    cp -f \"$ISO_MNT/$cand\" \"$PEGADIR/$cand\"; "
-        "    echo \"MSI_STAGED $cand\"; "
-        "    MSI_OK=1; "
-        "    break; "
+        "    echo \"Found candidate MSI: $cand\"; "
+        # Compute SHA256 for logging and optional validation
+        "    COMPUTED_HASH=$(sha256sum \"$ISO_MNT/$cand\" | awk '{print $1}'); "
+        "    echo \"MSI SHA256: $COMPUTED_HASH\"; "
+        # Check if allowlist has any non-comment entries
+        "    HASH_COUNT=$(grep -v '^#' /tmp/virtio-msi-hashes.txt | grep -v '^[[:space:]]*$' | wc -l); "
+        "    if [ \"$HASH_COUNT\" -eq 0 ]; then "
+        "      echo \"MSI_HASH_ALLOWLIST_EMPTY: No hashes configured (proceeding anyway).\"; "
+        "      echo \"SECURITY NOTE: For defense-in-depth, add the MSI SHA256 to the allowlist\"; "
+        "      echo \"in pegaprox/core/v2p.py (_inject_virtio_drivers function).\"; "
+        "      cp -f \"$ISO_MNT/$cand\" \"$PEGADIR/$cand\"; "
+        "      echo \"MSI_STAGED $cand\"; "
+        "      MSI_OK=1; "
+        "      break; "
+        "    fi; "
+        "    if grep -qF \"$COMPUTED_HASH\" /tmp/virtio-msi-hashes.txt; then "
+        "      echo \"MSI_HASH_VERIFIED: $cand\"; "
+        "      cp -f \"$ISO_MNT/$cand\" \"$PEGADIR/$cand\"; "
+        "      echo \"MSI_STAGED $cand\"; "
+        "      MSI_OK=1; "
+        "      break; "
+        "    else "
+        "      echo \"MSI_HASH_MISMATCH: $cand (computed: $COMPUTED_HASH)\"; "
+        "      echo \"SECURITY: Refusing to stage unverified MSI for LocalSystem execution.\"; "
+        "      echo \"If this is an official virtio-win release, add its SHA256 to the allowlist\"; "
+        "      echo \"in pegaprox/core/v2p.py after verifying authenticity from official sources.\"; "
+        "      echo \"Official source: https://fedorapeople.org/groups/virt/virtio-win/\"; "
+        "    fi; "
         "  fi; "
         "done\n"
-        "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING (skipping bulk install)'\n"
+        "rm -f /tmp/virtio-msi-hashes.txt\n"
+        "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING_OR_UNVERIFIED (skipping bulk install)'\n"
         # Register the one-shot service in the SYSTEM hive.
         # ImagePath runs as LocalSystem at next boot; cmd /c chains:
         #   msiexec /quiet → sc delete self → del MSI
