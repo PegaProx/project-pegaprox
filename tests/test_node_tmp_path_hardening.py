@@ -221,3 +221,87 @@ def test_the_default_repository_stays_open_to_the_delegate(api, starlvm_estate, 
     # 404 "No nodes found" is past the permission gate, which is the whole point here
     assert resp[1] == 404, resp
     assert 'No nodes found' in resp[0].get_json()['error']
+
+
+# ── GPG key fingerprint verification ─────────────────────────────────────────
+# MK Dec 2026 (pentest): The installer verifies the GPG key fingerprint after
+# downloading to prevent accepting an attacker key if the key-delivery path
+# (DNS, TLS CA, hosting) is compromised. Custom key URLs require the admin to
+# provide the expected fingerprint.
+
+def test_custom_key_url_requires_fingerprint(api, starlvm_estate, monkeypatch):
+    """A global admin using a custom key URL must provide the expected fingerprint."""
+    import pegaprox.api.nodes as _n
+    monkeypatch.setattr(_n, '_safe_repo_url', lambda u, d: u or d)
+    monkeypatch.setattr(_n, '_cluster_node_names', lambda mgr: [])
+    
+    body = {'key_url': 'https://mirror.example/custom.asc'}
+    with _install_ctx(api, {'user': 'root5', 'role': 'admin'}, body):
+        resp = _install_handler()('cluster_1')
+    
+    assert resp[1] == 400
+    assert 'key_fingerprint is required' in resp[0].get_json()['error']
+
+
+def test_custom_key_url_with_valid_fingerprint_is_accepted(api, starlvm_estate, monkeypatch):
+    """A global admin can use a custom key URL if they provide a valid fingerprint."""
+    import pegaprox.api.nodes as _n
+    monkeypatch.setattr(_n, '_safe_repo_url', lambda u, d: u or d)
+    monkeypatch.setattr(_n, '_cluster_node_names', lambda mgr: [])
+    
+    body = {
+        'key_url': 'https://mirror.example/custom.asc',
+        'key_fingerprint': 'ABCD EF01 2345 6789 ABCD  EF01 2345 6789 ABCD EF01'
+    }
+    with _install_ctx(api, {'user': 'root5', 'role': 'admin'}, body):
+        resp = _install_handler()('cluster_1')
+    
+    # 404 "No nodes found" means it passed fingerprint validation
+    assert resp[1] == 404
+    assert 'No nodes found' in resp[0].get_json()['error']
+
+
+def test_custom_key_fingerprint_must_be_valid_format(api, starlvm_estate, monkeypatch):
+    """The fingerprint must be 40 hex characters."""
+    import pegaprox.api.nodes as _n
+    monkeypatch.setattr(_n, '_safe_repo_url', lambda u, d: u or d)
+    monkeypatch.setattr(_n, '_cluster_node_names', lambda mgr: [])
+    
+    body = {
+        'key_url': 'https://mirror.example/custom.asc',
+        'key_fingerprint': 'not-a-valid-fingerprint'
+    }
+    with _install_ctx(api, {'user': 'root5', 'role': 'admin'}, body):
+        resp = _install_handler()('cluster_1')
+    
+    assert resp[1] == 400
+    assert '40-character hex' in resp[0].get_json()['error']
+
+
+def test_default_key_url_uses_embedded_fingerprint(api, starlvm_estate, monkeypatch):
+    """The default StarWind key URL automatically uses the embedded fingerprint."""
+    import pegaprox.api.nodes as _n
+    monkeypatch.setattr(_n, '_cluster_node_names', lambda mgr: [])
+    
+    # No key_fingerprint provided, but using default key_url
+    body = {}
+    with _install_ctx(api, {'user': 'root5', 'role': 'admin'}, body):
+        resp = _install_handler()('cluster_1')
+    
+    # 404 "No nodes found" means it passed validation (fingerprint was auto-set)
+    assert resp[1] == 404
+    assert 'No nodes found' in resp[0].get_json()['error']
+
+
+def test_the_script_verifies_fingerprint_before_using_key():
+    """The bash script includes fingerprint verification logic."""
+    import pegaprox.api.nodes as nodes
+    script = nodes.STARLVM_INSTALL_SCRIPT
+    
+    # The script must contain fingerprint verification
+    assert 'EXPECTED_FP' in script
+    assert 'gpg --no-default-keyring --keyring' in script
+    assert '--list-keys --with-colons' in script
+    assert 'key-fingerprint-mismatch' in script
+    # The keyring is removed if fingerprint doesn't match
+    assert 'rm -f "$KEYRING"' in script

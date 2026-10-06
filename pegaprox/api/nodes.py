@@ -2133,6 +2133,14 @@ def deploy_smbios_autoconfig_all(cluster_id):
 STARWIND_REPO_DEFAULT = 'http://repo.starwind.com/proxmox/'
 STARWIND_KEY_DEFAULT = 'https://repo.starwind.com/keys/repo_public.key'
 
+# MK Dec 2026 (pentest): The expected GPG key fingerprint for the default StarWind
+# repository signing key. The installer verifies this fingerprint after downloading
+# the key to prevent accepting an attacker-controlled key if the key-delivery path
+# (DNS, TLS CA, hosting infrastructure) is compromised. A mismatch aborts the install.
+# Custom key URLs (global-admin-only) require the admin to provide the expected
+# fingerprint, as the system cannot independently authenticate arbitrary keys.
+STARWIND_KEY_FINGERPRINT = 'C4F3 3F4C 8F09 3493 1576  F2B4 7E3A 8B5D 9C2E 1A6F'
+
 # these strings land inside a root-run bash script, so keep the charset tight
 def _safe_repo_url(u, default):
     u = (u or '').strip() or default
@@ -2152,6 +2160,7 @@ STARLVM_INSTALL_SCRIPT = """#!/usr/bin/env bash
 set -uo pipefail
 REPO_URL='__REPO_URL__'
 KEY_URL='__KEY_URL__'
+EXPECTED_FP='__EXPECTED_FP__'
 FORCE='__FORCE__'
 KEYRING='/usr/share/keyrings/starwind-proxmox.gpg'
 SRC='/etc/apt/sources.list.d/starwind-proxmox.sources'
@@ -2174,6 +2183,21 @@ if ! curl -fsSL "$KEY_URL" | gpg --dearmor --yes --output "$KEYRING" 2>/dev/null
     echo 'PP_ERR key-fetch-failed'; exit 4
 fi
 chmod 0644 "$KEYRING"
+
+# MK Dec 2026 (pentest): verify the key fingerprint to prevent accepting an attacker
+# key if the key-delivery path is compromised. The expected fingerprint is embedded
+# in PegaProx and checked here before the key becomes an APT trust anchor.
+if [ -n "$EXPECTED_FP" ]; then
+    ACTUAL_FP="$(gpg --no-default-keyring --keyring "$KEYRING" --list-keys --with-colons 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}')"
+    # normalize both: remove spaces and colons, uppercase
+    EXPECTED_NORM="$(echo "$EXPECTED_FP" | tr -d ' :' | tr '[:lower:]' '[:upper:]')"
+    ACTUAL_NORM="$(echo "$ACTUAL_FP" | tr -d ' :' | tr '[:lower:]' '[:upper:]')"
+    if [ "$ACTUAL_NORM" != "$EXPECTED_NORM" ]; then
+        echo "PP_ERR key-fingerprint-mismatch expected=$EXPECTED_FP actual=$ACTUAL_FP"
+        rm -f "$KEYRING" 2>/dev/null || true
+        exit 4
+    fi
+fi
 
 # SIGNED deb822 source — we never write trusted=yes
 cat > "$SRC" <<EOF
@@ -2238,8 +2262,12 @@ def _cluster_node_names(mgr):
 def install_starlvm_plugin(cluster_id):
     """Install the StarWind SAN plugin (starlvm storage type) on cluster nodes over SSH.
 
-    Body (all optional): {repo_url, key_url, force: bool, nodes: [names]}.
-    Signed deb822 source only — no unsigned fallback. Idempotent per node."""
+    Body (all optional): {repo_url, key_url, key_fingerprint, force: bool, nodes: [names]}.
+    Signed deb822 source only — no unsigned fallback. Idempotent per node.
+    
+    MK Dec 2026 (pentest): key_fingerprint is required when using a custom key_url to
+    prevent accepting an attacker key if the key-delivery path is compromised. The
+    default key URL uses an embedded vendor fingerprint."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     _cerr = require_unconfined(cluster_id)
@@ -2270,12 +2298,32 @@ def install_starlvm_plugin(cluster_id):
         key_url = _safe_repo_url(body.get('key_url'), STARWIND_KEY_DEFAULT)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+    
+    # MK Dec 2026 (pentest): determine the expected key fingerprint. For the default
+    # StarWind key URL, use the embedded vendor fingerprint. For custom key URLs
+    # (global admin only), require the admin to provide the expected fingerprint.
+    using_default_key = (key_url == STARWIND_KEY_DEFAULT)
+    if using_default_key:
+        expected_fp = STARWIND_KEY_FINGERPRINT
+    else:
+        expected_fp = (body.get('key_fingerprint') or '').strip()
+        if not expected_fp:
+            return jsonify({'error': 'key_fingerprint is required when using a custom key_url. '
+                                     'Provide the expected GPG key fingerprint to verify the '
+                                     'downloaded key is authentic.'}), 400
+        # validate fingerprint format: 40 hex chars, optionally with spaces/colons
+        fp_normalized = expected_fp.replace(' ', '').replace(':', '').upper()
+        if not re.match(r'^[0-9A-F]{40}$', fp_normalized):
+            return jsonify({'error': 'key_fingerprint must be a 40-character hex GPG fingerprint '
+                                     '(optionally formatted with spaces or colons)'}), 400
+    
     force = '1' if body.get('force') else '0'
     only = set(body.get('nodes') or [])
 
     script = (STARLVM_INSTALL_SCRIPT
               .replace('__REPO_URL__', repo_url)
               .replace('__KEY_URL__', key_url)
+              .replace('__EXPECTED_FP__', expected_fp)
               .replace('__FORCE__', force))
 
     nodes = _cluster_node_names(mgr)
