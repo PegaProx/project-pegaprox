@@ -4389,6 +4389,20 @@ class PegaProxDB:
     def save_vm_acl(self, cluster_id: str, vmid: str, data: dict):
         """Save VM ACL"""
         cursor = self.conn.cursor()
+        # sec (Dec 2026): normalize inherit_role to 0 or 1 defensively. The old logic
+        # stringified the value and compared to a false-value set; str([]) is "[]", which
+        # is not in that set, so [] stored 1. A type-confused value from a settings restore
+        # or a missed API gate would then grant ACL_INHERITED_VM_PERMISSIONS instead of the
+        # explicit permission list. Treat only actual boolean True or the integer 1 as true;
+        # everything else (including arrays, objects, strings, None) is false.
+        inherit_role_raw = data.get('inherit_role', True)
+        if isinstance(inherit_role_raw, bool):
+            inherit_role_int = 1 if inherit_role_raw else 0
+        elif isinstance(inherit_role_raw, int):
+            inherit_role_int = 1 if inherit_role_raw == 1 else 0
+        else:
+            # Non-boolean, non-int (array, object, string, None, etc.) → false
+            inherit_role_int = 0
         cursor.execute('''
             INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions, inherit_role)
             VALUES (?, ?, ?, ?, ?)
@@ -4397,7 +4411,7 @@ class PegaProxDB:
             vmid,
             json.dumps(data.get('users', [])),
             json.dumps(data.get('permissions', [])),
-            (0 if str(data.get('inherit_role', True)).strip().lower() in ('false', '0', 'no', 'off', 'none', '') else 1)
+            inherit_role_int
         ))
         self.conn.commit()
     

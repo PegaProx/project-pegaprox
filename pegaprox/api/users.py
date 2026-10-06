@@ -2039,6 +2039,15 @@ def set_vm_acl(cluster_id, vmid):
     permissions = data.get('permissions', [])
     inherit_role = data.get('inherit_role', True)
     
+    # sec (Dec 2026): type-check inherit_role before authorization or persistence. The
+    # authorization path uses Python truthiness while persistence stringifies and compares
+    # to a false-value set; [] is false-y to the first but str([]) is not a recognized
+    # false spelling for the second, so the DB stores 1 and the reader interprets it as
+    # True. A delegated caller can therefore create an ACL whose effective permissions
+    # (ACL_INHERITED_VM_PERMISSIONS) exceed the set checked against their ceiling.
+    if 'inherit_role' in data and not isinstance(inherit_role, bool):
+        return jsonify({'error': 'inherit_role must be a boolean value'}), 400
+    
     # validate permissions
     for p in permissions:
         if p not in PERMISSIONS:
