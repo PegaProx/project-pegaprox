@@ -68,6 +68,19 @@ def oidc_authorize():
     if not config['enabled'] or not config['client_id']:
         return jsonify({'error': 'OIDC authentication is not configured'}), 400
     
+    # SECURITY: Enforce HTTPS for OIDC flows to prevent session hijacking.
+    # The OIDC callback creates an authenticated session and sets a session cookie.
+    # If the flow happens over HTTP, both the PKCE state cookie and the session
+    # cookie are sent without the Secure flag, exposing them to network attackers.
+    # Fail closed: reject HTTP requests even if TLS termination is misconfigured.
+    from pegaprox.utils.audit import _is_trusted_proxy
+    is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+    if not is_secure:
+        logging.warning(f"[OIDC] Rejected authorize request over HTTP from {request.remote_addr}")
+        return jsonify({
+            'error': 'OIDC authentication requires HTTPS. Configure TLS or a reverse proxy with X-Forwarded-Proto.'
+        }), 400
+    
     # NS: Auto-detect redirect URI if not configured
     # never use Origin header - attacker can spoof it to steal OAuth tokens
     if not config.get('redirect_uri'):
@@ -78,6 +91,22 @@ def oidc_authorize():
             base_url = f"https://{fwd_host.split(',')[0].strip()}"
         config['redirect_uri'] = f"{base_url}/oidc/callback"
         logging.info(f"[OIDC] Auto-detected redirect_uri: {config['redirect_uri']}")
+    
+    # SECURITY: Validate that the redirect URI (whether configured or auto-detected)
+    # uses HTTPS. This is defense-in-depth: the auto-detection above already forces
+    # HTTPS when X-Forwarded-Proto is set, but an admin-configured HTTP URI would
+    # bypass that check.
+    from urllib.parse import urlparse
+    try:
+        parsed_redirect = urlparse(config['redirect_uri'])
+        if parsed_redirect.scheme != 'https':
+            logging.error(f"[OIDC] Redirect URI uses non-HTTPS scheme: {config['redirect_uri']}")
+            return jsonify({
+                'error': 'OIDC redirect URI must use HTTPS. Update the configuration in Settings.'
+            }), 400
+    except Exception as e:
+        logging.error(f"[OIDC] Failed to parse redirect URI: {e}")
+        return jsonify({'error': 'Invalid OIDC redirect URI configuration'}), 500
     
     # MK: Generate state for CSRF protection
     state = secrets.token_urlsafe(32)
@@ -109,7 +138,8 @@ def oidc_authorize():
     cookie_val = f"{state}:{nonce}:{code_verifier}"
     if _safe_internal_path(redirect_after):
         cookie_val += f":{redirect_after}"
-    response.set_cookie('oidc_state', cookie_val, httponly=True, secure=is_secure, samesite='Lax', max_age=600)
+    # SECURITY: secure=True is now guaranteed because we reject HTTP requests above
+    response.set_cookie('oidc_state', cookie_val, httponly=True, secure=True, samesite='Lax', max_age=600)
     return response
 
 
@@ -127,6 +157,19 @@ def oidc_callback():
     LW: Called by frontend after redirect back from IdP
     Frontend sends: {code, state} from URL query params
     """
+    # SECURITY: Enforce HTTPS for OIDC callback to prevent session hijacking.
+    # This endpoint creates an authenticated session and sets a session cookie.
+    # If the callback happens over HTTP, the session cookie is sent without the
+    # Secure flag, exposing it to network attackers. Fail closed: reject HTTP
+    # requests even if TLS termination is misconfigured.
+    from pegaprox.utils.audit import _is_trusted_proxy
+    is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
+    if not is_secure:
+        logging.warning(f"[OIDC] Rejected callback request over HTTP from {request.remote_addr}")
+        return jsonify({
+            'error': 'OIDC authentication requires HTTPS. Configure TLS or a reverse proxy with X-Forwarded-Proto.'
+        }), 400
+    
     # MK: Mar 2026 - use centralized IP resolution (respects trusted_proxies)
     client_ip = get_client_ip()
     oidc_cb_key = f'oidc_cb_{client_ip}'
@@ -310,6 +353,8 @@ def oidc_callback():
     response = make_response(jsonify(resp_data))
     
     # Set session cookie (same pattern as regular login)
+    # SECURITY: Always set secure=True because we enforce HTTPS above.
+    # The is_secure check is kept for consistency but will always be True here.
     from pegaprox.utils.audit import _is_trusted_proxy
     is_secure = request.is_secure or (_is_trusted_proxy(request.remote_addr) and request.headers.get('X-Forwarded-Proto') == 'https')
     response.set_cookie(
@@ -317,7 +362,7 @@ def oidc_callback():
         session_token,
         httponly=True,
         samesite='Strict',
-        secure=is_secure,
+        secure=True,
         max_age=get_session_timeout()
     )
     # Clear OIDC state cookie

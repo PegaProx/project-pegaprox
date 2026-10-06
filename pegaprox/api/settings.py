@@ -1768,6 +1768,28 @@ def update_server_settings():
                 if key in data:
                     settings[key] = transform(data[key])
             
+            # SECURITY: Enforce HTTPS for OIDC redirect URI to prevent session hijacking
+            # over plaintext HTTP. The OIDC flow creates authenticated sessions, so both
+            # the state cookie and session cookie must be protected with the Secure flag,
+            # which requires HTTPS. Reject HTTP redirect URIs at configuration time.
+            if 'oidc_redirect_uri' in data:
+                redirect_uri = settings.get('oidc_redirect_uri', '').strip()
+                if redirect_uri:
+                    from urllib.parse import urlparse
+                    try:
+                        parsed = urlparse(redirect_uri)
+                        if parsed.scheme == 'http':
+                            return jsonify({
+                                'error': 'OIDC redirect URI must use HTTPS. HTTP exposes session cookies to network attackers.'
+                            }), 400
+                        elif parsed.scheme and parsed.scheme != 'https':
+                            return jsonify({
+                                'error': f'OIDC redirect URI has invalid scheme: {parsed.scheme}. Only HTTPS is allowed.'
+                            }), 400
+                    except Exception as e:
+                        logging.warning(f"[OIDC] Failed to parse redirect_uri: {e}")
+                        return jsonify({'error': 'Invalid OIDC redirect URI format'}), 400
+            
             # MK: Encrypt OIDC client secret
             if 'oidc_client_secret' in data:
                 secret = str(data['oidc_client_secret'] or '')
@@ -2234,7 +2256,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2444,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
