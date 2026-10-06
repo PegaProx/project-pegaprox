@@ -1935,6 +1935,23 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating custom_cloud_templates table: {e}")
 
+        # Central images belong to this instance, alongside their on-disk files.
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_library (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+            source_url TEXT DEFAULT '', filename TEXT DEFAULT '', sha256 TEXT DEFAULT '',
+            size INTEGER DEFAULT 0, default_user TEXT DEFAULT 'root',
+            cores INTEGER DEFAULT 2, memory INTEGER DEFAULT 2048, disk_gb INTEGER DEFAULT 10,
+            created_by TEXT NOT NULL, created_at TEXT NOT NULL
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS image_provision_jobs (
+            id TEXT PRIMARY KEY, cluster_id TEXT NOT NULL, node TEXT NOT NULL,
+            image_id TEXT NOT NULL, image_name TEXT NOT NULL, name TEXT NOT NULL,
+            vmid INTEGER, status TEXT NOT NULL DEFAULT 'queued', progress INTEGER DEFAULT 0,
+            error TEXT DEFAULT '', started_by TEXT NOT NULL, started_at TEXT NOT NULL,
+            finished_at TEXT
+        )''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_image_jobs_cluster ON image_provision_jobs(cluster_id, started_at DESC)')
+
         # MK May 2026 — extend audit_log with cluster + severity columns for richer filtering
         try:
             cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_log)").fetchall()]

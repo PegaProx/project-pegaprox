@@ -19396,7 +19396,7 @@
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
-                                                        { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
+                                                        { id: 'templates', label: t('centralImagesAndTemplates'), icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield }
                                                     ].map(sub => (
@@ -19934,7 +19934,8 @@
 
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
                                                 {automationSubTab === 'templates' && (
-                                                    <TemplatesLibraryTab
+                                                    <ImagesAndTemplatesTab
+                                                        clusters={clusters}
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
                                                         authFetch={authFetch}
