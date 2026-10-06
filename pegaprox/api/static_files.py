@@ -402,8 +402,12 @@ def get_user_vm_access(username):
         return jsonify({'error': 'User not found'}), 404
     # sec (private disclosure Sep 2026 — audit): a tenant-scoped admin.users holder must not read a
     # user's VM-ACL grants in ANOTHER tenant (cross-tenant disclosure). Mirror get_user_perms.
-    if request.session.get('role') != ROLE_ADMIN:
-        _caller = users.get(request.session.get('user', ''), {})
+    # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(_caller)):
         if users[username].get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
             return jsonify({'error': 'Access denied'}), 403
 
@@ -437,11 +441,16 @@ def get_user_perms(username):
     # NS Sep 2026 — and answer 404, not 403, for a user outside the caller's tenant: the missing-user
     # branch used to run first, so 404-vs-403 still told a tenant admin whether a name existed
     # elsewhere. Both cases now look identical from outside.
+    # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
     user = users.get(username)
-    if user is not None and request.session.get('role') != ROLE_ADMIN:
-        _caller = users.get(request.session.get('user', ''), {})
-        if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
-            user = None
+    if user is not None:
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)):
+            if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+                user = None
     if user is None:
         return jsonify({'error': 'User not found'}), 404
     tenant_id = request.args.get('tenant_id', user.get('tenant_id', DEFAULT_TENANT_ID))
@@ -478,9 +487,13 @@ def set_user_perms(username):
     if tenant_id:
         # MK Jun 2026 (sec-review): only a global admin may set perms in any tenant; a
         # tenant-scoped admin is confined to their own tenant
-        if request.session.get('role') != ROLE_ADMIN:
-            caller = users_db.get(request.session.get('user', ''), {})
-            if tenant_id != caller.get('tenant_id', DEFAULT_TENANT_ID):
+        # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)):
+            if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
                 log_audit(request.session.get('user', ''), 'security.tenant_access_denied',
                           f"Denied setting {username} perms in tenant {tenant_id}")
                 return jsonify({'error': 'Access denied: cannot manage permissions for other tenants'}), 403
@@ -495,7 +508,9 @@ def set_user_perms(username):
         # a tenant_permissions entry resolves to the target's EFFECTIVE GLOBAL perms because
         # has_permission() runs with no tenant_id (auth.py) and get_user_permissions falls back to
         # the target's own tenant. (The 'role' field was also previously stored unvalidated.)
-        if request.session.get('role') != ROLE_ADMIN and (
+        # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)) and (
                 (role or '') == ROLE_ADMIN or any(str(p).startswith('admin.') for p in extra)):
             log_audit(request.session.get('user', ''), 'security.privilege_amplification_denied',
                       f"Denied tenant-admin granting admin-level role/perms to {username}")
@@ -516,11 +531,11 @@ def set_user_perms(username):
         #      carrying admin.* permissions (legitimately created by a global admin) set as
         #      a tenant role walks straight past the prefix test.
         # Resolve what the request would actually confer and weigh all of it.
-        if request.session.get('role') != ROLE_ADMIN:
+        # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)):
             from pegaprox.utils.rbac import get_role_permissions_for_user, has_permission
-            from pegaprox.utils.auth import build_authz_user
             # the caller's OWN effective permissions, token-floored like everywhere else
-            _caller = build_authz_user(request.session.get('user', ''), request.session)
             _conferred = list(extra)
             if role:
                 _conferred += get_role_permissions_for_user({'role': role}, tenant_id)
@@ -552,7 +567,12 @@ def set_user_perms(username):
         # admin.users alone (which a tenant-scoped admin can hold) gated the tenant branch above
         # but NOT this one, so a tenant admin could grant themselves/anyone global admin-equivalent
         # perms. Mirror the tenant-branch check: non-global-admins are confined to tenant_permissions.
-        if request.session.get('role') != ROLE_ADMIN:
+        # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)):
             log_audit(request.session.get('user', ''), 'security.global_perms_denied',
                       f"Denied setting GLOBAL permissions for {username} (caller is not a global admin)")
             return jsonify({'error': 'Access denied: only a global admin may set global permissions'}), 403
@@ -588,9 +608,13 @@ def remove_user_tenant_perms(username, tenant_id):
         return jsonify({'error': 'User not found'}), 404
 
     # MK Jun 2026 (sec-review): tenant-scoped admins can only touch their own tenant
-    if request.session.get('role') != ROLE_ADMIN:
-        caller = users_db.get(request.session.get('user', ''), {})
-        if tenant_id != caller.get('tenant_id', DEFAULT_TENANT_ID):
+    # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(_caller)):
+        if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
             log_audit(request.session.get('user', ''), 'security.tenant_access_denied',
                       f"Denied removing {username} perms in tenant {tenant_id}")
             return jsonify({'error': 'Access denied: cannot manage permissions for other tenants'}), 403

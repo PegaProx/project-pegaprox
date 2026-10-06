@@ -53,9 +53,14 @@ def _caller_tenant_or_none():
     # MK Jun 2026 (sec-review): a global admin manages every tenant; a tenant-scoped admin
     # (custom role carrying admin.users) is confined to their own tenant. Returns the tenant
     # to scope to, or None when the caller is a global admin (no restriction).
-    if request.session.get('role') == ROLE_ADMIN:
-        return None
+    # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions, not the
+    # stored role. An admin downgraded via tenant_permissions in their own tenant must be
+    # confined to that tenant, not bypass all scoping.
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     caller = get_db().get_user(request.session.get('user', '')) or {}
+    if (request.session.get('effective_role', request.session.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(caller)):
+        return None
     return caller.get('tenant_id', DEFAULT_TENANT_ID)
 
 
@@ -65,7 +70,9 @@ _ROLE_LEVEL = {ROLE_ADMIN: 3, ROLE_USER: 2, ROLE_VIEWER: 1}
 def _role_at_or_below_caller(target_role):
     # MK: stop a delegate holding admin.users from minting/assigning a role above their own
     # tier. Unknown/custom roles map to the 'user' level.
-    caller_lvl = _ROLE_LEVEL.get(request.session.get('role'), 2)
+    # MK Sep 2026 (Aikido 700487698): use effective_role so a tenant-capped admin cannot
+    # mint roles above their effective level.
+    caller_lvl = _ROLE_LEVEL.get(request.session.get('effective_role', request.session.get('role')), 2)
     return _ROLE_LEVEL.get(target_role, 2) <= caller_lvl
 
 
@@ -98,10 +105,13 @@ def _caller_can_grant_role(target_role):
     # level, so a custom role carrying admin.* perms would pass _role_at_or_below_caller for a
     # user-tier delegate. Require a non-global-admin caller to actually hold every permission the
     # role grants before assigning it. Global admins keep full delegation.
-    if request.session.get('role') == ROLE_ADMIN:
-        return True
+    # MK Sep 2026 (Aikido 700487698): check if the admin is capped via tenant_permissions.
     from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     caller = build_authz_user(request.session.get('user', ''), request.session)
+    if (caller.get('effective_role', caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(caller)):
+        return True
     return all(has_permission(caller, p) for p in _role_permissions(target_role))
 
 
@@ -110,10 +120,13 @@ def _caller_can_grant_perms(permissions):
     # template) must not grant it permissions the caller doesn't hold; otherwise an admin.roles
     # delegate could rewrite its own tenant role to admin.settings/admin.users and self-escalate to
     # global-admin-equivalent. Global admins keep full delegation.
-    if request.session.get('role') == ROLE_ADMIN:
-        return True
+    # MK Sep 2026 (Aikido 700487698): check if the admin is capped via tenant_permissions.
     from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
     caller = build_authz_user(request.session.get('user', ''), request.session)
+    if (caller.get('effective_role', caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(caller)):
+        return True
     return all(has_permission(caller, p) for p in (permissions or []))
 
 
@@ -171,11 +184,13 @@ def _caller_can_manage_user(target_user):
     # user direct admin.* grants, and a lesser delegate must not be able to reset such a peer and
     # inherit those grants. Global admins pass; otherwise the caller must hold every effective perm
     # the target has.
-    if request.session.get('role') == ROLE_ADMIN:
-        return True
+    # MK Sep 2026 (Aikido 700487698): check if the admin is capped via tenant_permissions.
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import get_user_permissions
+    from pegaprox.utils.rbac import get_user_permissions, _admin_is_capped_in_own_tenant
     caller = build_authz_user(request.session.get('user', ''), request.session)
+    if (caller.get('effective_role', caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(caller)):
+        return True
     return all(has_permission(caller, p) for p in get_user_permissions(target_user or {}))
 
 
@@ -1425,8 +1440,12 @@ def update_tenant(tenant_id):
 
     # NS Aug 2026 (Aikido pentest) — mirror get_tenant_quota: a tenant-scoped admin.tenants holder
     # may only edit its OWN tenant, else one tenant rewrites another's name/clusters/quota.
-    if request.session.get('role') != ROLE_ADMIN:
-        _caller = get_db().get_user(request.session.get('user', '')) or {}
+    # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+    from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+    from pegaprox.utils.auth import build_authz_user
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(_caller)):
         if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
             return jsonify({'error': 'Access denied to this tenant'}), 403
 
@@ -1491,8 +1510,12 @@ def get_tenant_quota(tenant_id):
         # MK Jun 2026 (sec-review) — admin.tenants can be held by a tenant-scoped
         # custom role, so scope to the caller's own tenant unless a real admin —
         # otherwise one tenant could read another's live usage (BOLA).
-        if request.session.get('role') != ROLE_ADMIN:
-            _caller = get_db().get_user(request.session.get('user', '')) or {}
+        # MK Sep 2026 (Aikido 700487698): check effective role after tenant_permissions.
+        from pegaprox.utils.rbac import _admin_is_capped_in_own_tenant
+        from pegaprox.utils.auth import build_authz_user
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        if not (_caller.get('effective_role', _caller.get('role')) == ROLE_ADMIN
+                and not _admin_is_capped_in_own_tenant(_caller)):
             if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
                 return jsonify({'error': 'Access denied to this tenant'}), 403
         from pegaprox.utils.rbac import check_tenant_quota
