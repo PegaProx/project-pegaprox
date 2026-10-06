@@ -2637,6 +2637,12 @@ def probe_pbs_fingerprint():
     Used by the Add-PBS wizard so the user doesn't have to run openssl by hand.
 
     Body: {"host": "pbs.example.com", "port": 8007}
+    
+    SECURITY: This endpoint performs an UNAUTHENTICATED probe to learn a fingerprint.
+    An on-path attacker can present their own certificate. Operators should verify
+    the returned fingerprint through an independent channel (e.g., SSH to the PBS
+    host and run: openssl s_client -connect localhost:8007 | openssl x509 -fingerprint -sha256)
+    before saving the PBS configuration.
     """
     import socket as _sock
     import ssl as _ssl
@@ -2671,7 +2677,12 @@ def probe_pbs_fingerprint():
         fp = hashlib.sha256(der).hexdigest().upper()
         # PBS expects fingerprint formatted with colons: AA:BB:CC...
         formatted = ':'.join(fp[i:i+2] for i in range(0, len(fp), 2))
-        return jsonify({'fingerprint': formatted, 'host': host, 'port': port})
+        return jsonify({
+            'fingerprint': formatted, 
+            'host': host, 
+            'port': port,
+            'warning': 'Fingerprint learned from unauthenticated connection. Verify through independent channel before saving.'
+        })
     except _sock.timeout:
         return jsonify({'error': f'TLS handshake timed out connecting to {host}:{port}'}), 504
     except (_sock.gaierror, ConnectionRefusedError, OSError) as e:
@@ -2928,7 +2939,16 @@ def auto_attach_pbs_to_clusters(pbs_id):
         storage_name = 'pbs-' + storage_name
     content = body.get('content') or 'backup'
 
-    # Probe live fingerprint so we always inject a current one
+    # SECURITY: Use the stored fingerprint from the PBS configuration. The stored fingerprint
+    # was configured by an administrator and should be verified through an independent channel.
+    # We do NOT probe the live fingerprint here because an unauthenticated probe would allow
+    # an attacker to poison the fingerprint that gets distributed to PVE clusters alongside
+    # the PBS credentials.
+    stored_fp = (pbs_mgr.fingerprint or '').strip()
+    if not stored_fp:
+        return jsonify({'error': 'PBS server has no configured fingerprint. Edit the PBS configuration and set a verified fingerprint before using auto-attach.'}), 400
+    
+    # Verify the stored fingerprint matches what the server presents
     import socket as _sock, ssl as _ssl, hashlib
     try:
         ctx = _ssl._create_unverified_context()
@@ -2936,9 +2956,18 @@ def auto_attach_pbs_to_clusters(pbs_id):
             with ctx.wrap_socket(s, server_hostname=pbs_mgr.host) as ssock:
                 der = ssock.getpeercert(binary_form=True)
         fp_hex = hashlib.sha256(der).hexdigest().upper()
-        fingerprint = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
+        live_fp = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
+        
+        # Normalize both fingerprints for comparison (remove colons, spaces, case-insensitive)
+        stored_normalized = stored_fp.upper().replace(':', '').replace(' ', '')
+        live_normalized = live_fp.upper().replace(':', '').replace(' ', '')
+        
+        if stored_normalized != live_normalized:
+            return jsonify({'error': f'Fingerprint verification failed: PBS server presents {live_fp[:23]}... but configuration expects {stored_fp[:23]}... The server certificate may have changed or an attacker may be intercepting the connection.'}), 502
+        
+        fingerprint = stored_fp  # Use the stored format
     except Exception as e:
-        return jsonify({'error': f'fingerprint probe failed: {e}'}), 502
+        return jsonify({'error': f'fingerprint verification failed: {e}'}), 502
 
     pbs_user = getattr(pbs_mgr, 'user', None) or getattr(pbs_mgr, 'username', None)
     pbs_pass = getattr(pbs_mgr, 'password', None)
@@ -3057,15 +3086,39 @@ def storage_preflight(cluster_id):
         fp_hex = hashlib.sha256(der).hexdigest().upper()
         live_fp = ':'.join(fp_hex[i:i+2] for i in range(0, len(fp_hex), 2))
         info['live_fingerprint'] = live_fp
-        if given_fp and given_fp != live_fp:
-            issues.append(f'Fingerprint mismatch — server presents {live_fp[:16]}…, you supplied {given_fp[:16]}…')
+        
+        # SECURITY: If a fingerprint was provided, verify it matches. An unauthenticated probe
+        # that accepts any certificate allows an attacker to intercept the subsequent credential-
+        # bearing connection. FAIL the preflight check on mismatch rather than just warning.
+        if given_fp:
+            # Normalize both for comparison
+            given_normalized = given_fp.replace(':', '').replace(' ', '')
+            live_normalized = fp_hex.replace(':', '').replace(' ', '')
+            if given_normalized != live_normalized:
+                return jsonify({
+                    'ok': False, 
+                    'issues': [f'Fingerprint verification failed: server presents {live_fp[:23]}... but you supplied {given_fp[:23]}... The server certificate may have changed or an attacker may be intercepting the connection.'],
+                    'info': info
+                }), 200
     except Exception as e:
         return jsonify({'ok': False, 'issues': [f'TLS handshake failed: {e}'], 'info': info}), 200
 
     # 3) Auth probe
+    # SECURITY: If a fingerprint was provided and verified above, use fingerprint pinning
+    # for the credential-bearing connection to prevent credential disclosure to an attacker.
     try:
         import requests as _r
-        s = _r.Session(); s.verify = False
+        s = _r.Session()
+        
+        # If we have a verified fingerprint, pin it for the auth probe
+        if given_fp:
+            from pegaprox.core.pbs import _PinnedFingerprintAdapter
+            s.mount('https://', _PinnedFingerprintAdapter(live_fp))
+            s.verify = False  # Fingerprint pinning handles authentication
+        else:
+            # No fingerprint provided - this is an unauthenticated probe
+            s.verify = False
+            
         ar = s.post(f'https://{server}:{port}/api2/json/access/ticket',
                     data={'username': username, 'password': password}, timeout=8)
         if ar.status_code != 200:
