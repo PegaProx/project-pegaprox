@@ -780,13 +780,26 @@ def _scope_pbs_rows(mgr, rows, type_key='backup-type', id_key='backup-id',
     scoped = _caller_is_scoped_here(mgr, user)
     if not scoped:
         return rows                      # plain cluster-wide operator — unchanged
+    
+    # Build a cache of VM resources per cluster to avoid repeated API calls
+    # when filtering a large listing (e.g., 10k snapshots)
+    vm_cache = {}
+    cluster_ids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
+    for cid in cluster_ids:
+        cmgr = cluster_managers.get(cid)
+        if cmgr:
+            try:
+                vm_cache[cid] = cmgr.get_vm_resources(max_age=30) or []
+            except Exception:
+                vm_cache[cid] = []
+    
     out = []
     for r in rows or []:
         bt, bid = key_fn(r) if key_fn else (r.get(type_key), r.get(id_key))
         # hand down both the identity and the confinement answer — a datastore listing is the
         # whole install's inventory, and each of those costs a users-table read or a pool and
-        # ACL enumeration per row otherwise
-        ok, _ = _authz_pbs_backup(mgr, bt, bid, permission, user=user, scoped=scoped)
+        # ACL enumeration per row otherwise. Also pass the VM cache to avoid repeated queries.
+        ok, _ = _authz_pbs_backup(mgr, bt, bid, permission, user=user, scoped=scoped, vm_cache=vm_cache)
         if ok:
             out.append(r)
     return out
@@ -911,7 +924,7 @@ def require_pbs_wide(pbs_id, action='this action'):
     return None
 
 
-def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None):
+def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=None, scoped=None, vm_cache=None):
     """NS Aug 2026 (sec-report, BOLA/CWE-639) — object-level scope for PBS backup ops.
 
     check_pbs_access only proves the caller reaches ONE of the PBS's linked clusters; it
@@ -935,7 +948,16 @@ def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=
     build_authz_user reads the whole users table and decrypts two TOTP columns per account, and
     caller_is_scoped enumerates pool grants and VM ACLs per linked cluster — _scope_pbs_rows
     runs this once per snapshot, so at 10k guests both are the difference between one lookup
-    and hundreds of thousands, on a greenlet that yields to nobody while it runs."""
+    and hundreds of thousands, on a greenlet that yields to nobody while it runs.
+    
+    `vm_cache` is an optional dict {cluster_id: [vm_resources]} to avoid repeated API calls
+    when filtering large listings. If not provided, each call will query the cluster.
+    
+    SECURITY FIX (pentest finding): The original implementation checked if the user could access
+    the VMID on ANY linked cluster, but did not verify that the VM actually exists on a cluster
+    the user has access to. This allowed a user with access to VMID 100 on cluster A to access
+    backups for VMID 100 on cluster B. The fix verifies that the VM exists on at least one
+    cluster the user can access before granting permission."""
     from pegaprox.utils.rbac import user_can_access_vm
     if user is None:
         from pegaprox.utils.auth import build_authz_user
@@ -959,12 +981,44 @@ def _authz_pbs_backup(mgr, backup_type, backup_id, permission='vm.backup', user=
     vmid = int(str(backup_id).strip())
     vm_type = 'lxc' if bt == 'ct' else 'qemu'
     # linked clusters own the backups; fall back to all connected clusters when a PBS has
-    # no explicit linking (mirrors _pbs_vm_name_lookup). user_can_access_vm still enforces
-    # per-cluster ACL/pool scope, so an empty-scope user gets no free pass here.
+    # no explicit linking (mirrors _pbs_vm_name_lookup).
     cluster_ids = list(mgr.linked_clusters or []) or list(cluster_managers.keys())
+    
+    # SECURITY FIX: Verify that the VM actually exists on a cluster the user can access.
+    # Without this check, a user with access to VMID N on cluster A could access backups
+    # for VMID N on cluster B by providing B's backup coordinates.
     for cid in cluster_ids:
-        if user_can_access_vm(user, cid, vmid, permission, vm_type):
+        # First check if user has permission for this VMID on this cluster
+        if not user_can_access_vm(user, cid, vmid, permission, vm_type):
+            continue
+        
+        # Now verify the VM actually exists on this cluster
+        # Use cached VM resources if provided, otherwise query the cluster
+        if vm_cache is not None and cid in vm_cache:
+            vm_resources = vm_cache[cid]
+        else:
+            cmgr = cluster_managers.get(cid)
+            if not cmgr:
+                continue
+            try:
+                vm_resources = cmgr.get_vm_resources(max_age=30) or []
+            except Exception as e:
+                # Log but continue checking other clusters - a transient error on one
+                # cluster shouldn't block access if the VM exists on another
+                logging.debug(f"[PBS-AUTHZ] Could not query cluster {cid} for VM {vmid}: {e}")
+                continue
+        
+        # Check if the VMID exists on this cluster with the correct type
+        vm_exists = any(
+            r.get('vmid') == vmid and r.get('type') == vm_type
+            for r in vm_resources
+            if r.get('type') in ('qemu', 'lxc')
+        )
+        
+        if vm_exists:
+            # VM exists on this cluster AND user has access to it
             return True, None
+    
     return _deny()
 
 
