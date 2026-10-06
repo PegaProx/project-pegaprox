@@ -534,6 +534,43 @@ def set_user_perms(username):
             if username == request.session.get('user', ''):
                 return jsonify({'error': 'Access denied: you cannot change your own '
                                          'permissions'}), 403
+            
+            # NS Jan 2027 (pentest — tenant permission overwrite enables account takeover) —
+            # an unresolved role produces an empty permission set and is stored as the
+            # target's tenant override. The write did not first compare the target's
+            # pre-mutation effective permissions with the caller's permissions. The later
+            # password-only user update calls _caller_can_manage_user; that helper evaluates
+            # the target's current effective permissions, which now appear empty because of
+            # the newly stored override. Consequently, a lower-privileged tenant administrator
+            # who could not previously manage the target can reset the target's local password
+            # and authenticate as that account.
+            #
+            # Two guards close it:
+            #   1. Reject an unresolved role outright — an empty _conferred passes the grant
+            #      ceiling check above (the caller holds every permission in []), but storing
+            #      it changes authorization state and defeats the target-management guard.
+            #   2. Require that the caller can manage the target AT ITS CURRENT privilege level
+            #      before allowing the permission change — the same tier guard the password-reset
+            #      and role-change paths enforce.
+            if role:
+                from pegaprox.utils.rbac import ROLE_PERMISSIONS
+                _role_perms = get_role_permissions_for_user({'role': role}, tenant_id)
+                if not _role_perms and role not in ROLE_PERMISSIONS:
+                    # The role did not resolve to any permissions and is not a builtin role.
+                    # This is either a deleted custom role or a typo. Storing it would grant
+                    # nothing and defeat downstream authorization checks.
+                    log_audit(request.session.get('user', ''), 'security.unresolved_role_denied',
+                              f"Denied setting unresolved role {role!r} for {username} in {tenant_id}")
+                    return jsonify({'error': f'Invalid role: {role!r} does not resolve to any permissions'}), 400
+            
+            # The caller must be able to manage the target at its CURRENT privilege level.
+            # Capture the target's effective permissions BEFORE the mutation.
+            _target_current_perms = get_user_permissions(users_db[username], tenant_id)
+            _target_over = [p for p in _target_current_perms if not has_permission(_caller, p)]
+            if _target_over:
+                log_audit(request.session.get('user', ''), 'security.target_outranks_caller',
+                          f"Denied changing {username} perms: target holds {len(_target_over)} permission(s) beyond caller's")
+                return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
 
         if 'tenant_permissions' not in users_db[username]:
             users_db[username]['tenant_permissions'] = {}
@@ -594,6 +631,37 @@ def remove_user_tenant_perms(username, tenant_id):
             log_audit(request.session.get('user', ''), 'security.tenant_access_denied',
                       f"Denied removing {username} perms in tenant {tenant_id}")
             return jsonify({'error': 'Access denied: cannot manage permissions for other tenants'}), 403
+        
+        # NS Jan 2027 (pentest — tenant permission removal can elevate privileges) —
+        # removing a tenant override reverts the target to their global permissions, which
+        # may be higher than the override. A tenant admin must be able to manage the target
+        # at BOTH the current level (with override) AND the post-removal level (global).
+        from pegaprox.utils.rbac import has_permission
+        from pegaprox.utils.auth import build_authz_user
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        
+        # Check current permissions (with override)
+        _target_current = get_user_permissions(users_db[username], tenant_id)
+        _current_over = [p for p in _target_current if not has_permission(_caller, p)]
+        if _current_over:
+            log_audit(request.session.get('user', ''), 'security.target_outranks_caller',
+                      f"Denied removing {username} tenant perms: target currently holds {len(_current_over)} permission(s) beyond caller's")
+            return jsonify({'error': 'Access denied: target has privileges beyond your own'}), 403
+        
+        # Check what permissions the target would have after removal (global permissions)
+        # Temporarily remove the override to see what they would revert to
+        tp = users_db[username].get('tenant_permissions', {})
+        if tenant_id in tp:
+            _saved_override = tp[tenant_id]
+            del tp[tenant_id]
+            _target_after = get_user_permissions(users_db[username], tenant_id)
+            tp[tenant_id] = _saved_override  # restore for now
+            
+            _after_over = [p for p in _target_after if not has_permission(_caller, p)]
+            if _after_over:
+                log_audit(request.session.get('user', ''), 'security.removal_would_elevate',
+                          f"Denied removing {username} tenant perms: removal would grant {len(_after_over)} permission(s) beyond caller's")
+                return jsonify({'error': 'Access denied: removing override would grant target privileges beyond your own'}), 403
 
     tp = users_db[username].get('tenant_permissions', {})
     if tenant_id in tp:
