@@ -363,6 +363,30 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
                             f"belongs to '{existing_source}', not to this directory")
             return None
 
+        # SECURITY: Verify directory principal continuity. The stored ldap_subject_dn is
+        # the immutable DN from first provisioning; if the current DN differs, this is a
+        # different directory entry reusing the username (deleted/recreated principal, or
+        # a different provider/realm). Manually assigned permissions must not transfer to
+        # the new principal. Mirrors oidc_sub continuity check in oidc_build_user_row.
+        current_dn = (ldap_result.get('user_dn') or '').strip()
+        stored_subject_dn = (existing.get('ldap_subject_dn') or '').strip()
+        
+        # For rows created before this field existed, ldap_subject_dn is empty. Treat the
+        # current ldap_dn as the subject DN and store it now (one-time migration). If
+        # ldap_dn is also empty (malformed old row), accept the current DN as the subject.
+        if not stored_subject_dn:
+            stored_subject_dn = (existing.get('ldap_dn') or '').strip()
+        
+        # LDAP DNs are case-insensitive per RFC 4514, so normalize for comparison
+        if stored_subject_dn and current_dn:
+            if stored_subject_dn.lower() != current_dn.lower():
+                logging.warning(
+                    f"[LDAP] Rejected provisioning for '{username}' - directory principal "
+                    f"changed (stored DN: {stored_subject_dn}, current DN: {current_dn}). "
+                    f"This is a different directory entry reusing the username. Manually "
+                    f"assigned permissions cannot transfer to a new principal.")
+                return None
+
         # Update the existing LDAP user with fresh LDAP info - on a copy, so the row
         # the caller handed in stays what it was
         user = copy.deepcopy(existing)
@@ -370,7 +394,10 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
         user['email'] = ldap_result.get('email', user.get('email', ''))
         user['role'] = ldap_result.get('role', user.get('role', ROLE_VIEWER))
         user['auth_source'] = 'ldap'
-        user['ldap_dn'] = ldap_result.get('user_dn', '')
+        user['ldap_dn'] = current_dn
+        # Store the immutable subject DN if not already set (first login after this fix)
+        if not user.get('ldap_subject_dn'):
+            user['ldap_subject_dn'] = current_dn
         user['last_ldap_sync'] = datetime.now().isoformat()
         
         # MK: Sync tenant assignment from LDAP group mapping
@@ -425,6 +452,7 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
         user['groups'] = _directory_groups_of(ldap_result)
     else:
         # Create new user
+        current_dn = (ldap_result.get('user_dn') or '').strip()
         user = {
             'role': ldap_result.get('role', ROLE_VIEWER),
             'enabled': True,
@@ -442,7 +470,9 @@ def ldap_build_user_row(ldap_result: dict, existing: dict = None):
             'theme': '',
             'language': '',
             'auth_source': 'ldap',
-            'ldap_dn': ldap_result.get('user_dn', ''),
+            'ldap_dn': current_dn,
+            # SECURITY: Store immutable subject DN for principal continuity verification
+            'ldap_subject_dn': current_dn,
             'last_ldap_sync': datetime.now().isoformat(),
             'created_at': datetime.now().isoformat(),
             'groups': _directory_groups_of(ldap_result),
