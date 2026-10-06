@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -9547,6 +9547,21 @@ def _cluster_nodes(mgr):
     return sorted(names)
 
 
+def _cluster_nodes_authoritative(mgr):
+    """The authoritative node list from the cluster configuration, queried from the
+    cluster itself. Returns None if the cluster cannot be queried, otherwise returns
+    a sorted list of node names as the cluster reports them."""
+    if not callable(getattr(mgr, '_ha_node_names', None)):
+        return None
+    try:
+        names = mgr._ha_node_names()
+        if names is None:
+            return None
+        return sorted(n for n in names if isinstance(n, str) and n)
+    except Exception:
+        return None
+
+
 def _cluster_row(st, cid, mgr, layout, reach_of, url_ids):
     """One cluster with node HA for the split-safety panel, and its findings. Only what
     the manager holds in memory: nothing here goes to a node."""
@@ -9573,6 +9588,20 @@ def _cluster_row(st, cid, mgr, layout, reach_of, url_ids):
         return row, found
     cfg = mgr.ha_config or {}
     nodes = _cluster_nodes(mgr)
+    # Validate that the derived node inventory is complete by comparing against the
+    # authoritative cluster configuration. If nodes are missing from all manager-held
+    # sources, they will be omitted from safety checks, creating a fail-open bypass.
+    authoritative = _cluster_nodes_authoritative(mgr)
+    if authoritative is not None:
+        missing = sorted(set(authoritative) - set(nodes))
+        if missing:
+            # Nodes exist in the cluster but are absent from all manager-held dictionaries.
+            # Include them in the inventory so they are subject to safety checks.
+            nodes = sorted(set(nodes) | set(missing))
+            found.append(dict(_finding('INCOMPLETE_NODE_INVENTORY', 'warn',
+                                       f'Cluster {name}: {len(missing)} node(s) missing from HA inventory '
+                                       f'({", ".join(missing)}). Safety checks may be incomplete.'),
+                              cluster=cid, nodes=list(missing)))
     want = getattr(mgr, 'FENCE_AGENT_VERSION', 2)
     seen = cfg.get('fence_agent_versions') if isinstance(cfg.get('fence_agent_versions'), dict) else {}
     agents = {n: (seen.get(n) if type(seen.get(n)) is int else 0) for n in nodes}
