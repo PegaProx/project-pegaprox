@@ -1444,7 +1444,37 @@ def user_can_access_vmware_vm(user: dict, vmware_id: str, vm_id: str, permission
         logging.debug(f"[VMWARE-ACL] {username} is VMware-ACL-scoped on {vmware_id}; VM {vm_id} not in {scoped_ids} → deny {permission}")
         return False
 
-    # No VM-specific ACL - use general permissions (now tenant-gated + scope-confined)
+    # Dec 2026 (pentest) — the general-permission fallback may ONLY grant access when the
+    # VMware server is unambiguously within the caller's tenant estate. A server linked to
+    # multiple clusters (potentially from different tenants) creates cross-tenant reach: user A
+    # (tenant 1, cluster 1) and user B (tenant 2, cluster 2) both pass the tenant gate above
+    # (each can reach one linked cluster), then both fall through to the general-permission
+    # grant and see each other's VMs. Mirrors the Proxmox tenant-cluster check (line 1225):
+    # the fallback requires TENANT OWNERSHIP of a linked cluster, not merely ACL/pool reach.
+    # An unlinked server (backward-compat: single-tenant ESXi with no linkage configured) or
+    # a server where the caller's tenant owns at least one linked cluster may fall through;
+    # otherwise deny and force explicit per-VM ACLs to distinguish tenant boundaries.
+    if _linked:
+        # _uc was resolved above (line 1410) with include_pools=False, so it contains only
+        # tenant-owned clusters. If the intersection with linked_clusters is empty, the caller
+        # reached the server only through ACL/pool grants on a cluster their tenant does not own.
+        if _uc is not None and not any(c in _uc for c in _linked):
+            # This branch is unreachable: the tenant gate (line 1415) already denied when the
+            # caller cannot reach any linked cluster. Kept for symmetry with the Proxmox path.
+            logging.debug(f"[VMWARE-ACL] {username} cannot reach any tenant-owned linked cluster of "
+                          f"{vmware_id} - deny {permission}")
+            return False
+        # The caller's tenant owns at least one linked cluster. If the server is linked to
+        # clusters from MULTIPLE tenants, the general-permission fallback would grant cross-tenant
+        # access. Detect this by checking if ANY linked cluster is outside the caller's tenant set.
+        # When true, require explicit VM-level ACLs to distinguish which VMs belong to which tenant.
+        if _uc is not None and any(c not in _uc for c in _linked):
+            logging.debug(f"[VMWARE-ACL] {username} tenant owns {[c for c in _linked if c in _uc]} but "
+                          f"{vmware_id} is also linked to {[c for c in _linked if c not in _uc]} → "
+                          f"deny {permission} on {vm_id} (no VM-specific ACL in multi-tenant server)")
+            return False
+
+    # No VM-specific ACL - use general permissions (now tenant-gated + scope-confined + multi-tenant-safe)
     return has_permission(user, permission)
 
 
