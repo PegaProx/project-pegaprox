@@ -85,6 +85,8 @@ def _row_to_policy(r):
         'notes': r['notes'] or '',
         'created_by': r['created_by'] or '',
         'created_at': r['created_at'],
+        'creator_api_token': bool(r['creator_api_token']) if 'creator_api_token' in r.keys() else False,
+        'creator_role': (r['creator_role'] or '') if 'creator_role' in r.keys() else '',
     }
 
 
@@ -348,9 +350,13 @@ def _prune(mgr, node, vmid, vm_type, policy):
     return pruned
 
 
-def _execute_policy(policy_id, force=False):
+def _execute_policy(policy_id, force=False, caller_session=None):
     """Run one policy. Persists a row in snapshot_runs. force=True runs even a
-    disabled policy (used by the manual 'run now' button — #586)."""
+    disabled policy (used by the manual 'run now' button — #586).
+    
+    caller_session: dict with 'api_token' and 'role' keys for manual runs, to
+    preserve the caller's authorization context. When None, uses the stored
+    creator context from the policy record."""
     db = get_db()
     c = db.conn.cursor()
     c.execute('SELECT * FROM snapshot_policies WHERE id = ?', (policy_id,))
@@ -414,6 +420,12 @@ def _execute_policy(policy_id, force=False):
     # can actually touch — otherwise a vm.snapshot holder could tag-target VMs they can't
     # see. Resolve the creator once; legacy policies with no recorded creator keep running
     # unfiltered (don't break existing automation), we just can't scope them.
+    #
+    # MK Dec 2026 (sec-pentest): reconstruct the FULL authorization context, including
+    # token-derived state. The old code loaded only the username and reconstructed the
+    # base account, so a restricted API token's scope was lost and the worker ran with
+    # the owner's full authority. For manual runs, caller_session carries the requesting
+    # principal; for scheduled runs, use the stored creator_api_token + creator_role.
     policy_creator = None
     creator_name = policy.get('created_by', '')
     if creator_name:
@@ -421,6 +433,16 @@ def _execute_policy(policy_id, force=False):
             policy_creator = load_users().get(creator_name)
             if policy_creator:
                 policy_creator['username'] = creator_name
+                # Reconstruct the authorization context that was active when the policy
+                # was created (or the manual-run caller's context if provided)
+                session_ctx = caller_session or {
+                    'api_token': policy.get('creator_api_token', False),
+                    'role': policy.get('creator_role', '')
+                }
+                if session_ctx.get('api_token') and session_ctx.get('role'):
+                    # Apply token role to get effective_role and _token_owner_capped
+                    from pegaprox.utils.auth import apply_token_role
+                    policy_creator = apply_token_role(policy_creator, session_ctx['role'])
             else:
                 # MK Sep 2026 - this said "per-VM authz not applied" and then ran the
                 # policy over every resolved target. An off-boarded account's policy
@@ -662,16 +684,22 @@ def create_policy(cluster_id):
     pid = uuid.uuid4().hex[:12]
     try:
         c = get_db().conn.cursor()
+        # MK Dec 2026 (sec-pentest): persist the authorization context so deferred
+        # execution can reconstruct the exact principal that created the policy,
+        # including token-derived scope. Without this, a restricted API token's
+        # policy would later execute with the owner's full base-account authority.
+        creator_api_token = 1 if request.session.get('api_token') else 0
+        creator_role = request.session.get('role', '')
         c.execute('''INSERT INTO snapshot_policies
             (id, cluster_id, name, target_type, target_value, schedule, schedule_at,
              schedule_cron, schedule_day, run_once_at, prune_only,
              retention_count, retention_days, include_ram, enabled, notes,
-             created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+             created_by, created_at, creator_api_token, creator_role)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
             (pid, cluster_id, name, target_type, target_value, schedule, schedule_at,
              schedule_cron, schedule_day, run_once_at, 1 if prune_only else 0,
              retention_count, retention_days, 1 if include_ram else 0, 1 if enabled else 0,
-             notes, _current_user(), datetime.now().isoformat()))
+             notes, _current_user(), datetime.now().isoformat(), creator_api_token, creator_role))
         get_db().conn.commit()
         c.execute('SELECT * FROM snapshot_policies WHERE id=?', (pid,))
         return jsonify({'policy': _row_to_policy(c.fetchone())})
@@ -845,7 +873,15 @@ def run_policy_now(cluster_id, pid):
 
     # fire in a thread so the request returns fast. force=True so 'run now' works
     # even on a disabled policy (#586 — run without having to enable the schedule).
-    t = threading.Thread(target=_execute_policy, args=(pid, True), daemon=True,
+    # MK Dec 2026 (sec-pentest): pass the caller's authorization context so the
+    # worker executes with the requesting principal's scope, not the policy creator's.
+    # The old code passed only (pid, True), so the worker reconstructed from the
+    # stored username and lost token-derived restrictions.
+    caller_session = {
+        'api_token': request.session.get('api_token'),
+        'role': request.session.get('role', '')
+    }
+    t = threading.Thread(target=_execute_policy, args=(pid, True, caller_session), daemon=True,
                          name=f'snap-run-{pid}')
     t.start()
     return jsonify({'ok': True, 'message': 'policy run started'})
