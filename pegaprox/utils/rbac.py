@@ -1294,7 +1294,29 @@ def _within_token_role(user: dict, permission: str) -> bool:
     _tid = user.get('tenant_id')
     allowed = get_role_permissions_for_user({'role': eff, 'tenant_id': _tid},
                                             _tenant_defining_role(eff, _tid))
-    return permission in (allowed or [])
+    if permission not in (allowed or []):
+        return False
+    
+    # MK Oct 2026 (sec-report) — a custom-role token must also be capped by what the OWNER
+    # holds right now. The token's own role is the right ceiling only while the owner still
+    # outranks it. A token bound to a custom role never went through the numeric floor in
+    # build_authz_user, so demoting its owner, stripping one of their permissions, or editing
+    # the custom role itself left the token resolving through the old, larger set. The VM-ACL
+    # and pool-grant paths in _user_can_access_vm_uncapped return True based on an object
+    # grant on the OWNER's account, then this ceiling validated only the token's own role and
+    # never consulted the owner's current permissions. A token created while its owner had a
+    # VM permission could therefore continue invoking the authenticated VM action endpoint
+    # after the owner was demoted or otherwise lost that permission, provided the existing
+    # ACL or pool grant remained. Intersect with the owner's current effective permissions
+    # the same way get_user_permissions does (lines 417-421).
+    if user.get('_token_owner_capped'):
+        _owner = {k: v for k, v in user.items()
+                  if k not in ('effective_role', '_token_owner_capped')}
+        _owner_perms = set(get_user_permissions(_owner, _tid))
+        if permission not in _owner_perms:
+            return False
+    
+    return True
 
 
 def user_can_access_vm(user: dict, cluster_id: str, vmid: int, permission: str = 'vm.view', vm_type: str = None) -> bool:
