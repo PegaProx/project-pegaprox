@@ -136,6 +136,7 @@ def _get_my_vms():
                 'cluster_id': cluster_id,
                 'cluster_name': mgr.config.name,
                 'uptime': vm.get('uptime', 0),
+                'uuid': vm.get('uuid'),  # NS Dec 2026: stable identity for VMID-reuse protection
             }
 
             if cfg.get('show_resource_usage', True):
@@ -973,6 +974,58 @@ def _destroy_guest():
     mgr = cluster_managers.get(cluster_id)
     if not mgr or not mgr.is_connected:
         return {'error': 'Cluster is currently unavailable'}, 503
+
+    # NS Dec 2026 (pentest) — bind delete to stable backend identity. The authorization
+    # above checked a snapshot from _get_my_vms(); fetch the CURRENT guest's UUID now
+    # (Proxmox smbios1 uuid, XCP-ng VM.uuid) and confirm it matches the authorized one
+    # immediately before the privileged delete call. If the VMID was reassigned between
+    # authz and operation, the UUID will differ and we refuse. Closes VMID-reuse
+    # cross-tenant destruction.
+    authorized_uuid = target.get('uuid')  # from _get_my_vms snapshot
+    try:
+        live_resources = mgr.get_vm_resources(max_age=0)
+        live_vm = next((r for r in live_resources if r.get('vmid') == vmid_int), None)
+        if not live_vm:
+            return {'error': 'VM no longer exists in current inventory'}, 404
+        
+        # Fetch stable identity: XCP-ng carries uuid in resources; Proxmox needs config fetch
+        live_uuid = live_vm.get('uuid')
+        if not live_uuid and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox':
+            # Proxmox: fetch VM config to extract smbios1 uuid (QEMU only; LXC has no smbios)
+            try:
+                if vm_type == 'qemu':
+                    config_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid_int}/config"
+                    config_resp = mgr._create_session().get(config_url, timeout=5)
+                    if config_resp.status_code == 200:
+                        config_data = config_resp.json().get('data', {})
+                        smbios1 = config_data.get('smbios1', '')
+                        # Parse smbios1 string for uuid (format: "uuid=xxx,manufacturer=yyy,...")
+                        if smbios1:
+                            for part in smbios1.split(','):
+                                if '=' in part:
+                                    key, val = part.split('=', 1)
+                                    if key.strip() == 'uuid':
+                                        live_uuid = val.strip()
+                                        break
+            except Exception as uuid_err:
+                logging.warning(f"[client_portal] Could not fetch UUID for Proxmox VM {vmid_int}: {uuid_err}")
+        
+        # If we have an authorized UUID from the snapshot, verify it matches the live one
+        if authorized_uuid and live_uuid and authorized_uuid != live_uuid:
+            logging.error(f"[client_portal] VMID reuse detected: authorized UUID {authorized_uuid} "
+                         f"!= live UUID {live_uuid} for VM {vmid_int} on {cluster_id}")
+            return {'error': 'VM identity verification failed (VMID may have been reassigned)'}, 403
+        
+        # If no UUID available (old VM without smbios1), verify name as secondary check
+        if not live_uuid:
+            live_name_current = live_vm.get('name', '')
+            if live_name_current != live_name:
+                logging.error(f"[client_portal] VMID reuse suspected: authorized name '{live_name}' "
+                             f"!= live name '{live_name_current}' for VM {vmid_int} on {cluster_id}")
+                return {'error': 'VM identity verification failed (name mismatch)'}, 403
+    except Exception as e:
+        logging.error(f"[client_portal] Failed to verify VM {vmid_int} identity before delete: {e}")
+        return {'error': 'Cannot verify VM identity before deletion'}, 500
 
     res = mgr.delete_vm(node, vmid_int, vm_type, purge=True, destroy_unreferenced=True)
     if not res.get('success'):

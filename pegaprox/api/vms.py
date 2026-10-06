@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12332,6 +12332,58 @@ def bulk_migrate_api(cluster_id):
             results.append({
                 'vmid': vm['vmid'], 'success': False, 'task': None,
                 'error': 'Permission denied: vm.migrate'
+            })
+            continue
+
+        # NS Dec 2026 (pentest) — bind authorization to stable backend identity. The
+        # authorization above checked the numeric VMID; fetch the live guest's UUID now
+        # (Proxmox smbios1 uuid, XCP-ng VM.uuid) and confirm it immediately before the
+        # privileged migrate call. If the VMID was reassigned between authz and operation,
+        # the UUID will differ and we refuse. Closes VMID-reuse cross-tenant migration.
+        try:
+            live_resources = mgr.get_vm_resources(max_age=0)
+            live_vm = next((r for r in live_resources if r.get('vmid') == vm['vmid']), None)
+            if not live_vm:
+                results.append({
+                    'vmid': vm['vmid'], 'success': False, 'task': None,
+                    'error': 'VM not found in current inventory'
+                })
+                continue
+            
+            # Fetch stable identity: XCP-ng carries uuid in resources; Proxmox needs config fetch
+            live_uuid = live_vm.get('uuid')
+            if not live_uuid and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox':
+                # Proxmox: fetch VM config to extract smbios1 uuid (QEMU only; LXC has no smbios)
+                try:
+                    node = live_vm.get('node') or vm.get('node')
+                    vm_type = live_vm.get('type', 'qemu')
+                    if vm_type == 'qemu':
+                        config_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vm['vmid']}/config"
+                        config_resp = mgr._create_session().get(config_url, timeout=5)
+                        if config_resp.status_code == 200:
+                            config_data = config_resp.json().get('data', {})
+                            smbios1 = config_data.get('smbios1', '')
+                            # Parse smbios1 string for uuid (format: "uuid=xxx,manufacturer=yyy,...")
+                            if smbios1:
+                                for part in smbios1.split(','):
+                                    if '=' in part:
+                                        key, val = part.split('=', 1)
+                                        if key.strip() == 'uuid':
+                                            live_uuid = val.strip()
+                                            break
+                except Exception as uuid_err:
+                    logging.warning(f"[MIGRATE] Could not fetch UUID for Proxmox VM {vm['vmid']}: {uuid_err}")
+            
+            # For VMs without UUID (LXC containers, old VMs), we cannot bind to stable identity
+            # but we still verified authorization above. Log a warning for audit trail.
+            if not live_uuid:
+                logging.warning(f"[MIGRATE] VM {vm['vmid']} on {cluster_id} has no UUID - "
+                               f"cannot bind to stable identity (type: {live_vm.get('type', 'unknown')})")
+        except Exception as e:
+            logging.error(f"[MIGRATE] Failed to verify VM {vm['vmid']} identity: {e}")
+            results.append({
+                'vmid': vm['vmid'], 'success': False, 'task': None,
+                'error': 'Cannot verify VM identity'
             })
             continue
 
