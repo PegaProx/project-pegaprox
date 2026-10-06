@@ -1298,6 +1298,20 @@ def confirm_vmware_cutover(mid):
     if getattr(task, 'phase', None) != 'awaiting_confirmation':
         return jsonify({'error': 'Migration is not waiting for cutover confirmation',
                         'phase': getattr(task, 'phase', None)}), 409
+    
+    # sec: cutover confirmation releases the worker to complete the migration, including
+    # source VM deletion when remove_source=true. That deletion is a vmware.vm.manage
+    # operation (enforced at creation), so confirming a destructive cutover requires the
+    # same elevated permission — otherwise a migrate-only user can confirm a reachable
+    # pending task and trigger deletion of a source VM they cannot manage.
+    if getattr(task, 'remove_source', False):
+        vmw, vid = getattr(task, 'vmware_id', None), getattr(task, 'vm_id', None)
+        if vmw and vid:
+            user = build_authz_user(request.session.get('user', ''), request.session)
+            if not user_can_access_vmware_vm(user, vmw, str(vid), 'vmware.vm.manage'):
+                return jsonify({'error': 'Permission denied: confirming cutover with source removal '\
+                                         'requires vmware.vm.manage on the source VM'}), 403
+    
     task._cutover_confirmed = True
     log_audit(request.session.get('user', 'admin'), 'vmware.migration.cutover_confirmed',
               f"V2P cutover confirmed for {getattr(task, 'vm_name', mid)} (migration {mid})")
