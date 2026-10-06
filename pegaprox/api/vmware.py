@@ -18,7 +18,7 @@ from pegaprox.utils.audit import log_audit
 # vmware_id from URL. Sanitise both before logging for consistency.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm
-from pegaprox.api.helpers import check_cluster_access, check_vmware_access, caller_is_scoped
+from pegaprox.api.helpers import check_cluster_access, check_vmware_access, check_vmware_cluster_access, caller_is_scoped
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -605,8 +605,8 @@ def get_vmware_vcenter_clusters(vmware_id):
 @require_auth(perms=['vmware.view'])
 def get_vmware_cluster_detail(vmware_id, cluster_id):
     """Get cluster detail with DRS/HA config"""
-    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
-    ok, err = check_vmware_access(vmware_id)
+    # Pentest Jan 2027 — validate both server and vSphere cluster access
+    ok, err = check_vmware_cluster_access(vmware_id, cluster_id)
     if not ok:
         return err
     if vmware_id not in vmware_managers:
@@ -623,8 +623,8 @@ def get_vmware_cluster_detail(vmware_id, cluster_id):
 @require_auth(perms=['vmware.cluster.manage'])
 def set_vmware_cluster_drs(vmware_id, cluster_id):
     """Toggle DRS on a cluster"""
-    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
-    ok, err = check_vmware_access(vmware_id)
+    # Pentest Jan 2027 — validate both server and vSphere cluster access
+    ok, err = check_vmware_cluster_access(vmware_id, cluster_id)
     if not ok:
         return err
     if vmware_id not in vmware_managers:
@@ -645,8 +645,8 @@ def set_vmware_cluster_drs(vmware_id, cluster_id):
 @require_auth(perms=['vmware.cluster.manage'])
 def set_vmware_cluster_ha(vmware_id, cluster_id):
     """Toggle HA on a cluster"""
-    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
-    ok, err = check_vmware_access(vmware_id)
+    # Pentest Jan 2027 — validate both server and vSphere cluster access
+    ok, err = check_vmware_cluster_access(vmware_id, cluster_id)
     if not ok:
         return err
     if vmware_id not in vmware_managers:

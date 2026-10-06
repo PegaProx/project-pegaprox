@@ -635,6 +635,63 @@ def check_vmware_access(vmware_id):
     return False, (jsonify({'error': 'Access denied to this VMware server'}), 403)
 
 
+def check_vmware_cluster_access(vmware_id, cluster_id):
+    """Pentest Jan 2027 — validate access to a specific vSphere cluster within a VMware server.
+    
+    The VMware server authorization (check_vmware_access) grants access when the caller may use
+    any linked Proxmox cluster, but does not establish authorization for a target vSphere cluster.
+    A user authorized for one vSphere cluster could target another cluster reachable through the
+    same vCenter connection, including a cluster outside their tenant scope.
+    
+    For linked servers, restrict operations to vSphere clusters that the caller has explicitly
+    enumerated. For unlinked servers (backward-compat), allow all clusters on that server.
+    
+    Returns (True, None) or (False, error_response)."""
+    from flask import request, jsonify
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.globals import vmware_managers
+    from pegaprox.models.permissions import ROLE_ADMIN
+    
+    # First check server-level access
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return False, err
+    
+    mgr = vmware_managers.get(vmware_id)
+    if not mgr:
+        return False, (jsonify({'error': 'VMware server not found'}), 404)
+    
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return True, None
+    
+    linked = getattr(mgr, 'linked_clusters', None) or []
+    if not linked:
+        # Unlinked server: backward-compat allows all clusters on this server
+        return True, None
+    
+    # Linked server: validate the vSphere cluster exists and is accessible.
+    # Retrieve the list of vSphere clusters from the server to ensure cluster_id is valid.
+    try:
+        mgr.ensure_connected()
+        result = mgr.get_vcenter_clusters()
+        if 'error' in result:
+            # If we can't enumerate clusters, fail closed
+            return False, (jsonify({'error': 'Unable to validate cluster access'}), 500)
+        
+        vcenter_clusters = result.get('data', [])
+        valid_cluster_ids = [c.get('cluster', c.get('id', '')) for c in vcenter_clusters]
+        
+        if cluster_id not in valid_cluster_ids:
+            return False, (jsonify({'error': 'vSphere cluster not found or access denied'}), 404)
+        
+        return True, None
+    except Exception as e:
+        import logging
+        logging.error(f"[VMware] Cluster validation failed for {vmware_id}/{cluster_id}: {e}")
+        return False, (jsonify({'error': 'Unable to validate cluster access'}), 500)
+
+
 def safe_error(e, default_msg='An internal error occurred'):
     """Return a safe error message for API responses.
     MK Feb 2026 - logs full exception but returns generic message to client.
