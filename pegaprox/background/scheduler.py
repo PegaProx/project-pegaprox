@@ -254,12 +254,28 @@ def _touch_last_run(task_id, when):
 
 
 def execute_scheduled_task(task):
-    """Execute a scheduled task"""
+    """Execute a scheduled task
+    
+    sec: Legacy scheduled_tasks have no created_by or tenant scope. Since we cannot verify
+    current authorization, we refuse to execute them. Operators must recreate schedules via
+    the newer scheduled_actions API (which stores created_by and enforces authorization at
+    execution time). This prevents persisted schedules from bypassing authorization revocation.
+    """
     cluster_id = task.get('cluster_id', '')
     action = task.get('action', '')
     target_type = task.get('target_type', 'vm')
     target_id = task.get('target_id', '')
     target_node = task.get('target_node', '')
+    
+    logging.error(f"Scheduled task '{_sl(task.get('name'))}' uses the legacy scheduled_tasks "
+                  f"schema which lacks authorization metadata. Refusing to execute {action} on "
+                  f"{target_type}/{target_id}. Please recreate this schedule via the API to "
+                  f"establish proper authorization tracking.")
+    return
+    
+    # The code below is unreachable but preserved to document what the legacy path did.
+    # It must not be re-enabled without adding authorization checks equivalent to those in
+    # execute_scheduled_action() in api/schedules.py.
     
     if cluster_id not in cluster_managers:
         logging.error(f"Scheduled task failed: Cluster {cluster_id} not found")

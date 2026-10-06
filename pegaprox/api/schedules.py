@@ -351,6 +351,7 @@ def execute_scheduled_action(action):
     vmid = action.get('vmid')
     vm_type = action.get('vm_type', 'qemu')
     action_type = action.get('action')
+    created_by = action.get('created_by', '')
     
     logging.info(f"[SCHEDULER] Executing {action_type} on {vm_type}/{vmid} in {cluster_id}")
     
@@ -361,6 +362,40 @@ def execute_scheduled_action(action):
     mgr = cluster_managers[cluster_id]
     if not mgr.is_connected:
         logging.error(f"[SCHEDULER] Cluster {cluster_id} not connected")
+        return
+    
+    # sec: recheck authorization at execution time - the creator must still have permission
+    # to perform this action on this VM. Without this, a schedule persists after the creator
+    # loses access (tenant change, ACL revocation, cluster reassignment).
+    if not created_by:
+        logging.error(f"[SCHEDULER] Schedule for {action_type} on {vm_type}/{vmid} has no "
+                      f"created_by field - cannot verify authorization. Refusing to execute.")
+        return
+    
+    from pegaprox.utils.auth import build_authz_user, load_users
+    from pegaprox.utils.rbac import user_can_access_vm, get_user_clusters
+    
+    users_db = load_users()
+    if created_by not in users_db:
+        logging.error(f"[SCHEDULER] Schedule creator '{created_by}' no longer exists. "
+                      f"Refusing to execute {action_type} on {vm_type}/{vmid}.")
+        return
+    
+    creator = build_authz_user(created_by, users_db[created_by])
+    
+    # Check cluster access via tenant membership
+    allowed_clusters = get_user_clusters(creator)
+    if allowed_clusters is not None and cluster_id not in allowed_clusters:
+        logging.error(f"[SCHEDULER] Creator '{created_by}' no longer has access to cluster "
+                      f"'{cluster_id}'. Refusing to execute {action_type} on {vm_type}/{vmid}.")
+        return
+    
+    # Check per-VM permission for the specific action
+    required_perm = _perm_for_action(action_type)
+    if not user_can_access_vm(creator, cluster_id, vmid, required_perm, vm_type):
+        logging.error(f"[SCHEDULER] Creator '{created_by}' no longer has permission "
+                      f"'{required_perm}' for {vm_type}/{vmid} in cluster '{cluster_id}'. "
+                      f"Refusing to execute {action_type}.")
         return
     
     try:
@@ -1049,7 +1084,8 @@ def _update_schedule_row(row):
         'migrate_templates': bool(row['migrate_templates']) if 'migrate_templates' in keys else False,
         'relax_anti_affinity': bool(row['relax_anti_affinity']) if 'relax_anti_affinity' in keys else False,
         'last_run': row['last_run'],
-        'next_run': row['next_run']
+        'next_run': row['next_run'],
+        'created_by': row.get('created_by', '') if 'created_by' in keys else ''
     }
 
 
@@ -1312,6 +1348,45 @@ def check_scheduled_updates():
                 if hasattr(mgr, '_rolling_update') and mgr._rolling_update:
                     if mgr._rolling_update.get('status') == 'running':
                         continue
+                
+                # sec: recheck authorization at execution time - the creator must still have permission
+                # to perform rolling updates on this cluster. Without this, a schedule persists after
+                # the creator loses access (tenant change, cluster reassignment).
+                created_by = schedule.get('created_by', '')
+                if not created_by:
+                    logging.error(f"[SCHEDULER] Update schedule for cluster '{cluster_id}' has no "
+                                  f"created_by field - cannot verify authorization. Refusing to execute.")
+                    continue
+                
+                from pegaprox.utils.auth import build_authz_user, load_users
+                from pegaprox.utils.rbac import get_user_clusters, has_permission
+                
+                users_db = load_users()
+                if created_by not in users_db:
+                    logging.error(f"[SCHEDULER] Update schedule creator '{created_by}' no longer exists. "
+                                  f"Refusing to execute rolling update for cluster '{cluster_id}'.")
+                    continue
+                
+                creator = build_authz_user(created_by, users_db[created_by])
+                
+                # Check cluster access via tenant membership
+                allowed_clusters = get_user_clusters(creator)
+                if allowed_clusters is not None and cluster_id not in allowed_clusters:
+                    logging.error(f"[SCHEDULER] Creator '{created_by}' no longer has access to cluster "
+                                  f"'{cluster_id}'. Refusing to execute rolling update.")
+                    continue
+                
+                # Check node.update permission (required for rolling updates)
+                if not has_permission(creator, 'node.update'):
+                    logging.error(f"[SCHEDULER] Creator '{created_by}' no longer has 'node.update' "
+                                  f"permission. Refusing to execute rolling update for cluster '{cluster_id}'.")
+                    continue
+                
+                # If reboot is enabled, also check node.reboot permission
+                if schedule.get('include_reboot', True) and not has_permission(creator, 'node.reboot'):
+                    logging.error(f"[SCHEDULER] Creator '{created_by}' no longer has 'node.reboot' "
+                                  f"permission. Refusing to execute rolling update with reboot for cluster '{cluster_id}'.")
+                    continue
                 
                 logging.info(f"[SCHEDULER] Starting scheduled update for cluster {cluster_id} (type: {schedule_type})")
                 

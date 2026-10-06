@@ -1408,6 +1408,48 @@ def create_tenant():
     
     return jsonify({'success': True, 'tenant': tenants_db[tid]})
 
+
+def _disable_schedules_for_clusters(tenant_id, cluster_ids):
+    """Disable all schedules for the given clusters that were created by users in this tenant.
+    
+    Called when a tenant's cluster membership changes to prevent schedules from persisting
+    after authorization is revoked.
+    """
+    try:
+        users = load_users()
+        tenant_users = {u for u, d in users.items() if d.get('tenant_id') == tenant_id}
+        
+        if not tenant_users:
+            return
+        
+        # Disable schedules in the newer scheduled_actions table
+        db = get_db()
+        for cluster_id in cluster_ids:
+            for username in tenant_users:
+                result = db.conn.execute(
+                    'UPDATE scheduled_actions SET enabled = 0 WHERE cluster_id = ? AND created_by = ?',
+                    (cluster_id, username)
+                )
+                if result.rowcount > 0:
+                    logging.info(f"Disabled {result.rowcount} schedule(s) for cluster '{cluster_id}' "
+                                 f"created by '{username}' (tenant '{tenant_id}' lost access)")
+        db.conn.commit()
+        
+        # Also disable legacy scheduled_tasks (though they will be refused at execution anyway)
+        for cluster_id in cluster_ids:
+            result = db.conn.execute(
+                'UPDATE scheduled_tasks SET enabled = 0 WHERE cluster_id = ?',
+                (cluster_id,)
+            )
+            if result.rowcount > 0:
+                logging.info(f"Disabled {result.rowcount} legacy scheduled_task(s) for cluster "
+                             f"'{cluster_id}' (tenant '{tenant_id}' lost access)")
+        db.conn.commit()
+        
+    except Exception as e:
+        logging.error(f"Failed to disable schedules for removed clusters: {e}")
+
+
 @bp.route('/api/tenants/<tenant_id>', methods=['PUT'])
 @require_auth(perms=['admin.tenants'])
 def update_tenant(tenant_id):
@@ -1479,6 +1521,16 @@ def update_tenant(tenant_id):
 
     # a cluster removed here must stop being reachable now, not after the next restart
     invalidate_tenants_cache()
+    
+    # sec: disable schedules for clusters that were removed from this tenant. Without this,
+    # a schedule created when a user had access persists after the cluster is reassigned to
+    # another tenant, allowing cross-tenant operations via the service's cluster-manager creds.
+    if 'clusters' in data:
+        _cur = set(map(str, _before.get('clusters') or []))
+        _new = set(map(str, data['clusters'] or []))
+        _removed = _cur - _new
+        if _removed:
+            _disable_schedules_for_clusters(tenant_id, _removed)
     log_audit(request.session['user'], 'tenant.updated', f"Updated tenant: {tenant_id}")
     
     return jsonify({'success': True, 'tenant': tenants_db[tenant_id]})
