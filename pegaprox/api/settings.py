@@ -1716,6 +1716,28 @@ def update_server_settings():
                         settings['ldap_user_group'] = ''
                         settings['ldap_viewer_group'] = ''
             
+            # SECURITY: Validate LDAP transport security configuration
+            if any(k in data for k in ldap_keys):
+                ldap_enabled = settings.get('ldap_enabled', False)
+                use_ssl = settings.get('ldap_use_ssl', False)
+                use_starttls = settings.get('ldap_use_starttls', False)
+                verify_tls = settings.get('ldap_verify_tls', True)
+                
+                if ldap_enabled:
+                    # Require at least one transport security mechanism
+                    if not use_ssl and not use_starttls:
+                        return jsonify({
+                            'error': 'LDAP transport security required: enable either "Use SSL (LDAPS)" or "Use STARTTLS". '
+                                   'Plaintext LDAP exposes credentials and directory data to network interception.'
+                        }), 400
+                    
+                    # Warn if TLS certificate verification is disabled (but allow it for internal CAs)
+                    if not verify_tls:
+                        logging.warning(
+                            "[LDAP] Configuration saved with TLS certificate verification disabled. "
+                            "This permits man-in-the-middle attacks. Enable 'Verify TLS Certificate' "
+                            "for production use or ensure the LDAP server's CA is in the system trust store.")
+            
             if any(k in data for k in ldap_keys):
                 log_audit(request.session.get('user', 'admin'), 'settings.ldap', 
                          f"LDAP settings updated (enabled={settings.get('ldap_enabled', False)})")
@@ -2234,7 +2256,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2444,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -5728,7 +5750,7 @@ def test_ldap():
         'username_attribute': data.get('ldap_username_attribute', saved.get('ldap_username_attribute', 'sAMAccountName')),
         'email_attribute': data.get('ldap_email_attribute', saved.get('ldap_email_attribute', 'mail')),
         'display_name_attribute': data.get('ldap_display_name_attribute', saved.get('ldap_display_name_attribute', 'displayName')),
-        'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', False)),
+        'verify_tls': data.get('ldap_verify_tls', saved.get('ldap_verify_tls', True)),  # SECURITY: Default to True for new configurations
     }
 
     # Use saved password if masked
@@ -5737,6 +5759,13 @@ def test_ldap():
 
     if not config['server']:
         return jsonify({'error': 'LDAP server is required'}), 400
+    
+    # SECURITY: Require transport security for LDAP connections
+    if not config['use_ssl'] and not config['use_starttls']:
+        return jsonify({
+            'error': 'LDAP transport security required: enable either "Use SSL (LDAPS)" or "Use STARTTLS". '
+                   'Plaintext LDAP exposes credentials and directory data to network interception.'
+        }), 400
 
     try:
         import ldap3
@@ -5749,12 +5778,10 @@ def test_ldap():
     results = {'steps': []}
 
     try:
-        # Step 1: Connect to server
-        # MK: Mar 2026 - use verify_tls from config instead of hardcoded CERT_NONE (#108)
-        tls_config = None
-        if config['use_ssl'] or config['use_starttls']:
-            validate = ssl_module.CERT_REQUIRED if config['verify_tls'] else ssl_module.CERT_NONE
-            tls_config = Tls(validate=validate)
+        # Step 1: Connect to server with TLS
+        # SECURITY: Enforce certificate verification by default
+        validate = ssl_module.CERT_REQUIRED if config['verify_tls'] else ssl_module.CERT_NONE
+        tls_config = Tls(validate=validate)
         
         server = Server(config['server'], port=config['port'], 
                        use_ssl=config['use_ssl'], tls=tls_config, 

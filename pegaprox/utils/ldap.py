@@ -39,7 +39,7 @@ def get_ldap_settings() -> dict:
         'viewer_group': settings.get('ldap_viewer_group', ''),
         'default_role': settings.get('ldap_default_role', ROLE_VIEWER),
         'auto_create_users': settings.get('ldap_auto_create_users', True),
-        'verify_tls': settings.get('ldap_verify_tls', False),  # NS: Mar 2026 - default off, most AD envs use internal CAs not in system trust store (#108)
+        'verify_tls': settings.get('ldap_verify_tls', True),  # SECURITY: Default to True - certificate verification required for TLS connections
         # MK: Feb 2026 - Custom group→role mappings for custom roles & tenants
         # Format: [{"group_dn": "CN=...", "role": "custom_role_name", "tenant": "tenant_id", "permissions": [...]}]
         'group_mappings': settings.get('ldap_group_mappings', []),
@@ -118,29 +118,23 @@ def ldap_authenticate(username: str, password: str) -> dict:
     port = int(ldap_config['port'])
     
     try:
-        # MK: Build server with optional TLS
-        # NS: Feb 2026 - SECURITY: configurable TLS cert verification (default CERT_NONE for backwards compat)
-        tls_config = None
-        if ldap_config['use_ssl'] or ldap_config['use_starttls']:
-            verify_tls = ldap_config.get('verify_tls', False)
-            validate = ssl_module.CERT_REQUIRED if verify_tls else ssl_module.CERT_NONE
-            if validate == ssl_module.CERT_NONE:
-                logging.warning("[LDAP] TLS certificate verification disabled - MITM risk")
-            tls_config = Tls(validate=validate)
-        else:
-            # MK Sep 2026 - the warning above only fires INSIDE the TLS branch, so the one
-            # configuration that has no protection at all was the only one that said nothing.
-            # Both toggles default to off, which makes this the state an operator lands in by
-            # filling in a server and a bind DN and touching nothing else. Three binds follow
-            # on this connection and the middle one carries the END USER'S password, not just
-            # ours. Refusing outright would break installs that run LDAP on a trusted segment
-            # on purpose, so this says it loudly instead and leaves that call to a release.
-            logging.warning(
-                "[LDAP] neither ldap_use_ssl nor ldap_use_starttls is set for %s:%s - the "
-                "service-account bind DN and password, every user password checked against "
-                "this directory, and the group lookup all cross the network in plaintext. "
-                "Enable LDAPS or STARTTLS in Settings unless this link is physically trusted.",
+        # SECURITY: Require transport security for LDAP connections
+        if not ldap_config['use_ssl'] and not ldap_config['use_starttls']:
+            logging.error(
+                "[LDAP] LDAP authentication rejected for %s:%s - neither LDAPS nor STARTTLS "
+                "is enabled. Credential-bearing binds and directory searches require transport "
+                "security. Enable 'Use SSL (LDAPS)' or 'Use STARTTLS' in LDAP settings.",
                 server_url, port)
+            return {'error': 'LDAP transport security required - enable LDAPS or STARTTLS in settings'}
+        
+        # MK: Build server with TLS
+        # SECURITY: Enforce certificate verification by default
+        verify_tls = ldap_config.get('verify_tls', True)
+        validate = ssl_module.CERT_REQUIRED if verify_tls else ssl_module.CERT_NONE
+        if validate == ssl_module.CERT_NONE:
+            logging.warning("[LDAP] TLS certificate verification disabled - MITM risk. "
+                          "Enable 'Verify TLS Certificate' in LDAP settings for production use.")
+        tls_config = Tls(validate=validate)
         
         server = Server(server_url, port=port, use_ssl=ldap_config['use_ssl'], 
                        tls=tls_config, get_info=ALL, connect_timeout=10)
