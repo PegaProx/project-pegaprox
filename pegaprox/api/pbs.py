@@ -874,7 +874,7 @@ def require_pbs_wide(pbs_id, action='this action'):
     Returns an error response to `return`, or None when the caller may proceed. MK Sep 2026
     """
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.utils.rbac import get_user_clusters, _admin_is_capped_in_own_tenant
     from pegaprox.api.helpers import caller_is_scoped
 
     mgr = pbs_managers.get(pbs_id)
@@ -882,7 +882,9 @@ def require_pbs_wide(pbs_id, action='this action'):
         return jsonify({'error': 'PBS server not found'}), 404
 
     user = build_authz_user(request.session.get('user', ''), request.session)
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec: honor tenant overrides that downgrade an admin in their own tenant
+    if (user.get('effective_role', user.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(user)):
         return None
 
     linked = list(mgr.linked_clusters or [])

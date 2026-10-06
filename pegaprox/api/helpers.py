@@ -450,10 +450,12 @@ def caller_is_scoped(user, cluster_id):
     here so the rule can't drift between call sites again."""
     from pegaprox.models.permissions import ROLE_ADMIN
     from pegaprox.utils.rbac import (get_user_clusters, user_has_any_pool_access, get_vm_acls,
-                                     acls_unavailable, acl_grants_user)
+                                     acls_unavailable, acl_grants_user, _admin_is_capped_in_own_tenant)
     if not user:
         return True   # unknown identity → treat as confined (fail closed)
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # sec: honor tenant overrides that downgrade an admin in their own tenant
+    if (user.get('effective_role', user.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(user)):
         return False
     tenant_clusters = get_user_clusters(user, include_pools=False)
     if tenant_clusters is not None and cluster_id not in tenant_clusters:
@@ -521,7 +523,7 @@ def check_pbs_access(pbs_id):
     """
     from flask import request, jsonify
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import get_user_clusters
+    from pegaprox.utils.rbac import get_user_clusters, _admin_is_capped_in_own_tenant
     from pegaprox.globals import pbs_managers
     from pegaprox.models.permissions import ROLE_ADMIN
 
@@ -535,8 +537,9 @@ def check_pbs_access(pbs_id):
     # check_cluster_access). get_user_clusters() already honors effective_role.
     user = build_authz_user(request.session.get('user', ''), request.session)
 
-    # Admins have full access
-    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+    # Admins have full access — unless a tenant override downgrades them in their own tenant
+    if (user.get('effective_role', user.get('role')) == ROLE_ADMIN
+            and not _admin_is_capped_in_own_tenant(user)):
         return True, None
     
     # Get PBS linked clusters
