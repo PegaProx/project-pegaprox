@@ -1515,6 +1515,14 @@ def delete_tenant(tenant_id):
     if tenant_id not in tenants_db:
         return jsonify({'error': 'Tenant not found'}), 404
     
+    # NS Dec 2026 (pentest) — mirror update_tenant and get_tenant_quota: a tenant-scoped
+    # admin.tenants holder (e.g. group_manager) may only delete its OWN tenant, else one
+    # tenant could delete another empty tenant (cross-tenant authorization bypass).
+    if request.session.get('role') != ROLE_ADMIN:
+        _caller = get_db().get_user(request.session.get('user', '')) or {}
+        if tenant_id != _caller.get('tenant_id', DEFAULT_TENANT_ID):
+            return jsonify({'error': 'Access denied to this tenant'}), 403
+    
     # check if users still assigned to this tenant
     users = load_users()
     users_in_tenant = [u for u, d in users.items() if d.get('tenant_id') == tenant_id]
