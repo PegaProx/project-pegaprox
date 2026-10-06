@@ -367,6 +367,12 @@ class PegaProxDB:
                 denied_permissions TEXT DEFAULT '[]',
                 oidc_sub TEXT DEFAULT '',
                 last_oidc_sync TEXT DEFAULT '',
+                -- OIDC provenance tracking (same pattern as LDAP above): what OIDC itself
+                -- last granted, so a sync can revoke its own grants without touching manual
+                -- admin assignments. Without these, removing a user from an IdP group leaves
+                -- the old tenant/permissions in place indefinitely.
+                oidc_permissions TEXT DEFAULT '[]',
+                oidc_tenant TEXT DEFAULT '',
                 layout_chosen INTEGER DEFAULT 0,
                 -- the user's directory / IdP groups as of the last sign-in, read by
                 -- username in the pool-grant lookups (#940)
@@ -1216,6 +1222,16 @@ class PegaProxDB:
                     logging.info("Added last_oidc_sync column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add last_oidc_sync column: {e}")
+            
+            # OIDC provenance tracking (same pattern as ldap_permissions/ldap_tenant above)
+            for _col, _decl in (('oidc_permissions', "TEXT DEFAULT '[]'"),
+                                ('oidc_tenant', "TEXT DEFAULT ''")):
+                if _col not in columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE users ADD COLUMN {_col} {_decl}")
+                        logging.info(f"Added {_col} column to users table")
+                    except Exception as e:
+                        logging.error(f"Failed to add {_col} column: {e}")
 
             if 'layout_chosen' not in columns:
                 try:
@@ -3687,6 +3703,9 @@ class PegaProxDB:
                 'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
                 'oidc_sub': row_dict.get('oidc_sub', ''),
                 'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+                # OIDC provenance tracking (same pattern as ldap_permissions/ldap_tenant)
+                'oidc_permissions': json.loads(row_dict.get('oidc_permissions') or '[]'),
+                'oidc_tenant': row_dict.get('oidc_tenant', '') or '',
                 'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
                 'portal_only': bool(row_dict.get('portal_only', 0)),
                 'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
@@ -3755,6 +3774,9 @@ class PegaProxDB:
             'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
             'oidc_sub': row_dict.get('oidc_sub', ''),
             'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+            # OIDC provenance tracking (same pattern as ldap_permissions/ldap_tenant)
+            'oidc_permissions': json.loads(row_dict.get('oidc_permissions') or '[]'),
+            'oidc_tenant': row_dict.get('oidc_tenant', '') or '',
             'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
@@ -3775,6 +3797,7 @@ class PegaProxDB:
              auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
              ldap_permissions, ldap_tenant,
              tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
+             oidc_permissions, oidc_tenant,
              layout_chosen, portal_only, sidebar_show_vmid, user_folder,
              directory_groups)
             VALUES (?, ?, ?, ?, ?, ?,
@@ -3783,6 +3806,7 @@ class PegaProxDB:
                     ?, ?, ?, ?, ?, ?, ?,
                     ?, ?,
                     ?, ?, ?, ?,
+                    ?, ?,
                     ?, ?, ?, ?,
                     COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
         ''', (
@@ -3818,6 +3842,9 @@ class PegaProxDB:
             json.dumps(data.get('denied_permissions', [])),
             data.get('oidc_sub', ''),
             data.get('last_oidc_sync', ''),
+            # OIDC provenance tracking
+            json.dumps(list(data.get('oidc_permissions') or [])),
+            data.get('oidc_tenant', '') or '',
             1 if data.get('layout_chosen', False) else 0,
             1 if data.get('portal_only', False) else 0,
             1 if data.get('sidebar_show_vmid', False) else 0,

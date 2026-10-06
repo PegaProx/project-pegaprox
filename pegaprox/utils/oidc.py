@@ -911,16 +911,47 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
         # provider that sends no groups claim, we keep what is stored and say so at
         # WARNING level. Revoking on a network hiccup would turn a privilege bug into an
         # outage, and half a group list is worse to decide on than none.
-        #
-        # tenant_id is deliberately NOT cleared when unmapped: admins also set it by hand,
-        # and dropping someone out of their tenant is a different decision from taking a
-        # permission away. Assign when mapped, leave alone otherwise - as before.
         if role_mapping.get('_authoritative'):
             user['role'] = role_mapping.get('role', ROLE_VIEWER)
-            user['permissions'] = list(role_mapping.get('permissions') or [])
-            user['tenant_permissions'] = dict(role_mapping.get('tenant_permissions') or {})
-            if role_mapping.get('tenant'):
-                user['tenant_id'] = role_mapping['tenant']  # NS: Must be tenant_id
+            
+            # Authoritative rebuild of permissions: revoke what OIDC previously granted,
+            # then apply the current mapping. Same pattern as LDAP (utils/ldap.py lines
+            # 399-408). Admins can still set permissions by hand; those are preserved.
+            new_oidc_perms = list(role_mapping.get('permissions') or [])
+            prev_oidc_perms = set(user.get('oidc_permissions', []) or [])
+            base_perms = [p for p in (user.get('permissions', []) or []) if p not in prev_oidc_perms]
+            user['permissions'] = list(dict.fromkeys(base_perms + new_oidc_perms))  # ordered, deduped
+            user['oidc_permissions'] = new_oidc_perms
+            
+            # Authoritative rebuild of tenant_permissions: revoke OIDC-owned tenant entries
+            # that are no longer in the current mapping, then (re)apply the fresh ones.
+            # Manually-set tenants OIDC never touched are left intact.
+            new_oidc_tp = dict(role_mapping.get('tenant_permissions') or {})
+            prev_oidc_tp_keys = set(user.get('oidc_tenant_permissions', {}) or {})
+            tp = dict(user.get('tenant_permissions', {}) or {})
+            for _t in prev_oidc_tp_keys - set(new_oidc_tp):
+                tp.pop(_t, None)
+            tp.update(new_oidc_tp)
+            user['tenant_permissions'] = tp
+            user['oidc_tenant_permissions'] = new_oidc_tp
+            
+            # Tenant assignment with provenance tracking: track what OIDC itself assigned
+            # (oidc_tenant), exactly like ldap_tenant (utils/ldap.py lines 376-397), and
+            # only ever revoke our own. An admin can set tenant_id by hand, and that is
+            # not OIDC's to take away.
+            _new_tenant = role_mapping.get('tenant') or ''
+            _prev_tenant = user.get('oidc_tenant') or ''
+            if _new_tenant:
+                user['tenant_id'] = _new_tenant
+                user['oidc_tenant'] = _new_tenant
+            elif _prev_tenant and user.get('tenant_id') == _prev_tenant:
+                # OIDC put them there and OIDC no longer says so
+                from pegaprox.utils.rbac import DEFAULT_TENANT_ID as _DT
+                user['tenant_id'] = _DT
+                user['oidc_tenant'] = ''
+                logging.info(f"[OIDC] '{username}' is no longer mapped to tenant "
+                             f"'{_prev_tenant}' - moved back to the default tenant")
+            
             # the full set (#940), so a group the IdP dropped stops granting pool
             # access with this sign-in
             user['groups'] = list(role_mapping.get('groups') or [])
@@ -935,15 +966,27 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             # would demote an admin on a failed fetch - the same outage this branch exists
             # to prevent, one field over. Permissions and tenant only appear when a group
             # actually matched, so those are safe to add.
+            #
+            # Track what OIDC grants even in the non-authoritative path, so the next
+            # authoritative sync knows what to revoke. Union the new grants in without
+            # removing anything (same as the old grant-only behavior).
             if role_mapping.get('tenant'):
                 user['tenant_id'] = role_mapping['tenant']
+                user['oidc_tenant'] = role_mapping['tenant']
             if role_mapping.get('permissions'):
-                user['permissions'] = list(set((user.get('permissions') or [])
-                                               + role_mapping['permissions']))
+                new_perms = role_mapping['permissions']
+                user['permissions'] = list(set((user.get('permissions') or []) + new_perms))
+                # Track what OIDC granted: union with what we already tracked
+                prev_oidc = set(user.get('oidc_permissions', []) or [])
+                user['oidc_permissions'] = list(prev_oidc | set(new_perms))
             if role_mapping.get('tenant_permissions'):
                 if 'tenant_permissions' not in user:
                     user['tenant_permissions'] = {}
                 user['tenant_permissions'].update(role_mapping['tenant_permissions'])
+                # Track what OIDC granted: union with what we already tracked
+                prev_oidc_tp = dict(user.get('oidc_tenant_permissions', {}) or {})
+                prev_oidc_tp.update(role_mapping['tenant_permissions'])
+                user['oidc_tenant_permissions'] = prev_oidc_tp
             # groups the same way as the permissions: add what this login saw, drop nothing.
             # The stored ones by username - the users table a caller hands in leaves them out.
             _held = get_db().get_user_directory_groups(username)
@@ -960,7 +1003,13 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             'password_hash': '',  # No local password for OIDC users
             'password_salt': '',
             'permissions': role_mapping.get('permissions', []),
+            # Track what OIDC granted so the first re-sync can authoritatively revoke it
+            # if the group mapping later changes (same pattern as LDAP, utils/ldap.py
+            # lines 435-439).
+            'oidc_permissions': list(role_mapping.get('permissions', []) or []),
+            'oidc_tenant_permissions': dict(role_mapping.get('tenant_permissions', {}) or {}),
             'tenant_id': role_mapping.get('tenant', ''),  # NS: Must be tenant_id
+            'oidc_tenant': role_mapping.get('tenant', ''),
             'tenant_permissions': role_mapping.get('tenant_permissions', {}),
             'theme': '',
             'language': '',
