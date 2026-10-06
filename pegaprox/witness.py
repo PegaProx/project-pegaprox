@@ -870,11 +870,12 @@ class Witness:
                 'pegaprox-witness update --to-leader'}
 
     def _told(self, sender, data):
-        """A data voter runs other code ({release, wire, url, fingerprint, update, voters}):
+        """A data voter runs other code ({release, wire, url, fingerprint, update, voters, name}):
         kept, and with update: true, newer code and the updates on, fetched and put in
         place by upkeep. url and fingerprint are the sender's own address; voters the
         addresses of the other data voters, where an update is fetched when the sender
-        cannot be reached from here (update_targets)."""
+        cannot be reached from here (update_targets). name is the digest-derived bundle
+        identity that binds the leader's announcement to the exact artifact."""
         node = self._node()
         if sender not in node.view.data:
             return {'accepted': False, 'reason': 'NOT_VOTER'}
@@ -886,15 +887,15 @@ class Witness:
         paired = self.st.get('paired') or {}
         if not url and paired.get('instance_id') == sender:
             url, fp = paired.get('url') or '', paired.get('fingerprint') or ''
-        leader = {'instance_id': sender, 'release': release, 'wire': wire, 'url': url, 'fingerprint': fp}
+        name = data.get('name') if isinstance(data.get('name'), str) and \
+            witness_boot.NAME_RE.fullmatch(data.get('name')) else ''
+        leader = {'instance_id': sender, 'release': release, 'wire': wire, 'url': url, 'fingerprint': fp, 'name': name}
         if {k: v for k, v in (self.update_state.get('leader') or {}).items() if k != 'at'} != leader:
             self.note_update(leader=dict(leader, at=_now_text()))
         others = data.get('voters') if isinstance(data.get('voters'), list) else []
         known = self._known(node, [dict(leader)] + [v for v in others[:KNOWN_MAX] if isinstance(v, dict)])
         if known != (self.update_state.get('voters') or {}):
             self.note_update(voters=known)
-        name = data.get('name') if isinstance(data.get('name'), str) and \
-            witness_boot.NAME_RE.fullmatch(data.get('name')) else ''
         theirs, mine = witness_boot.release_key(release, wire), witness_boot.release_key(RELEASE, WIRE)
         # the same release: other code only where both name the bundle it came from (a fix
         # pushed under the same release string), and that is the leader's
@@ -947,7 +948,8 @@ class Witness:
         (the leader's own address may be one only the members reach, and a member pairing
         code sets it anew), then the other data voters it knows the address of. Any data
         voter serves the bundle, and it is checked against the voter config held here
-        (verify_bundle), whoever served it."""
+        (verify_bundle), whoever served it. The leader's announced bundle name is carried
+        to bind the fetch to the exact artifact the leader selected."""
         node = self._node()
         data = node.view.data if node is not None else frozenset()
         paired = self.st.get('paired') or {}
@@ -965,7 +967,7 @@ class Witness:
                 continue
             seen.add(url.rstrip('/'))
             out.append({'instance_id': iid, 'url': url, 'fingerprint': str(rec.get('fingerprint') or ''),
-                        'release': rec.get('release'), 'wire': rec.get('wire')})
+                        'release': rec.get('release'), 'wire': rec.get('wire'), 'name': rec.get('name') or ''})
         return out
 
     def update_target(self):
@@ -1041,8 +1043,10 @@ class Witness:
         """(bundle answer, manifest, archive) from the first place update_targets names
         that serves code to take: newer than the code that runs, or with `to_leader` the
         release of the leader `job` names, older or not. Raises UpToDate when every place
-        that answered serves no newer code, else the first error."""
+        that answered serves no newer code, else the first error. When the leader announced
+        a bundle name, validates that the fetched bundle matches that exact artifact."""
         want = witness_boot.release_key(job.get('release'), job.get('wire')) if to_leader else None
+        want_name = job.get('name') if isinstance(job.get('name'), str) and witness_boot.NAME_RE.fullmatch(job.get('name')) else ''
         errors = []
         for target in self.update_targets(job):
             try:
@@ -1051,6 +1055,9 @@ class Witness:
                 if want is not None and witness_boot.release_key(manifest['release'], manifest.get('wire')) != want:
                     raise WitnessError(f"{target['url']} serves release {manifest['release']}, the leader "
                                        f"runs {job.get('release')}")
+                if want_name and witness_boot.bundle_name(manifest['release'], manifest['sha256']) != want_name:
+                    raise WitnessError(f"{target['url']} serves bundle {witness_boot.bundle_name(manifest['release'], manifest['sha256'])}, "
+                                       f"the leader announced {want_name}")
                 return data, manifest, archive
             except (WitnessError, witness_boot.BootError) as e:
                 errors.append(e)
