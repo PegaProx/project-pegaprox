@@ -138,11 +138,17 @@ def apply_host_key_policy(client, paramiko):
 
     Use in place of ``client.set_missing_host_key_policy(paramiko.AutoAddPolicy())``.
     """
-    try:
-        if os.path.exists(_KNOWN_HOSTS):
+    if os.path.exists(_KNOWN_HOSTS):
+        try:
             client.load_host_keys(_KNOWN_HOSTS)
-    except Exception:
-        pass
+        except Exception as e:
+            # MK Sep 2026 - a trust store that exists but cannot be loaded (corrupted,
+            # truncated, unreadable) must abort the connection rather than silently
+            # downgrade to TOFU: a previously pinned key would not be checked, and a
+            # changed key (MitM) would be accepted as unknown. Fail closed.
+            raise paramiko.SSHException(
+                f"SSH host-key trust store exists but cannot be loaded ({e}); "
+                "refusing connection rather than bypassing pinned-key verification") from e
     client.set_missing_host_key_policy(_make_policy(paramiko))
     return client
 
@@ -299,11 +305,17 @@ def verify_transport_host_key(transport, hostname, paramiko, port=22):
         _port = 22
     lookup_name = hostname if _port == 22 else '[%s]:%d' % (hostname, _port)
     hostkeys = paramiko.hostkeys.HostKeys()
-    try:
-        if os.path.exists(_KNOWN_HOSTS):
+    if os.path.exists(_KNOWN_HOSTS):
+        try:
             hostkeys.load(_KNOWN_HOSTS)
-    except Exception:
-        pass
+        except Exception as e:
+            # MK Sep 2026 - a trust store that exists but cannot be loaded (corrupted,
+            # truncated, unreadable) must abort the connection rather than silently
+            # downgrade to TOFU: a previously pinned key would not be checked, and a
+            # changed key (MitM) would be accepted as unknown. Fail closed.
+            raise paramiko.SSHException(
+                f"SSH host-key trust store exists but cannot be loaded ({e}); "
+                "refusing connection rather than bypassing pinned-key verification") from e
     entry = hostkeys.lookup(lookup_name)
     if entry is not None:
         # host is already known — the offered key MUST match one of its pinned keys.

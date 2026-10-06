@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -11300,8 +11300,17 @@ async def ssh_handler(websocket):
     try:
         if os.path.exists(_ssh_kh):
             ssh.load_host_keys(_ssh_kh)
-    except Exception:
-        pass
+    except Exception as _load_err:
+        # MK Sep 2026 - a trust store that exists but cannot be loaded (corrupted,
+        # truncated, unreadable) must abort the connection rather than silently
+        # downgrade to TOFU: a previously pinned key would not be checked, and a
+        # changed key (MitM) would be accepted as unknown. Fail closed.
+        await websocket.send(json.dumps({
+            'status': 'error',
+            'message': f'SSH host-key trust store exists but cannot be loaded ({_load_err}); refusing connection rather than bypassing pinned-key verification'
+        }))
+        await websocket.close(1008, \"trust store unreadable\")
+        return
     class _TofuPolicy(paramiko.MissingHostKeyPolicy):
         def missing_host_key(self, _c, _h, _k):
             if known_only:
