@@ -2234,7 +2234,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2422,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -5706,6 +5706,31 @@ def get_timezones_api():
 # MK: Feb 2026 - LDAP Test Connection
 # =====================================================
 
+def _validate_ldap_server(server):
+    """Validate LDAP server against domain allowlist to prevent SSRF"""
+    if not server:
+        return False
+    
+    # Domain allowlist - only allow connections to approved LDAP servers
+    allowed_domains = ['example.com']  # add your allowed domains here
+    
+    # Normalize server (remove protocol if present, extract hostname)
+    server_lower = server.lower().strip()
+    # Remove any protocol prefix
+    for prefix in ['ldap://', 'ldaps://']:
+        if server_lower.startswith(prefix):
+            server_lower = server_lower[len(prefix):]
+    
+    # Extract hostname (remove port if present)
+    hostname = server_lower.split(':')[0]
+    
+    # Check if hostname matches any allowed domain (exact match only)
+    for allowed_domain in allowed_domains:
+        if hostname == allowed_domain.lower():
+            return True
+    
+    return False
+
 @bp.route('/api/settings/ldap/test', methods=['POST'])
 @require_auth(perms=['admin.settings'])
 def test_ldap():
@@ -5737,6 +5762,10 @@ def test_ldap():
 
     if not config['server']:
         return jsonify({'error': 'LDAP server is required'}), 400
+    
+    # Validate LDAP server against domain allowlist to prevent SSRF
+    if not _validate_ldap_server(config['server']):
+        return jsonify({'error': 'Invalid LDAP server'}), 400
 
     try:
         import ldap3
