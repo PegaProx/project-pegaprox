@@ -673,6 +673,79 @@ def check_tenant_vmid(tenant_id, vmid):
     return False, f'VMID {v} is outside this tenant\'s range ({start}-{end})'
 
 
+def vmid_owner_tenant(cluster_id, vmid):
+    """Return the tenant_id that owns this VMID on this cluster, or None if ambiguous.
+
+    NS Dec 2026 (sec-report) — when a cluster is assigned to multiple tenants, VMID ranges
+    are the boundary that separates one tenant's VMs from another's. A VMID can only be
+    accessed by the tenant whose range contains it. If no tenant has a range configured,
+    or if multiple tenants' ranges overlap (misconfiguration), return None to fail closed.
+    
+    This is the ownership resolver for access control; check_tenant_vmid is the creation-time
+    range validator."""
+    try:
+        tenants = load_tenants()
+        if store_unavailable(tenants):
+            logging.error(f"[vmid-owner] tenant store unavailable - cannot resolve owner of {cluster_id}/{vmid}")
+            return None
+        
+        # Find all tenants that have this cluster assigned
+        cluster_tenants = []
+        for tid, tdata in (tenants or {}).items():
+            tenant_clusters = tdata.get('clusters') or []
+            # empty clusters list for DEFAULT_TENANT_ID means all clusters
+            if tid == DEFAULT_TENANT_ID and not tenant_clusters:
+                cluster_tenants.append((tid, tdata))
+            elif cluster_id in tenant_clusters:
+                cluster_tenants.append((tid, tdata))
+        
+        if not cluster_tenants:
+            # No tenant owns this cluster - should not happen in normal operation
+            logging.warning(f"[vmid-owner] cluster {cluster_id} is not assigned to any tenant")
+            return None
+        
+        if len(cluster_tenants) == 1:
+            # Only one tenant owns this cluster - no ambiguity
+            return cluster_tenants[0][0]
+        
+        # Multiple tenants share this cluster - use VMID ranges to determine ownership
+        try:
+            v = int(vmid)
+        except (TypeError, ValueError):
+            # Non-numeric VMID - cannot determine ownership by range
+            logging.debug(f"[vmid-owner] non-numeric vmid {vmid} on shared cluster {cluster_id}")
+            return None
+        
+        matching_tenants = []
+        for tid, tdata in cluster_tenants:
+            start = int(tdata.get('vmid_range_start', 0) or 0)
+            end = int(tdata.get('vmid_range_end', 0) or 0)
+            
+            # No range configured for this tenant
+            if start <= 0 or end <= 0 or end < start:
+                # On a shared cluster, every tenant MUST have a range configured
+                logging.warning(f"[vmid-owner] tenant {tid} shares cluster {cluster_id} but has no valid VMID range")
+                continue
+            
+            if start <= v <= end:
+                matching_tenants.append(tid)
+        
+        if len(matching_tenants) == 1:
+            return matching_tenants[0]
+        elif len(matching_tenants) > 1:
+            # Overlapping ranges - misconfiguration
+            logging.error(f"[vmid-owner] VMID {vmid} on {cluster_id} matches multiple tenant ranges: {matching_tenants}")
+            return None
+        else:
+            # VMID doesn't fall in any tenant's range on this shared cluster
+            logging.debug(f"[vmid-owner] VMID {vmid} on shared cluster {cluster_id} is outside all tenant ranges")
+            return None
+            
+    except Exception as e:
+        logging.error(f"[vmid-owner] failed to resolve owner of {cluster_id}/{vmid}: {e}")
+        return None
+
+
 # =============================================================================
 # VM-LEVEL ACCESS CONTROL
 # Fine-grained permissions for individual VMs/CTs
@@ -1226,6 +1299,38 @@ def _user_can_access_vm_uncapped(user: dict, cluster_id: str, vmid: int, permiss
     if tenant_clusters is not None and cluster_id not in tenant_clusters:
         logging.debug(f"[VM-ACL] {username} reached {cluster_id} only via ACL/pool; no grant for VM {vmid} → deny {permission}")
         return False
+    # NS Dec 2026 (sec-report) — when a cluster is assigned to multiple tenants, the cluster
+    # membership check above is not sufficient: it only confirms the caller's tenant owns the
+    # cluster, not that the VMID belongs to their tenant. VMID ranges separate tenants on a
+    # shared cluster, and a tenant-B user with ordinary VM permissions must not enumerate or
+    # operate on tenant-A VMs. vmid_owner_tenant resolves ownership; if it returns a tenant
+    # other than the caller's, deny. If it returns None (ambiguous/error), fail closed.
+    caller_tenant = user.get('tenant_id', DEFAULT_TENANT_ID)
+    vmid_tenant = vmid_owner_tenant(cluster_id, vmid)
+    if vmid_tenant is not None and vmid_tenant != caller_tenant:
+        logging.debug(f"[VM-ACL] {username} (tenant {caller_tenant}) denied access to VM {vmid} on shared cluster {cluster_id}: owned by tenant {vmid_tenant}")
+        return False
+    if vmid_tenant is None:
+        # Could not determine ownership - this happens when:
+        # 1. Multiple tenants share the cluster but ranges overlap (misconfiguration)
+        # 2. VMID is outside all configured ranges on a shared cluster
+        # 3. Tenant store is unavailable
+        # Fail closed: deny access rather than guess
+        tenants = load_tenants()
+        if not store_unavailable(tenants):
+            # Store is available, so this is a range issue, not a system failure
+            # Check if this is actually a shared cluster scenario
+            cluster_tenant_count = sum(1 for t in (tenants or {}).values()
+                                      if cluster_id in (t.get('clusters') or [])
+                                      or (t.get('id') == DEFAULT_TENANT_ID and not t.get('clusters')))
+            if cluster_tenant_count > 1:
+                logging.warning(f"[VM-ACL] {username} denied access to VM {vmid} on shared cluster {cluster_id}: ownership ambiguous (check VMID ranges)")
+                return False
+            # Single-tenant cluster with no range configured - allow the general permission check below
+        else:
+            # Store unavailable - fail closed
+            logging.error(f"[VM-ACL] {username} denied access to VM {vmid}: cannot resolve tenant ownership")
+            return False
     # MK Aug 2026 (sec-report, symplasson): a user EXPLICITLY scoped to specific VMs via VM-ACL
     # in this cluster (the Client Portal setup — an admin granted them "their" VMs) must not
     # fall through to the role-wide grant for a VM they were never granted, just because their
