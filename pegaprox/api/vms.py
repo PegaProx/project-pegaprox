@@ -4912,6 +4912,12 @@ def get_node_shell_ticket(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     
+    # sec: node shell is a whole-cluster operation (root access to hypervisor) — reject
+    # VM-ACL/pool-scoped callers that check_cluster_access deliberately admits
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
@@ -6114,7 +6120,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403

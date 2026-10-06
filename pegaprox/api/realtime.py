@@ -32,7 +32,7 @@ from pegaprox.utils.realtime import (
     push_immediate_update,
 )
 from pegaprox.utils.email import send_email
-from pegaprox.api.helpers import load_server_settings, get_connected_manager
+from pegaprox.api.helpers import load_server_settings, get_connected_manager, require_unconfined
 from pegaprox.models.permissions import ROLE_ADMIN
 
 bp = Blueprint('realtime', __name__)
@@ -398,6 +398,13 @@ def validate_ws_token_api():
                 if not has_permission(user, 'node.shell'):
                     logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' lacks node.shell for a node shell on '{_sl(requested_cluster)}'")
                     return jsonify({'error': 'node.shell permission required'}), 403
+                # sec: node shell is a whole-cluster operation (root access to hypervisor) — reject
+                # VM-ACL/pool-scoped callers that the fallbacks above deliberately admit. The
+                # permission alone is not enough; require_unconfined enforces whole-cluster authority.
+                from pegaprox.api.helpers import caller_is_scoped
+                if caller_is_scoped(user, requested_cluster):
+                    logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is confined (VM-ACL/pool) — node shell denied on '{_sl(requested_cluster)}'")
+                    return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
 
             # MK May 2026 - lightweight cluster context for the SSH/VNC proxy.
             # We intentionally do NOT call mgr._get_node_ip() here: that has a
