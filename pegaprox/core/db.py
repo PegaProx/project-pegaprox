@@ -37,6 +37,19 @@ from pegaprox.constants import (
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
 
+
+# MK Dec 2026 (pentest) - optimistic locking exception for concurrent user modifications
+class UserVersionConflict(Exception):
+    """Raised when a user write fails due to concurrent modification.
+    
+    The caller read a user snapshot, performed work, and attempted to save it,
+    but another write happened in between. The caller's snapshot is stale and
+    must not overwrite the newer security state (enabled, role, permissions,
+    MFA, password, or account existence).
+    """
+    pass
+
+
 # Encryption imports
 ENCRYPTION_AVAILABLE = False
 LEGACY_ENCRYPTION = False
@@ -370,7 +383,10 @@ class PegaProxDB:
                 layout_chosen INTEGER DEFAULT 0,
                 -- the user's directory / IdP groups as of the last sign-in, read by
                 -- username in the pool-grant lookups (#940)
-                directory_groups TEXT DEFAULT '[]'
+                directory_groups TEXT DEFAULT '[]',
+                -- MK Dec 2026 (pentest) - optimistic locking timestamp to prevent
+                -- stale writes from overwriting concurrent security changes
+                row_version TEXT DEFAULT '1970-01-01T00:00:00'
             )
         ''')
         
@@ -1232,6 +1248,18 @@ class PegaProxDB:
                     logging.info("Added directory_groups column to users table")
                 except Exception as e:
                     logging.error(f"Failed to add directory_groups column: {e}")
+            
+            # MK Dec 2026 (pentest) - optimistic locking to prevent stale writes from
+            # overwriting concurrent security changes (disable, role change, deletion).
+            # Timestamp-based: each write updates it, each write checks it matches what
+            # the caller read. Default to epoch so existing rows get a deterministic
+            # baseline; the first write after upgrade sets a real timestamp.
+            if 'row_version' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN row_version TEXT DEFAULT '1970-01-01T00:00:00'")
+                    logging.info("Added row_version column to users table for optimistic locking")
+                except Exception as e:
+                    logging.error(f"Failed to add row_version column: {e}")
 
         except Exception as e:
             logging.error(f"Error checking users schema: {e}")
@@ -3759,76 +3787,154 @@ class PegaProxDB:
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
             'user_folder': row_dict.get('user_folder', ''),
+            'row_version': row_dict.get('row_version', '1970-01-01T00:00:00'),
         }
 
     def save_user(self, username: str, data: dict):
-        """Save or update user"""
+        """Save or update user with optimistic locking.
+        
+        MK Dec 2026 (pentest) - checks row_version to prevent stale writes from
+        overwriting concurrent security changes (account disable, role demotion,
+        permission revocation, MFA reset, or deletion). Callers that read a user,
+        perform work, and write back later must handle UserVersionConflict by
+        reloading and deciding whether to retry.
+        
+        Raises UserVersionConflict when the stored row_version does not match
+        data['row_version'], indicating another write happened in between.
+        """
         cursor = self.conn.cursor()
         now = datetime.now().isoformat()
         
-        cursor.execute('''
-            INSERT OR REPLACE INTO users
-            (username, password_salt, password_hash, role, permissions, tenant,
-             created_at, last_login, password_expiry,
-             totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
-            enabled, theme, language, ui_layout, taskbar_auto_expand,
-             auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
-             ldap_permissions, ldap_tenant,
-             tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
-             layout_chosen, portal_only, sidebar_show_vmid, user_folder,
-             directory_groups)
-            VALUES (?, ?, ?, ?, ?, ?,
-                    COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
-        ''', (
-            username,
-            data.get('password_salt', ''),
-            data.get('password_hash', ''),
-            data.get('role', 'viewer'),
-            json.dumps(data.get('permissions', [])),
-            data.get('tenant_id') or data.get('tenant'),  # NS: Accept both key names
-            username, now,
-            data.get('last_login'),
-            data.get('password_expiry'),
-            self._encrypt(data.get('totp_secret', '')),
-            self._encrypt(data.get('totp_pending_secret', '')),  # MK: Save pending 2FA secret
-            1 if data.get('totp_enabled', False) else 0,
-            1 if data.get('force_password_change', False) else 0,
-            1 if data.get('enabled', True) else 0,
-            data.get('theme', ''),
-            data.get('language', ''),
-            data.get('ui_layout', 'modern'),
-            1 if data.get('taskbar_auto_expand', True) else 0,  # NS: Feb 2026
-            data.get('auth_source', 'local'),  # LW: Feb 2026 - LDAP
-            data.get('display_name', ''),
-            data.get('email', ''),
-            data.get('avatar_mime', ''),
-            data.get('avatar_data', ''),
-            data.get('ldap_dn', ''),
-            data.get('last_ldap_sync', ''),
-            json.dumps(list(data.get('ldap_permissions') or [])),
-            data.get('ldap_tenant', '') or '',
-            # NS: Feb 2026 - OIDC and tenant permission fields
-            json.dumps(data.get('tenant_permissions', {})),
-            json.dumps(data.get('denied_permissions', [])),
-            data.get('oidc_sub', ''),
-            data.get('last_oidc_sync', ''),
-            1 if data.get('layout_chosen', False) else 0,
-            1 if data.get('portal_only', False) else 0,
-            1 if data.get('sidebar_show_vmid', False) else 0,
-            data.get('user_folder', ''),
-            # #940 - user dicts from get_all_users carry no groups, and a sign-in writes the
-            # whole table back: without a 'groups' key the stored ones stay as they are
-            (json.dumps(_directory_groups(data.get('auth_source', 'local'), data.get('groups')))
-             if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
-             else None),
-            username,
-        ))
+        # Check if user exists and get current version
+        cursor.execute('SELECT row_version FROM users WHERE username = ?', (username,))
+        existing = cursor.fetchone()
+        
+        if existing:
+            # Update path: verify version matches what caller read
+            stored_version = existing['row_version'] if existing['row_version'] else '1970-01-01T00:00:00'
+            caller_version = data.get('row_version', '1970-01-01T00:00:00')
+            
+            if stored_version != caller_version:
+                # Another write happened between the caller's read and this write.
+                # The caller's snapshot is stale and must not overwrite the newer state.
+                raise UserVersionConflict(
+                    f"User '{username}' was modified concurrently (stored version "
+                    f"{stored_version}, caller has {caller_version}). Reload and retry."
+                )
+            
+            # Version matches: proceed with UPDATE, setting new version
+            cursor.execute('''
+                UPDATE users SET
+                    password_salt = ?, password_hash = ?, role = ?, permissions = ?, tenant = ?,
+                    last_login = ?, password_expiry = ?,
+                    totp_secret_encrypted = ?, totp_pending_secret_encrypted = ?,
+                    totp_enabled = ?, force_password_change = ?, enabled = ?,
+                    theme = ?, language = ?, ui_layout = ?, taskbar_auto_expand = ?,
+                    auth_source = ?, display_name = ?, email = ?,
+                    avatar_mime = ?, avatar_data = ?,
+                    ldap_dn = ?, last_ldap_sync = ?, ldap_permissions = ?, ldap_tenant = ?,
+                    tenant_permissions = ?, denied_permissions = ?,
+                    oidc_sub = ?, last_oidc_sync = ?,
+                    layout_chosen = ?, portal_only = ?, sidebar_show_vmid = ?,
+                    user_folder = ?,
+                    directory_groups = COALESCE(?, directory_groups),
+                    row_version = ?
+                WHERE username = ?
+            ''', (
+                data.get('password_salt', ''),
+                data.get('password_hash', ''),
+                data.get('role', 'viewer'),
+                json.dumps(data.get('permissions', [])),
+                data.get('tenant_id') or data.get('tenant'),
+                data.get('last_login'),
+                data.get('password_expiry'),
+                self._encrypt(data.get('totp_secret', '')),
+                self._encrypt(data.get('totp_pending_secret', '')),
+                1 if data.get('totp_enabled', False) else 0,
+                1 if data.get('force_password_change', False) else 0,
+                1 if data.get('enabled', True) else 0,
+                data.get('theme', ''),
+                data.get('language', ''),
+                data.get('ui_layout', 'modern'),
+                1 if data.get('taskbar_auto_expand', True) else 0,
+                data.get('auth_source', 'local'),
+                data.get('display_name', ''),
+                data.get('email', ''),
+                data.get('avatar_mime', ''),
+                data.get('avatar_data', ''),
+                data.get('ldap_dn', ''),
+                data.get('last_ldap_sync', ''),
+                json.dumps(list(data.get('ldap_permissions') or [])),
+                data.get('ldap_tenant', '') or '',
+                json.dumps(data.get('tenant_permissions', {})),
+                json.dumps(data.get('denied_permissions', [])),
+                data.get('oidc_sub', ''),
+                data.get('last_oidc_sync', ''),
+                1 if data.get('layout_chosen', False) else 0,
+                1 if data.get('portal_only', False) else 0,
+                1 if data.get('sidebar_show_vmid', False) else 0,
+                data.get('user_folder', ''),
+                # #940 - preserve stored groups when caller has none
+                (json.dumps(_directory_groups(data.get('auth_source', 'local'), data.get('groups')))
+                 if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
+                 else None),
+                now,  # new row_version
+                username,
+            ))
+        else:
+            # Insert path: new user, no version check needed
+            cursor.execute('''
+                INSERT INTO users
+                (username, password_salt, password_hash, role, permissions, tenant,
+                 created_at, last_login, password_expiry,
+                 totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
+                 enabled, theme, language, ui_layout, taskbar_auto_expand,
+                 auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
+                 ldap_permissions, ldap_tenant,
+                 tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
+                 layout_chosen, portal_only, sidebar_show_vmid, user_folder,
+                 directory_groups, row_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                username,
+                data.get('password_salt', ''),
+                data.get('password_hash', ''),
+                data.get('role', 'viewer'),
+                json.dumps(data.get('permissions', [])),
+                data.get('tenant_id') or data.get('tenant'),
+                now,  # created_at
+                data.get('last_login'),
+                data.get('password_expiry'),
+                self._encrypt(data.get('totp_secret', '')),
+                self._encrypt(data.get('totp_pending_secret', '')),
+                1 if data.get('totp_enabled', False) else 0,
+                1 if data.get('force_password_change', False) else 0,
+                1 if data.get('enabled', True) else 0,
+                data.get('theme', ''),
+                data.get('language', ''),
+                data.get('ui_layout', 'modern'),
+                1 if data.get('taskbar_auto_expand', True) else 0,
+                data.get('auth_source', 'local'),
+                data.get('display_name', ''),
+                data.get('email', ''),
+                data.get('avatar_mime', ''),
+                data.get('avatar_data', ''),
+                data.get('ldap_dn', ''),
+                data.get('last_ldap_sync', ''),
+                json.dumps(list(data.get('ldap_permissions') or [])),
+                data.get('ldap_tenant', '') or '',
+                json.dumps(data.get('tenant_permissions', {})),
+                json.dumps(data.get('denied_permissions', [])),
+                data.get('oidc_sub', ''),
+                data.get('last_oidc_sync', ''),
+                1 if data.get('layout_chosen', False) else 0,
+                1 if data.get('portal_only', False) else 0,
+                1 if data.get('sidebar_show_vmid', False) else 0,
+                data.get('user_folder', ''),
+                json.dumps(_directory_groups(data.get('auth_source', 'local'), data.get('groups', []))),
+                now,  # row_version
+            ))
+        
         self.conn.commit()
     
     def save_all_users(self, users: dict):

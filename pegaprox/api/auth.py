@@ -13,7 +13,7 @@ from flask import Blueprint, jsonify, request, make_response
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
-from pegaprox.core.db import get_db
+from pegaprox.core.db import get_db, UserVersionConflict
 
 from pegaprox.utils.auth import (
     hash_password, verify_password, needs_password_rehash,
@@ -273,14 +273,22 @@ def oidc_callback():
     
     username = user.get('username', '')
     
-    # Check if user is enabled
+    # MK Dec 2026 (pentest) - reload the user to get the current enabled state and
+    # row_version. The oidc_provision_user() call above wrote the row, but between
+    # that write and the session creation below an administrator may have disabled,
+    # demoted, or deleted the account. Check the fresh state, not the stale snapshot.
+    # This also ensures the last_login write below has the correct row_version.
     users = load_users()
-    if username in users and not users[username].get('enabled', True):
+    fresh_user = users.get(username)
+    if not fresh_user:
+        # Account was deleted between provision and here
+        return jsonify({'error': 'Account was deleted'}), 403
+    if not fresh_user.get('enabled', True):
         return jsonify({'error': 'Account is disabled'}), 403
     
     # Step 6: Create session via create_session() for proper session rotation + limits
     # MK: create_session() handles max 3 sessions per user, session rotation, save_sessions()
-    session_token = create_session(username, user.get('role', ROLE_VIEWER))
+    session_token = create_session(username, fresh_user.get('role', ROLE_VIEWER))
 
     # KG Aug 2026 — stamp last_login here, mirroring auth_login(). Only the password/LDAP
     # handler ever wrote this field, so every OIDC/Entra account showed "Never" in User
@@ -288,14 +296,34 @@ def oidc_callback():
     # Placed after create_session and after the disabled-account gate above, so a rejected
     # attempt is not recorded as a login.
     # #625: not on a standby, where no login writes the synced row
+    # MK Dec 2026 (pentest) - retry on version conflict: another request may have updated
+    # the row (e.g. a concurrent login, a preference change, an admin action). The enabled
+    # check above is authoritative; this write is only the last_login timestamp.
     if not on_standby:
-        user['last_login'] = datetime.now().isoformat()
-        save_single_user(username, user)
+        for _attempt in range(3):
+            try:
+                fresh_user['last_login'] = datetime.now().isoformat()
+                save_single_user(username, fresh_user)
+                break
+            except UserVersionConflict:
+                if _attempt < 2:
+                    # Reload and retry
+                    users = load_users()
+                    fresh_user = users.get(username)
+                    if not fresh_user or not fresh_user.get('enabled', True):
+                        # State changed during retry: abort
+                        invalidate_session(session_token)
+                        return jsonify({'error': 'Account state changed during login'}), 403
+                else:
+                    # Final attempt failed: log but proceed. The session is valid and the
+                    # enabled check passed; failing to stamp last_login is not a security
+                    # issue, merely a missing audit trail entry.
+                    logging.warning(f"[OIDC] Could not update last_login for '{username}' "
+                                    f"after 3 attempts (concurrent writes) - proceeding anyway")
 
     log_audit(username, 'auth.oidc.login', f"OIDC login via {provider} from {client_ip}")
     
     # NS: Apr 2026 - include portal_only so client portal can validate OIDC users
-    fresh_user = users.get(username, user)
     resp_data = {
         'success': True,
         'user': username,
@@ -1034,25 +1062,65 @@ def auth_login():
     # #625: not on a standby. Its users table is the active's copy; a rehash here comes
     # back as a changed hash with the next sync, and that ends the user's sessions.
     # The active migrates the hash at the user's next login there.
+    # MK Dec 2026 (pentest) - retry on version conflict
     if (not ldap_authenticated and not ha.is_standby()
             and needs_password_rehash(user.get('password_salt', ''), user.get('password_hash', ''))):
-        try:
-            new_salt, new_hash = hash_password(password)
-            user['password_salt'] = new_salt
-            user['password_hash'] = new_hash
-            save_single_user(username, user)
-            logging.info(f"Migrated password for user '{username}' to Argon2id (Military Grade)")
-        except Exception as e:
-            logging.warning(f"Failed to migrate password for {username}: {e}")
+        for _attempt in range(3):
+            try:
+                # Reload to get current row_version
+                users_db = load_users()
+                user = users_db.get(username)
+                if not user or not user.get('enabled', True):
+                    # State changed during retry: abort
+                    return jsonify({'error': 'Account state changed during login'}), 403
+                new_salt, new_hash = hash_password(password)
+                user['password_salt'] = new_salt
+                user['password_hash'] = new_hash
+                save_single_user(username, user)
+                logging.info(f"Migrated password for user '{username}' to Argon2id (Military Grade)")
+                break
+            except UserVersionConflict:
+                if _attempt < 2:
+                    # Retry
+                    continue
+                else:
+                    # Final attempt failed: log and proceed without migration
+                    logging.warning(f"Failed to migrate password for {username} after 3 attempts: concurrent writes")
+            except Exception as e:
+                logging.warning(f"Failed to migrate password for {username}: {e}")
+                break
     
     # Create session
     remember = data.get('remember', False)
     session_id = create_session(username, user['role'], remember=bool(remember))
     
     # Update last login - not on a standby, where no login writes the synced row
+    # MK Dec 2026 (pentest) - retry on version conflict: another request may have updated
+    # the row (e.g. a concurrent login, a preference change, an admin action). The enabled
+    # check above is authoritative; this write is only the last_login timestamp.
     if not ldap_row_untouched and not ha.is_standby():
-        user['last_login'] = datetime.now().isoformat()
-        save_single_user(username, user)
+        for _attempt in range(3):
+            try:
+                # Reload to get current row_version
+                users_db = load_users()
+                user = users_db.get(username)
+                if not user or not user.get('enabled', True):
+                    # State changed during retry: revoke session and abort
+                    invalidate_session(session_id)
+                    return jsonify({'error': 'Account state changed during login'}), 403
+                user['last_login'] = datetime.now().isoformat()
+                save_single_user(username, user)
+                break
+            except UserVersionConflict:
+                if _attempt < 2:
+                    # Retry
+                    continue
+                else:
+                    # Final attempt failed: log but proceed. The session is valid and the
+                    # enabled check passed; failing to stamp last_login is not a security
+                    # issue, merely a missing audit trail entry.
+                    logging.warning(f"[LOGIN] Could not update last_login for '{username}' "
+                                    f"after 3 attempts (concurrent writes) - proceeding anyway")
     
     logging.info(f"User '{username}' logged in successfully")
     log_audit(username, 'user.login', f"User logged in" + (" (with 2FA)" if user.get('totp_enabled') else ""))

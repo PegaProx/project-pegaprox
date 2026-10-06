@@ -975,21 +975,35 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
 
 def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 'oidc') -> dict:
     from pegaprox.utils.auth import load_users, save_users
+    from pegaprox.core.db import UserVersionConflict
     """Create or update local user from OIDC authentication
     
     NS: JIT provisioning - same pattern as LDAP but for OIDC providers
     MK: username derived from email or preferred_username
+    MK Dec 2026 (pentest): retry on version conflict to handle concurrent modifications
     """
-    users = load_users()
-    built = oidc_build_user_row(user_info, role_mapping, auth_source, users)
-    if built is None:
-        return None  # Caller should handle None return
-    username, user = built
-    if username in users:
-        logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
-    else:
-        logging.info(f"[OIDC] Provisioned new user '{username}' (role={role_mapping.get('role', ROLE_VIEWER)}, source={auth_source})")
-    users[username] = user
-    
-    save_users(users)
-    return {**users[username], 'username': username}
+    # Retry up to 3 times on version conflict
+    for _attempt in range(3):
+        try:
+            users = load_users()
+            built = oidc_build_user_row(user_info, role_mapping, auth_source, users)
+            if built is None:
+                return None  # Caller should handle None return
+            username, user = built
+            if username in users:
+                logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
+            else:
+                logging.info(f"[OIDC] Provisioned new user '{username}' (role={role_mapping.get('role', ROLE_VIEWER)}, source={auth_source})")
+            users[username] = user
+            
+            save_users(users)
+            return {**users[username], 'username': username}
+        except UserVersionConflict:
+            if _attempt < 2:
+                # Retry: reload and try again
+                logging.debug(f"[OIDC] Version conflict provisioning user, retrying (attempt {_attempt + 1})")
+                continue
+            else:
+                # Final attempt failed: log and raise
+                logging.error(f"[OIDC] Failed to provision user after 3 attempts due to concurrent modifications")
+                raise

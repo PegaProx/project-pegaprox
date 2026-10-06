@@ -462,25 +462,40 @@ def _directory_groups_of(ldap_result):
 
 def ldap_provision_user(ldap_result: dict) -> dict:
     from pegaprox.utils.auth import load_users, save_users
+    from pegaprox.core.db import UserVersionConflict
     """Create or update a local user from LDAP authentication result
     
     LW: JIT (Just-In-Time) provisioning - user account is created on first login
     MK: LDAP users have auth_source='ldap' and no local password
     NS: Feb 2026 - Also syncs tenant, permissions, and tenant_permissions from group mappings
+    MK Dec 2026 (pentest): retry on version conflict to handle concurrent modifications
     """
     username = ldap_result['username'].lower()
-    users = load_users()
-    existing = users.get(username)
-    user = ldap_build_user_row(ldap_result, existing)
-    if user is None:
-        return None  # Caller should handle None return
-    users[username] = user
-    if existing is not None:
-        logging.info(f"[LDAP] Updated existing user '{username}' from LDAP (role={user['role']}, tenant={user.get('tenant')})")
-    else:
-        logging.info(f"[LDAP] Provisioned new user '{username}' from LDAP (role={ldap_result.get('role', ROLE_VIEWER)}, tenant={ldap_result.get('tenant')})")
     
-    save_users(users)
-    return users[username]
+    # Retry up to 3 times on version conflict
+    for _attempt in range(3):
+        try:
+            users = load_users()
+            existing = users.get(username)
+            user = ldap_build_user_row(ldap_result, existing)
+            if user is None:
+                return None  # Caller should handle None return
+            users[username] = user
+            if existing is not None:
+                logging.info(f"[LDAP] Updated existing user '{username}' from LDAP (role={user['role']}, tenant={user.get('tenant')})")
+            else:
+                logging.info(f"[LDAP] Provisioned new user '{username}' from LDAP (role={ldap_result.get('role', ROLE_VIEWER)}, tenant={ldap_result.get('tenant')})")
+            
+            save_users(users)
+            return users[username]
+        except UserVersionConflict:
+            if _attempt < 2:
+                # Retry: reload and try again
+                logging.debug(f"[LDAP] Version conflict provisioning '{username}', retrying (attempt {_attempt + 1})")
+                continue
+            else:
+                # Final attempt failed: log and raise
+                logging.error(f"[LDAP] Failed to provision '{username}' after 3 attempts due to concurrent modifications")
+                raise
 
 
