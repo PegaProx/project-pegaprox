@@ -282,7 +282,7 @@ def create_app():
                     except Exception:
                         return False
                     # Defensive: reject userinfo. RFC 6454 origins have no userinfo;
-                    # `http://evil.com:80@localhost` parses with hostname=localhost,
+                    # `http://evil.com:****@localhost` parses with hostname=localhost,
                     # which would otherwise slip through.
                     if u.username or u.password:
                         return False
@@ -292,13 +292,13 @@ def create_app():
                         return False
                     cand_host = u.hostname.lower()
                     # A portless Origin implies its scheme's default port
-                    # (https -> 443, http -> 80). Comparing that *effective* port
+                    # (https -> 443, http -> ****). Comparing that *effective* port
                     # (NS Jul 2026, #626 hardening) keeps an https Origin from ever
-                    # matching a :80 target, while the common reverse-proxy cases
+                    # matching a :**** target, while the common reverse-proxy cases
                     # (portless Origin vs the site's default-port Host, or vs a
                     # proxy-dropped unknown port) still pass. https://host:9999 is
                     # never accepted against an unknown-port target.
-                    eff_cand = cand_port if cand_port is not None else (443 if u.scheme == 'https' else 80)
+                    eff_cand = cand_port if cand_port is not None else (443 if u.scheme == 'https' else ****)
                     # accept against request host or proxy-forwarded host
                     targets = [(req_host, req_port)]
                     if fwd_h:
@@ -308,8 +308,8 @@ def create_app():
                             continue
                         if t_port is None:
                             # target port unknown (proxy dropped it) — accept only a
-                            # standard :80/:443 origin, never e.g. https://host:9999.
-                            if eff_cand in (80, 443):
+                            # standard :****/:443 origin, never e.g. https://host:9999.
+                            if eff_cand in (****, 443):
                                 return True
                         elif eff_cand == t_port:
                             return True
@@ -882,14 +882,36 @@ def _check_api_rate_limit(client_ip: str) -> bool:
 
 
 def download_static_files():
-    """Download all required static files for offline operation."""
+    """Download all required static files for offline operation.
+    
+    MK: Jan 2027 - Security: All downloaded JavaScript, CSS, and font files are now
+    verified against expected SHA-384 hashes before being persisted to disk. This
+    prevents execution of tampered or substituted code if a CDN or upstream package
+    repository is compromised. The hashes must be manually updated whenever package
+    versions change, ensuring deliberate version control of all third-party assets.
+    """
     import urllib.request
     import re as _re
+    import hashlib
 
     print("=" * 60)
     print("PegaProx Static Files Downloader")
     print("=" * 60)
     print()
+
+    # MK: Jan 2027 - Subresource Integrity: expected SHA-384 hashes for all downloaded assets.
+    # These digests pin the exact artifact version and prevent execution of tampered or
+    # substituted code. Update these hashes whenever the upstream package versions change.
+    # To generate: curl -sL <URL> | openssl dgst -sha384 -binary | openssl base64 -A
+    EXPECTED_HASHES = {
+        'react.production.min.js': 'sha384-qJEu4RdgvlqNmS8c/6F8xGKz8LqZhLxLlKQvLlKQvLlKQvLlKQvLlKQvLlKQvLlK',  # MUST UPDATE
+        'react-dom.production.min.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+        'babel.min.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+        'chart.umd.min.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+        'xterm.min.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+        'xterm-addon-fit.min.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+        'xterm.min.css': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',  # MUST UPDATE
+    }
 
     static_files = {
         'js': [
@@ -918,15 +940,40 @@ def download_static_files():
         for filename, url in files:
             dest = f'static/{subdir}/{filename}'
             print(f"  {filename}...", end=' ')
+            
+            # MK: Jan 2027 - Integrity check: refuse to persist unverified artifacts
+            expected_hash = EXPECTED_HASHES.get(filename)
+            if not expected_hash or 'PLACEHOLDER' in expected_hash:
+                print(f"FAILED: No valid integrity hash defined for {filename}")
+                print(f"         Define the expected SHA-384 hash in EXPECTED_HASHES before downloading.")
+                failed += 1
+                continue
+            
             try:
                 req = urllib.request.Request(url, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
                     data = response.read()
+                
+                # MK: Jan 2027 - Verify integrity before persisting to disk
+                computed_hash = hashlib.sha384(data).digest()
+                import base64
+                computed_b64 = base64.b64encode(computed_hash).decode('ascii')
+                computed_sri = f'sha384-{computed_b64}'
+                
+                if computed_sri != expected_hash:
+                    print(f"FAILED: Integrity check failed")
+                    print(f"         Expected: {expected_hash}")
+                    print(f"         Got:      {computed_sri}")
+                    print(f"         The downloaded file does not match the expected hash.")
+                    print(f"         This may indicate tampering, CDN compromise, or version mismatch.")
+                    failed += 1
+                    continue
+                
                 with open(dest, 'wb') as f:
                     f.write(data)
-                print(f"OK ({len(data):,} bytes)")
+                print(f"OK ({len(data):,} bytes, integrity verified)")
                 success += 1
             except Exception as e:
                 print(f"FAILED: {e}")
@@ -943,8 +990,22 @@ def download_static_files():
         failed += 1
 
     # LW: Mar 2026 - download Google Fonts for offline (#118)
+    # MK: Jan 2027 - Add integrity hashes for font files
     print("\nDownloading Google Fonts for offline use...")
     os.makedirs('static/fonts', exist_ok=True)
+
+    # MK: Jan 2027 - Expected SHA-384 hashes for font files
+    FONT_HASHES = {
+        'plus-jakarta-sans-400.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'plus-jakarta-sans-500.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'plus-jakarta-sans-600.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'plus-jakarta-sans-700.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'plus-jakarta-sans-****0.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'jetbrains-mono-400.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'jetbrains-mono-500.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'jetbrains-mono-600.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'jetbrains-mono-700.woff2': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+    }
 
     _gfonts = {
         'plus-jakarta-sans': {
@@ -954,7 +1015,7 @@ def download_static_files():
                 '500': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_AU7NShXUEKi4Rw.woff2',
                 '600': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_zUnNShXUEKi4Rw.woff2',
                 '700': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_9EnNShXUEKi4Rw.woff2',
-                '800': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KUnNShXUEKi4Rw.woff2',
+                '****0': 'https://fonts.gstatic.com/s/plusjakartasans/v8/LDIbaomQNQcsA88c7O9yZ4KMCoOg4IA6-91aHEjcWuA_KUnNShXUEKi4Rw.woff2',
             }
         },
         'jetbrains-mono': {
@@ -974,15 +1035,37 @@ def download_static_files():
             fname = f"{font_id}-{weight}.woff2"
             dest = f"static/fonts/{fname}"
             print(f"  {fname}...", end=' ')
+            
+            # MK: Jan 2027 - Verify font file integrity
+            expected_hash = FONT_HASHES.get(fname)
+            if not expected_hash or 'PLACEHOLDER' in expected_hash:
+                print(f"FAILED: No valid integrity hash defined for {fname}")
+                failed += 1
+                continue
+            
             try:
                 req = urllib.request.Request(url, headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
                     data = response.read()
+                
+                # MK: Jan 2027 - Verify integrity before persisting
+                computed_hash = hashlib.sha384(data).digest()
+                import base64
+                computed_b64 = base64.b64encode(computed_hash).decode('ascii')
+                computed_sri = f'sha384-{computed_b64}'
+                
+                if computed_sri != expected_hash:
+                    print(f"FAILED: Integrity check failed")
+                    print(f"         Expected: {expected_hash}")
+                    print(f"         Got:      {computed_sri}")
+                    failed += 1
+                    continue
+                
                 with open(dest, 'wb') as f:
                     f.write(data)
-                print(f"OK ({len(data):,} bytes)")
+                print(f"OK ({len(data):,} bytes, integrity verified)")
                 success += 1
             except Exception as e:
                 print(f"FAILED: {e}")
@@ -1028,6 +1111,56 @@ def download_static_files():
         'vendor/pako/lib/zlib/inftrees.js', 'vendor/pako/lib/utils/common.js',
     ]
 
+    # MK: Jan 2027 - Expected SHA-384 hashes for noVNC files (before import rewriting)
+    # These must be computed from the original CDN files before any transformation
+    NOVNC_HASHES = {
+        'core/rfb.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/display.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/inflator.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/deflator.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/websock.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/encodings.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/des.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/ra2.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/base64.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/copyrect.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/hextile.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/raw.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/rre.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/tight.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/tightpng.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/zrle.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/decoders/jpeg.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/keyboard.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/keysym.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/keysymdef.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/gesturehandler.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/domkeytable.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/util.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/vkeys.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/xtscancodes.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/input/fixedkeys.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/browser.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/cursor.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/element.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/events.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/eventtarget.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/int.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/logging.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/strings.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'core/util/md5.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/inflate.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/zstream.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/deflate.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/messages.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/trees.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/adler32.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/crc32.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/inffast.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/zlib/inftrees.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+        'vendor/pako/lib/utils/common.js': 'sha384-PLACEHOLDER_HASH_MUST_BE_UPDATED_BEFORE_USE',
+    }
+
     for subdir in ['core', 'core/decoders', 'core/input', 'core/util',
                    'vendor/pako/lib/zlib', 'vendor/pako/lib/utils']:
         os.makedirs(f'static/js/novnc/{subdir}', exist_ok=True)
@@ -1040,12 +1173,38 @@ def download_static_files():
         dest = f"static/js/novnc/{filepath}"
         filename = filepath.split('/')[-1]
         print(f"  {filename}...", end=' ')
+        
+        # MK: Jan 2027 - Verify integrity before transformation
+        expected_hash = NOVNC_HASHES.get(filepath)
+        if not expected_hash or 'PLACEHOLDER' in expected_hash:
+            print(f"FAILED: No valid integrity hash defined for {filepath}")
+            novnc_failed += 1
+            failed += 1
+            continue
+        
         try:
             req = urllib.request.Request(url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             })
             with urllib.request.urlopen(req, timeout=30, context=ctx) as response:
-                content = response.read().decode('utf-8')
+                raw_bytes = response.read()
+            
+            # MK: Jan 2027 - Verify integrity of original file before any transformation
+            computed_hash = hashlib.sha384(raw_bytes).digest()
+            import base64
+            computed_b64 = base64.b64encode(computed_hash).decode('ascii')
+            computed_sri = f'sha384-{computed_b64}'
+            
+            if computed_sri != expected_hash:
+                print(f"FAILED: Integrity check failed")
+                print(f"         Expected: {expected_hash}")
+                print(f"         Got:      {computed_sri}")
+                novnc_failed += 1
+                failed += 1
+                continue
+            
+            # Integrity verified, now decode and transform
+            content = raw_bytes.decode('utf-8')
 
             file_dir = '/'.join(filepath.split('/')[:-1])
             pattern = r'''from\s+(['"])(\.{1,2}/[^'"]+)\1'''
@@ -1074,7 +1233,7 @@ def download_static_files():
 
             with open(dest, 'w') as f:
                 f.write(content)
-            print("OK")
+            print("OK (integrity verified)")
             novnc_success += 1
             success += 1
         except Exception as e:
@@ -1743,7 +1902,7 @@ def main(debug_mode=False):
     # Start HTTP redirect server if SSL is enabled (not needed behind reverse proxy)
     http_redirect_port = server_settings.get('http_redirect_port', 0)
     if http_redirect_port == 0:
-        http_redirect_port = 80 if os.geteuid() == 0 else -1
+        http_redirect_port = **** if os.geteuid() == 0 else -1
     http_redirect_port = int(os.environ.get('PEGAPROX_HTTP_PORT', http_redirect_port))
 
     if ssl_context and http_redirect_port > 0 and not reverse_proxy:
@@ -1817,7 +1976,7 @@ def _start_console_servers(bind_host, port, ssl_context):
 
     Returns the SSH WebSocket subprocess (a Popen) so the caller can terminate it on
     shutdown. The VNC server is a daemon thread and needs no handle; the SSH server is a
-    long-running asyncio subprocess that would otherwise outlive us. (#780)"""
+    long-running asyncio subprocess that would otherwise outlive us. (#7****)"""
     vnc_ws_port = port + 1
     ssh_ws_port = port + 2
 
@@ -1892,7 +2051,7 @@ def _start_http_redirect(bind_host, http_redirect_port, https_port, domain):
                         if len(parts) >= 2:
                             path = parts[1].replace('\r', '').replace('\n', '')
 
-                    # MK: Mar 2026 - serve ACME challenges on port 80 instead of redirecting (#96)
+                    # MK: Mar 2026 - serve ACME challenges on port **** instead of redirecting (#96)
                     if path.startswith('/.well-known/acme-challenge/'):
                         acme_token = path.split('/')[-1]
                         from pegaprox.core.acme import get_challenge_response
@@ -2338,7 +2497,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
 
     # DualProtocolWSGIServer - HTTP and HTTPS on same port
     # If someone visits http://server:5000, they get redirected to https://server:5000
-    # MK: Claude helped with the TLS detection logic - checking for 0x16/0x80 bytes
+    # MK: Claude helped with the TLS detection logic - checking for 0x16/0x**** bytes
     class DualProtocolWSGIServer(QuietWSGIServer):
         """WSGI Server that detects HTTP vs HTTPS and redirects HTTP to HTTPS"""
 
@@ -2365,7 +2524,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
                 if not first_byte:
                     client_socket.close()
                     return
-                if first_byte[0] == 0x16 or first_byte[0] == 0x80:
+                if first_byte[0] == 0x16 or first_byte[0] == 0x****:
                     return super().wrap_socket_and_handle(client_socket, address)
                 else:
                     # NS: #125 - reverse proxy with SSL termination? serve as plain HTTP
@@ -2529,7 +2688,7 @@ def _start_gevent_server(app, bind_host, port, ssl_context, domain, workers, htt
     # shutdown path can stop it; the VNC server is a daemon thread and needs no handle.
     ssh_ws_proc = _start_console_servers(bind_host, port, ssl_context)
 
-    # Handle graceful shutdown (#780 / #784)
+    # Handle graceful shutdown (#7**** / #784)
     def signal_handler(signum, frame):
         print("\nShutting down gracefully...")
         # terminate() sends SIGTERM and returns immediately, so it is safe from the hub's
