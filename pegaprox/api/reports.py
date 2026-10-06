@@ -183,6 +183,22 @@ def _syslog_ambiguous_hostnames():
         return tokens
 
 
+def _syslog_escape_like(value):
+    """Escape LIKE metacharacters (% and _) for use in SQLite LIKE patterns.
+    
+    MK Dec 2026 (pentest) — cluster config accepts name/host without rejecting LIKE
+    wildcards, and those values flow into syslog authorization LIKE patterns. A token
+    of '%' produces '%.%' which matches arbitrary dotted hostnames and defeats the
+    cross-tenant syslog boundary. Escape % and _ with backslash and declare ESCAPE '\\'
+    so they are treated as literals.
+    """
+    if not isinstance(value, str):
+        value = str(value)
+    # Escape backslash first, then the LIKE metacharacters
+    BACKSLASH = '\\'
+    return value.replace(BACKSLASH, BACKSLASH*2).replace('%', BACKSLASH+'%').replace('_', BACKSLASH+'_')
+
+
 def _syslog_host_clause(values, params):
     """`(host = x OR host LIKE 'x.%' OR ...)` over the tokens that identify one cluster."""
     _ambiguous = _syslog_ambiguous_hostnames()
@@ -190,8 +206,51 @@ def _syslog_host_clause(values, params):
     for value in sorted(set(values) - _ambiguous):
         parts.append("LOWER(logs.hostname) = ?")
         params.append(value)
-        parts.append("LOWER(logs.hostname) LIKE ?")
-        params.append(f"{value}.%")
+        # Escape LIKE metacharacters to prevent wildcard injection
+        escaped = _syslog_escape_like(value)
+        BACKSLASH = '\\'
+        parts.append(f"LOWER(logs.hostname) LIKE ? ESCAPE '{BACKSLASH}'")
+        params.append(f"{escaped}.%")
+    return f"({' OR '.join(parts)})" if parts else "1 = 0"
+
+
+@bp.route('/api/reports/summary', methods=['GET'])
+@require_auth()
+def get_reports_summary():
+    
+    MK Dec 2026 (pentest) — cluster config accepts name/host without rejecting LIKE
+    wildcards, and those values flow into syslog authorization LIKE patterns. A token
+    of '%' produces '%.%' which matches arbitrary dotted hostnames and defeats the
+    cross-tenant syslog boundary. Escape % and _ with backslash and declare ESCAPE '\\'
+    so they are treated as literals.
+    """
+    if not isinstance(value, str):
+        value = str(value)
+    # Escape backslash first, then the LIKE metacharacters
+    # BACKSLASH = chr(92)
+    BACKSLASH = '\\'
+    return value.replace(BACKSLASH, BACKSLASH*2).replace('%', BACKSLASH+'%').replace('_', BACKSLASH+'_')
+    # Escape backslash first, then the LIKE metacharacters
+    # Each replace: first arg is what to find, second arg is what to replace it with
+    # '\\' in source = one backslash in string
+    # '\\\\' in source = two backslashes in string
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+
+def _syslog_host_clause(values, params):
+    """`(host = x OR host LIKE 'x.%' OR ...)` over the tokens that identify one cluster."""
+    _ambiguous = _syslog_ambiguous_hostnames()
+    parts = []
+    for value in sorted(set(values) - _ambiguous):
+        parts.append("LOWER(logs.hostname) = ?")
+        params.append(value)
+        # Escape LIKE metacharacters to prevent wildcard injection
+        escaped = _syslog_escape_like(value)
+        BACKSLASH = '\\'
+        parts.append(f"LOWER(logs.hostname) LIKE ? ESCAPE '{BACKSLASH}'")
+        parts.append("LOWER(logs.hostname) LIKE ? ESCAPE '\\'")
+        params.append(f"{escaped}.%")
     return f"({' OR '.join(parts)})" if parts else "1 = 0"
 
 
