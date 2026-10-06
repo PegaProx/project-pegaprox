@@ -355,7 +355,7 @@ VOLATILE_COLUMNS = {
 # still in the pre-2026 Fernet format is resealed under the field key on its way
 # into a snapshot, because the standby holds our field key but not our Fernet key.
 ENCRYPTED_COLUMNS = {
-    'users': ('totp_secret_encrypted', 'totp_pending_secret_encrypted'),
+    'users': ('totp_secret_encrypted', '****pted'),
     'clusters': ('pass_encrypted', 'ssh_key_encrypted', 'api_token_secret_encrypted',
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
@@ -9917,7 +9917,12 @@ def _switch_back_again():
     known = st.get('members') or {}
     fresh = {mid: seen for mid, seen in list(rt.seen.items())
              if mid in known and now - seen.get('at', -1e9) <= LEASE_SEEN_FRESH}
+    wid = (_witness(st) or {}).get('instance_id')
+    witness_seen = rt.seen.get(wid) if wid is not None else None
     if any(seen.get('holds') is True for seen in fresh.values()):
+        return []
+    if (witness_seen is not None and now - witness_seen.get('at', -1e9) <= LEASE_SEEN_FRESH
+            and witness_seen.get('holder') and witness_seen.get('mode') != ha_vote.MODE_MANUAL):
         return []
     cfg = lease['cfg']
     before = (lease.get('cfg_chain') or [None])[-1]
