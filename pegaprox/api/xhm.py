@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.audit import log_audit
-from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.utils.rbac import user_can_access_vm, user_can_access_vmware_vm
 from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
 from pegaprox.core.xhm import (
     XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
@@ -50,6 +50,47 @@ def _prune_finished_migrations():
         _xhm_migrations.pop(mid, None)
 
 
+def _authorize_source_vm(user, source_cluster, source_vmid, permission):
+    """Authorize source VM access with the correct authorization domain.
+    
+    ESXi managers registered in cluster_managers use the VMware-specific authorization
+    domain (vmware:<server-id> ACLs), while native Proxmox/XCP-ng clusters use the
+    generic cluster/VM authorization. This prevents bypassing VMware VM-level ACLs
+    through the XHM migration endpoints.
+    
+    Args:
+        user: User dict from build_authz_user
+        source_cluster: Cluster/manager ID
+        source_vmid: VM identifier (string or int)
+        permission: Required permission (e.g., 'vm.migrate', 'vm.delete')
+    
+    Returns:
+        bool: True if authorized, False otherwise
+    """
+    src_mgr = cluster_managers.get(source_cluster)
+    if not src_mgr:
+        return False
+    
+    src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
+    
+    # ESXi sources must use VMware-specific authorization
+    if src_type == 'esxi':
+        # Map generic XHM permissions to VMware-specific ones
+        vmware_permission_map = {
+            'vm.migrate': 'vmware.vm.migrate',
+            'vm.delete': 'vmware.vm.migrate',  # removal after migration requires migrate permission
+        }
+        vmware_perm = vmware_permission_map.get(permission, 'vmware.vm.view')
+        return user_can_access_vmware_vm(user, source_cluster, str(source_vmid), vmware_perm)
+    
+    # Proxmox and XCP-ng use generic cluster/VM authorization
+    try:
+        vmid_int = int(source_vmid)
+    except (ValueError, TypeError):
+        return False
+    return user_can_access_vm(user, source_cluster, vmid_int, permission)
+
+
 @bp.route('/api/xhm/plan', methods=['GET'])
 @require_auth(perms=['vm.migrate'])
 def xhm_plan():
@@ -74,12 +115,8 @@ def xhm_plan():
 
     # Authorization: check source VM access
     user = build_authz_user(request.session['user'], request.session)
-    try:
-        vmid_int = int(source_vmid)
-    except (ValueError, TypeError):
-        return jsonify({'error': 'Invalid source_vmid'}), 400
     
-    if not user_can_access_vm(user, source_cluster, vmid_int, 'vm.migrate'):
+    if not _authorize_source_vm(user, source_cluster, source_vmid, 'vm.migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
     # sec (audit): the target got check_cluster_access only — which admits a pool-/ACL-scoped
     # caller — yet this creates a BRAND-NEW guest there on a caller-chosen node and storage.
@@ -149,12 +186,8 @@ def xhm_start():
 
     # Authorization: check source VM access
     user = build_authz_user(request.session['user'], request.session)
-    try:
-        vmid_int = int(data['source_vmid'])
-    except (ValueError, TypeError):
-        return jsonify({'error': 'Invalid source_vmid'}), 400
     
-    if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.migrate'):
+    if not _authorize_source_vm(user, data['source_cluster'], data['source_vmid'], 'vm.migrate'):
         return jsonify({'error': 'Access denied to source VM'}), 403
     # MK Sep 2026 - remove_source DESTROYS the source guest once the copy lands. That is
     # vm.delete, not vm.migrate, and the distinction is load-bearing here: vm.delete is
@@ -162,7 +195,7 @@ def xhm_start():
     # vm.migrate and never vm.delete. Without this check the migration path was the way
     # around that - copy the guest somewhere, tick the box, and the original is gone.
     if data.get('remove_source'):
-        if not user_can_access_vm(user, data['source_cluster'], vmid_int, 'vm.delete'):
+        if not _authorize_source_vm(user, data['source_cluster'], data['source_vmid'], 'vm.delete'):
             return jsonify({'error': 'Access denied: removing the source guest needs '
                                      'vm.delete on it'}), 403
     if caller_is_scoped(user, data['target_cluster']):
@@ -248,7 +281,7 @@ def _xhm_reachable(t):
     if svmid and scluster:
         try:
             _u = build_authz_user(request.session.get('user', ''), request.session)
-            return user_can_access_vm(_u, scluster, int(svmid), 'vm.migrate')
+            return _authorize_source_vm(_u, scluster, svmid, 'vm.migrate')
         except Exception:
             return False
     return True
