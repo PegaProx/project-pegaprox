@@ -237,3 +237,62 @@ def test_a_readable_file_is_still_written(known_hosts):
     """The mirror: refusing to write on a read error must not stop ordinary persistence."""
     sec.persist_host_keys(_client_holding(('fresh-host', _stable_key('fresh-host'))))
     assert 'fresh-host' in _hosts_on_disk(known_hosts)
+
+
+# --- concurrent first-use with different keys must not overwrite -------------------
+# The pre-lock lookup proves only that the host was absent at an earlier instant. Two
+# overlapping first-use connections can both pass that check, then both enter the locked
+# block. The second one reloads the file but did not verify whether the first connection
+# has since added the same host/key-type entry. Paramiko's HostKeys.add() replaces an
+# existing entry for the same hostname and key type, so the second connection's key
+# becomes the durable pin. If the first connection is legitimate and the second is
+# attacker-influenced, the attacker's key overwrites the legitimate pin. Aikido ai_pentest
+# 700489044 retest. MK
+
+
+def test_concurrent_tofu_for_same_host_rejects_mismatched_key(known_hosts, monkeypatch):
+    """Two connections racing to pin the SAME host with DIFFERENT keys: the second must
+    be rejected instead of overwriting the first's pin."""
+    monkeypatch.setattr(sec, 'strict_host_keys_enabled', lambda: False)
+    
+    legitimate_key = _stable_key('legitimate')
+    attacker_key = _stable_key('attacker')
+    
+    # Simulate the race: first connection pins the legitimate key while the second
+    # connection is waiting for the lock (after passing the pre-lock unknown-host check).
+    def _racing_pin():
+        _pin_on_disk(known_hosts, 'target-host', legitimate_key)
+        return False
+    monkeypatch.setattr(sec, 'strict_host_keys_enabled', _racing_pin)
+    
+    # The attacker's connection should be rejected with BadHostKeyException
+    with pytest.raises(paramiko.BadHostKeyException) as exc_info:
+        sec.verify_transport_host_key(_FakeTransport(attacker_key), 'target-host', paramiko, port=22)
+    
+    # Verify the legitimate key is still pinned (not overwritten)
+    hk = paramiko.hostkeys.HostKeys()
+    hk.load(known_hosts)
+    assert hk.lookup('target-host')[legitimate_key.get_name()] == legitimate_key, \
+        'the legitimate key was overwritten by the attacker key'
+
+
+def test_concurrent_tofu_for_same_host_with_same_key_succeeds(known_hosts, monkeypatch):
+    """Two connections racing to pin the SAME host with the SAME key: both should succeed
+    (the second one sees the first's pin and returns without error)."""
+    monkeypatch.setattr(sec, 'strict_host_keys_enabled', lambda: False)
+    
+    shared_key = _stable_key('shared')
+    
+    # Simulate the race: first connection pins the key while the second is waiting
+    def _racing_pin():
+        _pin_on_disk(known_hosts, 'target-host', shared_key)
+        return False
+    monkeypatch.setattr(sec, 'strict_host_keys_enabled', _racing_pin)
+    
+    # The second connection should succeed (no exception)
+    sec.verify_transport_host_key(_FakeTransport(shared_key), 'target-host', paramiko, port=22)
+    
+    # Verify the key is pinned
+    hk = paramiko.hostkeys.HostKeys()
+    hk.load(known_hosts)
+    assert hk.lookup('target-host')[shared_key.get_name()] == shared_key

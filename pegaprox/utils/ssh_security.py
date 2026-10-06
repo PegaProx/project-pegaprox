@@ -332,6 +332,17 @@ def verify_transport_host_key(transport, hostname, paramiko, port=22):
     # back on the TOFU path, which is the MitM window this function exists to close.
     # persist_host_keys() already does it the right way; do the same here: re-read inside
     # the lock, add only the key we just verified, save that.
+    #
+    # MK Sep 2026 - retest: the pre-lock lookup proves only that the host was absent at an
+    # earlier instant. Two overlapping first-use connections can both pass that check, then
+    # both enter the locked block. The second one reloads the file but did not verify
+    # whether the first connection has since added the same host/key-type entry. Paramiko's
+    # HostKeys.add() replaces an existing entry for the same hostname and key type, so the
+    # second connection's key becomes the durable pin. If the first connection is legitimate
+    # and the second is attacker-influenced, the attacker's key overwrites the legitimate
+    # pin. Fix: after reloading, check if another connection has added this host/keytype;
+    # if so, verify the offered key matches (raise BadHostKeyException if not), and only
+    # add if no entry exists yet.
     try:
         with _persist_lock:
             fresh = paramiko.hostkeys.HostKeys()
@@ -346,6 +357,18 @@ def verify_transport_host_key(transport, hostname, paramiko, port=22):
                 _log.warning("known_hosts unreadable (%s) - not pinning %s this round",
                              _le, hostname)
                 raise
+            # Check if another connection has added this host/keytype while we were waiting
+            # for the lock. If so, verify the offered key matches the now-pinned one.
+            recheck_entry = fresh.lookup(lookup_name)
+            if recheck_entry is not None and keytype in recheck_entry:
+                if recheck_entry[keytype] != key:
+                    # Another connection pinned a different key for this host/keytype while
+                    # we were waiting. This is the race: reject the mismatched key instead
+                    # of overwriting the legitimate pin.
+                    raise paramiko.BadHostKeyException(hostname, key, recheck_entry[keytype])
+                # The key matches the one just pinned by another connection - nothing to do.
+                return
+            # Still unknown after reload - safe to add.
             fresh.add(lookup_name, keytype, key)
             fresh.save(_KNOWN_HOSTS)
     except Exception:
