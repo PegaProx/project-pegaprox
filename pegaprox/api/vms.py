@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -12674,6 +12674,15 @@ def cross_cluster_migrate_api():
     err = _require_vm_access(source_cluster_id, vmid, 'vm.migrate', vm_type)
     if err:
         return err
+
+    # sec (pentest): the route mints a target token for the configured manager without privilege
+    # separation and uses it to perform the target-side migration with caller-selected placement.
+    # check_cluster_access admits VM-ACL/pool-scoped callers (reachability fallback), so a scoped
+    # caller can drive the target operation with the manager's authority rather than their own.
+    # The replication twin explicitly rejects scoped target callers; do the same here.
+    _xu = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_xu, target_cluster_id):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
 
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
