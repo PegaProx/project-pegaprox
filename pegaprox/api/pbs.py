@@ -1384,6 +1384,9 @@ def get_pbs_notifications(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'viewing notification configuration')
+    if _wide:
+        return _wide
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
@@ -1806,6 +1809,9 @@ def create_pbs_notification_target(pbs_id, target_type):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'creating a notification target')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -1829,6 +1835,9 @@ def update_pbs_notification_target(pbs_id, target_type, name):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'updating a notification target')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -1847,6 +1856,9 @@ def delete_pbs_notification_target(pbs_id, target_type, name):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'deleting a notification target')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -1866,6 +1878,9 @@ def create_pbs_notification_matcher(pbs_id):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'creating a notification matcher')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -1887,6 +1902,9 @@ def update_pbs_notification_matcher(pbs_id, name):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'updating a notification matcher')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
@@ -1905,6 +1923,9 @@ def delete_pbs_notification_matcher(pbs_id, name):
     ok, err = check_pbs_access(pbs_id)
     if not ok:
         return err
+    _wide = require_pbs_wide(pbs_id, 'deleting a notification matcher')
+    if _wide:
+        return _wide
     
     if pbs_id not in pbs_managers:
         return jsonify({'error': 'PBS server not found'}), 404
