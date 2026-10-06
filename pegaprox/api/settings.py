@@ -2234,7 +2234,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2422,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
@@ -2847,6 +2847,14 @@ def restore_config():
                     tenant_count += 1
                 except Exception as e:
                     results['errors'].append(f"Tenant: {str(e)}")
+            # sec (pentest): this path writes tenants directly (bypassing rbac.save_tenants),
+            # so drop the cached tenant ownership so the restore takes effect immediately for
+            # VMware authorization checks. Without this, get_user_clusters() continues consulting
+            # the old snapshot until the process restarts, and a tenant user can retain access
+            # to a cluster removed from their tenant by the restore.
+            if not dry_run and tenant_count > 0:
+                from pegaprox.utils.rbac import invalidate_tenants_cache
+                invalidate_tenants_cache()
             results['restored']['tenants'] = tenant_count
         
         # VM ACLs
