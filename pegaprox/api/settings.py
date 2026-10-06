@@ -392,6 +392,109 @@ def _restart_through_systemd():
     return False
 
 
+def _verify_update_signature(version_data, archive_bytes=None):
+    """Verify cryptographic signature of update artifacts.
+    
+    Validates that the version metadata and optional archive are signed by a trusted
+    publisher key. Returns (valid, reason) tuple.
+    
+    The signature verification uses Ed25519 public-key cryptography. The trusted
+    publisher public key is embedded in the application code and verified against
+    the signature field in version.json.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.exceptions import InvalidSignature
+        import base64
+        
+        # Embedded trusted publisher public key (Ed25519)
+        # This key is controlled by the PegaProx release process and must match
+        # the private key used to sign releases. Rotation requires a code update.
+        TRUSTED_PUBLIC_KEY_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # Placeholder - must be set by release team
+        
+        # Extract signature from version data
+        signature_b64 = version_data.get('signature')
+        if not signature_b64:
+            return False, "Update metadata missing required 'signature' field"
+        
+        # Extract the signed payload - everything except the signature itself
+        signed_fields = {k: v for k, v in version_data.items() if k != 'signature'}
+        
+        # Canonical JSON serialization for signature verification
+        # Sort keys to ensure consistent byte representation
+        import json
+        canonical_json = json.dumps(signed_fields, sort_keys=True, separators=(',', ':'))
+        message_bytes = canonical_json.encode('utf-8')
+        
+        try:
+            signature_bytes = base64.b64decode(signature_b64)
+            public_key_bytes = base64.b64decode(TRUSTED_PUBLIC_KEY_B64)
+        except Exception as decode_err:
+            return False, f"Invalid base64 encoding in signature or public key: {decode_err}"
+        
+        # Verify the signature
+        try:
+            public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            public_key.verify(signature_bytes, message_bytes)
+        except InvalidSignature:
+            return False, "Signature verification failed - update metadata is not authentic"
+        except Exception as verify_err:
+            return False, f"Signature verification error: {verify_err}"
+        
+        # If archive bytes provided, verify archive hash matches metadata
+        if archive_bytes is not None:
+            import hashlib
+            archive_hash_expected = version_data.get('archive_sha256')
+            if not archive_hash_expected:
+                return False, "Update metadata missing required 'archive_sha256' field"
+            
+            archive_hash_actual = hashlib.sha256(archive_bytes).hexdigest()
+            if archive_hash_actual != archive_hash_expected:
+                return False, f"Archive hash mismatch: expected {archive_hash_expected}, got {archive_hash_actual}"
+        
+        return True, "Signature and integrity verified"
+        
+    except ImportError as imp_err:
+        return False, f"Cryptography library not available for signature verification: {imp_err}"
+    except Exception as e:
+        return False, f"Signature verification failed: {e}"
+
+
+def _verify_file_hash(file_path, expected_hash, remote_version):
+    """Verify individual file hash against signed manifest.
+    
+    In fallback mode (individual file downloads), each file's hash must match
+    the hash in the signed file_hashes manifest. Returns (valid, reason) tuple.
+    """
+    try:
+        import hashlib
+        
+        # Get file hashes manifest from signed version metadata
+        file_hashes = remote_version.get('file_hashes', {})
+        if not file_hashes:
+            return False, "Update metadata missing required 'file_hashes' manifest for fallback mode"
+        
+        # Normalize path for lookup
+        normalized_path = file_path.replace('\\', '/')
+        expected_hash = file_hashes.get(normalized_path)
+        
+        if not expected_hash:
+            # File not in manifest - reject to prevent injection of new files
+            return False, f"File '{normalized_path}' not in signed manifest"
+        
+        # Compute actual hash
+        with open(file_path, 'rb') as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        
+        if actual_hash != expected_hash:
+            return False, f"Hash mismatch: expected {expected_hash}, got {actual_hash}"
+        
+        return True, "File hash verified"
+        
+    except Exception as e:
+        return False, f"File hash verification failed: {e}"
+
+
 @bp.route('/api/pegaprox/check-update', methods=['GET'])
 @require_auth(perms=['update.manage'])
 def check_pegaprox_update():
@@ -440,6 +543,17 @@ def check_pegaprox_update():
                 'update_available': False,
             }), 200
         
+        # SECURITY: Verify signature of update metadata
+        # Even for check-only operations, we verify the signature to ensure
+        # the version information comes from a trusted source and hasn't been
+        # tampered with. This prevents showing fake update notifications.
+        sig_valid, sig_reason = _verify_update_signature(remote_version)
+        signature_verified = sig_valid
+        if not sig_valid:
+            logging.warning(f"Update check: signature verification failed - {sig_reason}")
+            # Don't fail the check, but mark signature as unverified
+            # The actual update will fail if attempted
+        
         current_version = PEGAPROX_VERSION.replace('Alpha ', '').replace('Beta ', '')
         latest_version = remote_version.get('version', '0.0')
         
@@ -471,6 +585,7 @@ def check_pegaprox_update():
             'changelog': remote_version.get('changelog', []),
             'download_url': remote_version.get('download_url', GITHUB_REPO_URL),
             'update_available': update_available,
+            'signature_verified': signature_verified,
             'install_method': _method,
             'in_app_update_supported': _method == 'source',
             'managed_update_hint': _managed_update_guidance(_method),
@@ -513,6 +628,109 @@ def check_pegaprox_update():
         }), 200
 
 
+@bp.route('/api/pegaprox/update', methods=['POST'])
+@require_auth(perms=['update.manage'])
+def perform_pegaprox_update():
+    
+    Validates that the version metadata and optional archive are signed by a trusted
+    publisher key. Returns (valid, reason) tuple.
+    
+    The signature verification uses Ed25519 public-key cryptography. The trusted
+    publisher public key is embedded in the application code and verified against
+    the signature field in version.json.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from cryptography.exceptions import InvalidSignature
+        import base64
+        
+        # Embedded trusted publisher public key (Ed25519)
+        # This key is controlled by the PegaProx release process and must match
+        # the private key used to sign releases. Rotation requires a code update.
+        TRUSTED_PUBLIC_KEY_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="  # Placeholder - must be set by release team
+        
+        # Extract signature from version data
+        signature_b64 = version_data.get('signature')
+        if not signature_b64:
+            return False, "Update metadata missing required 'signature' field"
+        
+        # Extract the signed payload - everything except the signature itself
+        signed_fields = {k: v for k, v in version_data.items() if k != 'signature'}
+        
+        # Canonical JSON serialization for signature verification
+        # Sort keys to ensure consistent byte representation
+        import json
+        canonical_json = json.dumps(signed_fields, sort_keys=True, separators=(',', ':'))
+        message_bytes = canonical_json.encode('utf-8')
+        
+        try:
+            signature_bytes = base64.b64decode(signature_b64)
+            public_key_bytes = base64.b64decode(TRUSTED_PUBLIC_KEY_B64)
+        except Exception as decode_err:
+            return False, f"Invalid base64 encoding in signature or public key: {decode_err}"
+        
+        # Verify the signature
+        try:
+            public_key = ed25519.Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            public_key.verify(signature_bytes, message_bytes)
+        except InvalidSignature:
+            return False, "Signature verification failed - update metadata is not authentic"
+        except Exception as verify_err:
+            return False, f"Signature verification error: {verify_err}"
+        
+        # If archive bytes provided, verify archive hash matches metadata
+        if archive_bytes is not None:
+            import hashlib
+            archive_hash_expected = version_data.get('archive_sha256')
+            if not archive_hash_expected:
+                return False, "Update metadata missing required 'archive_sha256' field"
+            
+            archive_hash_actual = hashlib.sha256(archive_bytes).hexdigest()
+            if archive_hash_actual != archive_hash_expected:
+                return False, f"Archive hash mismatch: expected {archive_hash_expected}, got {archive_hash_actual}"
+        
+        return True, "Signature and integrity verified"
+        
+    except ImportError as imp_err:
+        return False, f"Cryptography library not available for signature verification: {imp_err}"
+    except Exception as e:
+        return False, f"Signature verification failed: {e}"
+
+
+def _verify_file_hash(file_path, expected_hash, remote_version):
+    """Verify individual file hash against signed manifest.
+    
+    In fallback mode (individual file downloads), each file's hash must match
+    the hash in the signed file_hashes manifest. Returns (valid, reason) tuple.
+    """
+    try:
+        import hashlib
+        
+        # Get file hashes manifest from signed version metadata
+        file_hashes = remote_version.get('file_hashes', {})
+        if not file_hashes:
+            return False, "Update metadata missing required 'file_hashes' manifest for fallback mode"
+        
+        # Normalize path for lookup
+        normalized_path = file_path.replace('\\', '/')
+        expected_hash = file_hashes.get(normalized_path)
+        
+        if not expected_hash:
+            # File not in manifest - reject to prevent injection of new files
+            return False, f"File '{normalized_path}' not in signed manifest"
+        
+        # Compute actual hash
+        with open(file_path, 'rb') as f:
+            actual_hash = hashlib.sha256(f.read()).hexdigest()
+        
+        if actual_hash != expected_hash:
+            return False, f"Hash mismatch: expected {expected_hash}, got {actual_hash}"
+        
+        return True, "File hash verified"
+        
+    except Exception as e:
+        return False, f"File hash verification failed: {e}"
+
 
 @bp.route('/api/pegaprox/update', methods=['POST'])
 @require_auth(perms=['update.manage'])
@@ -527,6 +745,12 @@ def perform_pegaprox_update():
     - config/, ssl/, certs/   (settings, encrypted data)
     - *.db, *.enc             (databases, encrypted files)
     - *.pem, *.key, *.crt    (certificates, private keys)
+    
+    SECURITY: All update artifacts are cryptographically verified using Ed25519
+    signatures before installation. The update will fail if:
+    - The version metadata signature is invalid or missing
+    - The archive hash does not match the signed metadata
+    - Any file hash does not match the signed manifest (fallback mode)
     """
     try:
         data = request.json or {}
@@ -585,6 +809,19 @@ def perform_pegaprox_update():
             remote_version = response.json()
         except:
             return jsonify({'error': 'Invalid version data from server'}), 500
+
+        # SECURITY: Verify cryptographic signature of update metadata before proceeding
+        # This ensures the update source has not been compromised and the metadata
+        # comes from a trusted publisher with the correct signing key.
+        sig_valid, sig_reason = _verify_update_signature(remote_version)
+        if not sig_valid:
+            log_audit(user, 'pegaprox.update_rejected', f'Update signature verification failed: {sig_reason}')
+            return jsonify({
+                'error': 'Update signature verification failed',
+                'detail': sig_reason,
+                'security_note': 'The update was rejected because it could not be cryptographically verified. '
+                                'This protects against compromised update sources or man-in-the-middle attacks.'
+            }), 403
 
         new_version = remote_version.get('version', '0.0')
 
@@ -668,9 +905,20 @@ def perform_pegaprox_update():
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 archive_path = os.path.join(tmpdir, 'repo.tar.gz')
+                archive_bytes = b''
                 with open(archive_path, 'wb') as f:
                     for chunk in resp.iter_content(8192):
                         f.write(chunk)
+                        archive_bytes += chunk
+
+                # SECURITY: Verify archive integrity against signed hash
+                # The archive hash in version.json was signed by the publisher's key,
+                # so verifying the downloaded bytes match that hash ensures the archive
+                # has not been tampered with during transit or at the source.
+                sig_valid, sig_reason = _verify_update_signature(remote_version, archive_bytes)
+                if not sig_valid:
+                    log_audit(user, 'pegaprox.update_rejected', f'Archive integrity verification failed: {sig_reason}')
+                    raise RuntimeError(f"Archive verification failed: {sig_reason}")
 
                 # MK: extractall with filter='data' to block path traversal
                 with tarfile.open(archive_path, 'r:gz') as tar:
@@ -803,6 +1051,17 @@ def perform_pegaprox_update():
                             tmp = dst + '.new'
                             with open(tmp, 'wb') as f:
                                 f.write(resp.content)
+                            
+                            # SECURITY: Verify file hash against signed manifest
+                            # Each file's hash must match the hash in the signed file_hashes
+                            # manifest to prevent injection of malicious files.
+                            hash_valid, hash_reason = _verify_file_hash(tmp, None, remote_version)
+                            if not hash_valid:
+                                os.unlink(tmp)
+                                last_err = f"Hash verification failed: {hash_reason}"
+                                logging.warning(f"[update] {remote_path}: {last_err}")
+                                continue
+                            
                             os.replace(tmp, dst)
                             downloaded_files.append(remote_path)
                             downloaded = True
@@ -842,6 +1101,15 @@ def perform_pegaprox_update():
                             _tmp = _dst + '.new'
                             with open(_tmp, 'wb') as _fh:
                                 _fh.write(_r.content)
+                            
+                            # SECURITY: Verify file hash against signed manifest (retry pass)
+                            _hash_valid, _hash_reason = _verify_file_hash(_tmp, None, remote_version)
+                            if not _hash_valid:
+                                os.unlink(_tmp)
+                                _err = f"Hash verification failed: {_hash_reason}"
+                                logging.warning(f"[update] retry {_rp}: {_err}")
+                                continue
+                            
                             os.replace(_tmp, _dst)
                             downloaded_files.append(_rp)
                             _ok = True
@@ -2234,7 +2502,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2690,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
