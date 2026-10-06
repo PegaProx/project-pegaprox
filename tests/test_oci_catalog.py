@@ -282,11 +282,15 @@ def test_a_deploy_pulls_the_image_then_creates_the_container_from_it(api, admin)
 
     (pull_path, pull), (create_path, create) = pve.posts
     assert pull_path == '/nodes/pve1/storage/local/oci-registry-pull'
-    assert pull == {'reference': REF, 'filename': 'docker.io_library_nginx_stable-alpine'}
+    assert pull['reference'] == REF
+    # The filename includes a hash to prevent collisions
+    assert pull['filename'].startswith('docker.io_library_nginx_stable-alpine_')
+    assert len(pull['filename']) > len('docker.io_library_nginx_stable-alpine_')
     assert create_path == '/nodes/pve1/lxc'
     # the template is the file PVE made of the pull, by its own naming rule
-    assert create['ostemplate'] == _pve_archive('local', pull['filename']) \
-        == 'local:vztmpl/docker.io_library_nginx_stable-alpine.tar'
+    assert create['ostemplate'] == _pve_archive('local', pull['filename'])
+    assert create['ostemplate'].startswith('local:vztmpl/docker.io_library_nginx_stable-alpine_')
+    assert create['ostemplate'].endswith('.tar')
     assert create['vmid'] == 105 and create['hostname'] == 'nginx'
     assert create['rootfs'] == 'local-lvm:2'
     assert create['net0'] == 'name=eth0,bridge=vmbr0,ip=dhcp,tag=20'
@@ -312,7 +316,9 @@ def test_a_deploy_pulls_the_image_then_creates_the_container_from_it(api, admin)
 
 
 def test_an_image_already_on_the_storage_is_not_pulled_again(api, admin):
-    pve = FakePve(on_storage=['local:vztmpl/docker.io_library_nginx_stable-alpine.tar'])
+    # Use the actual archive name that will be generated for REF
+    archive = f'local:vztmpl/{oci.archive_name(REF)}.tar'
+    pve = FakePve(on_storage=[archive])
     pve.manager(api)
     job = _job(_deploy(admin))
     assert job['status'] == 'completed', job['error']
@@ -372,7 +378,8 @@ def test_two_jobs_at_once_do_not_get_the_same_free_id(api, admin, monkeypatch):
     the create ran. Two jobs that ask in between would both get it; the second create
     would then fail on an id the first one took."""
     monkeypatch.setattr(oci, '_spawn', _REAL_SPAWN)
-    pve = FakePve(on_storage=['local:vztmpl/docker.io_library_nginx_stable-alpine.tar'])
+    archive = f'local:vztmpl/{oci.archive_name(REF)}.tar'
+    pve = FakePve(on_storage=[archive])
     m = pve.manager(api)
     taken = set()
 
@@ -602,6 +609,23 @@ def test_the_archive_name_keeps_the_registry():
     for ref in ('docker.io/library/nginx:1', 'localhost:5000/a/b:t'):
         name = oci.archive_name(ref)
         assert _pve_archive('s', name) == f's:vztmpl/{name}.tar'
+
+
+def test_the_archive_name_prevents_collisions():
+    """Distinct references that would collide without the hash get different names."""
+    # These two references differ only in whether the port is part of the registry or path
+    ref1 = 'example.com:5000/team:tag'
+    ref2 = 'example.com/5000/team:tag'
+    name1 = oci.archive_name(ref1)
+    name2 = oci.archive_name(ref2)
+    # Both start with the same human-readable base
+    assert name1.startswith('example.com_5000_team_tag_')
+    assert name2.startswith('example.com_5000_team_tag_')
+    # But they have different hash suffixes, preventing collision
+    assert name1 != name2
+    # Same reference produces same name (idempotent)
+    assert oci.archive_name(ref1) == name1
+    assert oci.archive_name(ref2) == name2
 
 
 # --- who may -------------------------------------------------------------------------------------

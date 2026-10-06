@@ -19,6 +19,7 @@ The calls, as the PVE API viewer (pve-docs/api-viewer/apidoc.js) documents them:
 Pulling takes minutes, so pull and create run as one job in a thread of its own. The
 jobs are kept here in memory; the tasks themselves stay in the PVE task log.
 """
+import hashlib
 import ipaddress
 import logging
 import re
@@ -156,8 +157,20 @@ def archive_name(ref):
     """The file name the pull gets, before PVE appends .tar. PVE keeps only what follows
     the last slash and turns anything outside [a-zA-Z0-9_.-] into _ (its
     normalize_content_filename). Doing the slashes here keeps the registry and the path
-    in the name, so nginx from two registries are two files."""
-    return re.sub(r'[^a-zA-Z0-9_.-]', '_', ref)
+    in the name, so nginx from two registries are two files.
+    
+    To prevent collisions where distinct references map to the same filename (e.g.,
+    'example.com:5000/team:tag' and 'example.com/5000/team:tag' both becoming
+    'example.com_5000_team_tag'), we append a hash of the full reference. This ensures
+    each unique reference gets its own cache entry."""
+    # Create a human-readable base name
+    base = re.sub(r'[^a-zA-Z0-9_.-]', '_', ref)
+    # Truncate to leave room for the hash suffix (max filename ~200 chars to be safe)
+    if len(base) > 180:
+        base = base[:180]
+    # Add a hash of the full reference to ensure uniqueness
+    ref_hash = hashlib.sha256(ref.encode('utf-8')).hexdigest()[:16]
+    return f"{base}_{ref_hash}"
 
 
 # --- which nodes can do it ----------------------------------------------------------------
