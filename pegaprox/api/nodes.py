@@ -2398,6 +2398,9 @@ def get_custom_scripts(cluster_id):
     """Get all custom scripts for a cluster (excludes soft-deleted)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     try:
         db = get_db()
@@ -2850,6 +2853,9 @@ def get_script_output(cluster_id, script_id):
     """Get the last execution output of a script"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     db = get_db()
     script = db.query_one('SELECT name, last_run, last_status, last_output FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NULL', (script_id, cluster_id))
@@ -2871,6 +2877,9 @@ def get_deleted_scripts(cluster_id):
     """Get list of soft-deleted scripts (pending permanent deletion)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     try:
         db = get_db()
