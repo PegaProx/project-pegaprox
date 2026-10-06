@@ -1180,6 +1180,49 @@ class PegaProxDB:
                         logging.info(f"Added {_col} column to users table")
                     except Exception as e:
                         logging.error(f"Failed to add {_col} column: {e}")
+            
+            # MK Dec 2026 (Aikido retest ai_pentest_700488637) — the August revocation fix
+            # relies on ldap_permissions to know what LDAP granted last time, so it can take
+            # back its OWN grants without touching manually assigned ones. But the migration
+            # that added the column left it empty for existing LDAP users, so every permission
+            # they held looked manually assigned and survived even when the mapped group was
+            # removed. Initialize it from the current permissions for LDAP users so the next
+            # sync can authoritatively revoke. This runs every startup to catch databases that
+            # were migrated before this backfill was added.
+            try:
+                cursor.execute("""
+                    UPDATE users 
+                    SET ldap_permissions = permissions 
+                    WHERE auth_source IN ('ldap') 
+                      AND permissions != '[]'
+                      AND (ldap_permissions IS NULL OR ldap_permissions = '[]')
+                """)
+                _migrated = cursor.rowcount
+                if _migrated > 0:
+                    logging.info(f"Initialized ldap_permissions from permissions for "
+                               f"{_migrated} existing LDAP user(s)")
+            except Exception as e:
+                logging.debug(f"ldap_permissions backfill skipped (column may not exist yet): {e}")
+            
+            # MK Dec 2026 — same for ldap_tenant: track what LDAP assigned so a sync can
+            # revoke it when the mapping changes. For existing users, assume LDAP owns the
+            # current tenant_id if they're LDAP-sourced and it's not the default.
+            try:
+                cursor.execute("""
+                    UPDATE users 
+                    SET ldap_tenant = tenant 
+                    WHERE auth_source IN ('ldap') 
+                      AND (ldap_tenant IS NULL OR ldap_tenant = '')
+                      AND tenant IS NOT NULL 
+                      AND tenant != ''
+                      AND tenant != 'default'
+                """)
+                _migrated_t = cursor.rowcount
+                if _migrated_t > 0:
+                    logging.info(f"Initialized ldap_tenant from tenant for "
+                               f"{_migrated_t} existing LDAP user(s)")
+            except Exception as e:
+                logging.debug(f"ldap_tenant backfill skipped (column may not exist yet): {e}")
 
             if 'last_ldap_sync' not in columns:
                 try:
