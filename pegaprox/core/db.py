@@ -1587,6 +1587,13 @@ class PegaProxDB:
             if 'last_snapshot' not in cols:
                 cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_snapshot TEXT DEFAULT ''")
                 logging.info("Added last_snapshot column to cross_cluster_replications")
+            # Security fix: authoritative replica node binding to prevent tag-forgery attacks.
+            # An attacker with VM config permissions can copy the job tag to an unrelated VM,
+            # causing privileged deletion. Store the authoritative node where the replica was
+            # created so _is_replica_of_job can verify both tag AND database binding.
+            if 'replica_node' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN replica_node TEXT DEFAULT ''")
+                logging.info("Added replica_node column to cross_cluster_replications")
         except Exception:
             pass
 

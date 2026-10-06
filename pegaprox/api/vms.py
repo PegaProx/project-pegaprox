@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -8191,11 +8191,60 @@ def _read_target_tags(mgr, node, vmid, vm_type):
 
 
 def _is_replica_of_job(mgr, node, vmid, vm_type, job_id):
-    """True iff the target VM is tagged as a replica of THIS specific xcrepl job."""
+    """True iff the target VM is tagged as a replica of THIS specific xcrepl job
+    AND the authoritative database binding confirms this vmid as the job's replica.
+    
+    Security: The tag alone is insufficient because a principal with VM config permissions
+    can copy it to an unrelated VM. The database binding is authoritative and cannot be
+    forged by target-side configuration access.
+    
+    The node parameter is the current node where the VM resides. We verify that the VMID
+    matches the job's target_vmid (when set), but we allow the node to differ from
+    replica_node to handle legitimate intra-cluster migrations. The key protection is
+    ensuring the VMID matches what the job expects."""
     tags = _read_target_tags(mgr, node, vmid, vm_type)
     if tags is None:
         return False
-    return _job_tag(job_id) in tags
+    if _job_tag(job_id) not in tags:
+        return False
+    
+    # Verify the authoritative database binding: this job must have recorded this
+    # specific vmid as its replica. Without this check, an attacker with VM
+    # config permissions could copy the tag to an unrelated VM and trigger deletion.
+    try:
+        db = get_db()
+        row = db.execute(
+            'SELECT target_vmid, replica_node FROM cross_cluster_replications WHERE id = ?',
+            (job_id,)
+        ).fetchone()
+        if not row:
+            # Job not found in database - refuse to proceed
+            logging.warning(f"[XCREPL] Job {job_id} not found in database during ownership check")
+            return False
+        
+        db_target_vmid = row['target_vmid']
+        db_replica_node = row['replica_node']
+        
+        # The job's target_vmid may be NULL (auto-assigned on first run), so we need to handle that.
+        # Once target_vmid is set, it must match. The replica_node is informational and updated
+        # after each successful run, but we don't enforce it here to allow legitimate intra-cluster
+        # migrations. The critical check is VMID matching.
+        if db_target_vmid is not None:
+            if int(db_target_vmid) != int(vmid):
+                logging.warning(
+                    f"[XCREPL] Job {job_id} ownership mismatch: VM {vmid} on {node} has the tag "
+                    f"but DB binding is vmid={db_target_vmid}"
+                )
+                return False
+        
+        # For jobs that haven't completed a run yet (target_vmid is NULL and replica_node is empty),
+        # we allow the tag check alone. This is the first-run scenario.
+        # For jobs that have completed at least one run, target_vmid will be set and must match.
+        return True
+    except Exception as e:
+        logging.error(f"[XCREPL] Database check failed for job {job_id}: {e}")
+        # Fail closed: if we can't verify the binding, refuse to proceed
+        return False
 
 
 def _tag_as_replica(mgr, node, vmid, vm_type, job_id, attempts=3):
@@ -8580,6 +8629,18 @@ def _execute_replication_incremental(job):
         # incremental one, and that run's first move is the tag check. Reporting ok here
         # while the tag is missing means the job is already broken and says otherwise.
         if tag_ok:
+            # Security: record the authoritative binding in the database so
+            # _is_replica_of_job can verify both tag AND database binding.
+            # This prevents an attacker with VM config permissions from copying
+            # the tag to an unrelated VM and triggering privileged deletion.
+            try:
+                db.execute(
+                    'UPDATE cross_cluster_replications SET replica_node = ?, target_vmid = ? WHERE id = ?',
+                    (target_node, tgt_vmid, job_id)
+                )
+                logging.info(f"[XCINCR] Job {job_id}: recorded authoritative binding to {target_node}/{tgt_vmid}")
+            except Exception as e:
+                logging.error(f"[XCINCR] Job {job_id}: failed to record replica_node binding: {e}")
             _update_repl_status(db, job_id, 'ok', '')
         else:
             _update_repl_status(db, job_id, 'error',
@@ -8925,6 +8986,18 @@ def _execute_replication(job):
                         tag_ok, tag_detail = False, f'{type(e).__name__}: {e}'
                         logging.warning(f"[XCREPL] Job {job_id}: replica-tag write failed: {e}")
                     if tag_ok:
+                        # Security: record the authoritative binding in the database so
+                        # _is_replica_of_job can verify both tag AND database binding.
+                        # This prevents an attacker with VM config permissions from copying
+                        # the tag to an unrelated VM and triggering privileged deletion.
+                        try:
+                            db.execute(
+                                'UPDATE cross_cluster_replications SET replica_node = ?, target_vmid = ? WHERE id = ?',
+                                (target_node, tgt_vmid, job_id)
+                            )
+                            logging.info(f"[XCREPL] Job {job_id}: recorded authoritative binding to {target_node}/{tgt_vmid}")
+                        except Exception as e:
+                            logging.error(f"[XCREPL] Job {job_id}: failed to record replica_node binding: {e}")
                         _update_repl_status(db, job_id, 'ok', '')
                     else:
                         _update_repl_status(db, job_id, 'error',
