@@ -347,6 +347,12 @@ def node_cmd(argv, *, timeout, host='', read=False, need=None, again=False, **kw
     if data is not None:
         kwargs['stdin'] = subprocess.PIPE
     started = time.monotonic()
+    # Final lease check: the command was authorized, but the lease may have been lost
+    # while preparing arguments. Verify we still hold authority before spawning.
+    if not read and ha.guard_on():
+        if not ha.is_active():
+            raise ha.GuardRefused(f'{os.path.basename(str(argv[0]))} {host}'.strip(),
+                                  'this instance lost the lease before the command could start')
     proc = subprocess.Popen(full, start_new_session=True, **kwargs)
     ha.register_child_group(proc.pid)
     try:
