@@ -208,6 +208,12 @@ PERMISSION_WARNINGS = {
         'host boots into - treat it like physical access to the rack. Only takes '
         'effect for accounts that see every cluster.'
     ),
+    'update.manage': (
+        'Not tenant-scoped. Controls the in-app updater, which modifies the shared '
+        'application installation, installs Python dependencies, and restarts the '
+        'service - affecting all tenants. Only takes effect for installation-wide '
+        'accounts.'
+    ),
 }
 
 # Default permissions per role

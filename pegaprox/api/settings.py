@@ -96,6 +96,35 @@ def _sanitize_acme_dns_settings(settings, data):
 def _acme_dns_config(settings):
     return acme_dns_config_from_settings(settings)
 
+
+def _require_installation_wide():
+    """Installation-wide guard for operations that affect the shared application state.
+    
+    sec (pentest): update and rollback modify the shared installation root, install Python
+    dependencies, and restart the service - affecting all tenants. update.manage is a
+    cataloged permission without scope metadata, so tenant custom-role creation accepts it
+    for tenant-scoped roles. This guard confines the permission to installation-wide accounts.
+    
+    Returns an error response to `return`, or None when the caller may proceed.
+    """
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import get_user_clusters
+    
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    # get_user_clusters returns None for installation-wide users (admins or default tenant
+    # with empty cluster list), and a list of cluster IDs for tenant-scoped users
+    user_clusters = get_user_clusters(user)
+    
+    if user_clusters is not None:
+        # Tenant-scoped user - deny access
+        return jsonify({
+            'error': 'Access denied: this operation affects the shared installation and is not tenant-scoped',
+            'code': 'INSTALLATION_WIDE_REQUIRED'
+        }), 403
+    
+    return None
+
+
 @bp.route('/api/pegaprox/version', methods=['GET'])
 @require_auth()
 def get_pegaprox_version():
@@ -401,6 +430,11 @@ def check_pegaprox_update():
     current version with a hint flag so the UI can render "Air-gap mode active —
     update checks disabled" instead of a misleading "no updates available".
     """
+    # sec (pentest): installation-wide operation guard
+    err = _require_installation_wide()
+    if err:
+        return err
+    
     if load_server_settings().get('air_gap_mode', False):
         return jsonify({
             'current_version': PEGAPROX_VERSION,
@@ -528,6 +562,11 @@ def perform_pegaprox_update():
     - *.db, *.enc             (databases, encrypted files)
     - *.pem, *.key, *.crt    (certificates, private keys)
     """
+    # sec (pentest): installation-wide operation guard
+    err = _require_installation_wide()
+    if err:
+        return err
+    
     try:
         data = request.json or {}
         force = data.get('force', False)
@@ -1053,6 +1092,11 @@ def rollback_pegaprox_update():
     
     NS: Rollback functionality - Jan 2026
     """
+    # sec (pentest): installation-wide operation guard
+    err = _require_installation_wide()
+    if err:
+        return err
+    
     try:
         data = request.json or {}
         backup_name = data.get('backup')
@@ -2234,7 +2278,7 @@ _SECRET_FIELD_MARKERS = ('password', 'passwd', 'secret', 'token', 'ssh_key', 'pr
 # key get_all_clusters() decrypts the cluster's root password into (db.py:2884) and 'password'
 # is not a substring of it — the substring sweep alone shipped every cluster's root password
 # in an archive labelled "secrets excluded".
-_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', 'totp_pending_secret')
+_SECRET_FIELD_NAMES = ('pass', 'passphrase', 'pw', 'totp_secret', '****cret')
 _SECRET_FIELD_KEEP = ('token_prefix', 'token_name', 'api_token_name', 'api_token_user',
                       'has_password',
                       'has_token', 'has_ssh_key', 'password_expires_at',
@@ -2422,7 +2466,7 @@ def backup_config():
                 # users_data is a dict: {'username': {data}}
                 for _uname, user_data in users_data.items():
                     if isinstance(user_data, dict):
-                        # same sweep — 'totp_pending_secret' (a live enrolment seed) was missed
+                        # same sweep — '****cret' (a live enrolment seed) was missed
                         _strip_secret_fields(user_data)
                         user_data.pop('password_hash', None)
                         user_data.pop('password_salt', None)
