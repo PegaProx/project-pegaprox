@@ -42,12 +42,6 @@ def start_verification(pve_mgr, params):
 
     Returns task_id or raises Exception if duplicate.
     """
-    # check for duplicate before starting
-    with _verify_lock:
-        for v in _active_verifications.values():
-            if v.get('vmid') == params.get('vmid') and v['status'] == 'running':
-                raise Exception(f"Verification already running for VM {params.get('vmid')}")
-
     task_id = str(uuid.uuid4())[:12]
 
     status = {
@@ -72,7 +66,11 @@ def start_verification(pve_mgr, params):
         'logs': [],
     }
 
+    # Check for duplicate and insert atomically under the same lock
     with _verify_lock:
+        for v in _active_verifications.values():
+            if v.get('vmid') == params.get('vmid') and v['status'] == 'running':
+                raise Exception(f"Verification already running for VM {params.get('vmid')}")
         _active_verifications[task_id] = status
 
     def _log(msg):
@@ -82,6 +80,7 @@ def start_verification(pve_mgr, params):
     def run():
         start_time = time.time()
         test_vmid = None
+        ownership_marker = None
         host, port = pve_mgr.host, pve_mgr.api_port
         node = params.get('node', '')
         vm_type = params.get('vm_type', 'qemu')
@@ -139,6 +138,20 @@ def start_verification(pve_mgr, params):
 
             status['restore_ok'] = True
             _log("Restore completed successfully")
+
+            # Immediately mark ownership after successful restore to prevent cleanup of wrong VM
+            ownership_marker = f"pegaprox-verify-{task_id}"
+            try:
+                mark_resp = pve_mgr._api_put(
+                    f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}/config",
+                    data={'description': ownership_marker}
+                )
+                if mark_resp.status_code == 200:
+                    _log(f"Ownership marker set: {ownership_marker}")
+                else:
+                    _log(f"Warning: Could not set ownership marker (status {mark_resp.status_code})")
+            except Exception as e:
+                _log(f"Warning: Could not set ownership marker: {e}")
 
             # Phase 3: Reconfigure network (optional isolation)
             if network_bridge:
@@ -232,32 +245,37 @@ def start_verification(pve_mgr, params):
                 status['phase'] = 'cleanup'
                 _log("Cleaning up test VM...")
 
-                # stop first
-                try:
-                    pve_mgr._api_post(
-                        f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}/status/stop",
-                        data={'timeout': 30}
-                    )
-                    time.sleep(5)
-                except Exception:
-                    pass
+                # Verify ownership before cleanup
+                if not _verify_ownership(pve_mgr, host, port, node, vm_type, test_vmid, ownership_marker, _log):
+                    _log(f"SECURITY: Ownership verification failed for VMID {test_vmid} — skipping cleanup to prevent destroying unrelated VM")
+                    status['cleanup_ok'] = False
+                else:
+                    # stop first
+                    try:
+                        pve_mgr._api_post(
+                            f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}/status/stop",
+                            data={'timeout': 30}
+                        )
+                        time.sleep(5)
+                    except Exception:
+                        pass
 
-                # delete
-                try:
-                    del_resp = pve_mgr._api_delete(
-                        f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}",
-                        params={'purge': 1, 'destroy-unreferenced-disks': 1}
-                    )
-                    if del_resp.status_code == 200:
-                        del_upid = del_resp.json().get('data')
-                        if del_upid:
-                            _wait_task(pve_mgr, del_upid, timeout=120)
-                        status['cleanup_ok'] = True
-                        _log("Test VM deleted")
-                    else:
-                        _log(f"Cleanup failed: {del_resp.text[:100]}")
-                except Exception as e:
-                    _log(f"Cleanup error: {e}")
+                    # delete
+                    try:
+                        del_resp = pve_mgr._api_delete(
+                            f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}",
+                            params={'purge': 1, 'destroy-unreferenced-disks': 1}
+                        )
+                        if del_resp.status_code == 200:
+                            del_upid = del_resp.json().get('data')
+                            if del_upid:
+                                _wait_task(pve_mgr, del_upid, timeout=120)
+                            status['cleanup_ok'] = True
+                            _log("Test VM deleted")
+                        else:
+                            _log(f"Cleanup failed: {del_resp.text[:100]}")
+                    except Exception as e:
+                        _log(f"Cleanup error: {e}")
             else:
                 _log(f"Auto-cleanup disabled — test VM {test_vmid} kept for inspection")
                 status['cleanup_ok'] = True
@@ -275,20 +293,23 @@ def start_verification(pve_mgr, params):
             status['error'] = str(e)
             _log(f"ERROR: {e}")
 
-            # cleanup on error
+            # cleanup on error — only if we own the VM
             if test_vmid:
-                try:
-                    pve_mgr._api_post(
-                        f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}/status/stop"
-                    )
-                    time.sleep(3)
-                    pve_mgr._api_delete(
-                        f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}",
-                        params={'purge': 1, 'destroy-unreferenced-disks': 1}
-                    )
-                    _log(f"Emergency cleanup: deleted test VM {test_vmid}")
-                except Exception:
-                    _log(f"Emergency cleanup failed for VM {test_vmid}")
+                if not _verify_ownership(pve_mgr, host, port, node, vm_type, test_vmid, ownership_marker, _log):
+                    _log(f"SECURITY: Ownership verification failed for VMID {test_vmid} — skipping emergency cleanup to prevent destroying unrelated VM")
+                else:
+                    try:
+                        pve_mgr._api_post(
+                            f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}/status/stop"
+                        )
+                        time.sleep(3)
+                        pve_mgr._api_delete(
+                            f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{test_vmid}",
+                            params={'purge': 1, 'destroy-unreferenced-disks': 1}
+                        )
+                        _log(f"Emergency cleanup: deleted test VM {test_vmid}")
+                    except Exception:
+                        _log(f"Emergency cleanup failed for VM {test_vmid}")
 
         finally:
             status['completed_at'] = datetime.now().isoformat()
@@ -312,6 +333,43 @@ def start_verification(pve_mgr, params):
     thread.start()
 
     return task_id
+
+
+def _verify_ownership(pve_mgr, host, port, node, vm_type, vmid, expected_marker, log_fn):
+    """Verify that a VM belongs to this verification task before cleanup.
+    
+    Returns True if the VM has the expected ownership marker, False otherwise.
+    This prevents cleanup from destroying a VM that was created by another process
+    after VMID reuse/collision.
+    """
+    if not expected_marker:
+        # No marker was set (restore failed before marking), so we cannot verify ownership.
+        # Fail safe: do not clean up a VM we cannot prove we created.
+        log_fn(f"No ownership marker available for VMID {vmid} — cannot verify ownership")
+        return False
+    
+    try:
+        config_resp = pve_mgr._api_get(
+            f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/config"
+        )
+        
+        if config_resp.status_code != 200:
+            log_fn(f"Could not fetch config for VMID {vmid} (status {config_resp.status_code}) — cannot verify ownership")
+            return False
+        
+        config = config_resp.json().get('data', {})
+        actual_description = config.get('description', '')
+        
+        if actual_description == expected_marker:
+            log_fn(f"Ownership verified: VMID {vmid} has expected marker")
+            return True
+        else:
+            log_fn(f"Ownership mismatch: VMID {vmid} has description '{actual_description[:50]}' but expected '{expected_marker}'")
+            return False
+            
+    except Exception as e:
+        log_fn(f"Exception during ownership verification for VMID {vmid}: {e}")
+        return False
 
 
 def _wait_task(pve_mgr, upid, timeout=600):
