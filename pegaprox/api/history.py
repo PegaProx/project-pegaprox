@@ -469,13 +469,37 @@ def get_affinity_rules(cluster_id=None):
 def create_affinity_rule(cluster_id=None):
     """Create a new affinity rule"""
     data = request.json or {}
-    config = load_affinity_rules()
-
-    import uuid
+    
     # MK: frontend sends vm_ids, db column is vms - accept both
     vms_data = data.get('vm_ids') or data.get('vms', [])
     # NS: cluster_id from URL takes priority over body
     rule_cluster_id = cluster_id or data.get('cluster_id', '')
+    
+    # sec (pentest): enforce cluster access and VM authorization. A globally-admin account
+    # restricted by tenant RBAC can otherwise create affinity policies in another tenant's
+    # cluster, and enabled enforced rules cause conflicting VM migrations to fail with 409.
+    if not rule_cluster_id:
+        return jsonify({'error': 'cluster_id is required'}), 400
+    ok, err = check_cluster_access(rule_cluster_id)
+    if not ok:
+        return err
+    
+    # sec (pentest): verify the caller can access every VM in the rule. An affinity policy
+    # names its members and is evaluated by check_affinity_violation; a caller confined to
+    # specific VMs must not create rules referencing guests they cannot see.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    for vm_id in vms_data:
+        try:
+            if not user_can_access_vm(_u, rule_cluster_id, int(vm_id), 'vm.view'):
+                return jsonify({'error': f'Access denied to VM {vm_id}'}), 403
+        except (TypeError, ValueError):
+            return jsonify({'error': f'Invalid VM ID: {vm_id}'}), 400
+    
+    config = load_affinity_rules()
+
+    import uuid
     new_rule = {
         'id': str(uuid.uuid4())[:8],
         'name': data.get('name', 'New Rule'),
@@ -506,11 +530,42 @@ def update_affinity_rule(rule_id, cluster_id=None):
 
     for rule in config['rules']:
         if rule['id'] == rule_id:
+            # sec (pentest): verify the caller can access the existing rule's cluster before
+            # allowing mutation. PUT searches the flattened all-cluster rule list by ID and
+            # accepts replacement cluster and VM data; a globally-admin account restricted by
+            # tenant RBAC can otherwise overwrite another tenant's affinity policy.
+            existing_cluster = rule.get('cluster_id', '')
+            if existing_cluster:
+                ok, err = check_cluster_access(existing_cluster)
+                if not ok:
+                    return err
+            
             # MK: try every possible source for the vm list
             vms_data = data.get('vm_ids') or data.get('vms') or rule.get('vms') or rule.get('vm_ids', [])
+            new_cluster_id = cluster_id or data.get('cluster_id', rule.get('cluster_id', ''))
+            
+            # sec (pentest): if the cluster is being changed, verify access to the new cluster
+            if new_cluster_id and new_cluster_id != existing_cluster:
+                ok, err = check_cluster_access(new_cluster_id)
+                if not ok:
+                    return err
+            
+            # sec (pentest): verify the caller can access every VM in the updated rule
+            from pegaprox.utils.auth import build_authz_user
+            from pegaprox.utils.rbac import user_can_access_vm
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            target_cluster = new_cluster_id or existing_cluster
+            if target_cluster:
+                for vm_id in vms_data:
+                    try:
+                        if not user_can_access_vm(_u, target_cluster, int(vm_id), 'vm.view'):
+                            return jsonify({'error': f'Access denied to VM {vm_id}'}), 403
+                    except (TypeError, ValueError):
+                        return jsonify({'error': f'Invalid VM ID: {vm_id}'}), 400
+            
             rule.update({
                 'name': data.get('name', rule['name']),
-                'cluster_id': cluster_id or data.get('cluster_id', rule.get('cluster_id', '')),
+                'cluster_id': new_cluster_id,
                 'type': data.get('type', rule['type']),
                 'vms': vms_data,
                 'vm_ids': vms_data,
@@ -528,6 +583,25 @@ def update_affinity_rule(rule_id, cluster_id=None):
 def delete_affinity_rule(rule_id, cluster_id=None):
     """Delete an affinity rule"""
     config = load_affinity_rules()
+    
+    # sec (pentest): verify the caller can access the rule's cluster before allowing deletion.
+    # DELETE filters by ID alone; a globally-admin account restricted by tenant RBAC can
+    # otherwise delete another tenant's affinity policy.
+    rule_to_delete = None
+    for rule in config['rules']:
+        if rule['id'] == rule_id:
+            rule_to_delete = rule
+            break
+    
+    if not rule_to_delete:
+        return jsonify({'error': 'Rule not found'}), 404
+    
+    rule_cluster = rule_to_delete.get('cluster_id', '')
+    if rule_cluster:
+        ok, err = check_cluster_access(rule_cluster)
+        if not ok:
+            return err
+    
     config['rules'] = [r for r in config['rules'] if r['id'] != rule_id]
     save_affinity_rules(config)
 
