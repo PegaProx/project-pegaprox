@@ -445,7 +445,33 @@ def initialization_state() -> str:
     # the user table survived (volume mount oddities, manual restore, etc.)
     try:
         db = get_db()
-        return INIT_INITIALIZED if db.get_all_users() else INIT_UNINITIALIZED
+        users = db.get_all_users()
+        if users:
+            return INIT_INITIALIZED
+        # MK Oct 2026 - partial legacy migration: _migrate_from_legacy() commits
+        # clusters before calling _migrate_users(). When the legacy user store is
+        # missing or undecryptable, _migrate_users() returns False and writes no
+        # users. On the next startup, cluster_count > 0 prevents re-migration, so
+        # the database remains populated with imported clusters but no users. This
+        # is NOT a fresh install - it is a broken migration state. Returning
+        # INIT_UNINITIALIZED here would re-open /api/auth/setup and allow an
+        # unauthenticated attacker to create an administrator with access to the
+        # already-imported cluster integrations. Return INIT_UNKNOWN instead to
+        # refuse both /login and /setup until the operator recovers the user store.
+        if hasattr(db, 'get_all_clusters'):
+            try:
+                clusters = db.get_all_clusters()
+                if clusters:
+                    logging.error("database contains clusters but no users - refusing first-run "
+                                  "setup to prevent unauthenticated administrator creation on a "
+                                  "partially-migrated installation")
+                    return INIT_UNKNOWN
+            except Exception as cluster_err:
+                # get_all_clusters() failed - cannot determine if this is a broken
+                # migration or a fresh install. Fail closed: refuse setup.
+                logging.error(f"cannot read clusters to decide first-run state: {cluster_err}")
+                return INIT_UNKNOWN
+        return INIT_UNINITIALIZED
     except Exception as e:
         logging.error(f"cannot read the user store to decide first-run state: {e}")
         return INIT_UNKNOWN
