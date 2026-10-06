@@ -6114,7 +6114,7 @@ def _root_refusal(access, what):
     why = {
         'token': 'This cluster is connected with an API token, and Proxmox accepts none for this.',
         'not_root': 'This cluster is connected as a user other than root@pam.',
-        'no_password': 'No root@pam password is stored for this cluster.',
+        'no_password': '****ter.',
     }.get(access.get('reason'), '')
     return jsonify({'error': f'Proxmox lets only root@pam {what}. {why}'.strip(),
                     'code': 'PVE_ROOT_REQUIRED', 'reason': access.get('reason')}), 403
@@ -6351,7 +6351,8 @@ def _vm_dir_mappings(manager, cluster_id, node, vmid):
     mappings, read_err = _read_mappings(manager, 'dir', check_node=node)
     if mappings is None:
         return jsonify({'error': read_err}), 502
-    confined = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    confined = caller_is_scoped(user, cluster_id)
     if confined:
         raw = _vm_raw_config(manager, node, vmid)
         if raw is None:
@@ -6360,8 +6361,11 @@ def _vm_dir_mappings(manager, cluster_id, node, vmid):
         mappings = [m for m in mappings if m['id'] in mine]
     for m in mappings:
         m.pop('digest', None)
+    # Attaching a new directory mapping requires cluster.config permission
+    from pegaprox.utils.rbac import has_permission
+    may_add = has_permission(user, 'cluster.config')
     return jsonify({'kind': 'dir', 'node': node, 'supported': True, 'mappings': mappings,
-                    'may_add': not confined})
+                    'may_add': may_add})
 
 
 def _virtiofs_refusal(manager, cluster_id, node, vmid, vm_type, config_updates):
@@ -6386,14 +6390,34 @@ def _virtiofs_refusal(manager, cluster_id, node, vmid, vm_type, config_updates):
         return jsonify({'error': 'virtiofs needs Proxmox VE 8.4 or newer'}), 400
 
     acl = any(opts.get('expose-acl') == '1' for _v, opts in parsed.values())
-    confined = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    confined = caller_is_scoped(user, cluster_id)
     raw = None
     if confined or (acl and 'ostype' not in config_updates):
         raw = _vm_raw_config(manager, node, vmid)
         if raw is None:
             return jsonify({'error': 'Could not read the VM config to check the virtiofs device'}), 502
+    
+    # Read the VM's current directory mappings to determine if new ones are being added
+    if raw is None:
+        raw = _vm_raw_config(manager, node, vmid)
+        if raw is None:
+            return jsonify({'error': 'Could not read the VM config to check the virtiofs device'}), 502
+    mine = _vm_virtiofs_dirids(raw)
+    
+    # Check if any new directory mappings are being added (not already attached to the VM)
+    new_dirids = {opts['dirid'] for _v, opts in parsed.values() if opts['dirid'] not in mine}
+    
+    # Attaching a new directory mapping is a cluster-wide operation that requires cluster.config
+    if new_dirids:
+        from pegaprox.utils.rbac import has_permission
+        if not has_permission(user, 'cluster.config'):
+            return jsonify({'error': 'Attaching a new host directory mapping to a VM requires cluster.config permission. '
+                                     'Directory mappings are cluster-wide resources that expose host paths to guests.',
+                            'code': 'VIRTIOFS_CLUSTER_CONFIG_REQUIRED'}), 403
+    
+    # For confined users, still enforce the original restriction
     if confined:
-        mine = _vm_virtiofs_dirids(raw)
         if any(opts['dirid'] not in mine for _v, opts in parsed.values()):
             return jsonify({'error': 'Sharing another host directory with a VM is a change for the whole '
                                      'cluster, which this account cannot make',
