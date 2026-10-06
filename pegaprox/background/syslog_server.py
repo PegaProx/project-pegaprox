@@ -49,8 +49,11 @@ def _entry_bytes(entry):
     """Rough resident size of one queued entry. The message dominates; the rest is
     small fixed fields, so a flat allowance beats summing every one of them."""
     try:
-        return len(entry.get('message') or '') + 200
-    except Exception:
+        msg = entry.get('message') or ''
+        return len(msg) + 200
+    except (AttributeError, TypeError):
+        # Defensive: if a non-dict somehow reaches the queue, charge conservatively.
+        # The listeners now create dicts, so this should not fire in normal operation.
         return 200
 
 # Runtime start/stop so the Settings → Syslog toggle can open/close the port live
@@ -99,9 +102,16 @@ def _flush_batch(batch):
     threadpool (see _drain_loop) so the encrypt+insert stays off the hub."""
     conn = _open_db(timeout=30)
     try:
+        # Convert dict entries to tuples for executemany. The listeners now create dicts
+        # so _entry_bytes() can measure them accurately; the DB layer still wants tuples.
+        rows = [
+            (e['timestamp'], e['source_ip'], e['hostname'], e['facility'],
+             e['severity'], e['severity_text'], e['message'], e['protocol'])
+            for e in batch
+        ]
         conn.executemany(
             "INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
         conn.commit()
     finally:
         try:
@@ -402,10 +412,16 @@ def _udp_listener(host, port):
             if not message:
                 continue
             hostname, facility, severity, severity_text, msg = parse_syslog(message)
-            entry = (
-                datetime.now().isoformat(),
-                addr[0], hostname, facility, severity, severity_text, msg, "UDP"
-            )
+            entry = {
+                'timestamp': datetime.now().isoformat(),
+                'source_ip': addr[0],
+                'hostname': hostname,
+                'facility': facility,
+                'severity': severity,
+                'severity_text': severity_text,
+                'message': msg,
+                'protocol': 'UDP'
+            }
             _enqueue_log(entry)
         except Exception as e:
             if _stop_event.is_set():
@@ -463,10 +479,16 @@ def _tcp_listener(host, port):
                     message = line.decode(errors="ignore").strip()
                     if message:
                         hostname, facility, severity, severity_text, msg = parse_syslog(message)
-                        entry = (
-                            datetime.now().isoformat(),
-                            addr[0], hostname, facility, severity, severity_text, msg, "TCP"
-                        )
+                        entry = {
+                            'timestamp': datetime.now().isoformat(),
+                            'source_ip': addr[0],
+                            'hostname': hostname,
+                            'facility': facility,
+                            'severity': severity,
+                            'severity_text': severity_text,
+                            'message': msg,
+                            'protocol': 'TCP'
+                        }
                         _enqueue_log(entry)
         except Exception:
             pass
