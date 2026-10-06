@@ -864,7 +864,14 @@ def create_user():
     data = request.get_json()
     username = sanitize_username(data.get('username', '').strip().lower())
     password = data.get('password', '')
-    role = data.get('role', ROLE_USER)
+    # MK Jan 2027 (pentest) — default to viewer (read-only) not user (destructive ops).
+    # ROLE_USER carries vm.config, vm.migrate, backup.delete, backup.restore, pool.assign,
+    # pbs.datastore.gc/verify, vmware.vm.manage, and xapi.vm.config — infrastructure-level
+    # operations that materially exceed tenant_user authority. The default tenant's empty
+    # cluster list is interpreted as all clusters, so an unscoped account provisioned without
+    # an explicit role would reach every configured cluster with those permissions. Require
+    # the provisioning flow to explicitly request elevated roles; least-privilege default.
+    role = data.get('role', ROLE_VIEWER)
     display_name = data.get('display_name', username)
     email = data.get('email', '')
     tenant_id = data.get('tenant_id', DEFAULT_TENANT_ID)
