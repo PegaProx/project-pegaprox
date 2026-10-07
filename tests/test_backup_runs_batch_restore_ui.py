@@ -123,7 +123,10 @@ def test_the_history_is_offered_outside_what_a_standby_hides():
     """Reading the runs changes nothing: Cloud shows its button outside the mut.acts block"""
     cloud = _call_sites()[1]
     assert cloud.count('{mut.acts && (<>') == 1
-    assert cloud.index('<CloudIconBtn icon="Clock"') < cloud.index('{mut.acts && (<>')
+    # after the gated block, so the row actions still open with it (the standby check in
+    # test_ha_ui reads them that way)
+    assert cloud.index('<CloudIconBtn icon="Clock"') > cloud.index('{mut.acts && (<>')
+    assert re.search(r'</>\)\}\n\s*<CloudIconBtn icon="Clock" title=\{t\(\'bkpRunsHistory\'\)', _read('web', 'src', 'cloud.js'))
     storage = _call_sites()[2]
     # restoring asks vm.backup, which hasPerm withholds on a standby; the list of batches is a read
     assert "hasPerm('vm.backup')" in storage and "hasPerm('backup.view')" in storage
