@@ -12,6 +12,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
+from pegaprox.models.tasks import balancer_cooldown
 
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
@@ -157,6 +158,7 @@ def load_migration_history():
                 'status': row['status'],
                 'duration': row['duration_seconds'],
                 'timestamp': row['timestamp'],
+                'trigger': row['trigger_kind'] if 'trigger_kind' in row.keys() else None,
             })
         
         return {'migrations': migrations}
@@ -184,45 +186,19 @@ def save_migration_history(config):
 
 def log_migration(cluster_id: str, vmid: int, vm_name: str, vm_type: str, 
                   source_node: str, target_node: str, migration_type: str,
-                  status: str, user: str = 'system', duration: float = 0):
+                  status: str, user: str = 'system', duration: float = 0,
+                  reason: str = None, trigger: str = None, details: dict = None):
     """Log a VM migration event to SQLite database
     
     MK: Called from migrate_vm and HA failover functions
-    writes to db now
+    writes to db now. Oct 2026 - the balancer passes its own reason and trigger,
+    and the table keeps the newest rows per cluster (db.add_migration_event)
     """
     try:
-        db = get_db()
-        cursor = db.conn.cursor()
-        
-        cursor.execute('''
-            INSERT INTO migration_history
-            (cluster_id, vmid, vm_name, source_node, target_node, 
-             reason, status, duration_seconds, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            cluster_id,
-            vmid,
-            vm_name,
-            source_node,
-            target_node,
-            f"{migration_type} by {user}",
-            status,
-            duration,
-            datetime.now().isoformat()
-        ))
-        
-        db.conn.commit()
-        
-        # Cleanup old entries (keep last 1000)
-        cursor.execute('''
-            DELETE FROM migration_history 
-            WHERE id NOT IN (
-                SELECT id FROM migration_history 
-                ORDER BY timestamp DESC LIMIT 1000
-            )
-        ''')
-        db.conn.commit()
-        
+        get_db().add_migration_event(
+            cluster_id, vmid, vm_name, source_node, target_node, status,
+            reason=reason or f"{migration_type} by {user}", trigger=trigger,
+            details=details, duration=duration)
     except Exception as e:
         logging.error(f"Error logging migration: {e}")
     
@@ -278,7 +254,7 @@ def get_migration_history():
     migrations = [m for m in migrations
                   if user_can_access_vm(_u, m.get('cluster_id'), m.get('vmid'), 'vm.view')]
 
-    return jsonify(migrations[:limit])
+    return jsonify(_balancer_rows_without_why(migrations[:limit], _u))
 
 @bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history', methods=['GET'])
 @require_auth(perms=['vm.view'])
@@ -303,7 +279,76 @@ def get_vm_migration_history(cluster_id, vmid):
     migrations = [m for m in config.get('migrations', []) 
                   if m.get('cluster_id') == cluster_id and m.get('vmid') == vmid]
     
-    return jsonify(migrations)
+    return jsonify(_balancer_rows_without_why(migrations, _u))
+
+
+def _balancer_rows_without_why(rows, user):
+    """A caller confined to some guests of a cluster gets the balancer's moves of their
+    guests without why: the reason quotes the load of every node and the names of rules
+    over guests they cannot see."""
+    from pegaprox.api.helpers import caller_is_scoped
+    scoped, out = {}, []
+    for m in rows:
+        if m.get('trigger'):
+            cid = m.get('cluster_id')
+            if cid not in scoped:
+                scoped[cid] = caller_is_scoped(user, cid)
+            if scoped[cid]:
+                m = dict(m, reason='')
+        out.append(m)
+    return out
+
+
+# MK Oct 2026 - what the balancer of one cluster moved and why, newest first, a page at a
+# time (?before=<id of the last row>). Only the instance whose balancer runs fills the
+# table, so a standby reads this from its active (ha.LEADER_ONLY_READS).
+BALANCE_HISTORY_STATUSES = ('success', 'failed', 'dry_run')
+
+
+@bp.route('/api/clusters/<cluster_id>/balance-history', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_balance_history(cluster_id):
+    """Balancer moves of one cluster with why. ?trigger=balance,predictive,affinity,pin
+    ?status=success|failed|dry_run ?before=<row id> ?limit=1..200"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    mgr = cluster_managers.get(cluster_id)
+    if mgr is None:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    db = get_db()
+    raw = request.args.get('trigger', '')
+    triggers = [t for t in raw.split(',') if t] if raw else None
+    if triggers is not None and (len(triggers) > len(db.BALANCER_TRIGGERS)
+                                 or any(t not in db.BALANCER_TRIGGERS for t in triggers)):
+        return jsonify({'error': f"trigger must be one or more of {', '.join(db.BALANCER_TRIGGERS)}"}), 400
+    status = request.args.get('status') or None
+    if status is not None and status not in BALANCE_HISTORY_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(BALANCE_HISTORY_STATUSES)}"}), 400
+    before = request.args.get('before') or None
+    if before is not None:
+        if not before.isdigit() or len(before) > 18:
+            return jsonify({'error': 'before must be the id of a row'}), 400
+        before = int(before)
+    from pegaprox.api.helpers import bounded_limit, caller_is_scoped, scope_vm_rows
+    limit = bounded_limit(request.args.get('limit'), 50, 200)
+
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        # their own guests only, and not why: the reason quotes the load of every node
+        # and the names of rules over guests they cannot see
+        rows = scope_vm_rows(cluster_id, db.list_balancer_moves(cluster_id, triggers, status, before))
+        rows = [dict(r, reason='', details={}) for r in rows[:limit + 1]]
+    else:
+        rows = db.list_balancer_moves(cluster_id, triggers, status, before, limit + 1)
+    page = rows[:limit]
+    return jsonify({
+        'entries': page,
+        'next_before': page[-1]['id'] if len(rows) > limit and page else None,
+        'cooldown': balancer_cooldown(getattr(getattr(mgr, 'config', None), 'migration_cooldown', None)),
+    })
 
 
 # =====================================================

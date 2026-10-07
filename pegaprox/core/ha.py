@@ -228,6 +228,7 @@ LEADER_ONLY_READS = frozenset((
     '/api/push/inbox',
     '/api/migration-history',
     '/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history',
+    '/api/clusters/<cluster_id>/balance-history',
 ))
 # The task lists of an XCP-ng pool. PegaProx follows the XAPI tasks it started itself, in
 # the process that started them (core/xcpng.py _active_tasks), so a member lists none of
@@ -1434,7 +1435,7 @@ _UNREADABLE = '\x00unreadable'
 # _hand_over_ha_view refreshes those copies as well.
 _REFRESH_CLUSTER_FIELDS = (
     'name', 'enabled', 'check_interval', 'migration_threshold', 'migration_tolerance',
-    'auto_migrate', 'balance_containers', 'balance_local_disks', 'dry_run', 'ha_enabled',
+    'migration_cooldown', 'auto_migrate', 'balance_containers', 'balance_local_disks', 'dry_run', 'ha_enabled',
     'ha_settings', 'excluded_nodes', 'predictive_balancing', 'predictive_threshold',
     'balance_cpu_weight', 'balance_mem_weight', 'balance_io_weight', 'cpu_baseline',
     'vnc_tunnel', 'proxlb_tags_enabled', 'proxlb_pins_auto_migrate', 'proxlb_pins_strict',

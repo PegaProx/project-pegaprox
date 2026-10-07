@@ -48,7 +48,8 @@ from pegaprox.globals import (
     cluster_managers, _ssh_active_connections,
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
-from pegaprox.models.tasks import MaintenanceTask, PegaProxConfig
+from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
+                                   BALANCER_COOLDOWN_DEFAULT)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for
@@ -498,6 +499,118 @@ def drop_own_recovery_locks(instance_id):
     if removed:
         logging.info(f"[HA] removed {removed} recovery lock file(s) this instance left behind")
     return removed
+
+
+# MK Oct 2026 - every move the balancer makes goes into migration_history with why. The
+# sentence is for whoever reads the table, the numbers beside it let the UI word it in
+# the reader's language. The guest dict carries it into migrate_vm under this key, so
+# no caller of migrate_vm (or stand-in for it) has to take a new argument.
+BALANCE_WHY = '_balance_why'
+MIGRATION_LOG_MAX = 200   # the in-memory list behind "last migrations"
+
+
+def _node_load(node_status, node):
+    d = (node_status or {}).get(node) or {}
+
+    def num(key):
+        try:
+            return round(float(d.get(key) or 0), 1)
+        except (TypeError, ValueError):
+            return 0.0
+    return {'score': num('score'), 'cpu': num('cpu_percent'), 'mem': num('mem_percent')}
+
+
+def balance_reason(kind, source, target, node_status=None, **facts):
+    """{trigger, reason, details} of one balancer move. kind 'balance' (threshold,
+    tolerance), 'predictive' (forecast, confidence 0..1, threshold), 'affinity' (rule) or
+    'pin' (pinned); manual=True when someone started it by hand (Balance Now, Move back now)."""
+    def num(key, digits=1):
+        try:
+            return round(float(facts.get(key) or 0), digits)
+        except (TypeError, ValueError):
+            return 0.0
+    details = {'source': source, 'target': target}
+    tgt = _node_load(node_status, target)
+    if kind == 'balance':
+        src = _node_load(node_status, source)
+        diff = round(src['score'] - tgt['score'], 1)
+        threshold, tolerance = num('threshold'), num('tolerance')
+        details.update(source_load=src, target_load=tgt, diff=diff,
+                       threshold=threshold, tolerance=tolerance)
+        text = (f"{source} score {src['score']} (CPU {src['cpu']}%, RAM {src['mem']}%) and "
+                f"{target} score {tgt['score']} (CPU {tgt['cpu']}%, RAM {tgt['mem']}%) are "
+                f"{diff} apart, above threshold {threshold:g} + tolerance {tolerance:g}")
+    elif kind == 'predictive':
+        forecast, threshold = num('forecast'), num('threshold')
+        confidence = int(round(num('confidence', 4) * 100))
+        details.update(forecast=forecast, confidence=confidence, threshold=threshold,
+                       target_load=tgt)
+        text = (f"{source} is heading for overload (forecast score {forecast} above "
+                f"{threshold:g}, confidence {confidence}%), moved to the least loaded node "
+                f"{target} (score {tgt['score']})")
+    elif kind == 'affinity':
+        rule = str(facts.get('rule') or '')[:200]
+        details.update(rule=rule, target_load=tgt)
+        text = (f"anti-affinity rule '{rule}': another guest of the rule runs on {source}, "
+                f"moved to {target} (score {tgt['score']})")
+    else:
+        pinned = sorted(str(n) for n in (facts.get('pinned') or []))
+        details.update(pinned=pinned)
+        text = f"pinned to {', '.join(pinned)} but running on {source}, returned to {target}"
+    if facts.get('manual'):
+        details['manual'] = True
+        text += ' (started by hand)'
+    return {'trigger': kind, 'reason': text, 'details': details}
+
+
+def record_balance_move(cluster_id, vm, target, why, status, duration=0.0, note=''):
+    """One balancer move into migration_history. Never raises: the move happened (or
+    failed) whether or not its line could be written."""
+    try:
+        reason = why.get('reason') or ''
+        if note:
+            reason = f"{reason}; {note}" if reason else note
+        get_db().add_migration_event(
+            cluster_id, vm.get('vmid'), vm.get('name') or '', vm.get('node') or '', target or '',
+            status, reason=reason[:1000], trigger=why.get('trigger'),
+            details=why.get('details'), duration=duration)
+    except Exception as e:
+        logging.warning(f"[BAL] could not record the move of {vm.get('vmid')} in the history: {e}")
+
+
+def _iso_epoch(value):
+    try:
+        ts = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return ts.timestamp()
+
+
+def balancer_cooldown_secs(mgr):
+    return balancer_cooldown(getattr(getattr(mgr, 'config', None), 'migration_cooldown',
+                                     BALANCER_COOLDOWN_DEFAULT))
+
+
+def recent_balancer_moves(mgr):
+    """{vmid: when the balancer last moved it}, the cooldown table. The first look after a
+    start fills it from the history: a restart used to hand the balancer a guest it had
+    moved a minute before."""
+    table = mgr._vm_migration_cooldown
+    cid = getattr(mgr, 'id', None)
+    if isinstance(cid, str) and not getattr(mgr, '_cooldown_seeded', False):
+        mgr._cooldown_seeded = True
+        horizon = time.time() - balancer_cooldown_secs(mgr)
+        try:
+            db = get_db()
+            for row in db.list_balancer_moves(cid, status='success', limit=db.MIGRATION_HISTORY_KEEP):
+                ts = _iso_epoch(row['timestamp'])
+                if ts is None or ts < horizon:
+                    continue
+                vmid = int(row['vmid'])
+                table[vmid] = max(table.get(vmid, 0), ts)
+        except Exception as e:
+            logging.debug(f"[BAL] cooldown not read back from the history: {e}")
+    return table
 
 
 class UnreadList(list):
@@ -2571,8 +2684,8 @@ class PegaProxManager:
             # stop ping-pong. The reconcile records that cooldown after a move but
             # never read it back, so a guest HA or an operator keeps pulling off
             # its pin got dragged back on every cycle. Defer it until it lapses.
-            last_move = self._vm_migration_cooldown.get(v['vmid'])
-            if last_move and (time.time() - last_move) < 900:
+            last_move = recent_balancer_moves(self).get(v['vmid'])
+            if last_move and (time.time() - last_move) < balancer_cooldown_secs(self):
                 self.logger.info(
                     f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but was migrated "
                     "recently - waiting out the cooldown")
@@ -2631,6 +2744,8 @@ class PegaProxManager:
             if not ha.confirm_step(f"returning {v['vmid']} to its pinned node"):
                 break
             migrated_now += 1
+            vm[BALANCE_WHY] = balance_reason('pin', v['node'], target, pinned=v['pinned_nodes'],
+                                             manual=force)
             if self.migrate_vm(vm, target, dry_run=False, wait_timeout=1800):
                 result['migrated'].append({**v, 'target': target})
                 self._vm_migration_cooldown[v['vmid']] = time.time()
@@ -3005,9 +3120,12 @@ class PegaProxManager:
 
                     if not ha.confirm_step(f'the anti-affinity move of {vid}'):
                         return migrations
+                    vm_res[BALANCE_WHY] = balance_reason('affinity', nd, target, node_status,
+                                                         rule=rule.get('name'))
                     ok = self.migrate_vm(vm_res, target)
                     if ok:
                         migrations += 1
+                        self._vm_migration_cooldown[vm_res.get('vmid')] = time.time()
                         # update maps so next iteration sees the new position
                         vm_nodes[vid] = target
                         node_groups.setdefault(target, []).append(vid)
@@ -3067,11 +3185,13 @@ class PegaProxManager:
 
         # Filter VMs on source node that are running
         # NS: VM cooldown — skip VMs migrated in last 15 min to prevent ping-pong
-        cooldown_secs = 900
+        # MK Oct 2026 - per cluster now (migration_cooldown), and it survives a restart
+        cooldown_secs = balancer_cooldown_secs(self)
         now = time.time()
-        cooled_vmids = {vmid for vmid, ts in self._vm_migration_cooldown.items() if now - ts < cooldown_secs}
+        recent = recent_balancer_moves(self)
+        cooled_vmids = {vmid for vmid, ts in recent.items() if now - ts < cooldown_secs}
         # clean up old entries
-        self._vm_migration_cooldown = {v: t for v, t in self._vm_migration_cooldown.items() if now - t < cooldown_secs}
+        self._vm_migration_cooldown = {v: t for v, t in recent.items() if now - t < cooldown_secs}
 
         # MK May 2026 — coexistence with PVE 9.2's CRS. Two-layer check:
         #
@@ -4113,13 +4233,17 @@ class PegaProxManager:
         """migrate vm to another node"""
         # NS: this handles the proxmox api call
         # MK: had to add iso unmount, was breaking migrations silently for weeks
+        # MK Oct 2026 - a balancer move brings its reason along (BALANCE_WHY); taken off the
+        # dict first thing, it must not stick to the guest for the next caller
+        why = vm.pop(BALANCE_WHY, None) if isinstance(vm, dict) else None
+        started = time.time()
         if dry_run is None:
             dry_run = self.config.dry_run
         
         # dry run = just log, dont actually do it
         if dry_run:
             self.logger.info(f"[DRY RUN] Would migrate {vm.get('name', 'unnamed')} ({vm.get('vmid')}) to {target_node}")
-            self.last_migration_log.append({
+            self._note_migration({
                 'timestamp': datetime.now().isoformat(),
                 'vm': vm.get('name', 'unnamed'),
                 'vmid': vm.get('vmid'),
@@ -4127,7 +4251,7 @@ class PegaProxManager:
                 'to_node': target_node,
                 'dry_run': True,
                 'success': True
-            })
+            }, why, started)
             return True
         
         try:
@@ -4208,7 +4332,7 @@ class PegaProxManager:
                     success = self._wait_for_task(source_node, task_id, timeout=wait_timeout)
                     if success:
                         self.logger.info(f"[OK] Successfully migrated {vm.get('name', 'unnamed')} to {target_node}")
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4216,7 +4340,7 @@ class PegaProxManager:
                             'to_node': target_node,
                             'dry_run': False,
                             'success': True
-                        })
+                        }, why, started)
                         return True
                     else:
                         # MK Apr 2026 (#340): HA + negative-affinity setups fail the original
@@ -4258,7 +4382,7 @@ class PegaProxManager:
                                 f"ended up on {actual_node} (HA likely re-routed from {target_node}). "
                                 "Treating as success."
                             )
-                            self.last_migration_log.append({
+                            self._note_migration({
                                 'timestamp': datetime.now().isoformat(),
                                 'vm': vm.get('name', 'unnamed'),
                                 'vmid': vmid,
@@ -4268,10 +4392,10 @@ class PegaProxManager:
                                 'dry_run': False,
                                 'success': True,
                                 'note': 'HA re-routed during evacuation',
-                            })
+                            }, why, started)
                             return True
                         self.logger.error(f"[ERROR] Migration task failed for {vm.get('name', 'unnamed')}")
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4280,9 +4404,19 @@ class PegaProxManager:
                             'dry_run': False,
                             'success': False,
                             'error': 'Task failed'
-                        })
+                        }, why, started)
                         return False
-                
+
+                if why:
+                    self._note_migration({
+                        'timestamp': datetime.now().isoformat(),
+                        'vm': vm.get('name', 'unnamed'),
+                        'vmid': vmid,
+                        'from_node': source_node,
+                        'to_node': target_node,
+                        'dry_run': False,
+                        'success': True
+                    }, why, started)
                 return True
             else:
                 resp_text = response.text or ''
@@ -4308,7 +4442,7 @@ class PegaProxManager:
                             f"[OK] {vm.get('name', 'unnamed')} left {source_node} (now on "
                             f"{landed}) via the in-flight migration — evacuation successful."
                         )
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4317,10 +4451,10 @@ class PegaProxManager:
                             'dry_run': False,
                             'success': True,
                             'note': 'already migrating (migrate lock) — confirmed off source',
-                        })
+                        }, why, started)
                         return True
                 self.logger.error(f"[ERROR] Failed to migrate {vm.get('name', 'unnamed')}: {response.status_code} - {resp_text}")
-                self.last_migration_log.append({
+                self._note_migration({
                     'timestamp': datetime.now().isoformat(),
                     'vm': vm.get('name', 'unnamed'),
                     'vmid': vmid,
@@ -4329,13 +4463,49 @@ class PegaProxManager:
                     'dry_run': False,
                     'success': False,
                     'error': resp_text
-                })
+                }, why, started)
                 return False
                 
         except Exception as e:
             self.logger.error(f"[ERROR] Error migrating VM: {e}")
+            if why:
+                self._note_migration({
+                    'timestamp': datetime.now().isoformat(),
+                    'vm': vm.get('name', 'unnamed'),
+                    'vmid': vm.get('vmid'),
+                    'from_node': vm.get('node'),
+                    'to_node': target_node,
+                    'dry_run': False,
+                    'success': False,
+                    'error': str(e)
+                }, why, started)
             return False
-    
+
+    def _note_migration(self, entry, why=None, started=None):
+        """A line of the in-memory "last migrations" list, and for a move of the balancer
+        (why set) its row in migration_history."""
+        log = self.last_migration_log
+        log.append(entry)
+        if len(log) > MIGRATION_LOG_MAX:
+            del log[:-MIGRATION_LOG_MAX]
+        if not why:
+            return
+        entry['trigger'] = why.get('trigger')
+        status = 'dry_run' if entry.get('dry_run') else ('success' if entry.get('success') else 'failed')
+        extra, note = {}, ''
+        if entry.get('requested_target'):
+            extra['requested_target'] = entry['requested_target']
+            note = f"HA placed it on {entry.get('to_node')} instead of {entry['requested_target']}"
+        if entry.get('error'):
+            extra['error'] = str(entry['error'])[:300]
+            note = f"failed: {extra['error']}"
+        if extra:
+            why = dict(why, details=dict(why.get('details') or {}, **extra))
+        record_balance_move(self.id, {'vmid': entry.get('vmid'), 'name': entry.get('vm'),
+                                      'node': entry.get('from_node')},
+                            entry.get('to_node'), why, status,
+                            duration=(time.time() - started) if started else 0.0, note=note)
+
     def _wait_for_task(self, node: str, task_id: str, timeout: int = 600) -> bool:
         """
         Wait for a Proxmox task to complete.
@@ -19482,6 +19652,10 @@ echo "AGENT_INSTALLED_OK"
                     # an automatic leader that lost its lease starts no migration (#625)
                     if not ha.confirm_step(f'balancing {vm_name} ({vmid})'):
                         break
+                    vm[BALANCE_WHY] = balance_reason(
+                        'balance', source_node, target_node, node_status,
+                        threshold=self.config.migration_threshold,
+                        tolerance=getattr(self.config, 'migration_tolerance', 10) or 0, manual=force)
                     success = self.migrate_vm(vm, target_node)
                     
                     if success:
@@ -19523,6 +19697,9 @@ echo "AGENT_INSTALLED_OK"
                                 self.logger.info(f"[PREDICTIVE] Migrating {vm.get('name', '')} (VMID {vm.get('vmid')}): {nname} → {tgt}")
                                 if not ha.confirm_step(f"balancing {vm.get('vmid')} ahead of a trend"):
                                     break
+                                vm[BALANCE_WHY] = balance_reason(
+                                    'predictive', nname, tgt, node_status, forecast=ps['score'],
+                                    confidence=ps['confidence'], threshold=pred_threshold)
                                 if self.migrate_vm(vm, tgt):
                                     migrations_done += 1
                                     self._vm_migration_cooldown[vm.get('vmid')] = time.time()

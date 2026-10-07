@@ -11,7 +11,8 @@ from flask import Blueprint, jsonify, request
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
-from pegaprox.models.tasks import PegaProxConfig
+from pegaprox.models.tasks import (PegaProxConfig, balancer_cooldown, BALANCER_COOLDOWN_MIN,
+                                   BALANCER_COOLDOWN_MAX)
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
 from pegaprox.core.cache import StorageDataCache
@@ -131,6 +132,7 @@ def get_clusters():
                 'ssh_disabled': bool(getattr(mgr.config, 'ssh_disabled', False)),
                 'migration_threshold': mgr.config.migration_threshold,
                 'migration_tolerance': getattr(mgr.config, 'migration_tolerance', 10),
+                'migration_cooldown': balancer_cooldown(getattr(mgr.config, 'migration_cooldown', None)),
                 'check_interval': mgr.config.check_interval,
                 'auto_migrate': mgr.config.auto_migrate,
                 'balance_containers': getattr(mgr.config, 'balance_containers', False),
@@ -192,6 +194,9 @@ def add_cluster():
     _uerr = _ssh_user_error(data)
     if _uerr:
         return _uerr
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -258,6 +263,7 @@ def export_cluster_config(cluster_id):
         'ssl_verification': c.ssl_verification,
         'migration_threshold': c.migration_threshold,
         'migration_tolerance': getattr(c, 'migration_tolerance', 10),
+        'migration_cooldown': balancer_cooldown(getattr(c, 'migration_cooldown', None)),
         'check_interval': c.check_interval,
         'auto_migrate': c.auto_migrate,
         'balance_containers': getattr(c, 'balance_containers', False),
@@ -413,6 +419,11 @@ def reconfigure_cluster(cluster_id):
     else:
         kept = getattr(old_mgr.config, 'ha_settings', None)
         data['ha_settings'] = dict(kept) if isinstance(kept, dict) else {}
+    # the balancer cooldown is no connection setting either: one the dialog leaves out stays
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
+    data.setdefault('migration_cooldown', balancer_cooldown(getattr(old_mgr.config, 'migration_cooldown', None)))
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -1447,6 +1458,7 @@ def get_cluster_resources(cluster_id):
 # password was that secret, offered to every node. /reconfigure changes both together.
 ALLOWED_CONFIG_FIELDS = {
     'name', 'host', 'ssl_verification', 'migration_threshold', 'migration_tolerance',
+    'migration_cooldown',  # MK Oct 2026 - seconds the balancer leaves a moved guest alone
     'check_interval', 'auto_migrate', 'balance_containers', 'balance_local_disks',
     'dry_run', 'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user', 'ssh_port',
     'excluded_nodes',
@@ -1465,6 +1477,19 @@ ALLOWED_CONFIG_FIELDS = {
 # truthy string like "false" would round-trip back to True and silently flip an
 # opt-in on. Only a real bool is accepted for them, no bool() coercion.
 BOOLEAN_CONFIG_FIELDS = {'proxlb_pins_auto_migrate', 'proxlb_pins_strict'}
+
+
+def _cooldown_error(data):
+    """A 400 when the body sets migration_cooldown to anything but whole seconds in
+    range. Checked before any field is applied, like the booleans above."""
+    if 'migration_cooldown' not in data:
+        return None
+    value = data['migration_cooldown']
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or not BALANCER_COOLDOWN_MIN <= value <= BALANCER_COOLDOWN_MAX:
+        return jsonify({'error': f"'migration_cooldown' must be whole seconds from "
+                                 f"{BALANCER_COOLDOWN_MIN} to {BALANCER_COOLDOWN_MAX}"}), 400
+    return None
 
 
 def _ssh_user_error(data):
@@ -1601,6 +1626,9 @@ def update_cluster_config(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -1649,6 +1677,9 @@ def update_cluster_config_live(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -1662,10 +1693,15 @@ def update_cluster_config_live(cluster_id):
             updated.append(key)
 
     save_config()
+    usr = getattr(request, 'session', {}).get('user', 'system')
     if rebind:
-        log_audit(getattr(request, 'session', {}).get('user', 'system'), 'cluster.endpoint_changed',
+        log_audit(usr, 'cluster.endpoint_changed',
                   f"Cluster {mgr.config.name}: {', '.join(rebind['moved'])} changed with the "
                   f"credential re-entered")
+    # MK Oct 2026 - the settings tab saves through here, and nothing of it reached the audit log
+    if updated:
+        log_audit(usr, 'cluster.config_changed', f"Cluster {mgr.config.name} config updated: "
+                  f"{', '.join(updated)}")
 
     return jsonify({'message': 'Configuration updated successfully', 'updated_fields': updated})
 

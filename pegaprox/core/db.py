@@ -32,6 +32,7 @@ from pegaprox.constants import (
     MIGRATION_HISTORY_FILE, SERVER_SETTINGS_FILE, CUSTOM_ROLES_FILE,
     ESXI_CONFIG_FILE, STORAGE_CLUSTERS_FILE,
 )
+from pegaprox.models.tasks import balancer_cooldown, BALANCER_COOLDOWN_DEFAULT
 
 # Fallback tenant ID for existing users (mirrors pegaprox.utils.rbac.DEFAULT_TENANT_ID)
 # Defined here to avoid circular import: rbac imports from db
@@ -620,11 +621,17 @@ class PegaProxDB:
                 reason TEXT,
                 status TEXT,
                 duration_seconds REAL,
-                timestamp TEXT NOT NULL
+                timestamp TEXT NOT NULL,
+                trigger_kind TEXT,
+                details TEXT
             )
         ''')
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_migration_timestamp ON migration_history(timestamp DESC)
+        ''')
+        # the balancer history pages one cluster newest first, and the trim keeps per cluster
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_migration_cluster ON migration_history(cluster_id, id)
         ''')
 
         # #720 — persist node maintenance so it survives a PegaProx restart.
@@ -1371,6 +1378,8 @@ class PegaProxDB:
                 # MK Aug 2026 (#689) — optional FQDN suffix for "Open in Proxmox" node links.
                 # e.g. "example.local" turns pve01 → https://pve01.example.local:8006. Empty = off.
                 ('node_ui_suffix', "TEXT DEFAULT ''"),
+                # seconds the balancer leaves a guest alone after moving it (was a fixed 900)
+                ('migration_cooldown', "INTEGER DEFAULT 900"),
             ]:
                 if col_name not in cluster_columns:
                     try:
@@ -1429,6 +1438,17 @@ class PegaProxDB:
                     logging.error(f"Failed to add enforce column: {e}")
         except Exception as e:
             logging.error(f"Error checking affinity_rules schema: {e}")
+
+        # what started a move (the balancer, and which of its rules) and the
+        # numbers behind the reason, so the history can be filtered and worded in the UI
+        try:
+            cursor.execute("PRAGMA table_info(migration_history)")
+            mh_columns = [col[1] for col in cursor.fetchall()]
+            for col_name in ('trigger_kind', 'details'):
+                if col_name not in mh_columns:
+                    cursor.execute(f"ALTER TABLE migration_history ADD COLUMN {col_name} TEXT")
+        except Exception as e:
+            logging.error(f"Error checking migration_history schema: {e}")
 
         # MK: Migration - create balancing_excluded_vms table if not exists
         try:
@@ -3310,6 +3330,7 @@ class PegaProxDB:
                 'ssl_verification': bool(row['ssl_verification']),
                 'migration_threshold': row['migration_threshold'],
                 'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
+                'migration_cooldown': balancer_cooldown(row['migration_cooldown']) if 'migration_cooldown' in row.keys() else BALANCER_COOLDOWN_DEFAULT,
                 'check_interval': row['check_interval'],
                 'auto_migrate': bool(row['auto_migrate']),
                 'balance_containers': bool(row['balance_containers']),
@@ -3400,6 +3421,7 @@ class PegaProxDB:
             'ssl_verification': bool(row['ssl_verification']),
             'migration_threshold': row['migration_threshold'],
             'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
+            'migration_cooldown': balancer_cooldown(row['migration_cooldown']) if 'migration_cooldown' in row.keys() else BALANCER_COOLDOWN_DEFAULT,
             'check_interval': row['check_interval'],
             'auto_migrate': bool(row['auto_migrate']),
             'balance_containers': bool(row['balance_containers']),
@@ -3444,8 +3466,8 @@ class PegaProxDB:
 
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
-                       'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict '
-                       'FROM clusters WHERE id = ?', (cluster_id,))
+                       'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict, '
+                       'migration_cooldown FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -3469,7 +3491,8 @@ class PegaProxDB:
         cursor.execute('''
             INSERT OR REPLACE INTO clusters
             (id, name, host, user, pass_encrypted, ssl_verification,
-             migration_threshold, migration_tolerance, check_interval, auto_migrate,
+             migration_threshold, migration_tolerance, migration_cooldown,
+             check_interval, auto_migrate,
              balance_containers, balance_local_disks, dry_run, enabled,
              ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted,
              ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
@@ -3486,7 +3509,7 @@ class PegaProxDB:
              proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -3496,6 +3519,9 @@ class PegaProxDB:
             1 if data.get('ssl_verification', True) else 0,
             data.get('migration_threshold', 30),
             data.get('migration_tolerance', 10),
+            # a restore from a backup that predates the field keeps what is stored
+            balancer_cooldown(data.get('migration_cooldown',
+                                       existing['migration_cooldown'] if existing else BALANCER_COOLDOWN_DEFAULT)),
             data.get('check_interval', 300),
             1 if data.get('auto_migrate', False) else 0,
             1 if data.get('balance_containers', False) else 0,
@@ -3595,6 +3621,66 @@ class PegaProxDB:
             if 'cluster_id' in cols:
                 cursor.execute('DELETE FROM "%s" WHERE cluster_id = ?' % tbl, (cluster_id,))
         self.conn.commit()
+
+    # MK Oct 2026 - the moves the balancer made, with why. migration_history is a local
+    # table: the instance whose balancer moved the guest holds the row, a standby asks it.
+    MIGRATION_HISTORY_KEEP = 1000
+    BALANCER_TRIGGERS = ('balance', 'predictive', 'affinity', 'pin')
+
+    def add_migration_event(self, cluster_id, vmid, vm_name, source_node, target_node, status,
+                            reason='', trigger=None, details=None, duration=0.0, timestamp=None):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO migration_history
+            (cluster_id, vmid, vm_name, source_node, target_node, reason, status,
+             duration_seconds, timestamp, trigger_kind, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (cluster_id, int(vmid), vm_name or '', source_node or '', target_node or '',
+              reason or '', status or '', round(float(duration or 0), 1),
+              timestamp or datetime.now().astimezone().isoformat(timespec='seconds'),
+              trigger, json.dumps(details) if details else None))
+        row_id = cursor.lastrowid
+        # the newest rows of each cluster stay, a busy cluster does not push the others out
+        cursor.execute('''
+            DELETE FROM migration_history WHERE cluster_id = ? AND id <= (
+                SELECT id FROM migration_history WHERE cluster_id = ?
+                ORDER BY id DESC LIMIT 1 OFFSET ?)
+        ''', (cluster_id, cluster_id, self.MIGRATION_HISTORY_KEEP))
+        self.conn.commit()
+        return row_id
+
+    def list_balancer_moves(self, cluster_id, triggers=None, status=None, before_id=None, limit=None):
+        """Balancer moves of one cluster, newest first; limit None is every row kept."""
+        kinds = [k for k in (triggers or self.BALANCER_TRIGGERS) if k in self.BALANCER_TRIGGERS]
+        if not kinds:
+            return []
+        sql = ('SELECT id, vmid, vm_name, source_node, target_node, reason, status, '
+               'duration_seconds, timestamp, trigger_kind, details FROM migration_history '
+               'WHERE cluster_id = ? AND trigger_kind IN (%s)' % ','.join('?' * len(kinds)))
+        params = [cluster_id, *kinds]
+        if status:
+            sql += ' AND status = ?'
+            params.append(status)
+        if before_id is not None:
+            sql += ' AND id < ?'
+            params.append(int(before_id))
+        sql += ' ORDER BY id DESC'
+        if limit is not None:
+            sql += ' LIMIT ?'
+            params.append(int(limit))
+        out = []
+        for row in self.query(sql, tuple(params)):
+            try:
+                details = json.loads(row['details']) if row['details'] else {}
+            except (TypeError, ValueError):
+                details = {}
+            out.append({'id': row['id'], 'vmid': row['vmid'], 'vm_name': row['vm_name'] or '',
+                        'source_node': row['source_node'], 'target_node': row['target_node'],
+                        'trigger': row['trigger_kind'], 'reason': row['reason'] or '',
+                        'details': details if isinstance(details, dict) else {},
+                        'status': row['status'], 'duration': row['duration_seconds'],
+                        'timestamp': row['timestamp']})
+        return out
 
     # XCP-ng VMID mapping helpers - MK Mar 2026
     #

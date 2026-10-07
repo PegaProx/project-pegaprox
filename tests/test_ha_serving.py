@@ -1163,6 +1163,7 @@ LEADER_VIEWS = {
     '/api/migration-history': f'/api/migration-history?cluster_id={CID}',
     '/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history':
         f'/api/clusters/{CID}/vms/100/migration-history',
+    '/api/clusters/<cluster_id>/balance-history': f'/api/clusters/{CID}/balance-history',
 }
 ACKS = {
     ('POST', '/api/drift/events/<int:eid>/acknowledge'): '/api/drift/events/7/acknowledge',
