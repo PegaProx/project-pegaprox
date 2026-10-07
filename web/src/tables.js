@@ -3077,3 +3077,457 @@
                 </div>
             );
         }
+
+        // LW Oct 2026 - All Guests: every guest of every cluster the user may see, in one table.
+        // The server filters, sorts and cuts it to a page (GET /inventory/guests/page), so 10k
+        // guests are never all in the browser, and the picked ones stay picked from page to page.
+        // The actions are the bulk dialogs of the guest table: one request per guest to its own
+        // route, and the bulk migration (#952) for guests of one cluster. A row says what its
+        // guest takes from this user; on a standby there is nothing to pick.
+        const ALL_GUESTS_SIZES = [50, 100, 250, 500];
+        const ALL_GUESTS_POLL_MS = 30000;
+        const ALL_GUESTS_SIZE_KEY = 'pegaprox-all-guests-size';
+
+        function allGuestsUptime(s) {
+            if (!s) return '-';
+            const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+            return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
+        }
+
+        function AllGuestsView({ clusters, authFetch, addToast, onOpenGuest, onBulkMigrate }) {
+            const { t, language } = useTranslation();
+            const { haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const acts = !haReadOnly;
+            const [query, setQuery] = useState('');
+            const [view, setView] = useState(() => {
+                let size = 100;
+                try { size = parseInt(localStorage.getItem(ALL_GUESTS_SIZE_KEY) || '100', 10); } catch (e) {}
+                return { q: '', cluster: '', status: '', type: '', tag: '', by: 'name', dir: 'asc',
+                    size: ALL_GUESTS_SIZES.includes(size) ? size : 100, page: 0 };
+            });
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [picked, setPicked] = useState({});
+            const [bulk, setBulk] = useState(null);
+            const [migrate, setMigrate] = useState(null);
+            const [tick, setTick] = useState(0);
+            const seq = useRef(0);
+            // another filter or order starts on the first page
+            const refine = (patch) => setView(v => ({ ...v, ...patch, page: 0 }));
+            const keyOf = (g) => `${g.cluster_id}:${g.vmid}`;
+
+            useEffect(() => {
+                const id = setTimeout(() => {
+                    const q = query.trim().slice(0, 200);
+                    setView(v => v.q === q ? v : { ...v, q, page: 0 });
+                }, 350);
+                return () => clearTimeout(id);
+            }, [query]);
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                const p = new URLSearchParams({ limit: String(view.size), offset: String(view.page * view.size), sort: view.by, dir: view.dir });
+                ['q', 'cluster', 'status', 'type', 'tag'].forEach(k => { if (view[k]) p.set(k, view[k]); });
+                const res = await authFetch(`${API_URL}/inventory/guests/page?${p.toString()}`);
+                const body = res && res.ok ? await res.json().catch(() => null) : null;
+                if (mine !== seq.current) return;  // a newer read is on its way
+                setLoading(false);
+                if (!body || !Array.isArray(body.guests)) {
+                    // what was read stays shown
+                    setData(prev => ({ ...(prev || {}), failed: true }));
+                    return;
+                }
+                setData(body);
+                // a picked guest takes the figures of this read: the dialogs go by its status
+                setPicked(prev => {
+                    let changed = false;
+                    const next = { ...prev };
+                    body.guests.forEach(g => { if (next[keyOf(g)]) { next[keyOf(g)] = g; changed = true; } });
+                    return changed ? next : prev;
+                });
+            };
+            useEffect(() => { load(); }, [view, tick]);
+            useEffect(() => {
+                const id = setInterval(() => { if (!document.hidden) setTick(n => n + 1); }, ALL_GUESTS_POLL_MS);
+                return () => clearInterval(id);
+            }, []);
+            // fewer guests than before, past the last page: back to the last one
+            useEffect(() => {
+                if (data && !data.failed && data.total > 0 && view.page * view.size >= data.total) {
+                    setView(v => ({ ...v, page: Math.max(0, Math.ceil(data.total / v.size) - 1) }));
+                }
+            }, [data]);
+
+            const names = useMemo(() => new Map((clusters || []).map(c => [c.id, c.display_name || c.name])), [clusters]);
+            const label = (id, fallback) => names.get(id) || fallback || id;
+            const rows = (data && data.guests) || [];
+            const total = (data && data.total) || 0;
+            const counts = (data && data.status_counts) || null;
+            const pickedList = Object.values(picked);
+            const pageAll = rows.length > 0 && rows.every(g => picked[keyOf(g)]);
+            const togglePage = () => setPicked(prev => {
+                const next = { ...prev };
+                rows.forEach(g => { if (pageAll) delete next[keyOf(g)]; else next[keyOf(g)] = g; });
+                return next;
+            });
+            const toggleOne = (g) => setPicked(prev => {
+                const next = { ...prev };
+                if (next[keyOf(g)]) delete next[keyOf(g)]; else next[keyOf(g)] = g;
+                return next;
+            });
+            const openGuest = (g) => {
+                const cl = (clusters || []).find(c => c.id === g.cluster_id);
+                if (cl && onOpenGuest) onOpenGuest(cl, { vmid: g.vmid, node: g.node, type: g.type, name: g.name, status: g.status });
+            };
+
+            const actions = [
+                { action: 'start', can: 'start', label: t('start'), icon: <Icons.PlayCircle />, cls: 'bg-green-600 hover:bg-green-700' },
+                { action: 'shutdown', can: 'stop', label: t('shutdown'), icon: <Icons.Power />, cls: 'bg-yellow-600 hover:bg-yellow-700' },
+                { action: 'reboot', can: 'reboot', label: t('reboot'), icon: <Icons.RefreshCw />, cls: 'bg-orange-500 hover:bg-orange-600' },
+                { action: 'stop', can: 'stop', label: t('forceStop'), icon: <Icons.XCircle />, cls: 'bg-red-600 hover:bg-red-700' },
+                { action: 'snapshot', can: 'snapshot', label: t('snapshot'), icon: <Icons.Camera />, cls: 'bg-purple-600 hover:bg-purple-700' },
+            ].concat(onBulkMigrate ? [{ action: 'migrate', can: 'migrate', label: t('migrate'), icon: <Icons.ArrowRight />, cls: 'bg-blue-600 hover:bg-blue-700' }] : []);
+            const allowedFor = (a) => pickedList.filter(g => g.can && g.can[a.can]);
+            const spread = (list) => new Set(list.map(g => g.cluster_id)).size;
+            const blocked = (a) => { const ok = allowedFor(a); return !ok.length || (a.action === 'migrate' && spread(ok) > 1); };
+            const hint = (a) => {
+                const ok = allowedFor(a);
+                if (a.action === 'migrate' && spread(ok) > 1) return t('allGuestsOneCluster');
+                if (ok.length < pickedList.length) return t('allGuestsNoPermission').replace('{n}', pickedList.length - ok.length);
+                return '';
+            };
+            const runAction = async (a) => {
+                const ok = allowedFor(a);
+                if (!ok.length || blocked(a)) return;
+                if (ok.length < pickedList.length) addToast?.(t('allGuestsLeftOut').replace('{n}', pickedList.length - ok.length), 'info');
+                if (a.action !== 'migrate') {
+                    setBulk({ action: a.action, guests: ok.map(g => ({ ...g, _clusterId: g.cluster_id })) });
+                    return;
+                }
+                const cid = ok[0].cluster_id;
+                let nodes = [];
+                const res = await authFetch(`${API_URL}/clusters/${encodeURIComponent(cid)}/metrics`);
+                const m = res && res.ok ? await res.json().catch(() => null) : null;
+                if (m && typeof m === 'object' && !Array.isArray(m)) {
+                    nodes = Object.entries(m).filter(([, n]) => n && typeof n === 'object' && !n.offline && (n.status || 'online') === 'online')
+                        .map(([name]) => name).sort();
+                }
+                // without the node figures: the nodes its guests are on, as far as they are known here
+                if (!nodes.length) nodes = [...new Set(rows.concat(pickedList).filter(g => g.cluster_id === cid).map(g => g.node).filter(Boolean))].sort();
+                setMigrate({ clusterId: cid, nodes, vms: ok.map(g => ({ vmid: g.vmid, node: g.node, type: g.type, name: g.name })) });
+            };
+            const later = (ms) => setTimeout(() => setTick(n => n + 1), ms);
+
+            // text sorts A to Z first, figures the largest first
+            const sortOn = (by) => setView(v => v.by === by
+                ? { ...v, dir: v.dir === 'asc' ? 'desc' : 'asc', page: 0 }
+                : { ...v, by, dir: ['name', 'vmid', 'cluster', 'node', 'status'].includes(by) ? 'asc' : 'desc', page: 0 });
+            const columns = [
+                { by: 'vmid', label: 'ID' }, { by: 'name', label: t('name') }, { by: 'cluster', label: t('cluster') },
+                { by: 'node', label: t('node') }, { by: 'status', label: t('status') }, { by: 'cpu', label: 'CPU' },
+                { by: 'mem', label: 'RAM' }, { by: 'disk', label: t('disk') }, { by: 'uptime', label: t('uptime') },
+                { by: '', label: 'IP' }, { by: '', label: t('tags') },
+            ];
+            const stateOf = (g) => g.status === 'running' ? 'running' : g.status === 'stopped' ? 'stopped' : 'other';
+            const statusText = (g) => ({ running: t('running'), stopped: t('stopped'), paused: t('paused') })[g.status] || g.status;
+            const cpuText = (g) => g.status === 'running' ? `${Math.round((g.cpu || 0) * 100)}%` : '-';
+            const memText = (g) => g.status === 'running' && g.mem ? `${formatBytes(g.mem)} / ${formatBytes(g.memory)}` : formatBytes(g.memory);
+            const diskText = (g) => g.disk > 0 ? `${formatBytes(g.disk)} / ${formatBytes(g.disk_size)}` : formatBytes(g.disk_size);
+            const ipText = (g) => (g.ip_addresses || []).length ? g.ip_addresses[0] + (g.ip_addresses.length > 1 ? ` +${g.ip_addresses.length - 1}` : '') : '-';
+            const unlisted = ((data && data.clusters) || []).filter(c => c.state !== 'ok');
+            const stateNames = { offline: t('allGuestsOffline'), unreadable: t('allGuestsUnreadable') };
+            const from = total ? view.page * view.size + 1 : 0;
+            const to = Math.min(total, (view.page + 1) * view.size);
+            // figures in the language of the page, not of the browser
+            const num = (n) => { try { return Number(n || 0).toLocaleString(language || undefined); } catch (e) { return String(n || 0); } };
+            const range = t('allGuestsRange').replace('{from}', num(from)).replace('{to}', num(to)).replace('{total}', num(total));
+            const setSize = (n) => {
+                try { localStorage.setItem(ALL_GUESTS_SIZE_KEY, String(n)); } catch (e) {}
+                refine({ size: n });
+            };
+
+            const chip = (s, text, cls, style) => counts && (
+                <button type="button" key={s} data-all-guests-count={s} onClick={() => refine({ status: view.status === s ? '' : s })}
+                    className={cls} style={style}>
+                    {num(counts[s])} {text}
+                </button>
+            );
+            const refreshButton = (
+                <button type="button" data-all-guests-refresh onClick={() => setTick(n => n + 1)} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const selectCls = isCorporate ? 'corp-toolbar-filter' : 'px-3 py-1.5 text-xs bg-proxmox-dark text-gray-300 border border-proxmox-border rounded-lg cursor-pointer';
+            const filters = (<>
+                <div className="relative">
+                    <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                    <input type="text" data-all-guests-search value={query} maxLength={200} onChange={e => setQuery(e.target.value)} placeholder={t('allGuestsSearch')}
+                        className={isCorporate ? 'pr-2 py-1 text-[13px] bg-transparent border text-white placeholder-gray-500 focus:outline-none w-56'
+                            : 'pr-2 py-1.5 text-sm bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange w-64'}
+                        style={isCorporate ? { paddingLeft: '28px', borderColor: 'var(--corp-border-medium)', borderRadius: '2px' } : { paddingLeft: '1.75rem' }} />
+                </div>
+                <select data-all-guests-cluster value={view.cluster} onChange={e => refine({ cluster: e.target.value })} className={selectCls}>
+                    <option value="">{t('allGuestsAnyCluster')}</option>
+                    {((data && data.clusters) || []).map(c => <option key={c.cluster_id} value={c.cluster_id}>{label(c.cluster_id, c.cluster_name)}</option>)}
+                </select>
+                <select data-all-guests-status value={view.status} onChange={e => refine({ status: e.target.value })} className={selectCls}>
+                    <option value="">{t('allGuestsAnyStatus')}</option>
+                    <option value="running">{t('running')}</option>
+                    <option value="stopped">{t('stopped')}</option>
+                    <option value="other">{t('allGuestsOther')}</option>
+                </select>
+                <select data-all-guests-type value={view.type} onChange={e => refine({ type: e.target.value })} className={selectCls}>
+                    <option value="">{t('allGuestsAnyType')}</option>
+                    <option value="qemu">{t('virtualMachines')}</option>
+                    <option value="lxc">{t('containers')}</option>
+                    <option value="template">{t('allGuestsTemplates')}</option>
+                </select>
+                {(data && data.tags && data.tags.length > 0 || view.tag) && (
+                    <select data-all-guests-tag value={view.tag} onChange={e => refine({ tag: e.target.value })} className={selectCls}>
+                        <option value="">{t('allTags')}</option>
+                        {((data && data.tags) || []).map(x => <option key={x} value={x}>{x}</option>)}
+                    </select>
+                )}
+            </>);
+            const pager = (
+                <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {unlisted.length > 0 && (
+                            <span data-all-guests-unlisted className="text-amber-400">
+                                {t('allGuestsNotListed')} {unlisted.map(c => `${label(c.cluster_id, c.cluster_name)} (${stateNames[c.state] || c.state})`).join(', ')}
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-1.5">
+                            {t('perPage')}
+                            <select data-all-guests-size value={view.size} onChange={e => setSize(parseInt(e.target.value, 10))}
+                                className={isCorporate ? 'corp-toolbar-filter' : 'px-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300'}>
+                                {ALL_GUESTS_SIZES.map(n => <option key={n} value={n}>{n}</option>)}
+                            </select>
+                        </label>
+                        <span data-all-guests-range>{range}</span>
+                        <button type="button" data-all-guests-prev disabled={view.page === 0} title={t('allGuestsPrevPage')}
+                            onClick={() => setView(v => ({ ...v, page: Math.max(0, v.page - 1) }))}
+                            className="p-1 rounded text-gray-400 hover:text-white hover:bg-proxmox-hover disabled:opacity-30">
+                            <Icons.ChevronLeft className="w-4 h-4" />
+                        </button>
+                        <button type="button" data-all-guests-next disabled={to >= total} title={t('allGuestsNextPage')}
+                            onClick={() => setView(v => ({ ...v, page: v.page + 1 }))}
+                            className="p-1 rounded text-gray-400 hover:text-white hover:bg-proxmox-hover disabled:opacity-30">
+                            <Icons.ChevronRight className="w-4 h-4" />
+                        </button>
+                    </div>
+                </div>
+            );
+            const notes = (<>
+                {!data && <div className="text-sm text-gray-500 p-3">{t('loading')}</div>}
+                {data && data.failed && <div data-all-guests-failed className="text-sm text-amber-400 p-3">{t('allGuestsFailed')}</div>}
+                {data && !data.failed && rows.length === 0 && (
+                    <div data-all-guests-empty className="text-sm text-gray-400 p-3">{data.count ? t('allGuestsNoMatch') : t('allGuestsEmpty')}</div>
+                )}
+            </>);
+            const modals = (<>
+                {bulk && (
+                    <GuestBulkActionModal action={bulk.action} guests={bulk.guests} authFetch={authFetch}
+                        onFinished={() => later(1500)} onClose={() => setBulk(null)} />
+                )}
+                {migrate && onBulkMigrate && (
+                    <BulkMigrateModal vms={migrate.vms} nodes={migrate.nodes} clusterId={migrate.clusterId}
+                        onMigrate={async (args) => { const r = await onBulkMigrate(args); if (r && r.ok) later(3000); return r; }}
+                        onClose={() => setMigrate(null)} />
+                )}
+            </>);
+            const pickBox = (g) => (
+                <input type="checkbox" data-all-guests-pick={keyOf(g)} checked={!!picked[keyOf(g)]} onChange={() => toggleOne(g)}
+                    className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark" />
+            );
+            const pageBox = (
+                <input type="checkbox" data-all-guests-pick-page checked={pageAll} onChange={togglePage} title={t('allGuestsPickPage')}
+                    className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark" />
+            );
+
+            if (isCorporate) {
+                const dot = { running: '#60b515', stopped: '#728b9a', other: '#efc006' };
+                return (
+                    <div data-all-guests>
+                        <div className="corp-content-header">
+                            <div className="flex items-center gap-2">
+                                <span className="flex" style={{color: 'var(--corp-accent)'}}><Icons.Monitor /></span>
+                                <span className="corp-header-title">{t('allGuestsTitle')}</span>
+                                {data && !data.failed && <span data-all-guests-total className="text-[11px]" style={{color: '#728b9a'}}>{num(data.count)}</span>}
+                            </div>
+                            <div className="flex items-center gap-3 text-[12px]">
+                                {chip('running', t('running'), 'hover:underline capitalize', { color: dot.running })}
+                                {chip('stopped', t('stopped'), 'hover:underline capitalize', { color: dot.stopped })}
+                                {counts && counts.other > 0 && chip('other', t('allGuestsOther'), 'hover:underline capitalize', { color: dot.other })}
+                                {refreshButton}
+                            </div>
+                        </div>
+                        <div className="corp-vm-toolbar" style={{flexWrap: 'wrap'}}>
+                            {filters}
+                            <div style={{flex: 1}} />
+                            {acts && pickedList.length > 0 && (<>
+                                <span data-all-guests-picked className="text-[11px]" style={{color: '#49afd9'}}>{pickedList.length} {t('selectedItems')}</span>
+                                {actions.map(a => (
+                                    <button key={a.action} type="button" data-all-guests-action={a.action} onClick={() => runAction(a)} disabled={blocked(a)} title={hint(a)}
+                                        className="corp-toolbar-filter disabled:opacity-40"
+                                        style={a.action === 'stop' ? {color: '#f54f47'} : a.action === 'migrate' ? {color: '#49afd9'} : undefined}>
+                                        {a.label}
+                                    </button>
+                                ))}
+                                <button type="button" data-all-guests-clear onClick={() => setPicked({})} className="corp-toolbar-filter">{t('clearSelection')}</button>
+                            </>)}
+                        </div>
+                        {notes}
+                        {rows.length > 0 && (
+                            <table className="corp-datagrid corp-datagrid-striped">
+                                <thead>
+                                    <tr>
+                                        {acts && <th style={{width: '28px'}}>{pageBox}</th>}
+                                        {columns.map((c, i) => (
+                                            <th key={i} data-all-guests-sort={c.by || undefined} className={c.by ? 'cursor-pointer' : ''} style={{textAlign: 'left'}}
+                                                onClick={c.by ? () => sortOn(c.by) : undefined}>
+                                                {c.label} {c.by && view.by === c.by && <span className="sort-indicator">{view.dir === 'asc' ? '▲' : '▼'}</span>}
+                                            </th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {rows.map(g => (
+                                        <tr key={keyOf(g)} data-all-guests-row={keyOf(g)} className={picked[keyOf(g)] ? 'corp-row-selected' : ''}>
+                                            {acts && <td>{pickBox(g)}</td>}
+                                            <td style={{color: '#728b9a'}}>{g.vmid}</td>
+                                            <td>
+                                                <button type="button" data-all-guests-open={keyOf(g)} onClick={() => openGuest(g)} title={t('allGuestsOpen')}
+                                                    className="inline-flex items-center gap-1.5 hover:underline" style={{fontWeight: 500}}>
+                                                    <span className="flex" style={{color: g.type === 'qemu' ? '#49afd9' : '#a178d9'}}>{g.type === 'qemu' ? <Icons.Monitor /> : <Icons.Layers />}</span>
+                                                    {g.name || `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}`}
+                                                </button>
+                                                {g.template && <span className="ml-2 text-[10px] uppercase" style={{color: '#728b9a'}}>{t('template')}</span>}
+                                            </td>
+                                            <td>{label(g.cluster_id, g.cluster_name)}</td>
+                                            <td style={{color: '#adbbc4'}}>{g.node || '-'}</td>
+                                            <td>
+                                                <span className="inline-flex items-center gap-1">
+                                                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: dot[stateOf(g)]}} />
+                                                    <span className="capitalize" style={{color: dot[stateOf(g)], fontSize: '12px'}}>{statusText(g)}</span>
+                                                </span>
+                                            </td>
+                                            <td title={`${g.vcpus} vCPU`}>{cpuText(g)}</td>
+                                            <td>{memText(g)}</td>
+                                            <td>{diskText(g)}</td>
+                                            <td style={{color: '#adbbc4'}}>{g.status === 'running' ? allGuestsUptime(g.uptime) : '-'}</td>
+                                            <td style={{color: '#adbbc4'}} title={(g.ip_addresses || []).join(', ')}>{ipText(g)}</td>
+                                            <td style={{color: '#728b9a', fontSize: '12px'}}>{(g.tags || []).join(', ')}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        )}
+                        <div className="p-2">{pager}</div>
+                        {modals}
+                    </div>
+                );
+            }
+
+            const badge = { running: 'bg-green-500/20 text-green-400', stopped: 'bg-gray-500/20 text-gray-400', other: 'bg-yellow-500/20 text-yellow-400' };
+            const pill = (s) => `px-2 py-1 rounded-lg text-xs font-medium capitalize border ${view.status === s ? 'border-proxmox-orange text-white' : 'border-proxmox-border text-gray-400 hover:text-white'}`;
+            return (
+                <div data-all-guests className="space-y-4">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                <Icons.Monitor />
+                            </div>
+                            <div>
+                                <h2 className="text-xl font-bold text-white">
+                                    {t('allGuestsTitle')} {data && !data.failed && <span data-all-guests-total className="text-sm font-normal text-gray-500">({num(data.count)})</span>}
+                                </h2>
+                                <p className="text-xs text-gray-500">{t('allGuestsDesc')}</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {chip('running', t('running'), pill('running'))}
+                            {chip('stopped', t('stopped'), pill('stopped'))}
+                            {counts && counts.other > 0 && chip('other', t('allGuestsOther'), pill('other'))}
+                            {refreshButton}
+                        </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">{filters}</div>
+                    {acts && pickedList.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2 p-3 bg-proxmox-orange/10 border border-proxmox-orange/30 rounded-lg">
+                            <span data-all-guests-picked className="text-sm text-proxmox-orange font-medium mr-1">{pickedList.length} {t('selectedItems')}</span>
+                            {actions.map(a => (
+                                <button key={a.action} type="button" data-all-guests-action={a.action} onClick={() => runAction(a)} disabled={blocked(a)} title={hint(a)}
+                                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-white text-sm disabled:opacity-40 ${a.cls}`}>
+                                    {a.icon}
+                                    {a.label}
+                                </button>
+                            ))}
+                            <button type="button" data-all-guests-clear onClick={() => setPicked({})} className="px-3 py-1.5 text-gray-400 hover:text-white text-sm">
+                                {t('clearSelection')}
+                            </button>
+                        </div>
+                    )}
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                        {notes}
+                        {rows.length > 0 && (
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead className="bg-proxmox-dark/50">
+                                        <tr className="text-left text-xs text-gray-400">
+                                            {acts && <th className="px-3 py-3 w-10">{pageBox}</th>}
+                                            {columns.map((c, i) => (
+                                                <th key={i} data-all-guests-sort={c.by || undefined} onClick={c.by ? () => sortOn(c.by) : undefined}
+                                                    className={`px-3 py-3 font-medium whitespace-nowrap ${c.by ? 'cursor-pointer hover:text-white' : ''}`}>
+                                                    {c.label}{c.by && view.by === c.by && <span className="ml-1">{view.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-proxmox-border/50">
+                                        {rows.map(g => (
+                                            <tr key={keyOf(g)} data-all-guests-row={keyOf(g)}
+                                                className={`${picked[keyOf(g)] ? 'bg-proxmox-orange/10' : ''} hover:bg-proxmox-hover/50 transition-colors`}>
+                                                {acts && <td className="px-3 py-2">{pickBox(g)}</td>}
+                                                <td className="px-3 py-2 text-xs text-gray-500">{g.vmid}</td>
+                                                <td className="px-3 py-2">
+                                                    <button type="button" data-all-guests-open={keyOf(g)} onClick={() => openGuest(g)} title={t('allGuestsOpen')}
+                                                        className="flex items-center gap-2 text-left text-sm font-medium text-white hover:text-proxmox-orange">
+                                                        <span className={`flex ${g.type === 'qemu' ? 'text-blue-400' : 'text-purple-400'}`}>{g.type === 'qemu' ? <Icons.Monitor /> : <Icons.Layers />}</span>
+                                                        <span className="truncate">{g.name || `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}`}</span>
+                                                        {g.template && <span className="px-1.5 py-0.5 text-[10px] rounded bg-proxmox-dark text-gray-400 uppercase">{t('template')}</span>}
+                                                    </button>
+                                                </td>
+                                                <td className="px-3 py-2 text-sm text-gray-300">{label(g.cluster_id, g.cluster_name)}</td>
+                                                <td className="px-3 py-2 text-sm text-gray-400">{g.node || '-'}</td>
+                                                <td className="px-3 py-2">
+                                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize ${badge[stateOf(g)]}`}>{statusText(g)}</span>
+                                                </td>
+                                                <td className="px-3 py-2 text-sm text-gray-300" title={`${g.vcpus} vCPU`}>{cpuText(g)}</td>
+                                                <td className="px-3 py-2 text-xs text-gray-300 whitespace-nowrap">{memText(g)}</td>
+                                                <td className="px-3 py-2 text-xs text-gray-300 whitespace-nowrap">{diskText(g)}</td>
+                                                <td className="px-3 py-2 text-xs text-gray-400 whitespace-nowrap">{g.status === 'running' ? allGuestsUptime(g.uptime) : '-'}</td>
+                                                <td className="px-3 py-2 text-xs text-gray-400 font-mono" title={(g.ip_addresses || []).join(', ')}>{ipText(g)}</td>
+                                                <td className="px-3 py-2">
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {(g.tags || []).slice(0, 3).map(x => <span key={x} className="px-1.5 py-0.5 text-[10px] rounded bg-proxmox-dark text-gray-400">{x}</span>)}
+                                                        {(g.tags || []).length > 3 && <span className="text-[10px] text-gray-500">+{g.tags.length - 3}</span>}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                        <div className="p-3 border-t border-proxmox-border">{pager}</div>
+                    </div>
+                    {modals}
+                </div>
+            );
+        }

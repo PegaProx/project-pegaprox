@@ -10778,6 +10778,7 @@
             const [sidebarXHM, setSidebarXHM] = useState(false);
             const [sidebarMultiSdn, setSidebarMultiSdn] = useState(false); // #612 — Multi-Cluster EVPN view
             const [sidebarAutoInstall, setSidebarAutoInstall] = useState(false);
+            const [sidebarGuests, setSidebarGuests] = useState(false);  // All Guests, every guest in one table
             const [autoInstallIntent, setAutoInstallIntent] = useState(null); // {wizard, target_cluster_id} handed to the panel once
             const [xhmMigrations, setXhmMigrations] = useState([]);
             const [xhmSelectedMigration, setXhmSelectedMigration] = useState(null);
@@ -10845,21 +10846,23 @@
             };
 
             // NS: auto-clear topology/xhm sidebar when navigating to something else
-            useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
+            useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
 
             // All Clusters used to check only XHM, so it stayed lit next to World Map / EVPN
-            const onGlobalView = sidebarTopology || sidebarWorldmap || sidebarXHM || sidebarMultiSdn || sidebarAutoInstall;
+            const onGlobalView = sidebarTopology || sidebarWorldmap || sidebarXHM || sidebarMultiSdn || sidebarAutoInstall || sidebarGuests;
             // one way in for every auto-install shortcut, intent opens the wizard on arrival
             const openAutoInstall = (intent = null) => {
-                setSidebarAutoInstall(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false);
+                setSidebarAutoInstall(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarGuests(false);
                 setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null);
                 setAutoInstallIntent(intent);
             };
             // the other global views, one place for the Modern rows and the corporate Tools section
-            const openTopology = () => { setSidebarTopology(true); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); };
-            const openWorldmap = () => { setSidebarWorldmap(true); setSidebarTopology(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
-            const openXhm = () => { setSidebarXHM(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
-            const openMultiSdn = () => { setSidebarMultiSdn(true); setSidebarXHM(false); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openTopology = () => { setSidebarTopology(true); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); };
+            const openWorldmap = () => { setSidebarWorldmap(true); setSidebarTopology(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openXhm = () => { setSidebarXHM(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openMultiSdn = () => { setSidebarMultiSdn(true); setSidebarXHM(false); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            // LW Oct 2026 - All Guests, the guest table of every cluster
+            const openGuests = () => { setSidebarGuests(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
             // XHM needs a cluster on each side
             const hasXhmPair = clusters.some(c => c.type === 'xcpng' || c.cluster_type === 'xcpng') && clusters.some(c => c.type !== 'xcpng' && c.cluster_type !== 'xcpng');
 
@@ -11010,7 +11013,7 @@
                 selectedGroup, selectedCluster, selectedPBS, selectedVMware,
                 selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, activeTab,
                 // the global views set no selection, so they never closed the drawer
-                sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall,
+                sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall, sidebarGuests,
             ]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
@@ -17772,7 +17775,7 @@
                                         <div className={isCorporate ? 'space-y-0' : 'space-y-3'}>
                                             {/* MK: overview button, LW: compact for corporate */}
                                             <button
-                                                onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); }}
+                                                onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); }}
                                                 className={`w-full flex items-center ${
                                                     isCorporate
                                                         ? 'gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5'
@@ -17826,6 +17829,27 @@
                                                         <div>
                                                             <div className="text-sm font-medium">{t('worldMap') || 'World Map'}</div>
                                                             <div className="text-xs text-gray-500">{t('worldMapHint') || 'Cluster locations'}</div>
+                                                        </div>
+                                                    </span>
+                                                </button>
+
+                                                {/* LW Oct 2026 - All Guests, one table of every guest; a standby shows it without the actions */}
+                                                <button
+                                                    onClick={openGuests}
+                                                    data-sidebar-guests=""
+                                                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all mt-1 ${
+                                                        sidebarGuests
+                                                            ? 'bg-gradient-to-r from-blue-500/20 to-blue-600/10 border border-blue-500/30 text-white'
+                                                            : 'bg-proxmox-card border border-proxmox-border hover:border-blue-500/30 text-gray-300 hover:text-white'
+                                                      }`}
+                                                >
+                                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${sidebarGuests ? 'bg-blue-500/20' : 'bg-proxmox-dark'}`}>
+                                                        <span className="flex text-blue-400"><Icons.Monitor /></span>
+                                                    </div>
+                                                    <span className="flex-1 text-left">
+                                                        <div>
+                                                            <div className="text-sm font-medium">{t('allGuestsTitle')}</div>
+                                                            <div className="text-xs text-gray-500">{t('allGuestsHint')}</div>
                                                         </div>
                                                     </span>
                                                 </button>
@@ -18013,6 +18037,8 @@
                                         cluster; the empty card has the auto-install link. */}
                                     {isCorporate && clusters.length > 0 && (() => {
                                         const tools = [
+                                            { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests,
+                                              icon: <Icons.Monitor /> },
                                             { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology,
                                               icon: <Icons.Network className="w-4 h-4" /> },
                                             // Globe always draws at w-5, zoom puts it in the 16px column of the others
@@ -26018,6 +26044,20 @@
                                             />
                                         </div>
                                     </div>
+                                ) : sidebarGuests ? (
+                                    <AllGuestsView
+                                        clusters={clusters}
+                                        authFetch={authFetch}
+                                        addToast={addToast}
+                                        onBulkMigrate={handleBulkMigrate}
+                                        onOpenGuest={(cluster, guest) => {
+                                            setSelectedCluster(cluster);
+                                            setSelectedSidebarVm({...guest, _clusterId: cluster.id});
+                                            setSelectedSidebarNode(null);
+                                            setActiveTab('resources');
+                                            setResourcesSubTab('management');
+                                        }}
+                                    />
                                 ) : (
                                     <AllClustersOverview
                                         clusters={clusters}
@@ -26049,6 +26089,7 @@
                                             }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
+                                        onOpenGuests={openGuests}
                                     />
                                 )}
                             </div>

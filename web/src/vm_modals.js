@@ -7204,7 +7204,7 @@
 
         // LW: All Clusters Overview - GitHub Feature Request #16
         // added a bunch of stuff here - storage, sparklines, sorting etc
-        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast }) {
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests }) {
             // #625: an empty list on a standby is no reason to offer adding a cluster there -
             // say why it is empty instead: no sync yet, or its live view is off
             const haInfo = (useAuth() || {}).ha || {};
@@ -7548,6 +7548,11 @@
                                     <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
                                         <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
                                     </span>
+                                )}
+                                {!topologyOnly && clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests} className="corp-vm-btn corp-vm-btn-ghost">
+                                        <span className="flex"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
                                 )}
                                 {!topologyOnly && clusters.length > 0 && (
                                     <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
@@ -7951,6 +7956,12 @@
                             </div>
 
                             <div className="flex items-center gap-3">
+                                {clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests}
+                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors">
+                                        <span className="flex text-blue-400"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
                                 {clusters.length > 0 && (
                                     <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
                                         className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors disabled:opacity-50" />
