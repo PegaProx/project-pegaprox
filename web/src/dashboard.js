@@ -10569,6 +10569,8 @@
             const [error, setError] = useState(null);
             const [toasts, setToasts] = useState([]);
             const [activeTab, setActiveTab] = useState('overview');
+            // LW Oct 2026 - the datacenter section an overview link opens (the Ceph one), once
+            const [datacenterSection, setDatacenterSection] = useState(null);
             const [resourcesSubTab, setResourcesSubTab] = useState('management');
             const [sidebarTopology, setSidebarTopology] = useState(false);
             // MK May 2026 — Worldmap top-level sidebar entry (offline cluster geo-view)
@@ -19526,7 +19528,8 @@
 
                                         {/* Datacenter Tab */}
                                         {activeTab === 'datacenter' && (
-                                            <DatacenterTab clusterId={selectedCluster.id} addToast={addToast} />
+                                            <DatacenterTab clusterId={selectedCluster.id} addToast={addToast}
+                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)} />
                                         )}
 
                                         {/* Datastore Tab */}
@@ -22144,7 +22147,7 @@
                                                 )}
 
                                                 {/* Update Manager Section */}
-                                                <div className="lg:col-span-2">
+                                                <div className="lg:col-span-2" data-update-manager>
                                                     <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} addToast={addToast} />
                                                 </div>
                                                 
@@ -26029,6 +26032,19 @@
                                             setSelectedSidebarNode(null);
                                             setActiveTab('resources');
                                             setResourcesSubTab('management');
+                                        }}
+                                        onOpenClusterTab={(cluster, tab, section) => {
+                                            setSelectedCluster(cluster);
+                                            setSelectedSidebarVm(null);
+                                            setSelectedSidebarNode(null);
+                                            setSelectedSidebarDatastore(null);
+                                            setDatacenterSection(tab === 'datacenter' ? section : null);
+                                            setActiveTab(tab);
+                                            // the update manager sits further down the settings tab
+                                            if (section === 'updates') setTimeout(() => {
+                                                const el = document.querySelector('[data-update-manager]');
+                                                if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+                                            }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                     />

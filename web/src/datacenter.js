@@ -320,11 +320,18 @@
         }
 
         // Datacenter Tab Component
-        function DatacenterTab({ clusterId, addToast }) {
+        function DatacenterTab({ clusterId, addToast, initialSection, onSectionShown }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
             const { isCorporate } = useLayout();
-            const [activeSection, setActiveSection] = useState('summary');
+            const [activeSection, setActiveSection] = useState(initialSection || 'summary');
+            // LW Oct 2026 - opened from an overview on one section (the Ceph one): that once,
+            // the next visit starts where the user left it
+            useEffect(() => {
+                if (!initialSection) return;
+                setActiveSection(initialSection);
+                if (onSectionShown) onSectionShown();
+            }, [initialSection]);
             const [loading, setLoading] = useState(true);
             const [dcStatus, setDcStatus] = useState(null);
             const [clusterNodes, setClusterNodes] = useState([]);
