@@ -1928,7 +1928,7 @@
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
             const memDataGB = React.useMemo(() => {
                 if (!metricsData?.metrics?.memory || !maxMemGB) return [];
-                return metricsData.metrics.memory.map(p => (p / 100) * maxMemGB);
+                return metricsData.metrics.memory.map(p => p === null ? null : (p / 100) * maxMemGB);
             }, [metricsData, maxMemGB]);
 
             // Toggle HA
@@ -2862,6 +2862,9 @@
         // Migrate Modal Component
         // LW: This thing was a nightmare to debug. ISO detection finally works now!
         // See also: CrossClusterMigrateModal below (similar logic)
+        // storages that keep a qcow2 file, which carries its snapshots along
+        const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
+
         function MigrateModal({ vm, nodes, clusterId, onMigrate, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -3002,6 +3005,37 @@
                 ? virtiofs.filter(v => !dirMappings.some(m => m.id === v.dirid && m.nodes.includes(targetNode)))
                 : [];
 
+            // LW Oct 2026 - snapshots on local disks, read once when the dialog opens: Proxmox
+            // moves no such disk while the VM runs (unless replication has it on the target),
+            // and offline only where both storages keep snapshots in the volume
+            const [snapCheck, setSnapCheck] = useState(null);
+            useEffect(() => {
+                if (!vm || !vm.node || !clusterId) return;
+                let gone = false;
+                (async () => {
+                    try {
+                        const r = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/migrate-check`, { credentials: 'include', headers: getAuthHeaders() });
+                        const d = r && r.ok ? await r.json() : null;
+                        if (!gone) setSnapCheck(d && d.supported !== false ? d : null);
+                    } catch (e) {
+                        if (!gone) setSnapCheck(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [vm && vm.vmid, vm && vm.node, vm && vm.type, clusterId]);
+
+            const snapVols = snapCheck && snapCheck.snapshot_count > 0 ? (snapCheck.volumes || []) : [];
+            const snapLive = !isContainer && vm.status === 'running' && online;
+            const snapNotThere = snapLive
+                ? snapVols.filter(v => !(v.family === 'zfs' && targetNode && (snapCheck.replicated_to || []).includes(targetNode)))
+                : [];
+            const tgtStoreType = targetStorage ? ((storages.find(s => s.storage === targetStorage) || {}).type || '') : '';
+            const snapCarried = (v) => !!v.family && (!tgtStoreType || (v.family === 'zfs' ? tgtStoreType === 'zfspool'
+                : v.family === 'btrfs' ? tgtStoreType === 'btrfs' : MIG_SNAP_FILE_STORAGES.includes(tgtStoreType)));
+            const snapStuck = snapLive ? [] : snapVols.filter(v => !snapCarried(v));
+            const snapCopied = snapLive ? [] : snapVols.filter(snapCarried);
+            const snapDisks = (vols) => vols.map(v => `${v.key} (${v.storage}${v.type ? ', ' + v.type : ''})`).join(', ');
+
             // Fetch storages when target node changes
             useEffect(() => {
                 if(targetNode) {
@@ -3079,6 +3113,41 @@
                                             {vfsMissing.length > 0 && (
                                                 <p className="text-xs text-red-400 mt-2" data-mig-vfs-missing>
                                                     {t('migVfsMissing').replace(/\{node\}/g, () => targetNode).replace(/\{ids\}/g, () => vfsMissing.map(v => v.dirid).join(', '))}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {snapVols.length > 0 && (snapNotThere.length > 0 || snapStuck.length > 0 || snapCopied.length > 0) && (
+                                <div className={`p-3 rounded-lg border ${snapNotThere.length || snapStuck.length ? 'bg-red-500/10 border-red-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}
+                                    data-mig-snap={snapNotThere.length || snapStuck.length ? 'blocked' : 'copied'}>
+                                    <div className="flex items-start gap-2">
+                                        <Icons.AlertTriangle />
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-medium text-sm ${snapNotThere.length || snapStuck.length ? 'text-red-400' : 'text-yellow-400'}`}>{t('migSnapTitle')}</p>
+                                            <p className="text-xs text-gray-300 mt-1">{t('migSnapIntro').replace(/\{count\}/g, () => String(snapCheck.snapshot_count))}</p>
+                                            <div className="mt-2 flex flex-wrap gap-2 text-xs" data-mig-snap-names>
+                                                {(snapCheck.snapshots || []).slice(-6).reverse().map(s => (
+                                                    <code key={s.name} className="bg-proxmox-dark px-1 rounded text-gray-300">{s.name}</code>
+                                                ))}
+                                                {snapCheck.snapshot_count > 6 && (
+                                                    <span className="text-gray-500">{t('migSnapMore').replace(/\{n\}/g, () => String(snapCheck.snapshot_count - 6))}</span>
+                                                )}
+                                            </div>
+                                            {snapNotThere.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-live>
+                                                    {t('migSnapLive').replace(/\{disks\}/g, () => snapDisks(snapNotThere))}
+                                                </p>
+                                            )}
+                                            {snapStuck.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-stuck>
+                                                    {t('migSnapStuck').replace(/\{disks\}/g, () => snapDisks(snapStuck))}
+                                                </p>
+                                            )}
+                                            {snapCopied.length > 0 && (
+                                                <p className="text-xs text-gray-300 mt-2" data-mig-snap-copied>
+                                                    {t('migSnapCopied').replace(/\{disks\}/g, () => snapDisks(snapCopied))}
                                                 </p>
                                             )}
                                         </div>

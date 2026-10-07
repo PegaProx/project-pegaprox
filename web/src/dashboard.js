@@ -9453,10 +9453,15 @@
         // the server dedup) lets us keep the SAME array reference on a no-op frame, so
         // ResourceTable's filter/sort useMemos + the whole grid stay idle instead of
         // re-rendering every second.
+        // LW Oct 2026 - the agent column of the list redraws when the agent comes or goes; the
+        // disk rates are fed from every frame through pegaprox-resources-frame instead
         function _resSig(r) {
             return r.vmid + '|' + (r.status || '') + '|' + (r.node || '') + '|' + (r.name || '') +
                    '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + Math.floor((r.mem_percent || 0) / 2) +
-                   '|' + (r.ip || '') + '|' + (r.tags || '');
+                   '|' + (r.ip || '') + '|' + (r.tags || '') + '|' + (r.agent_running === undefined ? '' : r.agent_running);
+        }
+        function announceResourcesFrame(clusterId, rows) {
+            try { window.dispatchEvent(new CustomEvent('pegaprox-resources-frame', { detail: { cluster_id: clusterId, rows } })); } catch (e) {}
         }
         function areResourcesEqual(a, b) {
             if (a === b) return true;
@@ -13707,6 +13712,7 @@
                                     // NS Jul 2026 (render-perf): skip the array swap on a no-op/
                                     // keepalive frame so the VM grid doesn't re-filter/re-render
                                     // every second (window.pegaproxVmList is the last-applied list)
+                                    announceResourcesFrame(data.cluster_id, data.data);
                                     if (!areResourcesEqual(window.pegaproxVmList, data.data)) {
                                         setClusterResources(data.data);
                                         window.pegaproxVmList = data.data;
@@ -15471,6 +15477,7 @@
                             return { ...prev, [clusterId]: { ...cur, resources: data } };
                         });
                         if (selectedClusterRef.current?.id !== clusterId) return;
+                        announceResourcesFrame(clusterId, data);
                         // NS Jul 2026 (render-perf): only swap + re-render on a real change
                         if (!areResourcesEqual(window.pegaproxVmList, data)) {
                             setClusterResources(data);

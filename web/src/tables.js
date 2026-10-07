@@ -1348,6 +1348,34 @@
             );
         }
 
+        // LW Oct 2026 - optional columns of the guest table, in this order. Both come from what
+        // the list already carries, no call per guest: the agent from the server's agent sweep,
+        // the throughput from PVE's read/write counters
+        const VM_LIST_EXTRA_COLS = ['agent', 'diskio'];
+
+        // the counters are bytes since the guest started, and uptime comes from the same
+        // pvestatd sample, so two samples give bytes per second whatever the refresh rhythm
+        function guestIoSample(prev, r) {
+            const up = Number(r.uptime), rd = Number(r.diskread), wr = Number(r.diskwrite);
+            if (!(up > 0) || !isFinite(rd) || !isFinite(wr)) return null;
+            const fresh = { up, rd, wr, read: null, write: null };
+            if (!prev) return fresh;
+            if (up === prev.up) return prev;
+            // a read that arrives late is a little older, a restart starts over
+            if (up < prev.up) return prev.up - up <= 30 ? prev : fresh;
+            if (rd < prev.rd || wr < prev.wr) return fresh;
+            const dt = up - prev.up;
+            return { up, rd, wr, read: (rd - prev.rd) / dt, write: (wr - prev.wr) / dt };
+        }
+
+        function fmtIoRate(bps) {
+            if (bps < 1024) return `${Math.round(bps)} B/s`;
+            const units = ['KB/s', 'MB/s', 'GB/s'];
+            let v = bps, i = -1;
+            do { v /= 1024; i++; } while (v >= 1024 && i < units.length - 1);
+            return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+        }
+
         // Resource Table Component
         // LW: The main VM/CT list - supports cards, table, and detail view
         // NS: Added bulk select for mass operations (migration, etc.)
@@ -1386,6 +1414,77 @@
             const _savedSort = (() => { try { return JSON.parse(localStorage.getItem(_sortKey) || '{}'); } catch (e) { return {}; } })();
             const [sortBy, setSortBy] = useState(_savedSort.by || 'vmid');
             const [sortDir, setSortDir] = useState(_savedSort.dir || 'asc');
+            // the optional columns, kept per user next to the sort
+            const _colsKey = `pegaprox-vmcols-${user?.username || '_'}`;
+            const [extraCols, setExtraCols] = useState(() => {
+                try {
+                    const v = JSON.parse(localStorage.getItem(_colsKey) || '[]');
+                    return Array.isArray(v) ? VM_LIST_EXTRA_COLS.filter(k => v.includes(k)) : [];
+                } catch (e) { return []; }
+            });
+            const [showColMenu, setShowColMenu] = useState(false);
+            const colMenuRef = useRef(null);
+            // a click anywhere else or Escape closes the column menu
+            useEffect(() => {
+                if (!showColMenu) return;
+                const away = (e) => { if (colMenuRef.current && !colMenuRef.current.contains(e.target)) setShowColMenu(false); };
+                const esc = (e) => { if (e.key === 'Escape') setShowColMenu(false); };
+                document.addEventListener('mousedown', away);
+                document.addEventListener('keydown', esc);
+                return () => { document.removeEventListener('mousedown', away); document.removeEventListener('keydown', esc); };
+            }, [showColMenu]);
+            const toggleExtraCol = (key) => {
+                const next = VM_LIST_EXTRA_COLS.filter(k => (k === key) !== extraCols.includes(k));
+                setExtraCols(next);
+                try { localStorage.setItem(_colsKey, JSON.stringify(next)); } catch (e) {}
+            };
+            const showAgent = extraCols.includes('agent');
+            const showIo = extraCols.includes('diskio');
+            const ioKey = (r) => `${r._clusterId || clusterId}:${r.vmid}`;
+            const ioRef = useRef(new Map());
+            const ioFedRef = useRef(null);
+            const [ioTick, setIoTick] = useState(0);
+            // true when a rate moved; a frame with the same pvestatd sample changes nothing
+            const feedIo = (rows) => {
+                const seen = ioRef.current, next = new Map();
+                let moved = false;
+                rows.forEach(r => {
+                    if (!r || r.status !== 'running') return;
+                    const prev = seen.get(ioKey(r));
+                    const s = guestIoSample(prev, r);
+                    if (s) next.set(ioKey(r), s);
+                    if (s !== prev) moved = true;
+                });
+                ioRef.current = next;
+                return moved || next.size !== seen.size;
+            };
+            // the list keeps its array while names, status and load stay put, so the rates
+            // also take every frame the dashboard receives for this cluster
+            useEffect(() => {
+                if (!showIo) return;
+                const onFrame = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (d.cluster_id !== clusterId || !Array.isArray(d.rows)) return;
+                    if (feedIo(d.rows)) setIoTick(n => n + 1);
+                };
+                window.addEventListener('pegaprox-resources-frame', onFrame);
+                return () => window.removeEventListener('pegaprox-resources-frame', onFrame);
+            }, [showIo, clusterId]);
+            const ioRates = useMemo(() => {
+                if (!showIo || !resources) { ioRef.current = new Map(); ioFedRef.current = null; return null; }
+                if (ioFedRef.current !== resources) {
+                    ioFedRef.current = resources;
+                    feedIo(resources);
+                }
+                return new Map(ioRef.current);
+            }, [resources, showIo, ioTick]);
+            const ioTotal = (r) => {
+                const s = ioRates && ioRates.get(ioKey(r));
+                return s && s.read !== null ? s.read + s.write : -1;
+            };
+            // the rates re-sort the list only while it is sorted by them
+            const ioSortRates = sortBy === 'diskio' ? ioRates : null;
+            const agentRank = (r) => r.agent_running === true ? 2 : r.agent_running === false ? 1 : 0;
             const [viewMode, setViewMode] = useState(isCorporate ? 'table' : 'cards'); // LW: corporate defaults to table
             const [actionLoading, setActionLoading] = useState({});
             const [selectedVms, setSelectedVms] = useState([]);
@@ -1521,20 +1620,23 @@
                     return matchesSearch && matchesFilter && matchesNode && matchesTag;
                 });
                 
-                // sort
+                // sort; a saved sort on a column that is switched off falls back to the ID
+                const by = VM_LIST_EXTRA_COLS.includes(sortBy) && !extraCols.includes(sortBy) ? 'vmid' : sortBy;
                 filtered.sort((a, b) => {
                     const dir = sortDir === 'asc' ? 1 : -1;
-                    if (sortBy === 'ip') {  // NS #431: per-octet numeric, not lexical
+                    if (by === 'ip') {  // NS #431: per-octet numeric, not lexical
                         return (ipSortKey(getIp(a)) - ipSortKey(getIp(b))) * dir;
                     }
-                    const aVal = a[sortBy];
-                    const bVal = b[sortBy];
+                    if (by === 'agent') return (agentRank(a) - agentRank(b)) * dir;
+                    if (by === 'diskio') return (ioTotal(a) - ioTotal(b)) * dir;
+                    const aVal = a[by];
+                    const bVal = b[by];
                     if (typeof aVal === 'number') return(aVal - bVal) * dir;
                     return String(aVal).localeCompare(String(bVal)) * dir;
                 });
 
                 return filtered;
-            }, [resources, search, filter, nodeFilter, tagFilter, sortBy, sortDir, ipTick]);
+            }, [resources, search, filter, nodeFilter, tagFilter, sortBy, sortDir, ipTick, extraCols, ioSortRates]);
             
             // Reset page when filters change - MK Jan 2026
             // NS: Also reset when cluster changes (via clusterId) to avoid showing empty page
@@ -1684,6 +1786,78 @@
                 return groups;
             }, [filteredResources]);
 
+            const extraColText = {
+                agent: [t('listColAgent'), t('listColAgentHint')],
+                diskio: [t('listColDiskIo'), t('listColDiskIoHint')],
+            };
+            const colPicker = (corp) => (
+                <div className="relative" ref={colMenuRef}>
+                    <button onClick={() => setShowColMenu(v => !v)} data-col-picker title={t('listColumns')}
+                        className={corp ? `corp-toolbar-filter ${extraCols.length ? 'active' : ''}`
+                            : 'flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-proxmox-dark text-gray-400 hover:text-white border border-proxmox-border'}>
+                        {!corp && <Icons.Settings />}
+                        {t('listColumns')}
+                    </button>
+                    {showColMenu && (
+                        <div className="absolute right-0 top-full mt-1 w-64 bg-proxmox-card border border-proxmox-border rounded-lg shadow-xl z-50 py-1" data-col-menu>
+                            {VM_LIST_EXTRA_COLS.map(k => (
+                                <label key={k} data-col-toggle={k} className="flex items-start gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-proxmox-hover cursor-pointer">
+                                    <input type="checkbox" checked={extraCols.includes(k)} onChange={() => toggleExtraCol(k)} className="w-4 h-4 mt-0.5 rounded" />
+                                    <span className="flex-1 min-w-0">
+                                        <span className="block">{extraColText[k][0]}</span>
+                                        <span className="block text-xs text-gray-500">{extraColText[k][1]}</span>
+                                    </span>
+                                </label>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            );
+
+            const agentCell = (r) => {
+                if (r.type !== 'qemu' || r.status !== 'running' || typeof r.agent_running !== 'boolean') {
+                    return <span className="text-xs text-gray-500" data-agent="none"
+                        title={r.type === 'qemu' && r.status === 'running' ? t('listColAgentUnknown') : undefined}>-</span>;
+                }
+                return (
+                    <span className={`inline-flex items-center gap-1.5 text-xs ${r.agent_running ? 'text-green-400' : 'text-gray-400'}`}
+                        data-agent={r.agent_running ? 'up' : 'down'}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${r.agent_running ? 'bg-green-400' : 'bg-gray-500'}`} />
+                        {r.agent_running ? t('yes') : t('no')}
+                    </span>
+                );
+            };
+
+            const ioCell = (r) => {
+                const s = r.status === 'running' && ioRates ? ioRates.get(ioKey(r)) : null;
+                if (!s || s.read === null) {
+                    return <span className="text-xs text-gray-500" data-io="none"
+                        title={r.status === 'running' ? t('listColDiskIoWait') : undefined}>-</span>;
+                }
+                return (
+                    <div className="text-xs font-mono text-gray-400 whitespace-nowrap" data-io="rate"
+                        data-io-read={Math.round(s.read)} data-io-write={Math.round(s.write)}>
+                        <div>{t('listColRead')} {fmtIoRate(s.read)}</div>
+                        <div>{t('listColWrite')} {fmtIoRate(s.write)}</div>
+                    </div>
+                );
+            };
+
+            const tableCols = [
+                { key: 'vmid', label: 'ID' },
+                { key: 'name', label: t('name') },
+                { key: 'type', label: t('type') },
+                { key: 'node', label: 'Node' },
+                { key: 'ip', label: 'IP' },
+                { key: 'cpu_percent', label: 'CPU' },
+                { key: 'mem', label: 'RAM' },
+                { key: 'disk', label: t('disk') },
+                ...(showAgent ? [{ key: 'agent', label: t('listColAgent') }] : []),
+                ...(showIo ? [{ key: 'diskio', label: t('listColDiskIo') }] : []),
+                { key: 'status', label: 'Status' },
+                { key: 'actions', label: t('actions') },
+            ];
+
             return(
                 <div className={isCorporate ? 'space-y-0' : 'space-y-4'}>
                     {/* LW: Mar 2026 - corporate flat toolbar vs modern rounded pills */}
@@ -1711,6 +1885,10 @@
                             <span className="text-[11px]" style={{color: '#728b9a'}}>
                                 {filteredResources.length} {t('items') || 'items'}
                             </span>
+                            {viewMode === 'table' && (<>
+                                <span className="corp-toolbar-divider" />
+                                {colPicker(true)}
+                            </>)}
                             <div style={{flex: 1}} />
                             {selectedVms.length > 0 && (
                                 <>
@@ -1803,6 +1981,7 @@
                                 </select>
                             )}
                         </div>
+                        {viewMode === 'table' && colPicker(false)}
                         {isCorporate ? (
                         <div className="corp-toolbar-group">
                             <button onClick={() => setViewMode('cards')} className={`p-1.5 ${viewMode === 'cards' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-dark text-gray-400 hover:text-white'}`} title={t('gridView')}>
@@ -2221,20 +2400,10 @@
                                                 className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange focus:ring-proxmox-orange"
                                             />
                                         </th>
-                                        {[
-                                            { key: 'vmid', label: 'ID' },
-                                            { key: 'name', label: t('name') },
-                                            { key: 'type', label: t('type') },
-                                            { key: 'node', label: 'Node' },
-                                            { key: 'ip', label: 'IP' },
-                                            { key: 'cpu_percent', label: 'CPU' },
-                                            { key: 'mem', label: 'RAM' },
-                                            { key: 'disk', label: t('disk') },
-                                            { key: 'status', label: 'Status' },
-                                            { key: 'actions', label: t('actions') },
-                                        ].map(col => (
+                                        {tableCols.map(col => (
                                             <th
                                                 key={col.key}
+                                                data-col={col.key}
                                                 onClick={() => col.key !== 'actions' && !col.noSort && handleSort(col.key)}
                                                 className={isCorporate
                                                     ? `text-xs font-semibold uppercase tracking-wider ${col.key !== 'actions' && !col.noSort ? 'cursor-pointer hover:text-white' : ''}`
@@ -2263,7 +2432,7 @@
                                 <tbody className={isCorporate ? '' : 'divide-y divide-proxmox-border'}>
                                     {paginatedResources.length === 0 ? (
                                         <tr>
-                                            <td colSpan={10} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
+                                            <td colSpan={tableCols.length + 1} className={isCorporate ? 'px-2 py-4 text-center text-gray-500' : 'px-4 py-8 text-center text-gray-500'}>
                                                 {t('noResults')}
                                             </td>
                                         </tr>
@@ -2406,6 +2575,8 @@
                                                         </span>
                                                     </div>
                                                 </td>
+                                                {showAgent && <td className="px-4 py-3" data-col="agent">{agentCell(resource)}</td>}
+                                                {showIo && <td className="px-4 py-3" data-col="diskio">{ioCell(resource)}</td>}
                                                 <td className="px-4 py-3">
                                                     <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium ${
                                                         resource.status === 'running'

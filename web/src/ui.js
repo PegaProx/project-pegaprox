@@ -441,7 +441,7 @@
                 return chartDatasets.map(ds => {
                     const d = ds.data;
                     if (!d || d.length === 0) return '0';
-                    return d.length + ':' + (d[0] || 0) + ':' + (d[Math.floor(d.length/2)] || 0) + ':' + (d[d.length-1] || 0);
+                    return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1];
                 }).join('|');
             }, [chartDatasets]);
 
@@ -513,22 +513,28 @@
                 }
 
                 // Process each dataset
+                // LW Oct 2026 - a slot without a sample (null, undefined, NaN) stays null and
+                // the line breaks there: it used to be drawn as a measured 0. A bucket of the
+                // decimation takes its first real value, a sample between two gaps gets a dot
                 chartDatasets.forEach(ds => {
                     if (!ds.data || ds.data.length === 0) return;
                     const cleanData = [];
                     for (let i = 0; i < ds.data.length; i++) {
                         const v = ds.data[i];
-                        cleanData.push((v === null || v === undefined || v !== v) ? 0 : v);
+                        cleanData.push((typeof v === 'number' && isFinite(v)) ? v : null);
                     }
 
                     let finalData = [];
                     if (step > 1) {
                         for (let i = 0; i < cleanData.length; i += step) {
-                            finalData.push(cleanData[i]);
+                            let v = null;
+                            for (let j = i; j < Math.min(i + step, cleanData.length) && v === null; j++) v = cleanData[j];
+                            finalData.push(v);
                         }
                     } else {
                         finalData = cleanData;
                     }
+                    const lone = finalData.map((v, i) => v !== null && (i === 0 || finalData[i - 1] === null) && (i === finalData.length - 1 || finalData[i + 1] === null));
 
                     processedDatasets.push({
                         label: ds.label || label,
@@ -536,8 +542,10 @@
                         borderColor: ds.color || color,
                         backgroundColor: (ds.color || color) + '33',
                         fill: ds.fill !== undefined ? ds.fill : true,
+                        spanGaps: false,
                         tension: 0.4,
-                        pointRadius: 0,
+                        pointRadius: lone.some(Boolean) ? (c => lone[c.dataIndex] ? 2 : 0) : 0,
+                        pointBackgroundColor: ds.color || color,
                         pointHitRadius: 8,
                         borderWidth: 2,
                     });
@@ -588,6 +596,7 @@
                                     callbacks: {
                                         label: function(c) {
                                             var val = c.parsed.y;
+                                            if (val === null || val === undefined || val !== val) return ' ' + c.dataset.label + ': -';
                                             var fn = formatRef.current;
                                             var str = fn ? fn(val) : val.toFixed(2);
                                             return ' ' + c.dataset.label + ': ' + str + (unitStr.trim() ? unitStr : '');
@@ -679,7 +688,7 @@
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
             const memDataGB = React.useMemo(() => {
                 if (!data || !data.metrics || !data.metrics.memory || !maxMemGB) return [];
-                return data.metrics.memory.map(p => (p / 100) * maxMemGB);
+                return data.metrics.memory.map(p => p === null ? null : (p / 100) * maxMemGB);
             }, [data, maxMemGB]);
 
             return(
