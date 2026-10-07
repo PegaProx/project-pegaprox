@@ -272,6 +272,9 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     # a bulk migration runs in the process of the instance that started it (#952)
     '/api/bulk-migrations',
     '/api/bulk-migrations/<run_id>',
+    # and so does a batch restore
+    '/api/batch-restores',
+    '/api/batch-restores/<run_id>',
 ))
 # The one rule every plugin route is served behind (api/plugins.py plugin_proxy). A
 # plugin handler serves every method from one function and most never look at which
