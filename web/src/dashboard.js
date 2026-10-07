@@ -11146,7 +11146,7 @@
             const [alertMutes, setAlertMutes] = useState([]);
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
-            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health'];
+            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop'];
             const [sessionExpired, setSessionExpired] = useState(false);  // any 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -13052,6 +13052,8 @@
                     return t('backupCoverageSummary').replace('{n}', n) + (tags.length ? ` - ${t('backupCoverageExcept').replace('{tags}', tags.join(', '))}` : '');
                 }
                 if (alert.metric === 'zfs_health') return `${t('zfsAlertTitle')}: ${Number(n) >= 1 ? t('zfsAlertStateOnly') : t('zfsAlertAny')}`;
+                if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
+                if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
                 return `${alert.metric?.toUpperCase()} ${alert.operator} ${alert.threshold}%`;
             };
 
@@ -27405,6 +27407,7 @@
                                     }
                                     if (alertMetricSel === 'snapshot_age') payload.snapshot_ignore_policy = form.snapshot_ignore_policy.checked;
                                     if (alertMetricSel === 'backup_coverage') payload.backup_exclude_tags = form.backup_exclude_tags.value;
+                                    if (alertMetricSel === 'restart_loop') payload.restart_window_minutes = parseInt(form.restart_window_minutes.value);
                                     if (editingAlert) {  // #618 — edit keeps the alert's current enabled state
                                         await updateClusterAlert(editingAlert.id, payload);
                                     } else {
@@ -27424,7 +27427,7 @@
                                             <select name="target_type" defaultValue={editingAlert ? editingAlert.target_type : 'cluster'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cluster">{t('entireCluster') || 'Entire Cluster'}</option>
                                                 <option value="node">{t('specificNode') || 'Specific Node'}</option>
-                                                {alertMetricSel !== 'zfs_health' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
+                                                {alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
                                             </select>
                                         </div>
                                         <div>
@@ -27452,6 +27455,8 @@
                                                 <option value="snapshot_age">{t('alertMetricSnapshots')}</option>
                                                 <option value="backup_coverage">{t('backupCoverageTitle')}</option>
                                                 <option value="zfs_health">{t('zfsAlertTitle')}</option>
+                                                <option value="clock_drift">{t('clockDriftTitle')}</option>
+                                                <option value="restart_loop">{t('restartLoopTitle')}</option>
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -27465,6 +27470,8 @@
                                                     : alertMetricSel === 'replication' ? t('alertReplHelp')
                                                     : alertMetricSel === 'backup_coverage' ? t('backupCoverageHelp')
                                                     : alertMetricSel === 'zfs_health' ? t('zfsAlertHelp')
+                                                    : alertMetricSel === 'clock_drift' ? t('clockDriftHelp')
+                                                    : alertMetricSel === 'restart_loop' ? t('restartLoopHelp')
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
@@ -27565,6 +27572,25 @@
                                                         <option value="0">{t('zfsAlertAny')}</option>
                                                         <option value="1">{t('zfsAlertStateOnly')}</option>
                                                     </select>
+                                                </div>
+                                            )}
+                                            {/* LW Oct 2026 - a clock limit in seconds; a restart loop is so many starts within a window */}
+                                            {alertMetricSel === 'clock_drift' && (
+                                                <div data-event-fields="clock_drift">
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('clockDriftLimit')}</label>
+                                                    <input name="threshold" type="number" min="1" max="3600" required defaultValue={saved ? saved.threshold : 2} className={field} />
+                                                </div>
+                                            )}
+                                            {alertMetricSel === 'restart_loop' && (
+                                                <div data-event-fields="restart_loop" className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('restartLoopStarts')}</label>
+                                                        <input name="threshold" type="number" min="2" max="100" required defaultValue={saved ? saved.threshold : 3} className={field} />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('restartLoopWindow')}</label>
+                                                        <input name="restart_window_minutes" type="number" min="1" max="1440" required defaultValue={saved ? (saved.restart_window_minutes || 15) : 15} className={field} />
+                                                    </div>
                                                 </div>
                                             )}
                                             {alertMetricSel !== 'rolling_update' && (
