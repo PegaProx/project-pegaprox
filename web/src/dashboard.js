@@ -5439,6 +5439,153 @@
             );
         }
 
+        // LW Oct 2026 - what the balancer moved on this cluster and why. The server keeps it in
+        // the migration history, so it outlives a restart; read when the settings open and on
+        // demand, a page at a time, never polled. The reason is worded here from the numbers the
+        // server stored; a caller confined to some guests gets their rows without them.
+        // BAL_HIST_TRIGGERS sits beside MigrationHistory (vm_modals.js)
+        const BAL_HIST_PAGE = 50;
+        const BAL_HIST_STATUS = {
+            success: ['balHistStatusSuccess', 'text-green-400'],
+            failed: ['balHistStatusFailed', 'text-red-400'],
+            dry_run: ['balHistStatusDryRun', 'text-yellow-400'],
+        };
+        function balHistReason(e, t) {
+            const d = e.details || {};
+            const fill = (key, vals) => Object.keys(vals).reduce(
+                (s, k) => s.split(`{${k}}`).join(String(vals[k] ?? '?')), t(key));
+            const load = (l) => l || {};
+            let text = '';
+            if (e.trigger === 'balance' && d.source_load) {
+                const s = load(d.source_load), g = load(d.target_load);
+                text = fill('balHistWhyBalance', { src: d.source, srcScore: s.score, srcCpu: s.cpu, srcMem: s.mem,
+                    tgt: d.target, tgtScore: g.score, tgtCpu: g.cpu, tgtMem: g.mem, diff: d.diff,
+                    threshold: d.threshold, tolerance: d.tolerance });
+            } else if (e.trigger === 'predictive' && d.forecast !== undefined) {
+                text = fill('balHistWhyPredictive', { src: d.source, forecast: d.forecast, threshold: d.threshold,
+                    confidence: d.confidence, tgt: d.target, tgtScore: load(d.target_load).score });
+            } else if (e.trigger === 'affinity' && d.rule !== undefined) {
+                text = fill('balHistWhyAffinity', { rule: d.rule, src: d.source, tgt: d.target });
+            } else if (e.trigger === 'pin' && d.pinned) {
+                text = fill('balHistWhyPin', { nodes: d.pinned.join(', '), src: d.source, tgt: d.target });
+            } else {
+                return e.reason || '';
+            }
+            if (d.manual) text += ' ' + t('balHistManual');
+            if (d.requested_target) text += ' ' + fill('balHistRerouted', { node: e.target_node, requested: d.requested_target });
+            if (d.error) text += ' ' + fill('balHistFailedWith', { error: d.error });
+            return text;
+        }
+
+        function BalancerHistory({ clusterId, authFetch, t }) {
+            const [rows, setRows] = React.useState([]);
+            const [next, setNext] = React.useState(null);
+            const [loaded, setLoaded] = React.useState(false);
+            const [failed, setFailed] = React.useState(false);
+            const [loading, setLoading] = React.useState(false);
+            const [trigger, setTrigger] = React.useState('');
+            const [status, setStatus] = React.useState('');
+            const [leaderAway, setLeaderAway] = React.useState(false);
+            const gen = React.useRef(0);
+
+            const load = React.useCallback(async (before) => {
+                const mine = before ? gen.current : ++gen.current;
+                setLoading(true);
+                try {
+                    const q = new URLSearchParams({ limit: String(BAL_HIST_PAGE) });
+                    if (trigger) q.set('trigger', trigger);
+                    if (status) q.set('status', status);
+                    if (before) q.set('before', String(before));
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/balance-history?${q.toString()}`);
+                    // only the instance whose balancer runs keeps these rows (#625)
+                    const away = await haLeaderAway(r);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (mine !== gen.current) return;
+                    setLeaderAway(away);
+                    setFailed(!d && !away);
+                    if (!d) return;
+                    setRows(prev => before ? prev.concat(d.entries || []) : (d.entries || []));
+                    setNext(d.next_before || null);
+                    setLoaded(true);
+                } finally {
+                    if (mine === gen.current) setLoading(false);
+                }
+            }, [clusterId, authFetch, trigger, status]);
+
+            React.useEffect(() => {
+                setRows([]); setNext(null); setLoaded(false);
+                load(null);
+                return () => { gen.current += 1; };
+            }, [load]);
+
+            const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
+            const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
+
+            return (
+                <div className="space-y-3 min-w-0" data-balancer-history>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                            <h3 className="font-semibold flex items-center gap-2">
+                                <span className="text-blue-400 flex-shrink-0"><Icons.Activity /></span>
+                                {t('balHistTitle')}
+                            </h3>
+                            <p className="text-xs text-gray-500 mt-1">{t('balHistDesc')}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <select value={trigger} onChange={e => setTrigger(e.target.value)} className={selectCls} data-bal-filter-trigger aria-label={t('balHistFilterTrigger')}>
+                                <option value="">{t('balHistAllTriggers')}</option>
+                                {Object.keys(BAL_HIST_TRIGGERS).map(k => <option key={k} value={k}>{t(BAL_HIST_TRIGGERS[k][0])}</option>)}
+                            </select>
+                            <select value={status} onChange={e => setStatus(e.target.value)} className={selectCls} data-bal-filter-status aria-label={t('balHistFilterStatus')}>
+                                <option value="">{t('balHistAllOutcomes')}</option>
+                                {Object.keys(BAL_HIST_STATUS).map(k => <option key={k} value={k}>{t(BAL_HIST_STATUS[k][0])}</option>)}
+                            </select>
+                            <button type="button" onClick={() => load(null)} disabled={loading} title={t('refresh')}
+                                className="p-1 text-gray-400 hover:text-white disabled:opacity-40" data-bal-refresh>
+                                {loading ? <Icons.RotateCw /> : <Icons.RefreshCw />}
+                            </button>
+                        </div>
+                    </div>
+                    {leaderAway && <div className="text-xs text-yellow-400" data-bal-leader-away>{t('pgHaLeaderAwayView')}</div>}
+                    {failed && <div className="text-xs text-red-400">{t('balHistLoadError')}</div>}
+                    {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
+                    {loaded && rows.length === 0 && (
+                        <div className="text-xs text-gray-500 p-2 bg-proxmox-dark rounded-lg" data-bal-empty>
+                            {t(trigger || status ? 'balHistNoMatch' : 'balHistNone')}
+                        </div>
+                    )}
+                    {rows.length > 0 && (
+                        <div className="space-y-2 max-h-96 overflow-y-auto">
+                            {rows.map(e => {
+                                const [tKey, tTone] = BAL_HIST_TRIGGERS[e.trigger] || ['', 'bg-gray-500/20 text-gray-400'];
+                                const [sKey, sTone] = BAL_HIST_STATUS[e.status] || ['', 'text-gray-400'];
+                                const why = balHistReason(e, t);
+                                return (
+                                    <div key={e.id} data-bal-row={e.id}
+                                        className="flex flex-col gap-1 bg-proxmox-dark rounded-lg px-3 py-2 text-xs min-w-0">
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0">
+                                            <span className="text-gray-500 whitespace-nowrap">{when(e.timestamp)}</span>
+                                            <span className="text-sm text-gray-200 truncate">{e.vm_name || `VM ${e.vmid}`} <span className="text-gray-500">({e.vmid})</span></span>
+                                            <span className="flex items-center gap-1 font-mono text-gray-300">{e.source_node}<Icons.ArrowRight />{e.target_node}</span>
+                                            <span className={`px-1.5 py-0.5 rounded ${tTone}`} data-bal-trigger={e.trigger}>{tKey ? t(tKey) : e.trigger}</span>
+                                            <span className={sTone} data-bal-status={e.status}>{sKey ? t(sKey) : e.status}</span>
+                                        </div>
+                                        {why && <div className="text-gray-400 leading-relaxed" data-bal-why>{why}</div>}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                    {next && (
+                        <button type="button" onClick={() => load(next)} disabled={loading} data-bal-more
+                            className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40">
+                            {t('balHistLoadMore')}
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
         // NS May 2026 — Config Drift Detection.
         // Tracks open events grouped by kind (vm_config, storage, network, cluster_options).
         // Admin can rescan, set baseline, acknowledge/promote events.
@@ -21467,7 +21614,33 @@
                                                         step={60}
                                                         unit="s"
                                                     />
-                                                    
+
+                                                    {/* LW Oct 2026 - the pause before the balancer moves the same guest again, in
+                                                        minutes here and seconds on the server; the active's to change (#625).
+                                                        Steps, not a slider: 1 min to 24 h on one track left no room for 5 to 60 */}
+                                                    <fieldset disabled={haReadOnly || !can('cluster.config')} className="min-w-0"
+                                                        data-ha-locked={haReadOnly ? '' : undefined} data-bal-cooldown>
+                                                        {(() => {
+                                                            const mins = Math.max(1, Math.round((selectedCluster.migration_cooldown ?? 900) / 60));
+                                                            const steps = [1, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440];
+                                                            const shown = steps.includes(mins) ? steps : [...steps, mins].sort((a, b) => a - b);
+                                                            const label = (m) => m % 60 === 0 && m >= 60 ? `${m / 60}${t('balCooldownHours')}` : `${m}${t('balCooldownUnit')}`;
+                                                            return (
+                                                                <div className="flex items-center justify-between gap-3">
+                                                                    <div className="min-w-0">
+                                                                        <label htmlFor="bal-cooldown" className="text-sm font-medium text-gray-200">{t('balCooldown')}</label>
+                                                                        <p className="text-xs text-gray-500">{t('balCooldownDesc')}</p>
+                                                                    </div>
+                                                                    <select id="bal-cooldown" value={mins}
+                                                                        onChange={e => updateConfig('migration_cooldown', Number(e.target.value) * 60)}
+                                                                        className="flex-shrink-0 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm font-mono font-semibold text-proxmox-orange disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                        {shown.map(m => <option key={m} value={m}>{label(m)}</option>)}
+                                                                    </select>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </fieldset>
+
                                                     {/* LW: Excluded Nodes Section - GitHub Feature Request */}
                                                     <div className="pt-4 border-t border-proxmox-border">
                                                         <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
@@ -21962,7 +22135,14 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                
+
+                                                {/* LW Oct 2026 - the balancer's moves with why, under its settings */}
+                                                {can('cluster.view') && (
+                                                    <div className={`lg:col-span-2 min-w-0 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
+                                                        <BalancerHistory key={selectedCluster.id} clusterId={selectedCluster.id} authFetch={authFetch} t={t} />
+                                                    </div>
+                                                )}
+
                                                 {/* Update Manager Section */}
                                                 <div className="lg:col-span-2">
                                                     <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} addToast={addToast} />

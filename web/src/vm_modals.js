@@ -4755,6 +4755,15 @@
             );
         }
 
+        // LW Oct 2026 - which rule of the balancer moved a guest: label key and colours, for the
+        // list below and the balancer history in the cluster settings
+        const BAL_HIST_TRIGGERS = {
+            balance: ['balHistTriggerBalance', 'bg-blue-500/20 text-blue-400'],
+            predictive: ['balHistTriggerPredictive', 'bg-purple-500/20 text-purple-400'],
+            affinity: ['balHistTriggerAffinity', 'bg-orange-500/20 text-orange-400'],
+            pin: ['balHistTriggerPin', 'bg-cyan-500/20 text-cyan-400'],
+        };
+
         // Migration History Component
         // LW: Limited to 10 items by default (GitHub Issue - list was too long)
         function MigrationHistory({ logs, maxItems = 10 }) {
@@ -4794,11 +4803,18 @@
                                 <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
                                     <div className="flex items-center justify-between mb-2">
                                         <span className="font-medium text-white">{log.vm}</span>
-                                        {log.dry_run && (
-                                            <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
-                                                Dry Run
-                                            </span>
-                                        )}
+                                        <div className="flex items-center gap-2">
+                                            {BAL_HIST_TRIGGERS[log.trigger] && (
+                                                <span className={`text-xs px-2 py-0.5 rounded ${BAL_HIST_TRIGGERS[log.trigger][1]}`} data-mig-trigger={log.trigger}>
+                                                    {t(BAL_HIST_TRIGGERS[log.trigger][0])}
+                                                </span>
+                                            )}
+                                            {log.dry_run && (
+                                                <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
+                                                    Dry Run
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className="flex items-center gap-2 text-sm text-gray-400">
                                         <span className="font-mono">{log.from_node}</span>
