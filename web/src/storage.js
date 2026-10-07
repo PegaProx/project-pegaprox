@@ -147,6 +147,7 @@
             const [uploadProgress, setUploadProgress] = useState(0);
             const [uploadSpeed, setUploadSpeed] = useState(0);
             const [deleteConfirm, setDeleteConfirm] = useState(null);
+            const [batchRestore, setBatchRestore] = useState(null);  // 'pick' or 'runs' while the dialog is open
             const [isRefreshing, setIsRefreshing] = useState(false);  // not used
             const lastFetchTime = useRef(0);  // for rate limiting, not implemented
             
@@ -1593,6 +1594,19 @@
                                                             <Icons.RefreshCw className="w-4 h-4" /> {t('rescan') || 'Rescan'}
                                                         </button>
                                                     )}
+                                                    {/* LW Oct 2026 - several of its backups in one go, and the batches before */}
+                                                    {hasPerm('vm.backup') && storageContent.some(i => i.content === 'backup' && i.vmid) && (
+                                                        <button onClick={() => setBatchRestore('pick')} data-br-open
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">
+                                                            <Icons.RotateCcw /> {t('batchRestoreButton')}
+                                                        </button>
+                                                    )}
+                                                    {hasPerm('backup.view') && storageContent.some(i => i.content === 'backup') && (
+                                                        <button onClick={() => setBatchRestore('runs')} data-br-recent-open title={t('batchRestoreRecent')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white">
+                                                            <Icons.ClipboardList />
+                                                        </button>
+                                                    )}
                                                     <button
                                                         onClick={() => loadStorageContent(selectedStorage.name, selectedStorage.node)}
                                                         className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
@@ -2464,6 +2478,14 @@
                         </div>
                     )}
                     
+                    {batchRestore && selectedStorage && (
+                        <BatchRestoreModal clusterId={clusterId} storage={selectedStorage.name}
+                            items={batchRestore === 'pick' ? storageContent.filter(i => i.content === 'backup') : null}
+                            nodes={datastores.nodes || []} datastores={datastores}
+                            defaultNode={selectedStorage.node || (storageContent.find(i => i.content === 'backup') || {}).node}
+                            onClose={() => setBatchRestore(null)} />
+                    )}
+
                     {/* Delete Confirm Modal */}
                     {deleteConfirm && (
                         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
