@@ -13,7 +13,8 @@ not say it again, and a mute holds a condition back until the mute runs out.
 What it reads, per cluster that has such a rule:
   - one /cluster/tasks per tick, compared from a cursor on
   - one /cluster/ceph/status per tick where Ceph answers (a cluster without it is asked
-    again after CEPH_RETRY)
+    again after CEPH_RETRY), shared with the Ceph overview of all clusters (api/ceph.py)
+    for CEPH_FRESH seconds, whichever asked last
   - /cluster/replication plus one status read per source node every REPLICATION_EVERY
   - the snapshot list of each guest once after a start, SNAPSHOT_READS_PER_TICK per tick,
     then only for a guest whose snapshot task shows up in the task list
@@ -59,6 +60,7 @@ TASK_LOOKBACK = 24 * 3600     # how far back a rule looks the first time it read
 TASK_OVERLAP = 300            # pmxcfs hands on the tasks of other nodes late: read behind the cursor
 CEPH_RETRY = 1800
 CEPH_PROBE_NODES = 10
+CEPH_FRESH = 30               # a status read this recent serves the tick and the Ceph overview alike
 REPLICATION_EVERY = 300
 REPLICATION_BUDGET = 40       # seconds for the per-node status reads of one cluster
 SNAPSHOT_EVAL_EVERY = 600
@@ -104,7 +106,9 @@ _CEPH_LEVELS = {'HEALTH_OK': 0, 'HEALTH_WARN': 1, 'HEALTH_ERR': 2}
 # per cluster, in this process. The cursors start over after a restart; the open
 # incidents in the database keep that from saying anything twice.
 _tasks = {}       # cid -> {'cursor': epoch, 'seen': {upid: endtime}}
-_ceph = {}        # cid -> {'absent_until': epoch, 'node': str|None}
+_ceph = {}        # cid -> {'absent_until': epoch, 'node': str|None, 'last': (epoch, status)}
+_ceph_locks = {}
+_ceph_guard = threading.Lock()
 _repl = {}        # cid -> {'next_at': epoch}
 _snaps = {}       # cid -> {'guests': {vmid: [(name, ts)]}, 'tried': {vmid: epoch}, 'dirty': set(), 'next_eval': epoch}
 _backup = {}      # cid -> {'next_at': epoch, 'since': {vmid: epoch first seen in no job}}
@@ -429,24 +433,68 @@ def _task_window(cid, tasks, now):
 
 def _read_ceph(cid, mgr, now):
     """The Ceph status dict, or None. Absent Ceph is asked again after CEPH_RETRY."""
-    st = _ceph.setdefault(cid, {'absent_until': 0, 'node': None, 'seen': False})
-    if now < st['absent_until']:
+    return ceph_status(cid, mgr, max_age=CEPH_FRESH, now=now)[1]
+
+
+def ceph_status(cid, mgr, max_age=0, now=None):
+    """(state, status dict, read at) of the Ceph of a cluster: 'ok' with what
+    /cluster/ceph/status or a node with Ceph answered, 'none' while no node has Ceph (asked
+    again after CEPH_RETRY), 'unreadable' when it did not answer this time; dict and time
+    None then. A read younger than max_age is handed out again, so the alert tick and the
+    Ceph overview of all clusters (api/ceph.py) ask a cluster once between them. MK Oct 2026
+    """
+    clock = now is None
+    now = time.time() if clock else now
+
+    def fresh(st, at):
+        last = st.get('last')
+        if last and max_age and 0 <= at - last[0] < max_age:
+            return 'ok', last[1], last[0]
         return None
+
+    hit = fresh(_ceph.setdefault(cid, {'absent_until': 0, 'node': None, 'seen': False}), now)
+    if hit:
+        return hit
+    with _ceph_guard:
+        lock = _ceph_locks.setdefault(cid, threading.Lock())
+    # one read per cluster at a time: an overview opened by many at once, or next to the
+    # tick, waits for the read under way and takes its answer
+    with lock:
+        now = time.time() if clock else now
+        st = _ceph.setdefault(cid, {'absent_until': 0, 'node': None, 'seen': False})
+        hit = fresh(st, now)
+        if hit:
+            return hit
+        state, data = _ceph_read(cid, mgr, st, now)
+        if data is None:
+            return state, None, None
+        st['last'] = (now, data)
+        return 'ok', data, now
+
+
+def ceph_seen(cid):
+    """Whether the Ceph of a cluster has answered since this process started."""
+    return bool((_ceph.get(cid) or {}).get('seen'))
+
+
+def _ceph_read(cid, mgr, st, now):
+    if now < st['absent_until']:
+        return 'none', None
     status, data = _get(mgr, '/cluster/ceph/status')
     if status == 200 and isinstance(data, dict):
         st['seen'] = True
-        return data
+        return 'ok', data
     if status == 0:
-        return None                       # no answer this time - not the same as no Ceph
+        return 'unreadable', None         # no answer this time - not the same as no Ceph
     if st['node']:
         s2, d2 = _get(mgr, f"/nodes/{quote(st['node'], safe='')}/ceph/status")
         if s2 == 200 and isinstance(d2, dict):
-            return d2
+            return 'ok', d2
     if st['seen']:
         # it answered before: a Ceph in trouble can fail the status call itself, and that
         # is the moment not to stop asking. Next tick again; the condition stays as it is
         _note(cid, 'ceph', False, f'status unreadable (HTTP {status})')
-        return None
+        return 'unreadable', None
     # the API host may run without Ceph in a cluster that has it (#191): look for a node
     # that answers, a few of them, and not again before CEPH_RETRY if none does
     try:
@@ -458,10 +506,10 @@ def _read_ceph(cid, mgr, now):
         s3, d3 = _get(mgr, f"/nodes/{quote(node, safe='')}/ceph/status")
         if s3 == 200 and isinstance(d3, dict):
             st['node'], st['seen'] = node, True
-            return d3
+            return 'ok', d3
     st['absent_until'] = now + CEPH_RETRY
     _note(cid, 'ceph', False, f'no Ceph answered (HTTP {status}); asking again in {CEPH_RETRY // 60} minutes')
-    return None
+    return 'none', None
 
 
 def _read_replication(cid, mgr, now):

@@ -338,6 +338,113 @@ def get_ceph_overview(cluster_id):
         return jsonify(result)
 
 
+_CHECK_LEVELS = {'HEALTH_ERR': 2, 'HEALTH_WARN': 1}
+_CHECKS_SHOWN = 8
+_PG_STATES_SHOWN = 8
+
+
+def _num(value):
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(n, 0)
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def ceph_rollup(status):
+    """The figures of the Ceph overview from one /cluster/ceph/status answer (`ceph -s`):
+    health and its checks, OSDs, placement groups, capacity, client I/O and monitors."""
+    health = _dict(status.get('health'))
+    checks = []
+    for name, chk in _dict(health.get('checks')).items():
+        chk = _dict(chk)
+        msg = _dict(chk.get('summary')).get('message') or ''
+        checks.append({'name': str(name)[:64], 'severity': str(chk.get('severity') or '')[:16],
+                       'message': str(msg)[:200]})
+    checks.sort(key=lambda c: (-_CHECK_LEVELS.get(c['severity'], 0), c['name']))
+    osdmap = _dict(status.get('osdmap'))
+    if isinstance(osdmap.get('osdmap'), dict):
+        osdmap = osdmap['osdmap']        # before Quincy it is nested once more
+    pgmap = _dict(status.get('pgmap'))
+    states = sorted(({'state': str(s.get('state_name') or '')[:80], 'count': _num(s.get('count'))}
+                     for s in (pgmap.get('pgs_by_state') or []) if isinstance(s, dict)),
+                    key=lambda s: (-s['count'], s['state']))
+    clean = sum(s['count'] for s in states if {'active', 'clean'} <= set(s['state'].split('+')))
+    used, total = _num(pgmap.get('bytes_used')), _num(pgmap.get('bytes_total'))
+    monmap = _dict(status.get('monmap'))
+    mons = _num(monmap.get('num_mons')) or len(monmap.get('mons') or [])
+    return {
+        'health': str(health.get('status') or health.get('overall_status') or 'unknown')[:16],
+        'checks': checks[:_CHECKS_SHOWN], 'checks_more': max(0, len(checks) - _CHECKS_SHOWN),
+        'osds': {'total': _num(osdmap.get('num_osds')), 'up': _num(osdmap.get('num_up_osds')),
+                 'in': _num(osdmap.get('num_in_osds'))},
+        'pgs': {'total': _num(pgmap.get('num_pgs')) or sum(s['count'] for s in states), 'clean': clean,
+                'states': states[:_PG_STATES_SHOWN]},
+        'bytes': {'used': used, 'avail': _num(pgmap.get('bytes_avail')), 'total': total},
+        'percent': round(used * 100.0 / total, 1) if total > 0 else None,
+        'io': {'read_bps': _num(pgmap.get('read_bytes_sec')), 'write_bps': _num(pgmap.get('write_bytes_sec')),
+               'read_iops': _num(pgmap.get('read_op_per_sec')), 'write_iops': _num(pgmap.get('write_op_per_sec')),
+               'recovery_bps': _num(pgmap.get('recovering_bytes_per_sec'))},
+        'mons': {'total': mons, 'quorum': len(status.get('quorum_names') or [])},
+    }
+
+
+# MK Oct 2026 - the Ceph of every cluster the caller reaches in one panel. One
+# /cluster/ceph/status per cluster, the read the ceph_health alert makes (alert_events
+# ceph_status): either serves the other for CEPH_FRESH seconds, and a cluster without Ceph
+# is asked again after CEPH_RETRY only.
+@bp.route('/api/ceph-overview', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_ceph_rollup():
+    """Ceph health, capacity, OSDs and placement groups of all clusters"""
+    from pegaprox.globals import cluster_managers
+    from pegaprox.background import alert_events
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.concurrent import run_concurrent
+    user = build_authz_user(request.session.get('user', ''), request.session)
+
+    def _name(cid, mgr):
+        name = getattr(getattr(mgr, 'config', None), 'name', None)
+        return name if isinstance(name, str) and name else cid
+
+    reach, out_clusters = [], []
+    for cid, mgr in sorted(list(cluster_managers.items()), key=lambda kv: _name(*kv).lower()):
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+            continue
+        ok, _err = check_cluster_access(cid)
+        if not ok:
+            continue
+        entry = {'cluster_id': cid, 'cluster_name': _name(cid, mgr), 'state': 'ok'}
+        out_clusters.append(entry)
+        # Ceph is the cluster's storage: a pool or a guest grant does not cover it
+        if caller_is_scoped(user, cid):
+            entry['state'] = 'confined'
+        elif not mgr.is_connected:
+            entry['state'] = 'offline'
+        else:
+            reach.append((cid, mgr, entry))
+
+    results = run_concurrent([lambda c=cid, m=mgr: alert_events.ceph_status(c, m, max_age=alert_events.CEPH_FRESH)
+                              for cid, mgr, _ in reach], timeout=30)
+    rows = []
+    for (cid, _mgr, entry), res in zip(reach, results):
+        state, data, at = res if res else ('unreadable', None, None)
+        if data is None:
+            entry['state'] = 'none' if state == 'none' else 'unreadable'
+            # a Ceph that answered before and does not now is news, a cluster that never had one is not
+            entry['had_ceph'] = alert_events.ceph_seen(cid)
+            continue
+        row = ceph_rollup(data)
+        row.update(cluster_id=cid, cluster_name=entry['cluster_name'], read_at=int(at))
+        rows.append(row)
+    return jsonify({'ceph': rows, 'clusters': out_clusters})
+
+
 # ============================================
 # Per-Node Ceph Status & Config
 # ============================================

@@ -32906,6 +32906,41 @@
         ]
       }
     },
+    "/api/updates-overview": {
+      "get": {
+        "operationId": "settings.get_updates_overview_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Pending package updates of all nodes and PBS servers, from the cached update checks",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/updates/rolling": {
       "post": {
         "operationId": "settings.start_rolling_update_post",
@@ -36835,6 +36870,41 @@
             }
           }
         ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/ceph-overview": {
+      "get": {
+        "operationId": "ceph.get_ceph_rollup_get",
+        "tags": [
+          "ceph"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Ceph health, capacity, OSDs and placement groups of all clusters",
         "x-pegaprox-auth": "decorator",
         "security": [
           {

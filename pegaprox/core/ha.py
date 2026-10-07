@@ -246,6 +246,8 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     '/api/xhm/migrations',
     '/api/xhm/migrations/<mid>',
     '/api/clusters/<cluster_id>/updates/status',
+    # the update checks the active ran, of every cluster at once (api/settings.py)
+    '/api/updates-overview',
     # what the node list shows of both, for every node at once (api/vms.py)
     '/api/clusters/<cluster_id>/node-progress',
     '/api/clusters/<cluster_id>/nodes/<node_name>/update',
