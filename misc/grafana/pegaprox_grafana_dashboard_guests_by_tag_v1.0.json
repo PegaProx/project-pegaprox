@@ -1,0 +1,586 @@
+{
+  "id": null,
+  "uid": "pegaprox-guests-by-tag",
+  "title": "PegaProx Guests by Tag",
+  "description": "Version: 1.0 | Guest load, backups and pressure for the guests that carry a tag, joined on pegaprox_guest_tag_info",
+  "tags": [
+    "pegaprox",
+    "proxmox",
+    "guests"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "cluster",
+        "label": "Cluster",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(pegaprox_cluster_connected, cluster)",
+        "definition": "label_values(pegaprox_cluster_connected, cluster)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1
+      },
+      {
+        "name": "tag",
+        "label": "Tag",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(pegaprox_guest_tag_info{cluster=~\"$cluster\"}, tag)",
+        "definition": "label_values(pegaprox_guest_tag_info{cluster=~\"$cluster\"}, tag)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Guests with the tag",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count(max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Running",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(pegaprox_guest_running * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "title": "No backup for 2 days",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count((time() - pegaprox_guest_last_backup_timestamp_seconds > 172800) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"})) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Guests whose newest backup is older than two days, or that have none."
+    },
+    {
+      "type": "stat",
+      "title": "Stopped",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count((pegaprox_guest_running == 0) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"})) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Stopped guests with the tag. A guest that keeps restarting is an alert rule: Automation > Alerts > Guest restart loops."
+    },
+    {
+      "type": "bargauge",
+      "title": "Guests per tag",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "count by (tag) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"})",
+          "refId": "A",
+          "legendFormat": "{{tag}}"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU, top 10",
+      "gridPos": {
+        "x": 8,
+        "y": 4,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_cpu_percent * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "percent",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory, top 10",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_mem_percent * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "percent",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Network, all guests with the tag",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(pegaprox_guest_network_receive_bytes_total[5m]) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "receive"
+        },
+        {
+          "expr": "sum(rate(pegaprox_guest_network_transmit_bytes_total[5m]) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "B",
+          "legendFormat": "transmit"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "Bps",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk reads, top 10",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, rate(pegaprox_guest_disk_read_bytes_total[5m]) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "Bps",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk writes, top 10",
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, rate(pegaprox_guest_disk_write_bytes_total[5m]) * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "Bps",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU pressure, top 10",
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_pressure_some_percent{resource=\"cpu\"} * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "percent",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "description": "Where Proxmox VE lists pressure stall figures with the guests."
+    },
+    {
+      "type": "timeseries",
+      "title": "IO pressure, top 10",
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(10, pegaprox_guest_pressure_some_percent{resource=\"io\"} * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"}))",
+          "refId": "A",
+          "legendFormat": "{{name}} ({{vmid}})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": false,
+            "showPoints": "never"
+          },
+          "unit": "percent",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "Backup age of the guests with the tag",
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "pegaprox_guest_last_backup_age_seconds * on(cluster_id, vmid) group_left() max by (cluster_id, vmid) (pegaprox_guest_tag_info{cluster=~\"$cluster\", tag=~\"$tag\"})",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "description": "Seconds since the newest backup. A guest without any backup has no row here; the stat above counts it."
+    }
+  ]
+}

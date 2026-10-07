@@ -2,7 +2,7 @@
 """
 PegaProx Event Alerts - Layer 7
 Failed Proxmox tasks, Ceph health, replication, stale snapshots, guests without a
-backup job and ZFS pools in trouble.
+backup job, ZFS pools in trouble, node clocks that drift and guests in a restart loop.
 
 The metric rules in alerts.py compare a number on every tick and send again after each
 cooldown for as long as it stays over the line. The rules here watch a condition: one
@@ -23,6 +23,10 @@ What it reads, per cluster that has such a rule:
   - the ZFS pool list of every online node every ZFS_EVERY, and `zpool status` of a pool
     (/nodes/<n>/disks/zfs/<pool>) while it is not ONLINE or shows errors, else every
     ZFS_DETAIL_EVERY, at most ZFS_DETAILS_PER_PASS per cluster and pass
+  - /nodes/<n>/time of every online node every CLOCK_EVERY, shared with the Prometheus
+    exporter (api/metrics_exporter.py), whichever asked last
+  - restart loops need no read of their own: the start and reboot tasks of the task list
+    above, kept per guest for RESTART_WINDOW_MAX minutes
 Nothing here asks a cluster per guest on every tick. Only the active instance runs any
 of it (alerts.alert_check_loop, #625); active_alerts is a table of its own, so after a
 takeover a condition that still holds is said once more by the new active.
@@ -50,11 +54,12 @@ except ImportError:  # python < 3.11
 
 
 EVENT_METRICS = ('task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage',
-                 'zfs_health')
+                 'zfs_health', 'clock_drift', 'restart_loop')
 
 # the fields a matching decision rests on; a rule whose one of these changed starts over
 MATCH_FIELDS = ('metric', 'target_type', 'target_id', 'threshold', 'task_type', 'task_status',
-                'task_warnings', 'snapshot_ignore_policy', 'backup_exclude_tags')
+                'task_warnings', 'snapshot_ignore_policy', 'backup_exclude_tags',
+                'restart_window_minutes')
 
 TASK_LOOKBACK = 24 * 3600     # how far back a rule looks the first time it reads a cluster
 TASK_OVERLAP = 300            # pmxcfs hands on the tasks of other nodes late: read behind the cursor
@@ -84,6 +89,15 @@ ZFS_DETAIL_EVERY = 1800       # zpool status of a pool that looks fine, for its 
 ZFS_DETAILS_PER_PASS = 40     # per cluster and pass, the pools in trouble first
 ZFS_PARALLEL = 8              # reads at a time against one cluster
 ZFS_BUDGET = 30               # seconds for the lists of one cluster, the same again for the pools
+CLOCK_EVERY = 300             # a clock drifts slowly
+CLOCK_PARALLEL = 8
+CLOCK_BUDGET = 30
+CLOCK_ROUND_TRIP_MAX = 5      # an answer that took longer says too little about the offset
+CLOCK_CRITICAL = 60           # where the connection check fails a clock as well (core/conncheck.py)
+RESTART_TASKS = frozenset(('qmstart', 'vzstart', 'qmreboot', 'vzreboot'))
+RESTART_WINDOW_DEFAULT = 15   # minutes
+RESTART_WINDOW_MAX = 1440     # minutes; the starts of a guest are kept this long
+RESTART_KEEP = 200            # starts kept per guest
 
 _THRESHOLDS = {
     # metric: (default, lowest, highest)
@@ -93,6 +107,8 @@ _THRESHOLDS = {
     'snapshot_age': (14, 1, 3650),      # days
     'backup_coverage': (1, 0, 720),     # hours a guest may be in no backup job before it counts
     'zfs_health': (0, 0, 1),            # 0: not ONLINE or with errors, 1: not ONLINE only
+    'clock_drift': (2, 1, 3600),        # seconds a node's clock may be off ours
+    'restart_loop': (3, 2, 100),        # starts within restart_window_minutes
 }
 _SNAPSHOT_TASKS = frozenset(('qmsnapshot', 'qmdelsnapshot', 'qmrollback',
                              'vzsnapshot', 'vzdelsnapshot', 'vzrollback'))
@@ -117,6 +133,9 @@ _coverage = {}    # cid -> (epoch, status, rows or None): the last not-backed-up
 _coverage_locks = {}
 _coverage_guard = threading.Lock()
 _status = {}      # cid -> {source: {'at': epoch, 'ok': bool, 'note': str}} for the diagnostics
+_clock = {}       # cid -> the last read_node_clocks() of a cluster, any caller
+_starts = {}      # cid -> {vmid: [epoch of each start or reboot task]}
+_wall = time.time  # our clock against the nodes'; the tests set it
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +247,8 @@ def normalize_rule(rule, data, prev_metric=None):
         rule['notify_resolved'] = bool(data.get('notify_resolved'))
     if metric != 'backup_coverage':
         rule.pop('backup_exclude_tags', None)
+    if metric != 'restart_loop':
+        rule.pop('restart_window_minutes', None)
     if metric not in EVENT_METRICS:
         for k in ('task_type', 'task_status', 'task_warnings', 'snapshot_ignore_policy'):
             rule.pop(k, None)
@@ -268,6 +289,14 @@ def normalize_rule(rule, data, prev_metric=None):
         if bad:
             return f'excluded tags: {bad}'
         rule['backup_exclude_tags'] = tags
+    if metric == 'restart_loop':
+        if 'restart_window_minutes' in data:
+            minutes = _int_in(data.get('restart_window_minutes'), 1, RESTART_WINDOW_MAX)
+            if minutes is None:
+                return f'restart_window_minutes must be a whole number from 1 to {RESTART_WINDOW_MAX}'
+        else:
+            minutes = _int_in(rule.get('restart_window_minutes'), 1, RESTART_WINDOW_MAX)
+        rule['restart_window_minutes'] = minutes or RESTART_WINDOW_DEFAULT
 
     if metric == 'ceph_health':
         rule['target_type'], rule['target_id'] = 'cluster', None
@@ -277,6 +306,8 @@ def normalize_rule(rule, data, prev_metric=None):
         return 'target_type must be cluster, node or vm'
     if ttype == 'vm' and metric == 'zfs_health':
         return 'a ZFS rule watches the pools of the cluster or of one node'
+    if ttype == 'vm' and metric == 'clock_drift':
+        return 'a clock rule watches the nodes of the cluster or one node'
     if ttype == 'vm' and not str(tid or '').isdigit():
         return 'a VM target needs its numeric ID'
     if ttype == 'node' and not (isinstance(tid, str) and tid.strip()):
@@ -756,6 +787,94 @@ def _run_zfs_reads(order, results, now):
         seen['zfs'] = z
 
 
+def _node_clock(mgr, node):
+    """(offset, error) of one node's clock against ours in seconds, or None.
+
+    Proxmox answers whole seconds (Perl's time()). The node took its reading T somewhere
+    between our t0 and t1, while its clock stood between T and T + 1, so the offset lies
+    in [T - t1, T + 1 - t0]: the middle of that, and half its width as the error.
+    """
+    t0 = _wall()
+    status, data = _get(mgr, f"/nodes/{quote(node, safe='')}/time", timeout=8)
+    t1 = _wall()
+    if status != 200 or not isinstance(data, dict) or t1 - t0 > CLOCK_ROUND_TRIP_MAX:
+        return None
+    t = data.get('time')
+    if isinstance(t, bool) or not isinstance(t, (int, float)):
+        return None
+    lo, hi = t - t1, t + 1 - t0
+    return round((lo + hi) / 2, 2), round((hi - lo) / 2, 2)
+
+
+def read_node_clocks(cid, mgr, now=None):
+    """Read the clock of every online node of a cluster, keep it for clock_reading() and
+    return it: {'at', 'nodes': {node: (offset, error)}, 'online': [...], 'known': {every
+    node}}. None when the node list could not be read. A node that did not answer has no
+    entry, which is unknown, not fine. The alert tick reads at CLOCK_EVERY, the Prometheus
+    exporter at its own pace; each takes what the other read when it is recent enough."""
+    try:
+        nodes = mgr.get_node_status() or {}
+    except Exception:
+        nodes = {}
+    if not nodes:
+        _note(cid, 'clock', False, 'node list unreadable')
+        return None
+    online = sorted(n for n, info in nodes.items() if (info or {}).get('status') == 'online')
+    got = run_per_node({n: (lambda node: _node_clock(mgr, node)) for n in online},
+                       max_concurrent=CLOCK_PARALLEL, timeout=CLOCK_BUDGET) or {}
+    readings = {n: got[n] for n in online if got.get(n)}
+    entry = {'at': now or time.time(), 'nodes': readings, 'online': online, 'known': set(nodes)}
+    _clock[cid] = entry
+    worst = max((abs(o) for o, _e in readings.values()), default=0.0)
+    unread = [n for n in online if n not in readings]
+    _note(cid, 'clock', not unread,
+          f"{len(readings)} of {len(online)} online node(s) read, largest offset {worst:.1f} s"
+          + (f", unread: {unread[:10]}" if unread else ''))
+    return entry
+
+
+def clock_reading(cid):
+    """The last clock read of a cluster (read_node_clocks), or None."""
+    return _clock.get(cid)
+
+
+def _run_clock_reads(order, results, now):
+    """The clock reads of every cluster whose last one is older than CLOCK_EVERY, all
+    clusters at once; then each tick evaluates the newest read it has."""
+    due = [(cid, mgr) for (cid, mgr, _r), seen in zip(order, results)
+           if seen is not None and seen.get('clock_due')]
+    if due:
+        run_concurrent([lambda c=cid, m=mgr: read_node_clocks(c, m, now) for cid, mgr in due],
+                       timeout=CLOCK_BUDGET + 10)
+    for (cid, _mgr, _r), seen in zip(order, results):
+        if seen is None or 'clock_due' not in seen:
+            continue
+        hit = _clock.get(cid)
+        # a read from before a long outage says nothing about now
+        seen['clock'] = hit if hit is not None and now - hit['at'] < 2 * CLOCK_EVERY else None
+
+
+def _record_starts(cid, fresh, now):
+    """Keep the start and reboot tasks just seen in the task list, per guest. Only those
+    that went through: a start that failed is a failed task (task_failed), not a start."""
+    st = _starts.setdefault(cid, {})
+    for t in fresh or ():
+        if t.get('type') not in RESTART_TASKS:
+            continue
+        status = str(t.get('status') or '')
+        tid = str(t.get('id') or '')
+        if not tid.isdigit() or not (status == 'OK' or status.upper().startswith('WARNINGS')):
+            continue
+        st.setdefault(int(tid), []).append(_num(t.get('starttime')) or _num(t.get('endtime')))
+    keep_after = now - RESTART_WINDOW_MAX * 60
+    for vmid in list(st):
+        kept = sorted(s for s in st[vmid] if s > keep_after)[-RESTART_KEEP:]
+        if kept:
+            st[vmid] = kept
+        else:
+            del st[vmid]
+
+
 def _guests(resources):
     out = {}
     for r in resources or ():
@@ -818,14 +937,16 @@ def _read_cluster(cid, mgr, kinds, now):
     """Everything the rules of one cluster need from it this tick. Runs in a greenlet of
     its own per cluster; touches only that cluster's state."""
     seen = {}
-    if kinds & {'task_failed', 'snapshot_age'}:
+    if kinds & {'task_failed', 'snapshot_age', 'restart_loop'}:
         status, tasks = _get(mgr, '/cluster/tasks')
         if status == 200 and isinstance(tasks, list):
             seen['tasks'], seen['fresh'] = _task_window(cid, tasks, now)
+            # whichever rule asked for the list: a restart rule added later finds the history
+            _record_starts(cid, seen['fresh'], now)
             _note(cid, 'tasks', True, f"{len(tasks)} listed, {len(seen['tasks'])} in the window")
         else:
             _note(cid, 'tasks', False, f'task list unreadable (HTTP {status})')
-    if kinds & {'task_failed', 'snapshot_age', 'replication', 'backup_coverage'}:
+    if kinds & {'task_failed', 'snapshot_age', 'replication', 'backup_coverage', 'restart_loop'}:
         try:
             seen['resources'] = mgr.get_vm_resources(max_age=60) or []
         except Exception:
@@ -846,6 +967,9 @@ def _read_cluster(cid, mgr, kinds, now):
         seen['backup'] = _read_coverage(cid, mgr, now)
     if 'zfs_health' in kinds:
         seen['zfs_nodes'] = _plan_zfs(cid, mgr, now)
+    if 'clock_drift' in kinds:
+        hit = _clock.get(cid)
+        seen['clock_due'] = hit is None or not 0 <= now - hit['at'] < CLOCK_EVERY
     return seen
 
 
@@ -1159,6 +1283,87 @@ def _eval_zfs(rule, seen, cname, cid):
     return p
 
 
+def _eval_clock(rule, seen, cname):
+    """One incident per node whose clock is surely off ours by more than the limit, closed
+    once it is surely within it. With whole seconds from Proxmox the band between the two
+    is too close to call, and an open incident stays as it is there."""
+    entry = seen.get('clock')
+    if not entry:
+        return None
+    limit = int(rule.get('threshold') or _THRESHOLDS['clock_drift'][0])
+    readings = entry['nodes']
+    p = _Pass()
+    # a node that left takes its incident along; an offline one keeps it until it answers
+    p.known = {f"clock:{n}" for n in entry['known']}
+    # every node off the same way by about as much: likelier this host's clock than theirs
+    ours = len(readings) >= 2 and (all(o - e > limit for o, e in readings.values())
+                                   or all(o + e < -limit for o, e in readings.values()))
+    if ours:
+        offs = [o for o, _e in readings.values()]
+        ours = max(offs) - min(offs) <= 2 * max(e for _o, e in readings.values()) + 1
+    for node in sorted(readings):
+        if not _target_ok(rule, node, None):
+            continue
+        off, err = readings[node]
+        obj = f"clock:{node}"
+        if abs(off) + err <= limit:
+            p.fine[obj] = (f"Resolved: clock of {node}",
+                           f"The clock of node {node} is within {limit} s of PegaProx again.")
+            continue
+        if abs(off) - err <= limit:
+            continue
+        way = 'ahead of' if off > 0 else 'behind'
+        note = (f" Every node of {cname} is about as far off: the clock of the PegaProx host may "
+                f"be the one that is wrong." if ours else '')
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'node', 'target_id': node, 'target_name': node,
+            'target_key': f"node:{node}", 'name': f"Clock of {node} is off by {abs(off):.0f} s",
+            'message': f"The clock of node {node} is {abs(off):.1f} s {way} PegaProx, the limit is {limit} s."
+                       + note,
+            'value': round(off, 1), 'display': f"{off:+.1f} s",
+            'severity': 'critical' if abs(off) - err >= CLOCK_CRITICAL else 'warning',
+            'details': [('Node', node), ('Offset', f"{off:+.1f} s (± {err:.1f} s)"), ('Limit', f"{limit} s")],
+        }
+    return p
+
+
+def _eval_restarts(rule, seen, cname, cid, now):
+    """One incident per guest that started `threshold` times within the window; it closes
+    once the guest stayed quiet for a whole window, so a loop is said once, not on every
+    start in it."""
+    guests = seen.get('guests')
+    if seen.get('tasks') is None or not guests:
+        return None                       # without this tick's tasks a quiet guest may not be quiet
+    need = int(rule.get('threshold') or _THRESHOLDS['restart_loop'][0])
+    minutes = _int_in(rule.get('restart_window_minutes'), 1, RESTART_WINDOW_MAX) or RESTART_WINDOW_DEFAULT
+    since = now - minutes * 60
+    starts = _starts.get(cid) or {}
+    p = _Pass(guests)
+    for vmid, r in guests.items():
+        node = r.get('node') or ''
+        if not _target_ok(rule, node, vmid):
+            continue
+        obj = f"vm:{vmid}"
+        who = _guest_label(guests, vmid)
+        recent = [s for s in starts.get(vmid, ()) if s > since]
+        if not recent:
+            p.fine[obj] = (f"Resolved: {who} stopped restarting",
+                           f"{who} has not started again for {minutes} minutes.")
+            continue
+        if len(recent) < need:
+            continue
+        last = datetime.fromtimestamp(recent[-1]).strftime('%Y-%m-%d %H:%M:%S')
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'vm', 'target_id': str(vmid), 'target_name': who,
+            'target_key': obj, 'name': f"{who} is in a restart loop",
+            'message': f"{who} on node {node or '?'} started {len(recent)} times in the last {minutes} minutes",
+            'value': float(len(recent)), 'display': f"{len(recent)} starts", 'severity': 'warning',
+            'details': [('Node', node or '?'), ('Starts', f"{len(recent)} in {minutes} minutes"),
+                        ('Last start', last)],
+        }
+    return p
+
+
 # ---------------------------------------------------------------------------
 # incidents and notices
 # ---------------------------------------------------------------------------
@@ -1243,7 +1448,7 @@ def _target_key_of(obj):
     vmid = object_vmid(obj)
     if vmid is not None:
         return f"vm:{vmid}"
-    if obj.startswith('task:') or obj.startswith('zfs:'):
+    if obj.startswith(('task:', 'zfs:', 'clock:')):
         return f"node:{obj.split(':')[1]}"
     return ''
 
@@ -1368,6 +1573,10 @@ def _evaluate(A, rule, cid, seen, mutes, settings, now):
             p = _eval_backup(rule, seen, cname, cid, now)
         elif metric == 'zfs_health':
             p = _eval_zfs(rule, seen, cname, cid)
+        elif metric == 'clock_drift':
+            p = _eval_clock(rule, seen, cname)
+        elif metric == 'restart_loop':
+            p = _eval_restarts(rule, seen, cname, cid, now)
         else:
             p = _eval_snapshots(rule, seen, cname, cid, now)
     except ValueError as e:
@@ -1427,6 +1636,7 @@ def check_event_alerts(now=None):
              for (cid, mgr, _), seen in zip(order, results)]
     read_now = _run_snapshot_reads([p for p in plans if p[2]], now)
     _run_zfs_reads(order, results, now)
+    _run_clock_reads(order, results, now)
 
     for (cid, mgr, crules), seen in zip(order, results):
         if seen is None:
@@ -1441,6 +1651,9 @@ def check_event_alerts(now=None):
             guests = seen.get('guests') or {}
             done = sum(1 for v in guests if v in st.get('guests', {}))
             _note(cid, 'snapshots', True, f"snapshot lists read for {done} of {len(guests)} guests")
+        if seen.get('tasks') is not None and any(r.get('metric') == 'restart_loop' for r in crules):
+            _note(cid, 'restarts', True, f"start tasks of the last {RESTART_WINDOW_MAX // 60} hours kept "
+                                         f"for {len(_starts.get(cid) or {})} guest(s)")
         if seen.get('backup') is not None and any(r.get('metric') == 'backup_coverage'
                                                   and r.get('backup_exclude_tags') for r in crules):
             seen['tags'] = guest_tags(cid, seen.get('resources'))

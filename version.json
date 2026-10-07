@@ -50,6 +50,8 @@
     "images/sponsors/technidata.png",
     "images/sponsors/uvensys.png",
     "misc/grafana/README.md",
+    "misc/grafana/pegaprox_grafana_dashboard_guests_by_tag_v1.0.json",
+    "misc/grafana/pegaprox_grafana_dashboard_node_health_v1.0.json",
     "misc/grafana/pegaprox_grafana_dashboard_v1.0.json",
     "misc/grafana/pegaprox_grafana_dashboard_v1.1.json",
     "misc/proxmox-lxc-appliance-creator.sh",

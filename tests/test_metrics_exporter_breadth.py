@@ -154,6 +154,10 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(mx, '_spawn', lambda fn: fn(), raising=False)
     monkeypatch.setattr(mx, '_repl_reads', {}, raising=False)
     monkeypatch.setattr(mx, '_reads_running', set(), raising=False)
+    monkeypatch.setattr(mx, '_pressure_reads', {})
+    monkeypatch.setattr(mx, '_pressure_absent', {})
+    from pegaprox.background import alert_events
+    monkeypatch.setattr(alert_events, '_clock', {})
     monkeypatch.setattr(clusters_mod, '_health_storage_cache', StorageDataCache(), raising=False)
     monkeypatch.setattr(pbs_mod, '_backup_status_cache', {})
 
@@ -372,9 +376,9 @@ def test_a_partial_backup_scan_is_not_handed_out(api, monkeypatch):
 # --- pace ----------------------------------------------------------------------------------
 
 def test_the_slow_reads_never_hold_up_a_scrape(api, monkeypatch):
-    """Replication and backup reads start in the background: the scrape that starts them
-    does not wait, one read per cluster and source runs at a time, and the next scrape
-    hands out what it found."""
+    """Replication, backup, clock and node pressure reads start in the background: the
+    scrape that starts them does not wait, one read per cluster and source runs at a time,
+    and the next scrape hands out what it found."""
     c1, pbs = _backup_estate(api)
     c1.answer('/cluster/replication', _jobs({'id': '101-0', 'guest': 101, 'source': 'pve1', 'target': 'pve2'}))
     c1.answer('/nodes/pve1/replication', [{'id': '101-0', 'fail_count': 0, 'last_sync': int(NOW) - 60}])
@@ -382,18 +386,20 @@ def test_the_slow_reads_never_hold_up_a_scrape(api, monkeypatch):
     monkeypatch.setattr(mx, '_spawn', started.append)
 
     body = _scrape(api)
-    assert len(started) == 2 and c1.calls.count('/cluster/replication') == 0 and pbs.reads == []
+    assert len(started) == 4 and c1.calls.count('/cluster/replication') == 0 and pbs.reads == []
+    assert not any(p.startswith('/nodes/pve1/time') or '/rrddata' in p for p in c1.calls)
     assert _find(body, 'pegaprox_replication_failed') == []
     assert _one(body, 'pegaprox_cluster_source_up', source='replication') == 0
     assert _one(body, 'pegaprox_cluster_source_up', source='backups') == 0
+    assert _one(body, 'pegaprox_cluster_source_up', source='clock') == 0
 
     _scrape(api)
-    assert len(started) == 2, 'a second read started while the first still runs'
+    assert len(started) == 4, 'a second read started while the first still runs'
 
     for fn in started:
         fn()
     body = _scrape(api)
-    assert len(started) == 2, 'read again although the last read is fresh'
+    assert len(started) == 4, 'read again although the last read is fresh'
     assert _one(body, 'pegaprox_replication_failed', job='101-0') == 0
     assert _one(body, 'pegaprox_guest_last_backup_timestamp_seconds', vmid='101') == int(NOW) - 7200
     assert _one(body, 'pegaprox_cluster_source_up', source='replication') == 1

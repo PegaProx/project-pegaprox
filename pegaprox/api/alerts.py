@@ -283,10 +283,12 @@ def create_cluster_alert(cluster_id):
     if _cerr:
         return _cerr
     
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if not data:
         return jsonify({'error': 'No data provided'}), 400
-    
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The request body must be a JSON object'}), 400
+
     alerts = load_cluster_alerts()
     if cluster_id not in alerts:
         alerts[cluster_id] = []
@@ -337,10 +339,12 @@ def update_cluster_alert(cluster_id, alert_id):
     if _cerr:
         return _cerr
     
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The request body must be a JSON object'}), 400
     alerts = load_cluster_alerts()
     cluster_alerts = alerts.get(cluster_id, [])
-    
+
     for alert in cluster_alerts:
         if alert['id'] == alert_id:
             before = {k: alert.get(k) for k in alert_events.MATCH_FIELDS}
@@ -422,6 +426,10 @@ def delete_cluster_alert(cluster_id, alert_id):
         return jsonify({'error': safe_error(e, 'Alert operation failed')}), 500
 
 
+# incidents about a node itself, not about anything on it a confined caller may see
+_NODE_ONLY_METRICS = ('zfs_health', 'clock_drift')
+
+
 @bp.route('/api/clusters/<cluster_id>/active-alerts', methods=['GET'])
 @require_auth()
 def get_active_alerts(cluster_id):
@@ -444,8 +452,9 @@ def get_active_alerts(cluster_id):
         incidents = [dict(zip(_q, r)) for r in rows]
         _ok = _alert_scoper(cluster_id)
         if _ok is not None:
-            # MK Oct 2026 - a ZFS pool is storage of a node, which a pool or guest grant does not reach
-            incidents = [i for i in incidents if i.get('metric') != 'zfs_health'
+            # MK Oct 2026 - a ZFS pool is storage of a node, and a node's clock is the node's:
+            # a pool or guest grant reaches neither
+            incidents = [i for i in incidents if i.get('metric') not in _NODE_ONLY_METRICS
                          and (i.get('target_type') != 'vm' or _ok(i.get('target_id')))]
         mutes = alert_events.active_mutes(cluster_id)
         out = []
@@ -520,7 +529,7 @@ def list_alert_mutes(cluster_id):
                     if a.get('target_type') == 'vm'}
 
         def _visible(m):
-            if str(m.get('object_key') or '').startswith('zfs:'):
+            if str(m.get('object_key') or '').startswith(('zfs:', 'clock:')):
                 return False
             vmid = alert_events.object_vmid(m.get('object_key'))
             if vmid is not None and not _ok(vmid):
