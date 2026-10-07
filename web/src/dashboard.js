@@ -8647,6 +8647,7 @@
             const [drDrillData, setDrDrillData] = useState(null);
             const [drDrillPolling, setDrDrillPolling] = useState(false);
             const [expandedEvent, setExpandedEvent] = useState(null);
+            const [guestPick, setGuestPick] = useState(null);
             const [sourceVms, setSourceVms] = useState([]);
             const [replJobs, setReplJobs] = useState([]);
             const [sourceBridges, setSourceBridges] = useState([]);
@@ -8686,6 +8687,10 @@
             useEffect(() => { fetchPlans(); }, []);
             useEffect(() => { if (selectedPlan) { fetchPlanDetail(selectedPlan); setSrSubTab('overview'); } else setPlanDetail(null); }, [selectedPlan]);
             useEffect(() => { if (selectedPlan && srSubTab === 'events') fetchEvents(selectedPlan); }, [srSubTab, selectedPlan]);
+            // a finished run moved guests: read where they are now
+            useEffect(() => {
+                if (selectedPlan && srProgress?.plan_id === selectedPlan && srProgress.progress >= 100) { fetchPlanDetail(selectedPlan); fetchPlans(); }
+            }, [srProgress?.plan_id, srProgress?.progress]);
             // a test's boot screenshots arrive after its event completed: while one of the
             // listed tests still takes them, read the list again every few seconds
             const shotsPending = srSubTab === 'events' && events.some(ev => ev.details?.screenshots?.state === 'capturing');
@@ -8792,15 +8797,23 @@
                 if (r && r.ok) { addToast('Plan deleted'); setSelectedPlan(null); fetchPlans(); }
                 else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Delete failed', 'error'); }
             };
-            const handleAction = async (planId, action, confirmMsg) => {
+            const handleAction = async (planId, action, confirmMsg, body) => {
                 if (confirmMsg && !confirm(confirmMsg)) return;
                 setActionRunning(true);
                 try {
-                    const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/${action}`, { method: 'POST' });
+                    const opts = body ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) } : { method: 'POST' };
+                    const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/${action}`, opts);
                     if (r && r.ok) { const d = await r.json(); addToast(d.message || 'Action started'); fetchPlanDetail(planId); fetchPlans(); }
                     else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Action failed', 'error'); }
                 } catch(e) { addToast('Action failed', 'error'); }
                 finally { setTimeout(() => setActionRunning(false), 2000); }
+            };
+            // LW Oct 2026 - emergency failover and failback of single guests. The picker hands
+            // over the guests ticked; all of them is the whole plan, sent without a list as before
+            const startPicked = (planId, action, vmids, all) => {
+                if (!confirm(action === 'failback' ? t('srConfirmFailback') : t('confirmEmergency'))) return;
+                setGuestPick(null);
+                handleAction(planId, action, null, all ? null : { vmids });
             };
             // readiness check with modal
             const handleReadiness = async (planId) => {
@@ -9066,14 +9079,15 @@
                                 <button onClick={() => setSelectedPlan(null)} className="text-gray-400 hover:text-white"><Icons.ChevronLeft className="w-5 h-5" /></button>
                                 <h2 className="text-lg font-semibold flex items-center gap-2"><Icons.Shield className="w-5 h-5 text-proxmox-orange" />{pd.name}</h2>
                                 <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[pd.status] || 'bg-gray-500/20 text-gray-400'}`}>{pd.status}</span>
+                                <SrFailoverBadge plan={pd} total={(pd.vms || []).length} t={t} />
                             </div>
                             <div className="flex items-center gap-2 flex-wrap">
                                 {canFailover && <button onClick={() => handleReadiness(pd.id)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-gray-600/50 text-gray-300 hover:bg-gray-600 disabled:opacity-40">{t('readinessCheck')}</button>}
                                 {canFailover && <button onClick={() => startDrDrill(pd)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 disabled:opacity-40">{t('drDrillRun') || 'DR Drill'}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'test', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 disabled:opacity-40">{t('testFailover')}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'failover', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">{t('plannedFailover')}</button>}
-                                {canFailover && <button onClick={() => handleAction(pd.id, 'emergency', t('confirmEmergency'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
-                                {canFailover && pd.status === 'completed' && <button onClick={() => handleAction(pd.id, 'failback', t('confirmFailover'))} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-40">{t('failback')}</button>}
+                                {canFailover && <button data-sr-action="emergency" onClick={() => setGuestPick('emergency')} disabled={actionRunning || pd.status === 'running' || pd.failover_state === 'all'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
+                                {canFailover && pd.failed_over_count > 0 && <button data-sr-action="failback" onClick={() => setGuestPick('failback')} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-40">{t('failback')}</button>}
                                 {canFailover && pd.status === 'testing' && <button onClick={() => handleAction(pd.id, 'test/cleanup', t('confirmTestCleanup'))} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 disabled:opacity-40">{t('testCleanup')}</button>}
                             </div>
                         </div>
@@ -9127,12 +9141,13 @@
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
-                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
+                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
                                             <tbody>
                                                 {groupVms.map(vm => (
                                                     <tr key={vm.id} className="border-t border-proxmox-border/30 hover:bg-proxmox-hover/30">
                                                         <td className="px-4 py-2 font-mono text-xs">{vm.vmid}</td>
                                                         <td className="py-2">{vm.vm_name || '-'}</td>
+                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} /></td>
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_group'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_group} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_group'})}>{vm.boot_group}</span>
@@ -9141,7 +9156,9 @@
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_delay} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_delay'})}>{vm.boot_delay}s</span>
                                                         }</td>
-                                                        <td className="py-2"><span className={rpoColor(vm)}>{vm.last_replication ? fmtDate(vm.last_replication) : '-'}</span></td>
+                                                        <td className="py-2">{vm.failed_over
+                                                            ? <span className="text-xs text-gray-500">{t('srReplicationHeld')}</span>
+                                                            : <span className={rpoColor(vm)}>{vm.last_replication ? fmtDate(vm.last_replication) : '-'}</span>}</td>
                                                         {canManage && <td className="py-2"><button onClick={() => handleRemoveVm(vm.id)} className="text-red-400 hover:text-red-300"><Icons.Trash2 className="w-3.5 h-3.5" /></button></td>}
                                                     </tr>
                                                 ))}
@@ -9225,10 +9242,10 @@
                                                     <table className="w-full text-xs">
                                                         <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
-                                                            <tr key={vmid} className="border-t border-proxmox-border/30">
+                                                            <tr key={vmid} className="border-t border-proxmox-border/30" data-sr-result={vmid}>
                                                                 <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
-                                                                <td className="py-1">{r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
-                                                                <td className="py-1 text-gray-500">{r.error || '-'}</td>
+                                                                <td className="py-1">{r.skipped ? <span className="text-gray-400">{t('skipped')}</span> : r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
+                                                                <td className="py-1 text-gray-500">{r.skipped ? (r.reason === 'not failed over' ? t('srSkipNotFailedOver') : t('srSkipFailedOver')) : (r.error || '-')}</td>
                                                             </tr>
                                                         ))}</tbody>
                                                     </table>
@@ -9292,6 +9309,11 @@
                                     </div>
                                 </div>
                             </div>
+                        )}
+
+                        {guestPick && canFailover && (
+                            <SrGuestPicker plan={pd} action={guestPick} t={t} onCancel={() => setGuestPick(null)}
+                                onStart={(vmids, all) => startPicked(pd.id, guestPick, vmids, all)} />
                         )}
 
                         {/* ---- Readiness check results modal ---- */}
@@ -9445,6 +9467,7 @@
                                 <div key={plan.id} onClick={() => setSelectedPlan(plan.id)} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 cursor-pointer hover:border-proxmox-orange/50 transition-colors">
                                     <div className="flex items-center justify-between mb-3"><h3 className="font-medium text-sm">{plan.name}</h3><span className={`px-2 py-0.5 rounded-full text-xs ${statusColors[plan.status] || 'bg-gray-500/20 text-gray-400'}`}>{plan.status}</span></div>
                                     <div className="text-xs text-gray-500 space-y-1"><p>{getClusterName(plan.source_cluster)} → {getClusterName(plan.target_cluster)}</p><p>{plan.vm_count} {t('protectedVMs')}</p>{plan.last_failover && <p>Last failover: {fmtDate(plan.last_failover)}</p>}</div>
+                                    {plan.failed_over_count > 0 && <div className="mt-2"><SrFailoverBadge plan={plan} total={plan.vm_count} t={t} /></div>}
                                     {canManage && <div className="mt-3 flex justify-end"><button onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.status === 'running' || plan.status === 'testing'); }} className="text-red-400 hover:text-red-300 text-xs"><Icons.Trash2 className="w-3.5 h-3.5" /></button></div>}
                                 </div>
                             ))}
@@ -9461,6 +9484,110 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - a recovery plan can be failed over guest by guest: how much of it is
+        // on the target now ('partial' or 'all', nothing while every guest is at the source)
+        function SrFailoverBadge({ plan, total, t }) {
+            const n = plan.failed_over_count || 0;
+            if (!n) return null;
+            const all = plan.failover_state === 'all';
+            return (
+                <span data-sr-failover-state={plan.failover_state}
+                    className={`px-2 py-0.5 rounded-full text-xs font-medium ${all ? 'bg-purple-500/20 text-purple-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                    {all ? t('srFailoverAll') : fillText(t('srFailoverPartial'), { n, total })}
+                </span>
+            );
+        }
+
+        function SrGuestPlace({ vm, t }) {
+            if (!vm.failed_over) return <span className="text-xs text-gray-500">{t('srGuestAtSource')}</span>;
+            return (
+                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
+                    title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
+                    {t('srGuestFailedOver')}
+                </span>
+            );
+        }
+
+        // the guests an emergency failover or a failback takes. Every guest it can take is
+        // ticked to begin with; the others are listed with where they are. A plan of thousands
+        // renders the first SR_PICK_SHOWN rows of the filter, and "all" ticks what it matches
+        const SR_PICK_SHOWN = 200;
+        function SrGuestPicker({ plan, action, t, onCancel, onStart }) {
+            const back = action === 'failback';
+            const guests = plan.vms || [];
+            const takes = (vm) => !!vm.failed_over === back;
+            const eligible = useMemo(() => guests.filter(takes), [guests, back]);
+            const [picked, setPicked] = useState(() => new Set(eligible.map(v => v.vmid)));
+            const [filter, setFilter] = useState('');
+            const q = filter.trim().toLowerCase();
+            const rows = useMemo(() => q ? guests.filter(v => String(v.vmid).includes(q) || (v.vm_name || '').toLowerCase().includes(q)) : guests, [guests, q]);
+            const matching = rows.filter(takes);
+            const allOn = matching.length > 0 && matching.every(v => picked.has(v.vmid));
+            const flip = (vmids, on) => setPicked(prev => {
+                const next = new Set(prev);
+                vmids.forEach(id => on ? next.add(id) : next.delete(id));
+                return next;
+            });
+            const count = eligible.filter(v => picked.has(v.vmid)).length;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+                    <div data-sr-pick={action} className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 w-full max-w-lg space-y-4" onClick={e => e.stopPropagation()}>
+                        <h3 className={`font-semibold flex items-center gap-2 ${back ? 'text-purple-400' : 'text-red-400'}`}>
+                            {back ? <Icons.RotateCcw className="w-5 h-5" /> : <Icons.Zap className="w-5 h-5" />}
+                            {back ? t('failback') : t('emergencyFailover')}<span className="text-gray-400 font-normal">- {plan.name}</span>
+                        </h3>
+                        <p className="text-xs text-gray-400">{back ? t('srPickFailbackHint') : t('srPickEmergencyHint')}</p>
+                        <div className="flex items-center gap-3">
+                            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer shrink-0">
+                                <input type="checkbox" className="rounded" data-sr-pick-all checked={allOn} disabled={!matching.length}
+                                    onChange={() => flip(matching.map(v => v.vmid), !allOn)} />
+                                {t('selectAll')}
+                            </label>
+                            <div className="flex items-center gap-1.5 flex-1 min-w-0 bg-proxmox-card border border-proxmox-border rounded-lg px-2">
+                                <Icons.Search className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                                <input value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('search')}
+                                    className="flex-1 min-w-0 bg-transparent py-1 text-sm focus:outline-none" />
+                            </div>
+                        </div>
+                        <div className="max-h-80 overflow-y-auto border border-proxmox-border rounded-lg">
+                            <table className="w-full text-sm">
+                                <thead><tr className="text-left text-gray-500 text-xs"><th className="px-3 py-2 w-8"></th><th className="py-2">VMID</th><th className="py-2">{t('name')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2 pr-4">{t('srGuestLocation')}</th></tr></thead>
+                                <tbody>
+                                    {rows.slice(0, SR_PICK_SHOWN).map(vm => {
+                                        const can = takes(vm);
+                                        return (
+                                            <tr key={vm.vmid} data-sr-pick-row={vm.vmid} className={`border-t border-proxmox-border/50 ${can ? 'hover:bg-proxmox-hover/30 cursor-pointer' : 'opacity-50'}`}
+                                                onClick={() => can && flip([vm.vmid], !picked.has(vm.vmid))}>
+                                                <td className="px-3 py-1.5"><input type="checkbox" className="rounded" disabled={!can} checked={can && picked.has(vm.vmid)} onChange={() => {}} /></td>
+                                                <td className="py-1.5 font-mono text-xs">{vm.vmid}</td>
+                                                <td className="py-1.5">{vm.vm_name || '-'}</td>
+                                                <td className="py-1.5 text-xs text-gray-400">{vm.boot_group ?? 0}</td>
+                                                <td className="py-1.5 pr-4"><SrGuestPlace vm={vm} t={t} /></td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                            {rows.length > SR_PICK_SHOWN && (
+                                <p className="text-xs text-gray-500 px-3 py-2 border-t border-proxmox-border/50" data-sr-pick-more>{fillText(t('srPickMore'), { n: rows.length - SR_PICK_SHOWN })}</p>
+                            )}
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs text-gray-400" data-sr-pick-count>{fillText(t('srPickCount'), { n: count, total: eligible.length })}</span>
+                            <div className="flex gap-2">
+                                <button onClick={onCancel} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                                <button data-sr-pick-start disabled={!count}
+                                    onClick={() => onStart(eligible.filter(v => picked.has(v.vmid)).map(v => v.vmid), count === eligible.length)}
+                                    className={`px-4 py-1.5 text-sm rounded-lg text-white disabled:opacity-40 ${back ? 'bg-purple-600 hover:bg-purple-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                                    {fillText(back ? t('srPickStartFailback') : t('srPickStartEmergency'), { n: count })}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             );
         }
