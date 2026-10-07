@@ -106,12 +106,15 @@ def _xcrepl_loop():
 
     # NS: lazy import to avoid circular dependency at module load time
     from pegaprox.api.vms import _execute_replication, _execute_local_replication
+    from pegaprox.background.site_recovery import HELD_JOB_SQL
 
     while _xcrepl_running:
         try:
             db = get_db()
-            # a standby starts no job; they are the active instance's to run
-            jobs = db.query('SELECT * FROM cross_cluster_replications WHERE enabled = 1') if ha.is_active() else []
+            # a standby starts no job; they are the active instance's to run. Nor does the job
+            # of a guest a recovery plan failed over: it waits for the failback (MK Oct 2026)
+            jobs = db.query('SELECT * FROM cross_cluster_replications r WHERE enabled = 1 '
+                            f'AND NOT {HELD_JOB_SQL}') if ha.is_active() else []
 
             if jobs:
                 now = time.time()

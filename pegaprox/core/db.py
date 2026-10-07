@@ -137,6 +137,40 @@ def _directory_groups(auth_source, value):
     return [g for g in value if isinstance(g, str) and g]
 
 
+def _replay_sr_failover_state(cursor):
+    """Mark the guests a finished failover moved and no failback brought home since.
+
+    The events are replayed oldest first: a guest a failover moved is failed over until
+    a failback moved it back. A failover event keeps {vmid: {success, ...}} as its details;
+    anything else there (a pre-flight abort, a restart) moved nobody. Returns how many
+    guests it marked."""
+    rows = cursor.execute(
+        "SELECT plan_id, event_type, completed_at, details FROM site_recovery_events "
+        "WHERE event_type IN ('planned', 'emergency', 'failback') AND completed_at IS NOT NULL "
+        "AND completed_at != '' ORDER BY started_at").fetchall()
+    where = {}
+    for plan_id, kind, done, details in rows:
+        try:
+            results = json.loads(details or '{}')
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(results, dict):
+            continue
+        for vmid, res in results.items():
+            if not (str(vmid).isdigit() and isinstance(res, dict) and res.get('success') is True):
+                continue
+            if res.get('skipped'):
+                continue
+            if kind == 'failback':
+                where.pop((plan_id, int(vmid)), None)
+            else:
+                where[(plan_id, int(vmid))] = (kind, done)
+    for (plan_id, vmid), (kind, done) in where.items():
+        cursor.execute("UPDATE site_recovery_vms SET failed_over = ?, failed_over_at = ? "
+                       "WHERE plan_id = ? AND vmid = ?", (kind, done, plan_id, vmid))
+    return len(where)
+
+
 class PegaProxDB:
     """
     SQLite database wrapper - MK
@@ -1712,7 +1746,9 @@ class PegaProxDB:
                     boot_delay INTEGER DEFAULT 30,
                     replication_job_id TEXT DEFAULT '',
                     target_vmid INTEGER,
-                    notes TEXT DEFAULT ''
+                    notes TEXT DEFAULT '',
+                    failed_over TEXT DEFAULT '',
+                    failed_over_at TEXT DEFAULT ''
                 )
             ''')
             cursor.execute('''
@@ -1731,6 +1767,9 @@ class PegaProxDB:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_plan ON site_recovery_vms(plan_id, vmid)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_events_plan ON site_recovery_events(plan_id, started_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_plans_status ON site_recovery_plans(status)')
+            # the replication scheduler asks per job whether a plan has its guest failed over
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_vmid ON site_recovery_vms(vmid)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_repl ON site_recovery_vms(replication_job_id)')
             # MK Oct 2026 - one console frame per guest a test failover booted, the evidence
             # that it came up. The event's details say what was taken and how long it took;
             # the pictures live here so the event list stays small. Size-capped and pruned in
@@ -1758,6 +1797,19 @@ class PegaProxDB:
                     logging.info("Added test_disconnect_nics column to site_recovery_plans")
             except Exception as e:
                 logging.error(f"Failed to add test_disconnect_nics column: {e}")
+            # MK Oct 2026 - where each guest of a plan is: '' at the source, else the kind of
+            # failover that moved it ('planned' / 'emergency'). A plan can be failed over guest
+            # by guest, so the plan's status alone no longer says it. A database from before
+            # gets it replayed from its failover events once.
+            try:
+                vm_cols = [row[1] for row in cursor.execute("PRAGMA table_info(site_recovery_vms)").fetchall()]
+                if 'failed_over' not in vm_cols:
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over TEXT DEFAULT ''")
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_at TEXT DEFAULT ''")
+                    marked = _replay_sr_failover_state(cursor)
+                    logging.info(f"Added failed_over columns to site_recovery_vms ({marked} guest(s) failed over)")
+            except Exception as e:
+                logging.error(f"Failed to add failed_over columns: {e}")
             logging.info("Ensured site_recovery tables exist")
         except Exception as e:
             logging.error(f"Error creating site_recovery tables: {e}")

@@ -490,10 +490,17 @@ def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
             'unsupported': False, 'error': '; '.join(failed)}
 
 
-def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
+def _mark_guest(vm, kind):
+    """Record where a plan guest is now: kind is the failover that moved it, '' home again."""
+    get_db().execute('UPDATE site_recovery_vms SET failed_over = ?, failed_over_at = ? WHERE id = ?',
+                     (kind, datetime.utcnow().isoformat() if kind else '', vm['id']))
+
+
+def execute_failover(plan_id, failover_type='planned', authorized_vmids=None, only_vmids=None):
     """Main failover orchestrator. Runs in greenlet.
 
     failover_type: 'planned', 'emergency', 'failback'
+    only_vmids: the guests an operator picked for this run; None is the whole plan.
     """
     plan = _get_plan(plan_id)
     if not plan:
@@ -514,8 +521,19 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
         if len(vms) != _before:
             logger.warning(f"[SR] plan {plan_id}: {_before - len(vms)} VM(s) were added "
                            f"after authorization and are excluded from this failover")
-    boot_groups = _group_vms_by_boot(vms)
+    if only_vmids is not None:
+        _picked = {str(v) for v in only_vmids}
+        vms = [v for v in vms if str(v.get('vmid')) in _picked]
     results = {}
+    # MK Oct 2026 - a plan can be failed over guest by guest. A failover moves the guests
+    # still at the source and a failback the ones failed over; a guest already where this
+    # run would put it is listed as skipped, not started or migrated a second time
+    going_home = failover_type == 'failback'
+    for vm in [v for v in vms if bool(v.get('failed_over')) != going_home]:
+        results[str(vm['vmid'])] = {'success': True, 'skipped': True, 'error': '', 'vm_name': vm.get('vm_name', ''),
+                                    'reason': 'not failed over' if going_home else 'failed over already'}
+    vms = [v for v in vms if bool(v.get('failed_over')) == going_home]
+    boot_groups = _group_vms_by_boot(vms)
     failed = False
 
     logger.info(f"[SR] Starting {failover_type} failover for plan '{_sl(plan['name'])}' ({len(vms)} VMs, {len(boot_groups)} boot groups)")
@@ -606,7 +624,18 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
                     # it up front and point the operator at Emergency Failover, which
                     # starts the already-replicated target, instead of churning.
                     _tgt_vmid = vm.get('target_vmid') or vmid
-                    if tgt_mgr and _target_vmid_exists(tgt_mgr, _tgt_vmid):
+                    if going_home and tgt_mgr and _target_vmid_exists(tgt_mgr, vmid):
+                        # an emergency failover leaves the source copy where it was; it is
+                        # older than the guest running on the DR site and is not ours to drop
+                        if vm.get('failed_over') == 'emergency':
+                            err = (f"VMID {vmid} still exists on '{tgt_id}': the copy the emergency "
+                                   f"failover left there is older than the guest running on "
+                                   f"'{src_id}'. Remove it on '{tgt_id}', then fail this guest back.")
+                        else:
+                            err = f"VMID {vmid} is in use on '{tgt_id}', the guest cannot come back under its id"
+                        ok = False
+                        logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
+                    elif tgt_mgr and _target_vmid_exists(tgt_mgr, _tgt_vmid):
                         ok, err = False, (f"Target VMID {_tgt_vmid} already exists on '{tgt_id}' "
                                           f"(likely pre-seeded by replication). Live/planned migration "
                                           f"cannot reconcile an existing VMID — use Emergency Failover "
@@ -623,6 +652,11 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
                 failed = True
             else:
                 logger.info(f"[SR] {_sl(vm_name)} OK")
+                # at once, not at the end: a run cut short still knows which guests moved
+                try:
+                    _mark_guest(vm, '' if going_home else failover_type)
+                except Exception as e:
+                    logger.error(f"[SR] could not record where {_sl(vm_name)} ({vmid}) is now: {e}")
 
             completed += 1
 
@@ -647,7 +681,8 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None):
     _broadcast_progress(plan_id, f"Failover {final_status}", 100)
 
     log_audit('system', f'site_recovery.{failover_type}_complete',
-              f"Plan '{_sl(plan['name'])}' {failover_type} {final_status}: {completed}/{total_vms} VMs")
+              f"Plan '{_sl(plan['name'])}' {failover_type} {final_status}: {completed}/{total_vms} VMs"
+              + (f", {len(results) - completed} skipped" if len(results) > completed else ''))
 
     logger.info(f"[SR] Failover {final_status} for '{_sl(plan['name'])}': {sum(1 for r in results.values() if r['success'])}/{total_vms} succeeded")
 
@@ -962,6 +997,37 @@ def cleanup_test(plan_id):
     _broadcast_progress(plan_id, "Test cleanup complete", 100)
 
 
+# ---- Replication of a failed-over guest ----
+
+# MK Oct 2026 - once a failover started or migrated a guest onto the target, the replica
+# IS the guest. The next run of its replication job would stop it and replace it with a
+# copy of the old source, or write deltas into its disks. So a job waits while a plan has
+# its guest failed over - linked by replication_job_id, or the same guest between the same
+# two clusters - and runs again after the failback; the plan's other guests replicate as
+# before. A condition on the job row `r`, both halves on an index, so the scheduler's one
+# query per tick stays one query at 10k jobs.
+HELD_JOB_SQL = (
+    "(EXISTS (SELECT 1 FROM site_recovery_vms v WHERE v.replication_job_id = r.id "
+    "AND v.failed_over > '') "
+    "OR EXISTS (SELECT 1 FROM site_recovery_vms v JOIN site_recovery_plans p ON p.id = v.plan_id "
+    "WHERE v.vmid = r.vmid AND v.failed_over > '' AND p.source_cluster = r.source_cluster "
+    "AND p.target_cluster = r.target_cluster))")
+
+
+def replication_held_by(job, db=None):
+    """The name of the plan that has this replication job's guest failed over, else None."""
+    try:
+        vmid = int(job.get('vmid'))
+    except (TypeError, ValueError):
+        vmid = -1
+    row = (db or get_db()).query_one(
+        "SELECT p.name FROM site_recovery_vms v JOIN site_recovery_plans p ON p.id = v.plan_id "
+        "WHERE v.failed_over > '' AND (v.replication_job_id = ? OR (v.vmid = ? "
+        "AND p.source_cluster = ? AND p.target_cluster = ?)) LIMIT 1",
+        (job.get('id') or None, vmid, job.get('source_cluster') or '', job.get('target_cluster') or ''))
+    return row['name'] if row else None
+
+
 # ---- Auto-Failover Heartbeat ----
 
 _last_fail_times = {}  # plan_id -> first_fail_timestamp
@@ -1053,10 +1119,16 @@ def _heartbeat_check():
 
             # NS Apr 2026: before auto-failover, verify every VM in plan has a healthy recent
             # replication. Otherwise we'd start VMs that were never copied, or worse, stale copies.
-            vms = db.query("SELECT * FROM site_recovery_vms WHERE plan_id = ?", (plan_id,))
+            vms = [dict(r) for r in (db.query("SELECT * FROM site_recovery_vms WHERE plan_id = ?",
+                                               (plan_id,)) or [])]
+            # a guest failed over already is not started again (execute_failover passes it
+            # over) and its replication is held, so only the others are weighed
+            waiting = [vm for vm in vms if not vm.get('failed_over')]
+            if vms and not waiting:
+                _last_fail_times.pop(plan_id, None)
+                continue
             blockers = []
-            for vm_row in vms:
-                vm = dict(vm_row)
+            for vm in waiting:
                 repl_id = (vm.get('replication_job_id') or '').strip()
                 if not repl_id:
                     blockers.append(f"VM {vm['vmid']} has no replication job linked")

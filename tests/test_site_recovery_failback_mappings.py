@@ -30,8 +30,9 @@ def _mgr(storages, bridges):
 
 @pytest.fixture
 def plan(db):
-    """One plan, prod → DR, with one VM in it."""
-    def _make(storage_map, net_map):
+    """One plan, prod → DR, with one VM in it. A failback moves only the guests that are
+    failed over, so the failback tests make theirs one (failed_over='planned')."""
+    def _make(storage_map, net_map, failed_over=''):
         db.execute(
             "INSERT INTO site_recovery_plans (id, group_id, name, source_cluster, "
             "target_cluster, network_mappings, storage_mappings, status) "
@@ -39,9 +40,9 @@ def plan(db):
             ('plan_1', 'g1', 'DR Plan', PROD, DR,
              json.dumps(net_map), json.dumps(storage_map), 'running'))
         db.execute(
-            "INSERT INTO site_recovery_vms (id, plan_id, vmid, vm_name, vm_type, boot_group) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ('vm_row_1', 'plan_1', 100, 'app-01', 'qemu', 0))
+            "INSERT INTO site_recovery_vms (id, plan_id, vmid, vm_name, vm_type, boot_group, failed_over) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ('vm_row_1', 'plan_1', 100, 'app-01', 'qemu', 0, failed_over))
         return 'plan_1'
     return _make
 
@@ -75,7 +76,7 @@ def clusters():
 def test_failback_reverses_the_mappings(db, plan, migrations, clusters):
     """Both sites use the same storage/bridge names, so the pre-flight can't save
     us — pre-fix this migrated the VM home onto 'dr-ssd'/'vmbr9'."""
-    plan_id = plan({'prod-ssd': 'dr-ssd'}, {'vmbr0': 'vmbr9'})
+    plan_id = plan({'prod-ssd': 'dr-ssd'}, {'vmbr0': 'vmbr9'}, failed_over='planned')
     both = ['prod-ssd', 'dr-ssd']
     clusters[PROD] = _mgr(both, ['vmbr0', 'vmbr9'])
     clusters[DR] = _mgr(both, ['vmbr0', 'vmbr9'])
@@ -90,7 +91,7 @@ def test_failback_reverses_the_mappings(db, plan, migrations, clusters):
 def test_failback_runs_when_only_the_production_names_exist_at_home(db, plan, migrations, clusters):
     """The common case: the DR storage name does not exist on the production
     cluster, so the forward map made the pre-flight abort every failback."""
-    plan_id = plan({'prod-ssd': 'dr-ssd'}, {'vmbr0': 'vmbr9'})
+    plan_id = plan({'prod-ssd': 'dr-ssd'}, {'vmbr0': 'vmbr9'}, failed_over='planned')
     clusters[PROD] = _mgr(['prod-ssd'], ['vmbr0'])
     clusters[DR] = _mgr(['dr-ssd'], ['vmbr9'])
 
@@ -115,7 +116,7 @@ def test_forward_failover_keeps_the_mappings_as_authored(db, plan, migrations, c
 def test_failback_refuses_a_mapping_it_cannot_reverse(db, plan, migrations, clusters):
     """Two production tiers collapsed onto one DR tier: reversing it would have to
     guess which one the VM came from, so the plan fails pre-flight instead."""
-    plan_id = plan({'prod-ssd': 'dr-ssd', 'prod-hdd': 'dr-ssd'}, {})
+    plan_id = plan({'prod-ssd': 'dr-ssd', 'prod-hdd': 'dr-ssd'}, {}, failed_over='planned')
     clusters[PROD] = _mgr(['prod-ssd', 'prod-hdd', 'dr-ssd'], ['vmbr0'])
     clusters[DR] = _mgr(['dr-ssd'], ['vmbr0'])
 

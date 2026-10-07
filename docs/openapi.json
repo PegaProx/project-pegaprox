@@ -40527,6 +40527,7 @@
           }
         },
         "summary": "Emergency failover - source may be unreachable",
+        "description": "An optional body {\"vmids\": [...]} fails over only those guests of the plan; the\nothers stay at the source and keep replicating.",
         "parameters": [
           {
             "name": "plan_id",
@@ -40690,6 +40691,7 @@
           }
         },
         "summary": "Reverse direction - migrate VMs back to original source",
+        "description": "Only guests that are failed over go back: all of them, or the ones a body\n{\"vmids\": [...]} names.",
         "parameters": [
           {
             "name": "plan_id",

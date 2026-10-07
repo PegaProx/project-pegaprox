@@ -8935,6 +8935,14 @@ def _execute_replication(job):
     isn't eligible (non-rbd disks etc.), in which case we fall through to this
     full clone+migrate flow.
     """
+    # MK Oct 2026 - never while a recovery plan has the guest failed over: the replica on
+    # the target is the running guest then, and this would replace it with the old source
+    from pegaprox.background.site_recovery import replication_held_by
+    _held = replication_held_by(job, get_db())
+    if _held:
+        logging.warning(f"[XCREPL] Job {job.get('id')}: VM {job.get('vmid')} is failed over by recovery "
+                        f"plan '{_sl(_held)}' - not replicated until it is failed back")
+        return
     if (job.get('mode') or 'full') == 'incremental':
         try:
             if _execute_replication_incremental(job):
@@ -9817,6 +9825,12 @@ def run_cross_cluster_replication(job_id):
     # NS Oct 2026 - a run writes the replica on the target, as create would have (#1068)
     if caller_is_scoped(_xu, _job.get('target_cluster') or ''):
         return jsonify({'error': 'Access denied to the target cluster'}), 403
+    # MK Oct 2026 - its guest is failed over: the replica is the running guest now
+    from pegaprox.background.site_recovery import replication_held_by
+    if replication_held_by(_job, db):
+        return jsonify({'error': 'This guest is failed over by a site recovery plan. Its replica on the '
+                                 'target is the running guest now: fail it back before replicating it again.',
+                        'code': 'SR_FAILED_OVER'}), 409
 
     # MK May 2026 (#455) — block duplicate triggers while a previous run is still
     # in-flight. The scheduler uses the same _claim_job() guard.
