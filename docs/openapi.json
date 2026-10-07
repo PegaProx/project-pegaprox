@@ -4861,6 +4861,36 @@
         ]
       }
     },
+    "/api/inventory/guests/page": {
+      "get": {
+        "operationId": "clusters.get_guest_page_get",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "One page of the guests of every cluster the caller reaches",
+        "description": "The guests the caller may see, of every Proxmox cluster and XCP-ng pool or of one\n(?cluster=), filtered, sorted and cut to a page. Query:\n- limit (1-500, default 100), offset (default 0)\n- q: text in the name, VMID, node, cluster, pool, IP addresses or tags\n- status: running, stopped or other; type: qemu, lxc or template; tag: one tag\n- sort: name, vmid, cluster, node, status, type, cpu, mem, disk or uptime; dir: asc or desc\n\nThe answer has the rows of the page (guests, each with `can`: which of start, stop,\nreboot, snapshot and migrate the caller may do to it), total (the guests the filters\nleave), count (all the caller sees), status_counts (by status, the status filter aside),\ntags (every tag among the guests) and clusters (each with its state and guest count).\nThe figures are those of the cluster's guest list, a few seconds old at most.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/tasks/{upid}": {
       "delete": {
         "operationId": "clusters.cancel_task_delete",
