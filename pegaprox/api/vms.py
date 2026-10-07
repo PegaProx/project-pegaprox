@@ -12591,6 +12591,120 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'Migration failed'}), 500
 
 
+# MK Oct 2026 - what the migrate dialog warns about for a guest with snapshots. Proxmox does
+# not move a local disk that is part of a snapshot while the VM runs (unless replication has
+# it on the target already), and offline it only takes the snapshots along where the storage
+# keeps them in the volume: ZFS, btrfs or a qcow2 file. Read only, one call per dialog.
+_MIG_VOLUME_KEYS = {'qemu': re.compile(r'^(?:(?:ide|sata|scsi|virtio)\d+|efidisk0|tpmstate0|unused\d+)$'),
+                    'lxc': re.compile(r'^(?:rootfs|mp\d+|unused\d+)$')}
+_MIG_PATH_STORAGES = ('dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs')
+_MIG_SNAPSHOTS_LISTED = 50
+
+
+def _snapshot_family(stype, fmt, vm_type):
+    """How an offline migration carries the snapshots of a volume: 'zfs', 'btrfs' or 'qcow2',
+    None where Proxmox cannot take them along (LVM-thin, a raw file, ...)."""
+    if vm_type == 'qemu' and fmt in ('qcow2', 'vmdk') and stype in _MIG_PATH_STORAGES:
+        return 'qcow2'
+    return {'zfspool': 'zfs', 'btrfs': 'btrfs'}.get(stype)
+
+
+def _guest_volumes(cfg, vm_type):
+    """The storage volumes of a guest config: [{key, storage, format, flagged_shared}]."""
+    out = []
+    for key in sorted(cfg):
+        val = cfg.get(key)
+        if not _MIG_VOLUME_KEYS[vm_type].match(key) or not isinstance(val, str):
+            continue
+        parts = val.split(',')
+        opts = dict(p.split('=', 1) for p in parts[1:] if '=' in p)
+        vol = parts[0]
+        if '=' in vol:
+            name, _, rest = vol.partition('=')
+            vol = rest if name in ('volume', 'file') else opts.get('volume', '')
+        if opts.get('media') == 'cdrom' or vol.startswith('/') or ':' not in vol:
+            continue
+        storage, volname = vol.split(':', 1)
+        base = volname.rsplit('/', 1)[-1]
+        fmt = opts.get('format') or (base.rsplit('.', 1)[1] if '.' in base else 'raw')
+        out.append({'key': key, 'storage': storage, 'format': fmt.lower(),
+                    'flagged_shared': opts.get('shared') in ('1', 'on', 'yes', 'true')})
+    return out
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/migrate-check', methods=['GET'])
+@require_auth(perms=['vm.migrate'])
+def migrate_check_api(cluster_id, node, vm_type, vmid):
+    """The snapshots of a guest and its local volumes, for the warnings of the migrate dialog"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': 'vm_type is qemu or lxc'}), 400
+    from pegaprox.utils.sanitization import validate_hostname
+    if not validate_hostname(node):
+        return jsonify({'error': 'Invalid node name'}), 400
+    denied = _require_vm_access(cluster_id, vmid, 'vm.migrate', vm_type)
+    if denied:
+        return denied
+
+    mgr = cluster_managers[cluster_id]
+    out = {'supported': True, 'snapshot_count': 0, 'snapshots': [], 'volumes': [], 'replicated_to': []}
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify(dict(out, supported=False))
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    base = f"https://{mgr.host}:{mgr.api_port}/api2/json"
+
+    def _read(path):
+        try:
+            r = mgr._api_get(base + path)
+        except Exception:
+            return None
+        if r is None or r.status_code != 200:
+            return None
+        try:
+            return r.json().get('data')
+        except Exception:
+            return None
+
+    snaps = _read(f'/nodes/{node}/{vm_type}/{vmid}/snapshot')
+    if not isinstance(snaps, list):
+        return jsonify({'error': 'Could not read the snapshots of the guest'}), 502
+    snaps = [s for s in snaps if isinstance(s, dict) and s.get('name') and s.get('name') != 'current']
+    if not snaps:
+        return jsonify(out)
+    snaps.sort(key=lambda s: s.get('snaptime') or 0)
+    out['snapshot_count'] = len(snaps)
+    out['snapshots'] = [{'name': str(s['name']), 'vmstate': bool(s.get('vmstate'))}
+                        for s in snaps[-_MIG_SNAPSHOTS_LISTED:]]
+
+    cfg = _read(f'/nodes/{node}/{vm_type}/{vmid}/config')
+    if not isinstance(cfg, dict):
+        return jsonify({'error': 'Could not read the configuration of the guest'}), 502
+    from pegaprox.api.clusters import cluster_storage_resources
+    stores = {s.get('storage'): s for s in (cluster_storage_resources(cluster_id, mgr) or [])
+              if isinstance(s, dict) and s.get('node') == node}
+    for vol in _guest_volumes(cfg, vm_type):
+        st = stores.get(vol['storage'])
+        # a storage this node does not list cannot be told apart, so it is not warned about
+        if st is None or vol['flagged_shared'] or st.get('shared'):
+            continue
+        stype = str(st.get('plugintype') or '')
+        out['volumes'].append({'key': vol['key'], 'storage': vol['storage'], 'type': stype,
+                               'format': vol['format'],
+                               'family': _snapshot_family(stype, vol['format'], vm_type)})
+    if any(v['family'] == 'zfs' for v in out['volumes']):
+        jobs = _read('/cluster/replication')
+        out['replicated_to'] = sorted({str(j.get('target')) for j in (jobs or [])
+                                       if isinstance(j, dict) and str(j.get('guest')) == str(vmid)
+                                       and j.get('target') and not j.get('disable')})
+    return jsonify(out)
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>', methods=['DELETE'])
 @require_auth(perms=['vm.delete'])
 def delete_vm_api(cluster_id, node, vm_type, vmid):

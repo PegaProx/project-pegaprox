@@ -511,6 +511,31 @@ class UnreadList(list):
     unavailable = True
 
 
+def _rrd_value(point, key, scale=1):
+    """One value of a PVE rrddata slot, None where PVE has no sample (it leaves the key out)."""
+    v = point.get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):
+        return None
+    return round(v * scale, 2)
+
+
+def _rrd_share(point, used_key, total_key, no_total=None):
+    """used of total in percent, None without a sample; no_total when the total is 0 (no swap)."""
+    used = _rrd_value(point, used_key)
+    if used is None:
+        return None
+    total = _rrd_value(point, total_key)
+    if not total:
+        return no_total
+    return round(used / total * 100, 2)
+
+
 class PegaProxManager:
     """
     main cluster manager - NS
@@ -579,6 +604,8 @@ class PegaProxManager:
         self._disk_cache_lock = threading.Lock()
         # #237: track VMs where guest agent is disabled to avoid spamming PVE with failed requests
         self._no_agent_vms = set()  # vmids with no agent (cleared on VM start/config change)
+        # (node, vmid) -> whether the guest agent answered the sweep's last call, under _ip_cache_lock
+        self._agent_state = {}
 
         # update tracking
         self.nodes_updating = {}
@@ -1248,6 +1275,7 @@ class PegaProxManager:
             # NS: clear stale IPs/disk so reconnect doesn't serve old data
             with self._ip_cache_lock:
                 self._ip_cache.clear()
+                self._agent_state.clear()
             with self._disk_cache_lock:
                 self._disk_cache.clear()
             # N-1 (regression fix): also drop the short node-status/tasks result
@@ -2130,7 +2158,9 @@ class PegaProxManager:
                 r['disk_percent'] = round((r.get('disk', 0) / maxdisk) * 100, 1) if maxdisk > 0 else 0
 
             # inject cached IP addresses + disk usage (only for running VMs)
-            if self._ip_cache or self._disk_cache:
+            agents = getattr(self, '_agent_state', None)
+            if self._ip_cache or self._disk_cache or agents:
+                no_agent = getattr(self, '_no_agent_vms', ())
                 with self._ip_cache_lock:
                     for r in resources:
                         if r.get('status') != 'running':
@@ -2140,6 +2170,13 @@ class PegaProxManager:
                         if ips:
                             r['ip'] = ips[0]
                             r['ip_addresses'] = ips
+                        if agents is not None and r.get('type') == 'qemu':
+                            # MK Oct 2026 - the agent column of the guest list, from the IP sweep
+                            up = agents.get(key)
+                            if up is None and r.get('vmid') in no_agent:
+                                up = False
+                            if up is not None:
+                                r['agent_running'] = up
                 with self._disk_cache_lock:
                     for r in resources:
                         if r.get('status') != 'running':
@@ -15907,44 +15944,40 @@ echo "AGENT_INSTALLED_OK"
                 ]
                 active_pressure_keys = []
 
-                # Check first valid point to determine available metrics
-                if rrd_data:
-                    first_point = next((p for p in rrd_data if p), None)
-                    if first_point:
-                        for k in pressure_keys:
-                            if k in first_point:
-                                active_pressure_keys.append(k)
-                                formatted_data['metrics'][k] = []
+                # a PSI series exists when any slot carries it: the first one may be a gap
+                for k in pressure_keys:
+                    if any(p and p.get(k) is not None for p in rrd_data):
+                        active_pressure_keys.append(k)
+                        formatted_data['metrics'][k] = []
 
+                # MK Oct 2026 - PVE leaves a value out of a slot it has no sample for (the guest
+                # stopped, the node was down); it goes on as None, so the chart draws a gap
+                # there and not a measured 0
                 for point in rrd_data:
                     if not point:
                         continue
-                    
+
                     timestamp = point.get('time', 0)
                     formatted_data['timestamps'].append(timestamp)
-                    
+
                     # CPU usage (0-1 -> 0-100%)
-                    cpu = point.get('cpu', 0)
-                    formatted_data['metrics']['cpu'].append(round((cpu or 0) * 100, 2))
-                    
+                    formatted_data['metrics']['cpu'].append(_rrd_value(point, 'cpu', 100))
+
                     # Memory usage (bytes)
-                    mem = point.get('mem', 0)
-                    maxmem = point.get('maxmem', 1)
-                    mem_percent = ((mem or 0) / (maxmem or 1)) * 100
-                    formatted_data['metrics']['memory'].append(round(mem_percent, 2))
-                    
+                    formatted_data['metrics']['memory'].append(_rrd_share(point, 'mem', 'maxmem'))
+
                     # Disk I/O (bytes/s)
-                    formatted_data['metrics']['disk_read'].append(point.get('diskread', 0) or 0)
-                    formatted_data['metrics']['disk_write'].append(point.get('diskwrite', 0) or 0)
-                    
+                    formatted_data['metrics']['disk_read'].append(_rrd_value(point, 'diskread'))
+                    formatted_data['metrics']['disk_write'].append(_rrd_value(point, 'diskwrite'))
+
                     # Network I/O (bytes/s)
-                    formatted_data['metrics']['net_in'].append(point.get('netin', 0) or 0)
-                    formatted_data['metrics']['net_out'].append(point.get('netout', 0) or 0)
+                    formatted_data['metrics']['net_in'].append(_rrd_value(point, 'netin'))
+                    formatted_data['metrics']['net_out'].append(_rrd_value(point, 'netout'))
 
                     # Pressure Stall (PSI)
                     for k in active_pressure_keys:
-                        formatted_data['metrics'][k].append(point.get(k, 0) or 0)
-                
+                        formatted_data['metrics'][k].append(_rrd_value(point, k))
+
                 return {'success': True, 'data': formatted_data}
             else:
                 return {'success': False, 'error': response.text}
@@ -18093,67 +18126,38 @@ echo "AGENT_INSTALLED_OK"
                 ]
                 active_pressure_keys = []
 
-                # Check first valid point to determine available metrics
-                if rrd_data:
-                    first_point = next((p for p in rrd_data if p), None)
-                    if first_point:
-                        for k in pressure_keys:
-                            if k in first_point:
-                                active_pressure_keys.append(k)
-                                formatted_data['metrics'][k] = []
+                # a PSI series exists when any slot carries it: the first one may be a gap
+                for k in pressure_keys:
+                    if any(p and p.get(k) is not None for p in rrd_data):
+                        active_pressure_keys.append(k)
+                        formatted_data['metrics'][k] = []
 
+                # same as the guest charts: a slot without a sample stays None
                 for point in rrd_data:
                     if not point:
                         continue
                     
                     timestamp = point.get('time', 0)
                     formatted_data['timestamps'].append(timestamp)
+                    metrics = formatted_data['metrics']
                     
-                    # CPU usage (0-1 -> 0-100%)
-                    cpu = point.get('cpu', 0)
-                    formatted_data['metrics']['cpu'].append(round((cpu or 0) * 100, 2))
+                    # CPU usage and IO wait (0-1 -> 0-100%)
+                    metrics['cpu'].append(_rrd_value(point, 'cpu', 100))
+                    metrics['iowait'].append(_rrd_value(point, 'iowait', 100))
                     
-                    # IO Wait
-                    iowait = point.get('iowait', 0)
-                    formatted_data['metrics']['iowait'].append(round((iowait or 0) * 100, 2))
+                    # memory, swap and root fs in percent; a node without swap has 0%
+                    metrics['memory'].append(_rrd_share(point, 'memused', 'memtotal'))
+                    metrics['swap'].append(_rrd_share(point, 'swapused', 'swaptotal', no_total=0))
+                    metrics['loadavg'].append(_rrd_value(point, 'loadavg'))
                     
-                    # Memory usage
-                    memused = point.get('memused', 0)
-                    memtotal = point.get('memtotal', 1)
-                    mem_percent = ((memused or 0) / (memtotal or 1)) * 100
-                    formatted_data['metrics']['memory'].append(round(mem_percent, 2))
-                    
-                    # Swap usage
-                    swapused = point.get('swapused', 0)
-                    swaptotal = point.get('swaptotal', 1)
-                    if swaptotal and swaptotal > 0:
-                        swap_percent = ((swapused or 0) / swaptotal) * 100
-                    else:
-                        swap_percent = 0
-                    formatted_data['metrics']['swap'].append(round(swap_percent, 2))
-                    
-                    # Load average
-                    loadavg = point.get('loadavg', 0)
-                    formatted_data['metrics']['loadavg'].append(round(loadavg or 0, 2))
-                    
-                    # Network I/O (bytes/s)
-                    netin = point.get('netin', 0)
-                    netout = point.get('netout', 0)
-                    formatted_data['metrics']['net_in'].append(round((netin or 0) / 1024, 2))  # KB/s
-                    formatted_data['metrics']['net_out'].append(round((netout or 0) / 1024, 2))  # KB/s
-                    
-                    # Root FS usage
-                    rootused = point.get('rootused', 0)
-                    roottotal = point.get('roottotal', 1)
-                    if roottotal and roottotal > 0:
-                        rootfs_percent = ((rootused or 0) / roottotal) * 100
-                    else:
-                        rootfs_percent = 0
-                    formatted_data['metrics']['rootfs'].append(round(rootfs_percent, 2))
+                    # Network I/O (bytes/s -> KB/s)
+                    metrics['net_in'].append(_rrd_value(point, 'netin', 1 / 1024))
+                    metrics['net_out'].append(_rrd_value(point, 'netout', 1 / 1024))
+                    metrics['rootfs'].append(_rrd_share(point, 'rootused', 'roottotal', no_total=0))
 
                     # Pressure Stall (PSI)
                     for k in active_pressure_keys:
-                        formatted_data['metrics'][k].append(point.get(k, 0) or 0)
+                        metrics[k].append(_rrd_value(point, k))
                 
                 return formatted_data
             return {'error': 'Failed to get RRD data'}
@@ -21196,17 +21200,34 @@ echo DONE""",
     def _fetch_qemu_ips(self, node: str, vmid: int) -> list:
         """Fetch IP addresses from QEMU guest agent for a running VM.
         Returns IPv4 addresses first, then IPv6."""
+        return self._probe_qemu_agent(node, vmid)[0]
+
+    def _probe_qemu_agent(self, node: str, vmid: int) -> tuple:
+        """(ips, agent) from one network-get-interfaces call: agent is True when the guest
+        agent answered (a command error from inside the guest included), False when PVE says
+        it is not running, not configured or timed out, None when this tells nothing (skipped,
+        or another error)."""
         if vmid in self._no_agent_vms:
-            return []
+            return [], None
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
             resp = self._create_session().get(url, timeout=8)
             if resp.status_code == 500:
                 self._no_agent_vms.add(vmid)
-                return []
+                said = (getattr(resp, 'text', '') or '').lower()
+                if any(s in said for s in ('not running', 'no qemu guest agent configured', 'got timeout')):
+                    return [], False
+                # "Agent error: <desc>" is the agent itself refusing the command
+                return [], (True if 'agent error' in said else None)
             if resp.status_code != 200:
-                return []
-            interfaces = resp.json().get('data', {}).get('result', [])
+                return [], None
+            return self._agent_ips(resp.json().get('data', {}).get('result', [])), True
+        except Exception:
+            return [], None
+
+    @staticmethod
+    def _agent_ips(interfaces) -> list:
+        try:
             ipv4s, ipv6s = [], []
             for iface in interfaces:
                 if iface.get('name') == 'lo':
@@ -21314,11 +21335,11 @@ echo DONE""",
                 vm_type = r.get('type', 'qemu')
                 if vm_type == 'lxc':
                     ips = self._fetch_lxc_ips(node, vmid)
-                    return (node, vmid, ips, None)
+                    return (node, vmid, ips, None, None)
                 else:
-                    ips = self._fetch_qemu_ips(node, vmid)
+                    ips, agent = self._probe_qemu_agent(node, vmid)
                     disk = self._fetch_qemu_disk_usage(node, vmid)
-                    return (node, vmid, ips, disk)
+                    return (node, vmid, ips, disk, agent)
 
             tasks = [lambda r=r: fetch_one(r) for r in running]
             # own pool — this is the one sweep whose size follows the estate, not the nodes
@@ -21328,13 +21349,17 @@ echo DONE""",
                 for result in results:
                     if result is None:
                         continue
-                    node, vmid, ips, disk = result
+                    node, vmid, ips, disk, agent = result
                     self._ip_cache[(node, vmid)] = ips
+                    # MK Oct 2026 - what the same call said about the agent, for the guest list;
+                    # a guest skipped or unreadable this round keeps what it last said
+                    if agent is not None:
+                        self._agent_state[(node, vmid)] = agent
             with self._disk_cache_lock:
                 for result in results:
                     if result is None:
                         continue
-                    node, vmid, ips, disk = result
+                    node, vmid, ips, disk, agent = result
                     if disk:
                         self._disk_cache[(node, vmid)] = disk
         except Exception as e:
