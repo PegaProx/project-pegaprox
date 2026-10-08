@@ -7029,6 +7029,190 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/files": {
+      "get": {
+        "operationId": "vms.browse_backup_files_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Browse files inside a backup archive using PVE's file-restore API (PVE 7.2+).",
+        "description": "NS: Lists entries at a given path inside a PBS backup volume. Only works for PBS backups (not VMA/tar). path is the base64-encoded filepath token returned by a prior listing call; omit to list the root.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "volid",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/file-restore": {
+      "post": {
+        "operationId": "vms.restore_backup_file_post",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          },
+          "413": {
+            "description": "File exceeds the size limit for direct restore"
+          }
+        },
+        "summary": "Restore a single file from a backup directly to the running guest.",
+        "description": "NS: QEMU uses the QEMU Guest Agent file-write endpoint; LXC uses SSH + pct exec with stdin. The VM or container must be running.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["volid", "filepath", "dest_path"],
+                "properties": {
+                  "volid": {
+                    "type": "string",
+                    "description": "The backup volume id (e.g. pbs-storage:vm/105/2026-10-08T09:28:43Z)"
+                  },
+                  "filepath": {
+                    "type": "string",
+                    "description": "Base64-encoded path of the file inside the backup (as returned by the files endpoint)"
+                  },
+                  "dest_path": {
+                    "type": "string",
+                    "description": "Absolute destination path inside the guest (e.g. /etc/myapp/config.yaml)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.restore"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/{volid}": {
       "delete": {
         "operationId": "vms.delete_vm_backup_delete",

@@ -394,6 +394,9 @@ EXITS = {
     ('pegaprox/api/vms.py', 'test_node_connection', 'ssh-exec'): (4, 'read'),
     ('pegaprox/api/vms.py', 'join_node_to_cluster', 'ssh-exec'): (2, 'client'),
     ('pegaprox/api/vms.py', 'remove_node_from_cluster', 'ssh-exec'): (3, 'client'),
+    # LXC file restore: pushes a file into a running container via pct exec on stdin;
+    # the SSH client comes from secure_ssh_client (a guarded factory)
+    ('pegaprox/api/vms.py', 'restore_backup_file', 'ssh-exec'): (1, 'client'),
     # `id -u` on the guarded client, the shutdown on a channel of its transport after
     # guard_ssh (see test_a_channel_of_a_transport_asks_guard_ssh_first)
     ('pegaprox/api/vms.py', 'node_action_api', 'ssh-exec'): (5, 'guard'),
@@ -503,12 +506,12 @@ def test_the_inventory_counts_what_the_report_says():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
-    # 257 calls out of this process, 152 (function, kind) pairs in 138 functions; 46 of
-    # them guarded at the exit and 84 execs on a client from a guarded factory. No route
+    # 258 calls out of this process, 153 (function, kind) pairs in 139 functions; 46 of
+    # them guarded at the exit and 85 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 257 and len(EXITS) == 152
-    assert len({(f, q) for f, q, _k in EXITS}) == 138
-    assert by['guard'] == 46 and by['client'] == 84
+    assert sum(n for n, _v in EXITS.values()) == 258 and len(EXITS) == 153
+    assert len({(f, q) for f, q, _k in EXITS}) == 139
+    assert by['guard'] == 46 and by['client'] == 85
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),
