@@ -1972,17 +1972,17 @@ def restore_backup_file(cluster_id, node, vm_type, vmid):
 
         # Step 1: stream the file out of the backup
         dl_url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/file-restore/download"
-        dl_resp = session.get(dl_url, params={'volume': volid, 'filepath': filepath},
-                              stream=True, timeout=60)
+        with session.get(dl_url, params={'volume': volid, 'filepath': filepath},
+                         stream=True, timeout=60) as dl_resp:
+            if dl_resp.status_code != 200:
+                return jsonify({'error': f'Could not download file from backup: {parse_pve_error(dl_resp.text)}'}), dl_resp.status_code
 
-        if dl_resp.status_code != 200:
-            return jsonify({'error': f'Could not download file from backup: {parse_pve_error(dl_resp.text)}'}), dl_resp.status_code
-
-        file_content = b''
-        for chunk in dl_resp.iter_content(chunk_size=65536):
-            file_content += chunk
-            if len(file_content) > MAX_BYTES:
-                return jsonify({'error': f'File exceeds the {MAX_BYTES // (1024 * 1024)} MB limit for direct restore'}), 413
+            buf = bytearray()
+            for chunk in dl_resp.iter_content(chunk_size=65536):
+                buf += chunk
+                if len(buf) > MAX_BYTES:
+                    return jsonify({'error': f'File exceeds the {MAX_BYTES // (1024 * 1024)} MB limit for direct restore'}), 413
+        file_content = bytes(buf)
 
         audit_user = getattr(request, 'session', {}).get('user', 'system')
 
