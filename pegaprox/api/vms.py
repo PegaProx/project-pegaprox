@@ -1799,6 +1799,275 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
         return jsonify({'error': safe_error(e, 'Failed to restore backup')}), 500
 
 
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/files', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def browse_backup_files(cluster_id, node, vm_type, vmid):
+    """Browse files inside a backup archive using PVE's file-restore API (PVE 7.2+).
+
+    Works for both QEMU (VMA / PBS) and LXC (tar) backups.
+    Returns the directory listing at the given path inside the backup's filesystem.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied:
+        return denied
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+
+    volid = request.args.get('volid', '')
+    path = request.args.get('path', '/')
+
+    if not volid:
+        return jsonify({'error': 'volid is required'}), 400
+
+    # Auth: ensure the caller may access the backup's source VMID, not only the
+    # URL vmid — mirrors the source check in restore_vm_backup.
+    from pegaprox.utils.rbac import acts_as_admin
+    _authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if not acts_as_admin(_authz_user):
+        _sm = re.search(r'/(?:vm|ct)/(\d+)/', volid) or re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
+        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+
+    if ':' not in volid:
+        return jsonify({'error': 'Invalid volid format (expected storage:path)'}), 400
+    storage = volid.split(':')[0]
+
+    # PVE's file-restore/list API only works with PBS (Proxmox Backup Server) backups.
+    # vzdump VMA archives (QEMU) and vzdump tar archives (LXC) stored on local/dir/NFS
+    # storage are not browsable via this API — PVE has no REST endpoint to mount them.
+    # Detect by filename extension before making a doomed API call.
+    _filename = volid.split('/')[-1] if '/' in volid else volid.split(':')[-1]
+    if re.search(r'\.(vma|vma\.zst|vma\.gz|vma\.lzo)$', _filename):
+        return jsonify({'error': (
+            f"File-level restore is not available for vzdump VMA backups ({_filename}). "
+            "PVE's file-browse API only supports Proxmox Backup Server (PBS) backups. "
+            "To restore individual files: use PBS storage for your backups, or restore "
+            "the full VM and copy files from inside the running guest."
+        )}), 400
+    if re.search(r'\.(tar|tar\.zst|tar\.gz|tar\.lzo)$', _filename):
+        return jsonify({'error': (
+            f"File-level restore is not available for vzdump tar backups ({_filename}). "
+            "PVE's file-browse API only supports Proxmox Backup Server (PBS) backups. "
+            "To restore individual files from an LXC backup, use PBS storage."
+        )}), 400
+
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+
+        url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/file-restore/list"
+        # filepath is base64-encoded per PVE schema.
+        # Root listing: base64('/') = 'Lw=='
+        # Subdirectories: item.filepath from a prior PVE response is already base64.
+        import base64 as _b64
+        if not path or path in ('/', ''):
+            api_filepath = _b64.b64encode(b'/').decode('ascii')   # 'Lw=='
+        else:
+            api_filepath = path  # already base64 from item.filepath
+        params = {'volume': volid, 'filepath': api_filepath}
+        logging.debug(f"[FILE-RESTORE-BROWSE] {url} params={params}")
+        resp = session.get(url, params=params, timeout=30)
+        logging.debug(f"[FILE-RESTORE-BROWSE] PVE {resp.status_code}: {resp.text[:300]}")
+
+        if resp.status_code == 200:
+            return jsonify(resp.json().get('data', []))
+
+        raw = resp.text[:400] if resp.text else ''
+        parsed = parse_pve_error(resp.text)
+        err_msg = f"{parsed} — {raw}" if raw and raw != parsed else parsed
+        return jsonify({'error': err_msg}), resp.status_code
+
+    except Exception as e:
+        logging.error(f"[FILE-RESTORE] Error browsing backup files: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to browse backup files')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/file-restore', methods=['POST'])
+@require_auth(perms=['backup.restore'])
+def restore_backup_file(cluster_id, node, vm_type, vmid):
+    """Restore a single file from a backup directly to the running guest.
+
+    QEMU: Downloads the file from the backup archive via PVE's file-restore API,
+          then writes it into the running VM using the QEMU Guest Agent
+          (POST /agent/file-write).  The VM must be running with the guest agent
+          installed and enabled.
+
+    LXC:  Downloads the file, then pushes it into the running container via
+          SSH + `pct exec <vmid> -- sh -c 'cat > <dest>'` (stdin pipe).
+          SSH credentials are taken from the cluster's stored configuration.
+          The container must be running.
+
+    Body JSON: { volid, filepath, dest_path }
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
+        return jsonify({'error': 'Permission denied: vm.backup'}), 403
+
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+
+    data = request.json or {}
+    volid = data.get('volid', '')
+    filepath = data.get('filepath', '')
+    dest_path = data.get('dest_path', '')
+
+    if not volid or not filepath or not dest_path:
+        return jsonify({'error': 'volid, filepath, and dest_path are required'}), 400
+
+    # dest_path must be absolute to prevent accidental relative-path writes
+    if not dest_path.startswith('/'):
+        return jsonify({'error': 'dest_path must be an absolute path'}), 400
+
+    # Auth: source backup VMID check (same as restore_vm_backup)
+    from pegaprox.utils.rbac import acts_as_admin
+    _authz_user = build_authz_user(request.session.get('user', ''), request.session)
+    if not acts_as_admin(_authz_user):
+        _sm = re.search(r'/(?:vm|ct)/(\d+)/', volid) or re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
+        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+
+    if ':' not in volid:
+        return jsonify({'error': 'Invalid volid format (expected storage:path)'}), 400
+    storage = volid.split(':')[0]
+
+    # 50 MB cap — file restore is meant for config files, not bulk data
+    MAX_BYTES = 50 * 1024 * 1024
+
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+
+        # Step 1: stream the file out of the backup
+        dl_url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/file-restore/download"
+        dl_resp = session.get(dl_url, params={'volume': volid, 'filepath': filepath},
+                              stream=True, timeout=60)
+
+        if dl_resp.status_code != 200:
+            return jsonify({'error': f'Could not download file from backup: {parse_pve_error(dl_resp.text)}'}), dl_resp.status_code
+
+        file_content = b''
+        for chunk in dl_resp.iter_content(chunk_size=65536):
+            file_content += chunk
+            if len(file_content) > MAX_BYTES:
+                return jsonify({'error': f'File exceeds the {MAX_BYTES // (1024 * 1024)} MB limit for direct restore'}), 413
+
+        audit_user = getattr(request, 'session', {}).get('user', 'system')
+
+        # ── QEMU: push via Guest Agent file-write ──────────────────────────────
+        if vm_type == 'qemu':
+            import base64
+            b64 = base64.b64encode(file_content).decode('ascii')
+
+            agent_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/agent/file-write"
+            agent_resp = session.post(agent_url, data={'file': dest_path, 'content': b64, 'encode': 1},
+                                      timeout=60)
+
+            if agent_resp.status_code == 200:
+                log_audit(audit_user, 'backup.file_restored',
+                          f"Restored '{_sl(filepath)}' from {_sl(volid)} to qemu/{vmid}:{_sl(dest_path)}",
+                          cluster=manager.config.name)
+                return jsonify({'success': True})
+
+            return jsonify({'error': f'Guest agent file-write failed: {parse_pve_error(agent_resp.text)}'}), agent_resp.status_code
+
+        # ── LXC: push via SSH + pct exec with stdin ────────────────────────────
+        elif vm_type == 'lxc':
+            paramiko = get_paramiko()
+            if not paramiko:
+                return jsonify({'error': 'SSH not available (paramiko not installed). '
+                                         'Install paramiko to use LXC file restore.'}), 500
+
+            cluster_config = manager.config
+            ssh_user_cfg = getattr(cluster_config, 'ssh_user', None) or ''
+            if not ssh_user_cfg:
+                api_user = getattr(cluster_config, 'user', '') or ''
+                ssh_user_cfg = api_user.split('@')[0] if api_user else 'root'
+
+            ssh_pw = ssh_password_for(cluster_config)
+            ssh_key_raw = getattr(cluster_config, 'ssh_key', '') or ''
+
+            node_ip = manager._get_node_ip(node) if hasattr(manager, '_get_node_ip') else None
+            if not node_ip:
+                node_ip = node  # fall back to the node name and trust DNS
+
+            ssh = secure_ssh_client(paramiko)
+            connected = False
+
+            if ssh_key_raw:
+                try:
+                    import io as _io
+                    kf = _io.StringIO(ssh_key_raw)
+                    pkey = None
+                    for key_cls in [paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey,
+                                    getattr(paramiko, 'DSSKey', None)]:
+                        if key_cls is None:
+                            continue
+                        try:
+                            kf.seek(0)
+                            pkey = key_cls.from_private_key(kf)
+                            break
+                        except Exception:
+                            continue
+                    if pkey:
+                        ssh.connect(node_ip, port=22, username=ssh_user_cfg, pkey=pkey, timeout=30)
+                        connected = True
+                except Exception as _ke:
+                    logging.debug(f"[FILE-RESTORE] SSH key auth failed for {node_ip}: {_ke}")
+
+            if not connected and ssh_pw:
+                try:
+                    ssh.connect(node_ip, port=22, username=ssh_user_cfg, password=ssh_pw, timeout=30)
+                    connected = True
+                except Exception as _pe:
+                    logging.debug(f"[FILE-RESTORE] SSH password auth failed for {node_ip}: {_pe}")
+
+            if not connected:
+                return jsonify({'error': 'SSH authentication failed. '
+                                         'Configure an SSH key or password in cluster settings.'}), 500
+
+            try:
+                # Build the remote command: pct exec pipes stdin straight into the container
+                inner_cmd = 'cat > ' + shlex.quote(dest_path)
+                cmd = f'pct exec {vmid} -- sh -c {shlex.quote(inner_cmd)}'
+                stdin_ch, stdout_ch, stderr_ch = ssh.exec_command(cmd, timeout=60)
+                stdin_ch.write(file_content)
+                stdin_ch.channel.shutdown_write()
+                exit_status = stdout_ch.channel.recv_exit_status()
+                err_out = stderr_ch.read().decode('utf-8', errors='replace').strip()
+
+                if exit_status == 0:
+                    log_audit(audit_user, 'backup.file_restored',
+                              f"Restored '{_sl(filepath)}' from {_sl(volid)} to lxc/{vmid}:{_sl(dest_path)}",
+                              cluster=manager.config.name)
+                    return jsonify({'success': True})
+
+                return jsonify({'error': f'pct exec failed (exit {exit_status}): {err_out[:200]}'}), 500
+            finally:
+                ssh.close()
+
+        else:
+            return jsonify({'error': f'File restore is not supported for vm_type: {vm_type}'}), 400
+
+    except Exception as e:
+        logging.error(f"[FILE-RESTORE] Error restoring file: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to restore file')}), 500
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/<path:volid>', methods=['DELETE'])
 @require_auth(perms=['backup.delete'])
 def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):

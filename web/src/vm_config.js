@@ -835,6 +835,17 @@
             const [showRestoreBackup, setShowRestoreBackup] = useState(null);
             const [verifyingBackup, setVerifyingBackup] = useState(null);
             const [verifyResults, setVerifyResults] = useState({});
+            // File-restore browser states
+            const [showFileRestore, setShowFileRestore] = useState(null);
+            // navStack: [{text, filepath}] — filepath is what PVE returns per item
+            // and is passed back verbatim as the filepath param for listing that dir.
+            // Empty stack = root (we omit the param so PVE uses its default).
+            const [fileRestoreNavStack, setFileRestoreNavStack] = useState([]);
+            const [fileRestoreList, setFileRestoreList] = useState([]);
+            const [fileRestoreLoading, setFileRestoreLoading] = useState(false);
+            const [fileRestoreSelected, setFileRestoreSelected] = useState(null);
+            const [fileRestoreDestPath, setFileRestoreDestPath] = useState('');
+            const [fileRestoring, setFileRestoring] = useState(false);
             const verifyPollRef = useRef(null);
             // cleanup verify poll on unmount
             useEffect(() => () => { if (verifyPollRef.current) clearInterval(verifyPollRef.current); }, []);
@@ -1810,6 +1821,118 @@
                         setVerifyingBackup(null);
                     }
                 } catch(e) { addToast(t('connectionError'), 'error'); setVerifyingBackup(null); }
+            };
+
+            // File-restore: open browser for a backup
+            const handleOpenFileRestore = async (backup) => {
+                setShowFileRestore(backup);
+                setFileRestoreNavStack([]);
+                setFileRestoreSelected(null);
+                setFileRestoreDestPath('');
+                setFileRestoreList([]);
+                await _fetchFileRestoreList(backup, null);
+            };
+
+            // filepath=null → root listing (param omitted so PVE uses its default).
+            // filepath=<string from item.filepath> → specific directory.
+            const _fetchFileRestoreList = async (backup, filepath) => {
+                setFileRestoreLoading(true);
+                try {
+                    const params = new URLSearchParams({ volid: backup.volid });
+                    if (filepath != null) params.set('path', filepath);
+                    const resp = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/files?${params}`
+                    );
+                    if (resp.ok) {
+                        const items = await resp.json();
+                        items.sort((a, b) => {
+                            if (a.type !== b.type) return a.type === 'd' ? -1 : 1;
+                            return (a.text || '').localeCompare(b.text || '');
+                        });
+                        setFileRestoreList(items);
+                    } else {
+                        const err = await resp.json().catch(() => ({}));
+                        setFileRestoreList([{ _error: err.error || (t('fileRestoreBrowseFailed') || 'Failed to browse backup') }]);
+                    }
+                } catch(e) {
+                    setFileRestoreList([{ _error: t('connectionError') || 'Connection error' }]);
+                } finally {
+                    setFileRestoreLoading(false);
+                }
+            };
+
+            const handleFileRestoreNavigate = async (item) => {
+                if (!item.leaf) {
+                    // Use item.filepath returned by PVE — already in the correct format
+                    // (possibly base64). Never construct this path ourselves.
+                    const nextFilepath = item.filepath ?? null;
+                    setFileRestoreNavStack(prev => [...prev, { text: item.text, filepath: nextFilepath }]);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, nextFilepath);
+                } else {
+                    setFileRestoreSelected(item);
+                    // Suggest a guest path: strip archive prefixes like "root.pxar:/"
+                    // or "v0/" from the human-readable text path.
+                    const breadcrumb = fileRestoreNavStack.map(s => s.text).join('/');
+                    const rawPath = breadcrumb ? `${breadcrumb}/${item.text}` : item.text;
+                    const guestPath = '/' + rawPath.replace(/^[^/]*:\/+/, '').replace(/^v\d+\//, '');
+                    setFileRestoreDestPath(guestPath.replace(/\/+/g, '/'));
+                }
+            };
+
+            const handleFileRestoreGoUp = async () => {
+                if (fileRestoreNavStack.length === 0) return;
+                const newStack = fileRestoreNavStack.slice(0, -1);
+                setFileRestoreNavStack(newStack);
+                setFileRestoreSelected(null);
+                const parentFilepath = newStack.length > 0 ? newStack[newStack.length - 1].filepath : null;
+                await _fetchFileRestoreList(showFileRestore, parentFilepath);
+            };
+
+            const handleFileRestoreGoToIndex = async (idx) => {
+                if (idx < 0) {
+                    // root
+                    setFileRestoreNavStack([]);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, null);
+                } else {
+                    const newStack = fileRestoreNavStack.slice(0, idx + 1);
+                    setFileRestoreNavStack(newStack);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, newStack[newStack.length - 1].filepath);
+                }
+            };
+
+            const handleFileRestoreSubmit = async () => {
+                if (!fileRestoreSelected || !fileRestoreDestPath || !showFileRestore) return;
+                // Use item.filepath from PVE response — it's the correct path for the restore API
+                const backupFilepath = fileRestoreSelected.filepath ?? fileRestoreSelected.text;
+                setFileRestoring(true);
+                try {
+                    const resp = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/file-restore`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                volid: showFileRestore.volid,
+                                filepath: backupFilepath,
+                                dest_path: fileRestoreDestPath
+                            })
+                        }
+                    );
+                    const result = await resp.json().catch(() => ({}));
+                    if (resp.ok && result.success) {
+                        addToast(t('fileRestoreSuccess') || 'File restored successfully', 'success');
+                        setShowFileRestore(null);
+                    } else {
+                        addToast(result.error || (t('fileRestoreFailed') || 'File restore failed'), 'error');
+                    }
+                } catch(e) {
+                    addToast(t('connectionError'), 'error');
+                } finally {
+                    setFileRestoring(false);
+                }
             };
 
             // Replication operations
@@ -3996,6 +4119,14 @@
                                                                         )}
                                                                     </button>
                                                                     <button
+                                                                        onClick={() => handleOpenFileRestore(backup)}
+                                                                        disabled={backupLoading}
+                                                                        className="p-2 rounded-lg bg-teal-500/10 hover:bg-teal-500/20 text-teal-400 transition-colors disabled:opacity-50"
+                                                                        title={t('fileRestore') || 'File Restore'}
+                                                                    >
+                                                                        <Icons.FolderOpen />
+                                                                    </button>
+                                                                    <button
                                                                         onClick={() => setShowRestoreBackup(backup)}
                                                                         disabled={backupLoading}
                                                                         className="p-2 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-colors disabled:opacity-50"
@@ -4137,6 +4268,137 @@
                                                 </div>
                                             )}
                                             
+                                            {/* File Restore Modal */}
+                                            {showFileRestore && (
+                                                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-2xl max-h-[80vh] flex flex-col">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className="text-lg font-semibold">{t('fileRestore') || 'File Restore'}</h3>
+                                                            <button onClick={() => setShowFileRestore(null)} className="p-1 hover:bg-proxmox-hover rounded-lg text-gray-400">
+                                                                <Icons.X />
+                                                            </button>
+                                                        </div>
+                                                        <div className="text-xs text-gray-500 mb-3 truncate font-mono">{showFileRestore.filename}</div>
+
+                                                        {/* Breadcrumb + Up button */}
+                                                        <div className="flex items-center gap-1 mb-3 text-sm flex-wrap">
+                                                            {fileRestoreNavStack.length > 0 && (
+                                                                <button
+                                                                    onClick={handleFileRestoreGoUp}
+                                                                    disabled={fileRestoreLoading}
+                                                                    className="px-2 py-1 bg-proxmox-dark hover:bg-proxmox-hover rounded text-gray-400 text-xs disabled:opacity-50"
+                                                                >
+                                                                    ↑ ..
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleFileRestoreGoToIndex(-1)}
+                                                                disabled={fileRestoreLoading}
+                                                                className="text-teal-400 hover:text-teal-300 disabled:opacity-50"
+                                                            >
+                                                                /
+                                                            </button>
+                                                            {fileRestoreNavStack.map((entry, idx) => (
+                                                                <span key={idx} className="flex items-center gap-1">
+                                                                    <span className="text-gray-600">/</span>
+                                                                    <button
+                                                                        onClick={() => handleFileRestoreGoToIndex(idx)}
+                                                                        disabled={fileRestoreLoading}
+                                                                        className="text-teal-400 hover:text-teal-300 disabled:opacity-50"
+                                                                    >
+                                                                        {entry.text}
+                                                                    </button>
+                                                                </span>
+                                                            ))}
+                                                        </div>
+
+                                                        {/* File listing */}
+                                                        <div className="flex-1 overflow-y-auto min-h-0 border border-proxmox-border rounded-lg">
+                                                            {fileRestoreLoading ? (
+                                                                <div className="flex items-center justify-center py-8">
+                                                                    <Icons.RotateCw className="animate-spin text-gray-400" />
+                                                                </div>
+                                                            ) : fileRestoreList.length === 1 && fileRestoreList[0]._error ? (
+                                                                <div className="text-center py-8 text-red-400 text-sm px-4">
+                                                                    <Icons.XCircle className="mx-auto mb-2 opacity-70" />
+                                                                    {fileRestoreList[0]._error}
+                                                                </div>
+                                                            ) : fileRestoreList.length === 0 ? (
+                                                                <div className="text-center py-8 text-gray-500 text-sm">
+                                                                    {t('emptyDirectory') || 'Empty directory'}
+                                                                </div>
+                                                            ) : (
+                                                                <table className="w-full text-sm">
+                                                                    <tbody>
+                                                                        {fileRestoreList.map((item, idx) => (
+                                                                            <tr
+                                                                                key={idx}
+                                                                                onClick={() => handleFileRestoreNavigate(item)}
+                                                                                className={`border-b border-proxmox-border/50 cursor-pointer hover:bg-proxmox-hover/50 transition-colors ${fileRestoreSelected === item ? 'bg-teal-500/10' : ''}`}
+                                                                            >
+                                                                                <td className="px-3 py-2 w-8">
+                                                                                    {!item.leaf
+                                                                                        ? <Icons.FolderOpen className="w-4 h-4 text-yellow-400" />
+                                                                                        : <Icons.FileText className="w-4 h-4 text-gray-400" />}
+                                                                                </td>
+                                                                                <td className="px-2 py-2 text-white font-mono">{item.text}</td>
+                                                                                <td className="px-3 py-2 text-right text-gray-500 text-xs whitespace-nowrap">
+                                                                                    {item.type !== 'd' && item.size != null
+                                                                                        ? item.size < 1024 ? `${item.size} B`
+                                                                                          : item.size < 1048576 ? `${(item.size / 1024).toFixed(1)} KB`
+                                                                                          : `${(item.size / 1048576).toFixed(1)} MB`
+                                                                                        : ''}
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            )}
+                                                        </div>
+
+                                                        {/* Destination path + restore button (shown when file selected) */}
+                                                        {fileRestoreSelected && (
+                                                            <div className="mt-4 space-y-3 border-t border-proxmox-border pt-4">
+                                                                <div className="text-xs text-gray-400">
+                                                                    <span className="font-medium text-white">{fileRestoreSelected.text}</span>
+                                                                    {' '}{t('selectedForRestore') || 'selected — set destination path in guest:'}
+                                                                </div>
+                                                                <input
+                                                                    type="text"
+                                                                    value={fileRestoreDestPath}
+                                                                    onChange={e => setFileRestoreDestPath(e.target.value)}
+                                                                    placeholder={t('destPath') || '/etc/nginx/nginx.conf'}
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white font-mono text-sm"
+                                                                />
+                                                                {vm.type === 'qemu' && (
+                                                                    <p className="text-xs text-yellow-400">{t('fileRestoreNoteQemu') || 'VM must be running with QEMU Guest Agent enabled.'}</p>
+                                                                )}
+                                                                {vm.type === 'lxc' && (
+                                                                    <p className="text-xs text-yellow-400">{t('fileRestoreNoteLxc') || 'Container must be running. Requires SSH access configured on the cluster.'}</p>
+                                                                )}
+                                                                <div className="flex gap-2 justify-end">
+                                                                    <button
+                                                                        onClick={() => setFileRestoreSelected(null)}
+                                                                        className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm"
+                                                                    >
+                                                                        {t('cancel')}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={handleFileRestoreSubmit}
+                                                                        disabled={fileRestoring || !fileRestoreDestPath.startsWith('/')}
+                                                                        className="px-4 py-2 bg-teal-600 hover:bg-teal-700 rounded-lg text-sm disabled:opacity-50"
+                                                                    >
+                                                                        {fileRestoring
+                                                                            ? <span className="flex items-center gap-2"><Icons.RotateCw className="w-4 h-4 animate-spin" />{t('restoring') || 'Restoring...'}</span>
+                                                                            : (t('restoreFile') || 'Restore File')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             {/* NS: Restore Backup Modal */}
                                             {showRestoreBackup && (
                                                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">

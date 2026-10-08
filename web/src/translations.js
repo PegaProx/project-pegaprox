@@ -8609,6 +8609,18 @@
                 backupNotes: 'Notes (optional)',
                 backupNotesPlaceholder: 'e.g. Before major update, weekly backup...',
 
+                // File restore
+                fileRestore: 'File Restore',
+                fileRestoreBrowseFailed: 'Failed to browse backup files',
+                fileRestoreSuccess: 'File restored successfully',
+                fileRestoreFailed: 'File restore failed',
+                fileRestoreNoteQemu: 'VM must be running with QEMU Guest Agent enabled.',
+                fileRestoreNoteLxc: 'Container must be running. Requires SSH access configured on the cluster.',
+                selectedForRestore: 'selected — set destination path in guest:',
+                destPath: 'Destination path in guest',
+                restoreFile: 'Restore File',
+                emptyDirectory: 'Empty directory',
+
                 // HA
                 ha: 'HA',
                 haStatus: 'HA Status',
