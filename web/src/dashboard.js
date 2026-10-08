@@ -10893,6 +10893,8 @@
             const [vmwareDsDetail, setVmwareDsDetail] = useState(null);
             const [vmwareClusters, setVmwareClusters] = useState([]);
             const [vmwareConnectionOk, setVmwareConnectionOk] = useState(true);
+            // what the VM list of the server answered when it failed: {code, message} (#1142)
+            const [vmwareError, setVmwareError] = useState(null);
             const [vmwareSelectedMigration, setVmwareSelectedMigration] = useState(null);
             const [vmwareMigrationDetail, setVmwareMigrationDetail] = useState(null);
             const [showVmwareRename, setShowVmwareRename] = useState(false);
@@ -11286,7 +11288,7 @@
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
             const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
-            const [sessionExpired, setSessionExpired] = useState(false);  // any 401 -> clear "session expired" overlay instead of silent failure
+            const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
             
@@ -11367,6 +11369,8 @@
             // addToast and t exist. A ref, because authFetch keeps one identity for good.
             // And with the 503 HA_ACTIVE_UNREACHABLE of a forwarding standby
             const haRefusedRef = useRef(null);
+            // when a 401 without one of our codes last made us ask /auth/check (#1142)
+            const sessionProbeRef = useRef(0);
             const authFetch = React.useCallback(async (url, opts = {}) => {
                 const { timeout, quiet, ...rest } = opts;
                 let ctrl, timer;
@@ -11383,11 +11387,24 @@
                     });
                     // #144: detect session loss early — don't auto-logout on auth/check or SSE
                     if (res.status === 401 && !url.includes('/auth/') && !url.includes('/sse')) {
-                        console.warn('[authFetch] 401 on', url.split('?')[0]);
-                        // Session invalid/expired (server restart, timeout, revoked token) — surface a
-                        // clear overlay instead of letting every poll fail silently. Idempotent, so
-                        // a burst of concurrent 401s only shows the prompt once.
-                        setSessionExpired(true);
+                        // LW Oct 2026 (#1142) - only a 401 with one of PegaProx's own codes means the
+                        // session is gone. Any other one (an ESXi server refusing its stored password,
+                        // a proxy) is the caller's error: the overlay threw the user out at every click
+                        // on such a server. /auth/check is asked once whether the session is still there.
+                        const body = await res.clone().json().catch(() => null);
+                        if (PegaProxApiErrors.sessionLost(body)) {
+                            console.warn('[authFetch] 401 on', url.split('?')[0]);
+                            // Session invalid/expired (server restart, timeout, revoked token) - surface a
+                            // clear overlay instead of letting every poll fail silently. Idempotent, so
+                            // a burst of concurrent 401s only shows the prompt once.
+                            setSessionExpired(true);
+                        } else if (Date.now() - sessionProbeRef.current > 15000) {
+                            sessionProbeRef.current = Date.now();
+                            fetch(`${API_URL}/auth/check?t=${Date.now()}`, { credentials: 'include', headers: getAuthHeaders() })
+                                .then(r => r.status === 401 ? { authenticated: false } : r.json())
+                                .then(d => { if (d && d.authenticated === false) setSessionExpired(true); })
+                                .catch(() => {});
+                        }
                     }
                     setConnectionError(null);
                     // #625 v2 - a standby refuses what acts. One translated toast here, and the
@@ -14854,11 +14871,18 @@
                 setVmwareLoading(true);
                 try {
                     const resp = await authFetch(`${API_URL}/vmware/${vmwId}/vms`);
-                    if (resp && resp.ok) {
+                    // a slow answer for the server shown before says nothing about this one
+                    const current = !selectedVMwareRef.current || selectedVMwareRef.current.id === vmwId;
+                    if (current && resp && resp.ok) {
                         const data = await resp.json();
                         setVmwareVms(Array.isArray(data) ? data : data.data || []);
                         setVmwareConnectionOk(true);
-                    } else {
+                        setVmwareError(null);
+                    } else if (current) {
+                        // the server's own words, so a refused password is told apart from a
+                        // server that is down (#1142)
+                        const body = resp ? await resp.json().catch(() => ({})) : {};
+                        setVmwareError(resp ? { code: body.code || '', message: body.error || `HTTP ${resp.status}` } : null);
                         setVmwareConnectionOk(false);
                     }
                 } catch (e) { console.warn('VMware VMs error:', e); setVmwareConnectionOk(false); }
@@ -15038,6 +15062,17 @@
                         setShowAddVMware(false);
                         setEditingVMware(null);
                         fetchVMwareServers();
+                        // the server on screen is read again at once, with the password just set (#1142).
+                        // All of it: networks have no poll, hosts and datastores wait a minute for theirs
+                        if (selectedVMware?.id === vmwId) {
+                            const saved = await resp.json().catch(() => null);
+                            if (saved) setSelectedVMware(prev => ({ ...prev, ...saved }));
+                            fetchVMwareVms(vmwId);
+                            fetchVMwareHosts(vmwId);
+                            fetchVMwareDatastores(vmwId);
+                            fetchVMwareNetworks(vmwId);
+                            fetchVMwareClusters(vmwId);
+                        }
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
                         addToast(`${t('updateFailed')}: ${err.error || t('unknown')}`, 'error');
@@ -15045,6 +15080,12 @@
                 } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
             };
             
+            const openVmwareEdit = (vmw) => {
+                setEditingVMware(vmw);
+                setVmwareForm({ name: vmw.name || '', host: vmw.host, port: vmw.port || 443, username: vmw.username || 'root', password: '', ssl_verify: vmw.ssl_verify || false, notes: vmw.notes || '' });
+                setShowAddVMware(true);
+            };
+
             const handleDeleteVMware = async (vmwId) => {
                 if (haReadOnly) { haRefusedRef.current?.(); return; }  // the active acts (#625)
                 if (!confirm(t('deleteEsxiServerConfirm'))) return;
@@ -15084,6 +15125,10 @@
             // Fetch VMs when a VMware server is selected
             useEffect(() => {
                 if (selectedVMware?.id) {
+                    // nothing of the server shown before stays under this one's name, not when
+                    // this one cannot be read either (#1142)
+                    setVmwareVms([]); setVmwareHosts([]); setVmwareDatastores([]); setVmwareNetworks([]); setVmwareClusters([]);
+                    setVmwareError(null); setVmwareConnectionOk(true);
                     fetchVMwareVms(selectedVMware.id);
                     fetchVMwareHosts(selectedVMware.id);
                     fetchVMwareDatastores(selectedVMware.id);
@@ -16024,15 +16069,16 @@
                             addToast(t('apiTokenCreated') || 'API token created on PVE', 'success');
                             setTimeout(() => addToast(t('sshPasswordStillNeeded') || 'SSH still uses the password', 'info'), 800);
                         }
-                    } else if (response && response.status === 401) {
-                        // #144: session expired or lost — re-login needed
-                        setError(t('sessionExpired') || 'Session expired — please log in again');
-                        setTimeout(() => logout(), 2000);
                     } else {
-                        const err = await response.json().catch(() => ({}));
-                        // #683 — a 2FA-enabled PVE account can't be added by password; show the
+                        const err = response ? await response.json().catch(() => ({})) : {};
+                        if (response?.status === 401 && PegaProxApiErrors.sessionLost(err)) {
+                            // #144: session expired or lost - re-login needed. Only our own 401 says
+                            // so; Proxmox refusing the login typed here is an error of this form (#1142)
+                            setError(t('sessionExpired') || 'Session expired - please log in again');
+                            setTimeout(() => logout(), 2000);
+                        // #683 - a 2FA-enabled PVE account can't be added by password; show the
                         // localized hint (API token OR temporarily disable 2FA) instead of the raw text.
-                        if (err.error_code === 'NEEDS_2FA') {
+                        } else if (err.error_code === 'NEEDS_2FA') {
                             setError(t('cluster2FAHint') || err.error);
                         } else {
                             setError(err.error || t('connectionFailed'));
@@ -23902,10 +23948,10 @@
                                             <div className={isCorporate ? 'corp-toolbar flex items-center gap-1' : 'flex items-center gap-2'}>
                                                 {isAdmin && !haReadOnly && (
                                                     <>
-                                                        <button onClick={() => { setEditingVMware(selectedVMware); setVmwareForm({ name: selectedVMware.name || '', host: selectedVMware.host, port: selectedVMware.port || 443, username: selectedVMware.username || 'root', password: '', ssl_verify: selectedVMware.ssl_verify || false, notes: selectedVMware.notes || '' }); setShowAddVMware(true); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm'}>
+                                                        <button onClick={() => openVmwareEdit(selectedVMware)} title={t('esxiEditServer')} data-esxi-edit className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm'}>
                                                             <Icons.Settings className="w-4 h-4" />
                                                         </button>
-                                                        <button onClick={() => handleDeleteVMware(selectedVMware.id)} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-red-400 hover:text-red-300 text-sm'}>
+                                                        <button onClick={() => handleDeleteVMware(selectedVMware.id)} title={t('esxiRemoveServer')} data-esxi-remove className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-red-400 hover:text-red-300 text-sm'}>
                                                             <Icons.Trash className="w-4 h-4" />
                                                         </button>
                                                     </>
@@ -23949,13 +23995,30 @@
                                         
                                         {/* VMs Tab */}
                                         {/* Connection Warning */}
+                                        {/* LW Oct 2026 (#1142) - a server that refuses its stored password says so,
+                                            with its words, and leads to the settings; edit and remove stay up top */}
                                         {!vmwareConnectionOk && (
-                                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-center gap-3">
+                                            <div data-esxi-error={vmwareError?.code || 'connection'} className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-center gap-3">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
-                                                <div className="flex-1">
-                                                    <span className="text-yellow-300 text-sm font-medium">{t('esxiConnectionLost')}</span>
-                                                    <span className="text-yellow-400/70 text-sm ml-2">{t('esxiSessionExpiredDataStale')}</span>
-                                                </div>
+                                                {vmwareError?.code === 'UPSTREAM_AUTH' ? (
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="text-yellow-300 text-sm font-medium">{t('esxiCredentialsRefused')}</div>
+                                                        <div className="text-yellow-400/70 text-sm break-all" data-esxi-error-message>{vmwareError.message}</div>
+                                                        <div className="text-yellow-400/70 text-xs mt-1">{t('esxiCredentialsHint')}</div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex-1 min-w-0">
+                                                        <span className="text-yellow-300 text-sm font-medium">{t('esxiConnectionLost')}</span>
+                                                        <span className="text-yellow-400/70 text-sm ml-2">{t('esxiSessionExpiredDataStale')}</span>
+                                                        {vmwareError?.message && <div className="text-yellow-400/70 text-xs mt-1 break-all" data-esxi-error-message>{vmwareError.message}</div>}
+                                                    </div>
+                                                )}
+                                                {vmwareError?.code === 'UPSTREAM_AUTH' && isAdmin && !haReadOnly && (
+                                                    <button onClick={() => openVmwareEdit(selectedVMware)} data-esxi-error-edit
+                                                        className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-xs font-medium">
+                                                        {t('esxiEditServer')}
+                                                    </button>
+                                                )}
                                                 <button onClick={() => { fetchVMwareVms(selectedVMware.id); fetchVMwareHosts(selectedVMware.id); fetchVMwareDatastores(selectedVMware.id); }} 
                                                     className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-xs font-medium">
                                                     {t('esxiReconnect')}
@@ -27420,11 +27483,11 @@
                     {/* Toast Notifications — rendered via portal to document.body to avoid corporate layout z-index/overflow issues */}
                     {toastPortal}
 
-                    {/* Session-expired overlay — any 401 (server restart, idle timeout, revoked token)
-                        surfaces this instead of silently failing every poll. Portal to body so it sits
-                        above the whole app regardless of layout z-index. */}
+                    {/* Session-expired overlay - a 401 of PegaProx's own (server restart, idle timeout,
+                        revoked token; #1142: its code says so) surfaces this instead of silently failing
+                        every poll. Portal to body so it sits above the whole app regardless of layout z-index. */}
                     {sessionExpired && ReactDOM.createPortal(
-                        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 100000, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(2px)' }}>
+                        <div data-session-expired className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 100000, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(2px)' }}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-sm p-7 text-center">
                                 <div className="mx-auto mb-4 rounded-full bg-yellow-500/15 flex items-center justify-center" style={{ width: 52, height: 52 }}>
                                     <Icons.Lock className="w-6 h-6 text-yellow-400" />

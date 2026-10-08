@@ -1861,9 +1861,12 @@ def test_esxi_pbs_and_the_add_buttons_stay_on_the_active(dash):
     # PBS edit/delete, encryption key and auto-verify; ESXi re-configure/delete
     for opener in ('<button onClick={() => { setEditingPBS(selectedPBS);', '<button onClick={() => setShowEncryptionKeyModal(true)}',
                    '<button onClick={() => setShowVerifyScheduleModal(true)}',
-                   '<button onClick={() => { setEditingVMware(selectedVMware);'):
+                   '<button onClick={() => openVmwareEdit(selectedVMware)} title='):
         at = dash.index(opener)
         assert '{isAdmin && !haReadOnly && (' in dash[at - 220:at], opener
+    # the way to the settings of an ESXi server that refuses its password, too (#1142)
+    at = dash.index('<button onClick={() => openVmwareEdit(selectedVMware)} data-esxi-error-edit')
+    assert "{vmwareError?.code === 'UPSTREAM_AUTH' && isAdmin && !haReadOnly && (" in dash[at - 160:at]
     for head in ('const vmwarePowerAction = async (vmId, action) => {',
                  'const vmwareSnapshotAction = async (vmId, action, data = {}) => {',
                  'const toggleVMwareDRS = async (vmwId, clusterId, enabled, automation) => {',
