@@ -90,3 +90,39 @@ def test_a_failed_write_does_not_leave_an_empty_target(ssl_dir, monkeypatch):
     # and the next start generates a fresh pair over the leftover temp file
     assert _resolve(cert, key) == (str(cert), str(key))
     assert _loads(cert, key)
+
+
+def test_short_writes_still_produce_the_whole_file(ssl_dir, monkeypatch):
+    cert, key = ssl_dir
+    real_write = os.write
+
+    def short_write(fd, data):
+        return real_write(fd, bytes(data[:100]))
+
+    monkeypatch.setattr(os, 'write', short_write)
+    app_module._generate_self_signed(str(cert), str(key), 'pegaprox.test', 'PegaProx')
+    monkeypatch.setattr(os, 'write', real_write)
+
+    assert key.read_bytes().rstrip().endswith(b'-----END PRIVATE KEY-----')
+    assert cert.read_bytes().rstrip().endswith(b'-----END CERTIFICATE-----')
+    assert _loads(cert, key)
+
+
+def test_a_write_that_runs_out_of_space_leaves_the_target_alone(ssl_dir, monkeypatch):
+    cert, key = ssl_dir
+    key.write_bytes(b'old key')
+    real_write = os.write
+    calls = []
+
+    def filling_disk(fd, data):
+        calls.append(fd)
+        if len(calls) > 1:
+            raise OSError(28, 'No space left on device')
+        return real_write(fd, bytes(data[:100]))
+
+    monkeypatch.setattr(os, 'write', filling_disk)
+    with pytest.raises(OSError):
+        app_module._write_atomic(str(key), b'x' * 1000, 0o600)
+    monkeypatch.setattr(os, 'write', real_write)
+
+    assert key.read_bytes() == b'old key'

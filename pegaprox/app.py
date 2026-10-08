@@ -1280,7 +1280,10 @@ def _write_atomic(path, data, mode):
     tmp = path + '.tmp'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
-        os.write(fd, data)
+        # a short write (disk filling up) must not get renamed over the target
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
         os.fsync(fd)
     finally:
         os.close(fd)
