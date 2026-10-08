@@ -271,6 +271,8 @@ def test_the_panel_mounts_them_on_the_leader_and_a_member_only(panel):
     assert active.count('{groupCards(true)}') == 1 and 'groupCards(false)' not in active
     assert standby.count('{groupCards(false)}') == 1 and 'groupCards(true)' not in standby
     cards = _block(panel, 'const groupCards = (leader) => {', 'if (!status) {')
+    # a removed instance shows none of them: the config it may still hold is the one it left
+    assert cards.index('if (status.removed) return null;') < cards.index('const reported')
     # a server from before stage 2 sends neither key, and this release sends auto: null -
     # nothing of the switch or the witness renders then
     assert 'const reported = status.auto != null;' in cards
@@ -974,6 +976,26 @@ def test_runtime_a_member_reads_and_changes_nothing(open_app, pending):
     assert panel.locator(f'[data-ha-member="{B}"] [data-ha-auto-site]').inner_text().strip() == 'dc1'
     page.wait_for_timeout(300)
     assert not [c for c in _writes(app) if c[1].startswith('/api/ha/')]
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_removed_member_shows_its_removal_and_no_card_of_the_group(open_app):
+    """Lab E8: removed after Force leader on the other side, with the voter config it left
+    still in its state (a build before the fix). The removed note says by whom and what to
+    do; no card shows the config it left, its votes or the group's zone."""
+    down = [_finding('VOTER_DOWN', 'warn', f'{ch * 8} holds a vote in the voter config and is no member of this '
+                     'group (any more).', ch * 32) for ch in 'bc']
+    app = open_app(role='standby', members=[],
+                   auto=_auto(mode='auto', findings=down, witness=_witness()),
+                   zone='Europe/Vienna', shipped=True)
+    app.server.removed = {'epoch': 2, 'at': _iso_ago(60), 'by': 'd' * 32}
+    panel = _open_ha(app, 'standby')
+    note = panel.locator('[data-ha-removed]')
+    note.wait_for(timeout=3000)
+    assert 'Removed by dddddddd under epoch 2' in note.inner_text()
+    assert panel.locator('[data-ha-auto], [data-ha-lead], [data-ha-split], [data-ha-witness], '
+                         '[data-ha-zone]').count() == 0
+    assert 'holds a vote in the voter config' not in panel.inner_text()
     assert not app.errors, app.errors
 
 

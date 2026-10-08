@@ -11224,6 +11224,9 @@
             // leader, read on a member. Each card only shows what its server reports: none of them
             // on a server from before stage 2, and on a member nothing it has no data for.
             const groupCards = (leader) => {
+                // a removed instance is in no group any more: the removed note says by whom and
+                // what to do, and nothing of the config it left is shown next to it
+                if (status.removed) return null;
                 // auto is null while this release does not offer automatic failover: no switch
                 // and no witness form that could only be refused
                 const reported = status.auto != null;
