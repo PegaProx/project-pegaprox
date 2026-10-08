@@ -181,6 +181,14 @@ main() {
                 mkdir -p "$INSTALL_DIR/systemd"
                 cp "$SCRIPT_DIR/systemd/pegaprox-witness.service" "$INSTALL_DIR/systemd/"
             fi
+            # NS Oct 2026 (#1134): the plugins never came along from a checkout. A re-run
+            # replaces their code and keeps each plugin's config.json
+            if [ -d "$SCRIPT_DIR/plugins" ] && [ -f "$SCRIPT_DIR/packaging/plugins/sync_plugins.py" ]; then
+                python3 "$SCRIPT_DIR/packaging/plugins/sync_plugins.py" "$SCRIPT_DIR/plugins" "$INSTALL_DIR/plugins" \
+                    || print_warning "Not every plugin could be copied (see above)"
+                mkdir -p "$INSTALL_DIR/packaging/plugins"
+                cp "$SCRIPT_DIR/packaging/plugins/sync_plugins.py" "$INSTALL_DIR/packaging/plugins/"
+            fi
         fi
 
         print_success "Files copied from local checkout"
@@ -191,6 +199,15 @@ main() {
 
         if git clone --depth 1 --branch "$GITHUB_BRANCH" --quiet "$GITHUB_REPO" "$TEMP_DIR/pegaprox" 2>/dev/null; then
             print_success "Repository cloned (branch: $GITHUB_BRANCH)"
+
+            # the plugins first, through the sync: on a re-run the copy below put each
+            # plugin's config.json back to the defaults (#1134)
+            if [ -d "$TEMP_DIR/pegaprox/plugins" ] && [ -f "$TEMP_DIR/pegaprox/packaging/plugins/sync_plugins.py" ]; then
+                python3 "$TEMP_DIR/pegaprox/packaging/plugins/sync_plugins.py" \
+                    "$TEMP_DIR/pegaprox/plugins" "$INSTALL_DIR/plugins" \
+                    || print_warning "Not every plugin could be copied (see above)"
+                rm -rf "$TEMP_DIR/pegaprox/plugins"
+            fi
 
             # Copy ALL files from repo
             cp -r "$TEMP_DIR/pegaprox/"* "$INSTALL_DIR/" 2>/dev/null || true

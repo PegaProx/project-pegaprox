@@ -53,6 +53,14 @@ COPY --chown=pegaprox:pegaprox update.sh .
 # bundle this instance serves (#625)
 COPY --chown=pegaprox:pegaprox packaging/witness/install.sh packaging/witness/install.sh
 COPY --chown=pegaprox:pegaprox systemd/pegaprox-witness.service systemd/pegaprox-witness.service
+# NS Oct 2026 (#1134): plugins/ above is what the image ships. The plugins are loaded from
+# the config volume; PegaProx brings the shipped ones in from PEGAPROX_PLUGINS_SEED on
+# every start and leaves each plugin's config.json alone - a new image used to reset it
+# to the defaults. In the app and not in an entrypoint, so an overridden entrypoint
+# (compose, Kubernetes) still gets them
+COPY --chown=pegaprox:pegaprox packaging/plugins/sync_plugins.py packaging/plugins/sync_plugins.py
+ENV PEGAPROX_PLUGINS_DIR=/app/config/plugins \
+    PEGAPROX_PLUGINS_SEED=/app/plugins
 # the branch this image is built from (docker-testing.yml passes Testing): "Add witness"
 # names the image of that branch for the witness, and update.sh follows it (#625)
 ARG PEGAPROX_BRANCH=main

@@ -22,6 +22,14 @@ if [ "$1" = "configure" ]; then
     # chown/chmod on it was a leftover from when it was tracked (54dbca4) and made the
     # postinst — and thus the whole appliance build — fail with "cannot access".
 
+    # NS Oct 2026 (#1134): the service loads its plugins from its working directory, and
+    # the package never brought any there. On every install and upgrade the shipped ones
+    # go in: their code replaced, a plugin's config.json and a plugin the admin added
+    # left alone. A plugin that does not make it is no reason to fail the upgrade.
+    /usr/bin/python3 /usr/lib/pegaprox/packaging/plugins/sync_plugins.py \
+        /usr/share/pegaprox/plugins /var/lib/pegaprox/plugins --owner pegaprox:pegaprox \
+        || echo "pegaprox: not every bundled plugin could be brought into /var/lib/pegaprox/plugins (see above)" >&2
+
     systemctl enable pegaprox.service
     systemctl restart pegaprox.service || true
 
