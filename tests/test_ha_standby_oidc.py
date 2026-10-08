@@ -471,11 +471,11 @@ PROVISIONING = {
         "[OIDC] Provisioned new user 'nora@corp.example' (role=user, source=oidc)"),
     'a-new-account-with-nothing-but-a-subject': (
         {}, {'sub': 'abcdef0123456789'}, {}, 'entra',
-        'oidc_abcdef012345',
+        'oidc_f445801e0cb89926',  # sha256 of the sub, lower case (#1141)
         {'role': 'viewer', 'tenant_id': 'default', 'permissions': [], 'tenant_permissions': {},
-         'auth_source': 'entra', 'oidc_sub': 'abcdef0123456789', 'display_name': 'oidc_abcdef012345',
+         'auth_source': 'entra', 'oidc_sub': 'abcdef0123456789', 'display_name': 'oidc_f445801e0cb89926',
          'email': '', 'enabled': True, 'last_oidc_sync': NOW},
-        "[OIDC] Provisioned new user 'oidc_abcdef012345' (role=viewer, source=entra)"),
+        "[OIDC] Provisioned new user 'oidc_f445801e0cb89926' (role=viewer, source=entra)"),
     'a-settled-account-the-whole-group-set': (
         {'olga': HELD}, OLGA, FULL, 'entra',
         'olga',

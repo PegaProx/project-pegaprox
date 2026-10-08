@@ -412,6 +412,20 @@ def caller_acts_as_admin():
     return acts_as_admin(acting_user())
 
 
+def find_user_key(users, name):
+    """The key an account is stored under, for a username taken from a route, or None.
+
+    The exact key first, then the lower-cased name. The admin routes used to lower-case
+    first, and an OIDC fallback account kept the case of the subject id (oidc_Wd...), so
+    it answered 404 everywhere: no edit, no delete, no 2FA reset (#1141). MK"""
+    if not isinstance(name, str) or not name:
+        return None
+    if name in users:
+        return name
+    lowered = name.lower()
+    return lowered if lowered in users else None
+
+
 def check_cluster_access(cluster_id):
     """Check if current user can access a cluster based on tenant or VM ACLs.
     Returns (True, None) if allowed, (False, error_response) if not.

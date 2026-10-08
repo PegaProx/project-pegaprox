@@ -35,7 +35,7 @@ from pegaprox.utils.ldap import (get_ldap_settings, ldap_authenticate, ldap_prov
                                  ldap_build_user_row, LDAP_AUTH_SOURCES)
 from pegaprox.utils.oidc import (
     get_oidc_settings, get_oidc_endpoints, oidc_build_auth_url,
-    oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info,
+    oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info, oidc_name_from_id_token,
     oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username, oidc_build_user_row, OIDC_AUTH_SOURCES,
 )
@@ -206,6 +206,10 @@ def oidc_callback():
     if not user_info:
         # MK: Fallback to ID token claims
         user_info = id_claims
+    else:
+        # MK Oct 2026 (#1141) - a userinfo answer without a name takes it from the
+        # signature-checked ID token, so the account is not keyed on the sub
+        user_info = oidc_name_from_id_token(user_info, id_claims)
     
     if not user_info or not (user_info.get('preferred_username') or user_info.get('email') or user_info.get('sub')):
         return jsonify({'error': 'Could not retrieve user information from provider'}), 401

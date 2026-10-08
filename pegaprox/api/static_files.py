@@ -22,7 +22,7 @@ from pegaprox.utils.rbac import (
     get_user_effective_role, get_role_permissions_for_user,
     DEFAULT_TENANT_ID, acts_as_admin,
 )
-from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_error, caller_acts_as_admin
+from pegaprox.api.helpers import check_cluster_access, safe_error, parse_pve_error, caller_acts_as_admin, find_user_key
 
 bp = Blueprint('static_files', __name__)
 
@@ -401,7 +401,8 @@ def check_pool_permission(cluster_id: str, vmid: int, vm_type: str, required_per
 def get_user_vm_access(username):
     """Get all VMs a user has explicit access to"""
     users = load_users()
-    if username not in users:
+    username = find_user_key(users, username)  # exact key, then lower-cased (#1141)
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     # sec (private disclosure Sep 2026 — audit): a tenant-scoped admin.users holder must not read a
     # user's VM-ACL grants in ANOTHER tenant (cross-tenant disclosure). Mirror get_user_perms.
@@ -440,7 +441,8 @@ def get_user_perms(username):
     # NS Sep 2026 — and answer 404, not 403, for a user outside the caller's tenant: the missing-user
     # branch used to run first, so 404-vs-403 still told a tenant admin whether a name existed
     # elsewhere. Both cases now look identical from outside.
-    user = users.get(username)
+    username = find_user_key(users, username)
+    user = users.get(username) if username is not None else None
     if user is not None and not caller_acts_as_admin():
         _caller = users.get(request.session.get('user', ''), {})
         if user.get('tenant_id', DEFAULT_TENANT_ID) != _caller.get('tenant_id', DEFAULT_TENANT_ID):
@@ -532,8 +534,9 @@ def set_user_perms(username):
     global users_db
     
     users_db = load_users()
+    username = find_user_key(users_db, username)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     
     data = request.json or {}
@@ -635,8 +638,9 @@ def remove_user_tenant_perms(username, tenant_id):
     """Remove tenant-specific permissions for a user (revert to global)"""
     global users_db
     users_db = load_users()
+    username = find_user_key(users_db, username)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
 
     # MK Jun 2026 (sec-review): tenant-scoped admins can only touch their own tenant

@@ -33,7 +33,7 @@ from pegaprox.utils.rbac import (
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
     DEFAULT_TENANT_ID, ROLE_TEMPLATES, acts_as_admin,
 )
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key
 
 bp = Blueprint('users', __name__)
 
@@ -389,10 +389,10 @@ def admin_disable_2fa(username):
     """Admin: Disable 2FA for a user"""
     global users_db
     
-    username = username.lower()
     users_db = load_users()
+    username = find_user_key(users_db, username)  # exact key first (#1141)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     
     user = users_db[username]
@@ -424,10 +424,10 @@ def admin_change_password(username):
     """
     global users_db
     
-    username = username.lower()
     users_db = load_users()
+    username = find_user_key(users_db, username)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     
     data = request.get_json()
@@ -477,7 +477,7 @@ def admin_change_password(username):
 
     # NS 2026-04-24 — if admin reset their OWN password, their session just died too
     # and the frontend needs to redirect to /login.
-    relogin_required = (admin_username.lower() == username)
+    relogin_required = (admin_username == username)
     resp = jsonify({
         'success': True,
         'message': f'Password for {username} changed',
@@ -605,7 +605,10 @@ def unlock_user(username):
     """
     global login_attempts_by_user
 
-    username = username.lower()
+    # the login path keys a lockout by the lower-cased name, so take the entry first and
+    # check the tenant of the account behind it - not of another row a case apart (#1141)
+    if username not in login_attempts_by_user:
+        username = username.lower()
 
     _ct = _caller_tenant_or_none()
     if _ct is not None:
@@ -1043,10 +1046,10 @@ def update_user(username):
     """Update a user (admin only)"""
     global users_db
     
-    username = username.lower()
     users_db = load_users()
+    username = find_user_key(users_db, username)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     
     data = request.get_json()
@@ -1209,10 +1212,10 @@ def delete_user(username):
     """Delete a user (admin only)"""
     global users_db
     
-    username = username.lower()
     users_db = load_users()
+    username = find_user_key(users_db, username)
     
-    if username not in users_db:
+    if username is None:
         return jsonify({'error': 'User not found'}), 404
     
     # Prevent deleting self

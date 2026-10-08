@@ -76,7 +76,8 @@ def test_falls_back_to_email(db):
 
 
 def test_falls_back_to_sub_when_claims_are_empty(db):
-    assert oidc_derive_username({'sub': 'abcdef0123456789'}) == 'oidc_abcdef012345'
+    # a hash of the whole sub, lower case (#1141)
+    assert oidc_derive_username({'sub': 'abcdef0123456789'}) == 'oidc_f445801e0cb89926'
 
 
 def test_existing_truncated_account_keeps_its_key(db):
