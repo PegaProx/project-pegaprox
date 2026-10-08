@@ -343,6 +343,23 @@ def _managed_update_command(method):
     }.get(method, '')
 
 
+def _update_target(install_dir, rel_path):
+    """Where the updater writes rel_path of the new tree, None to leave it as it is.
+
+    MK Oct 2026 (#1134) - plugins/ goes to the directory the plugins are loaded from
+    (PLUGINS_DIR), which is not always the one next to the code. And a plugin's
+    config.json there holds what the admin set: the update overwrote it on every run, a
+    missing one still comes from the release.
+    """
+    parts = rel_path.replace('\\', '/').split('/')
+    if len(parts) < 2 or parts[0] != 'plugins':
+        return os.path.join(install_dir, rel_path)
+    dst = os.path.join(os.path.abspath(PLUGINS_DIR), *parts[1:])
+    if len(parts) == 3 and parts[2] == 'config.json' and os.path.lexists(dst):
+        return None
+    return dst
+
+
 # MK Oct 2026 - the update, the rollback and the restart button hand the restart to
 # `systemctl restart pegaprox` only when this process runs in that unit. A second
 # PegaProx on the host (a test instance started by hand, one in a unit of another name)
@@ -551,6 +568,7 @@ def perform_pegaprox_update():
     - config/, ssl/, certs/   (settings, encrypted data)
     - *.db, *.enc             (databases, encrypted files)
     - *.pem, *.key, *.crt    (certificates, private keys)
+    - plugins/<id>/config.json once it exists (a plugin's settings, #1134)
     """
     _uerr = _refuse_confined_updater()
     if _uerr:
@@ -748,7 +766,10 @@ def perform_pegaprox_update():
                             skipped_protected.append(rel_path)
                             continue
 
-                        dst = os.path.join(install_dir, rel_path)
+                        dst = _update_target(install_dir, rel_path)
+                        if dst is None:
+                            skipped_protected.append(rel_path)
+                            continue
                         try:
                             os.makedirs(os.path.dirname(dst), exist_ok=True)
                             shutil.copy2(os.path.join(root, fname), dst)
@@ -812,7 +833,10 @@ def perform_pegaprox_update():
                 if remote_path.endswith('.pyc') or '/__pycache__/' in remote_path:
                     continue
 
-                dst = os.path.join(install_dir, remote_path)
+                dst = _update_target(install_dir, remote_path)
+                if dst is None:
+                    skipped_protected.append(remote_path)
+                    continue
 
                 # try GitHub first, then mirror.
                 # MK 2026-06-02: bare `except: continue` here used to swallow
@@ -859,7 +883,9 @@ def perform_pegaprox_update():
             for _rp, _err in failed_files:
                 if is_protected(_rp) or _rp.endswith('.pyc'):
                     continue
-                _dst = os.path.join(install_dir, _rp)
+                _dst = _update_target(install_dir, _rp)
+                if _dst is None:
+                    continue
                 _ok = False
                 for _bu in [GITHUB_RAW_URL, MIRROR_RAW_URL]:
                     try:
@@ -3708,9 +3734,10 @@ def status_page():
     """Serve public status page — only if plugin is enabled"""
     if not _plugin_page_here('status_page'):
         return '<h1>Status Page not available</h1><p>The Status Page plugin is not enabled.</p>', 404
-    import os
-    path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'status_page', 'status.html')
-    if os.path.exists(path):
+    # from where the plugin is loaded, not next to the code (#1134)
+    from pegaprox.api.plugins import plugin_file
+    path = plugin_file('status_page', 'status.html')
+    if path:
         return send_file(path)
     return '<h1>Status Page not installed</h1>', 404
 
@@ -3736,9 +3763,9 @@ def client_portal_page(subpath=None):
     """Serve client portal — only if plugin is enabled"""
     if not _plugin_page_here('client_portal'):
         return '<h1>Client Portal not available</h1><p>The Client Portal plugin is not enabled.</p>', 404
-    import os
-    portal_path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'client_portal', 'portal.html')
-    if os.path.exists(portal_path):
+    from pegaprox.api.plugins import plugin_file
+    portal_path = plugin_file('client_portal', 'portal.html')
+    if portal_path:
         return send_file(portal_path)
     return '<h1>Client Portal not installed</h1>', 404
 
