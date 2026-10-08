@@ -798,6 +798,37 @@ def parse_pve_error(response_text, fallback='Proxmox API error'):
     return html.escape(text) if text else fallback
 
 
+# MK Oct 2026 (#1142) - a 401 or 403 from a system behind PegaProx (Proxmox VE, PBS, an ESXi
+# server) is about the credentials PegaProx keeps for it, never about the caller's session.
+# Handed on as it came, the browser read the 401 as its own session running out and signed
+# the user off at every click on a server whose stored password had stopped working.
+UPSTREAM_AUTH = 'UPSTREAM_AUTH'
+UPSTREAM_AUTH_STATUSES = (401, 403)
+
+
+def upstream_status(status, default=500):
+    """The status to answer for an upstream one: its 401 and 403 are a 502 (#1142)."""
+    if status in UPSTREAM_AUTH_STATUSES:
+        return 502
+    return status or default
+
+
+def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra):
+    """(response, status) for an upstream system that answered `status`.
+
+    401 and 403 go out as 502 with code UPSTREAM_AUTH and say whose credentials were
+    refused; everything else keeps its status, as before. extra: more fields of the body.
+    """
+    from flask import jsonify
+    if status in UPSTREAM_AUTH_STATUSES:
+        said = ('refused the stored credentials' if status == 401
+                else 'does not allow this with the stored credentials')
+        msg = f'{system} {said} (HTTP {status})'
+        return jsonify({**extra, 'error': f'{msg}: {error}' if error else msg,
+                        'code': UPSTREAM_AUTH, 'upstream_status': status}), 502
+    return jsonify({**extra, 'error': error}), status or default
+
+
 # MK Oct 2026 (#763, #954) - the two evacuation options of a rolling update. The run started
 # by hand (settings.py) and the scheduled one (schedules.py) are two copies of the loop; what
 # the options do in either of them is written down once, here. Each reads its flags from the

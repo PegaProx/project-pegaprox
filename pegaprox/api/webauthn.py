@@ -131,7 +131,7 @@ def _require_session():
     sid = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     session = validate_session(sid)
     if not session:
-        return None, (jsonify({'error': 'not authenticated'}), 401)
+        return None, (jsonify({'error': 'not authenticated', 'code': 'AUTH_REQUIRED'}), 401)
     return session, None
 
 

@@ -2394,7 +2394,7 @@ def backup_config():
         logging.info(f"[Backup] User from session: {username}")
         if not username:
             logging.warning("[Backup] No user in session")
-            return jsonify({'error': 'Not authenticated'}), 401
+            return jsonify({'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}), 401
         
         users = load_users()
         
@@ -2676,7 +2676,7 @@ def restore_config():
         username = getattr(request, 'session', {}).get('user')
         logging.debug(f"[Restore] User from session: {username}")
         if not username:
-            return jsonify({'error': 'Not authenticated'}), 401
+            return jsonify({'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}), 401
         
         users = load_users()
         

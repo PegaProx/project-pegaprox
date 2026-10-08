@@ -51,7 +51,7 @@ def _xapi_refusal(cluster_id, user, perm):
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update, hold_websocket
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
-from pegaprox.api.helpers import xapi_permission_missing
+from pegaprox.api.helpers import xapi_permission_missing, upstream_failure
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
                                   node_maintenance_for_caller)
@@ -629,7 +629,7 @@ def set_datacenter_options(cluster_id):
 
         if response.status_code == 200:
             return jsonify({'success': True, 'message': 'Options updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except requests.exceptions.Timeout:
         # Map to 504 so the frontend knows it's a slow-PVE thing, not a code bug.
         # Settings *may* have applied — pveproxy on busy clusters sometimes
@@ -1173,7 +1173,7 @@ def delete_datastore_content(cluster_id, storage_name, volid):
             return jsonify({'success': True, 'message': f'Deleted {volid}'})
         else:
             error_msg = response.json().get('errors', response.text) if response.text else 'Delete failed'
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error deleting content: {e}")
@@ -1339,7 +1339,7 @@ def upload_to_datastore(cluster_id, storage_name):
             except Exception:
                 error_msg = response.text[:500] if response.text else 'Upload failed'
             logging.error(f"Upload to {storage_name} failed: HTTP {response.status_code} - {error_msg}")
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
 
     except Exception as e:
         logging.error(f"Error uploading to {storage_name}: {e}")
@@ -1538,7 +1538,7 @@ def download_iso_from_url(cluster_id, storage_name):
             except:
                 error_msg = response.text or 'Download failed'
             
-            return jsonify({'error': f'Proxmox API error: {error_msg}'}), response.status_code
+            return upstream_failure(response.status_code, f'Proxmox API error: {error_msg}')
             
     except Exception as e:
         logging.error(f"Error starting download: {e}")
@@ -1696,7 +1696,7 @@ def create_vm_backup(cluster_id, node, vm_type, vmid):
             log_audit(user, 'backup.created', f"Started backup for {vm_type}/{vmid}", cluster=manager.config.name)
             return jsonify({'success': True, 'task': task})
         
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
         
     except Exception as e:
         logging.error(f"[BACKUP] Error creating backup: {e}")
@@ -1792,7 +1792,7 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             return jsonify({'success': True, 'task': task, 'vmid': target_vmid})
         
         # NS: proxmox sometimes returns weird error messages, should probably parse them better
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
         
     except Exception as e:
         logging.error(f"[BACKUP] Error restoring backup: {e}")
@@ -1853,7 +1853,7 @@ def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):
             log_audit(user, 'backup.deleted', f"Deleted backup {volid}", cluster=manager.config.name)
             return jsonify({'success': True})
         
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
         
     except Exception as e:
         logging.error(f"[BACKUP] Error deleting backup: {e}")
@@ -1961,7 +1961,7 @@ def set_firewall_options(cluster_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'firewall.options_changed', f"Firewall options updated", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Firewall options updated'})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to set firewall options')}), 500
 
@@ -2012,7 +2012,7 @@ def create_firewall_rule(cluster_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'firewall.rule_created', f"Firewall rule created", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Firewall rule created'})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create firewall rule')}), 500
 
@@ -2039,7 +2039,7 @@ def update_firewall_rule(cluster_id, pos):
         
         if r.status_code == 200:
             return jsonify({'success': True, 'message': 'Firewall rule updated'})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update firewall rule')}), 500
 
@@ -2065,7 +2065,7 @@ def delete_firewall_rule(cluster_id, pos):
         
         if response.status_code == 200:
             return jsonify({'success': True, 'message': 'Firewall rule deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete firewall rule')}), 500
 
@@ -2184,7 +2184,7 @@ def set_vm_firewall_options(cluster_id, node, vmtype, vmid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'vm.firewall.options', f"VM {vmid} firewall options updated", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to set VM firewall options')}), 500
 
@@ -2235,7 +2235,7 @@ def create_vm_firewall_rule(cluster_id, node, vmtype, vmid):
         except:
             pve_err = r.text
         logging.warning(f"VM FW rule create failed: {r.status_code} data={data} pve_response={r.text[:300]}")
-        return jsonify({'error': pve_err, 'status': r.status_code}), r.status_code
+        return upstream_failure(r.status_code, pve_err, status=r.status_code)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall rule')}), 500
 
@@ -2255,7 +2255,7 @@ def update_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
         r = manager._create_session().put(_vm_fw_url(manager, node, vmtype, vmid, f'/rules/{pos}'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update VM firewall rule')}), 500
 
@@ -2276,7 +2276,7 @@ def delete_vm_firewall_rule(cluster_id, node, vmtype, vmid, pos):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'vm.firewall.rule_deleted', f"VM {vmid} firewall rule {pos} deleted", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete VM firewall rule')}), 500
 
@@ -2315,7 +2315,7 @@ def create_vm_firewall_alias(cluster_id, node, vmtype, vmid):
         r = manager._create_session().post(_vm_fw_url(manager, node, vmtype, vmid, '/aliases'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall alias')}), 500
 
@@ -2335,7 +2335,7 @@ def update_vm_firewall_alias(cluster_id, node, vmtype, vmid, name):
         r = manager._create_session().put(_vm_fw_url(manager, node, vmtype, vmid, f'/aliases/{name}'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update VM firewall alias')}), 500
 
@@ -2354,7 +2354,7 @@ def delete_vm_firewall_alias(cluster_id, node, vmtype, vmid, name):
         r = manager._create_session().delete(_vm_fw_url(manager, node, vmtype, vmid, f'/aliases/{name}'), timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete VM firewall alias')}), 500
 
@@ -2393,7 +2393,7 @@ def create_vm_firewall_ipset(cluster_id, node, vmtype, vmid):
         r = manager._create_session().post(_vm_fw_url(manager, node, vmtype, vmid, '/ipset'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create VM firewall IP set')}), 500
 
@@ -2432,7 +2432,7 @@ def add_vm_firewall_ipset_entry(cluster_id, node, vmtype, vmid, name):
         r = manager._create_session().post(_vm_fw_url(manager, node, vmtype, vmid, f'/ipset/{name}'), data=data, timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to add IP set entry')}), 500
 
@@ -2451,7 +2451,7 @@ def delete_vm_firewall_ipset_entry(cluster_id, node, vmtype, vmid, name, cidr):
         r = manager._create_session().delete(_vm_fw_url(manager, node, vmtype, vmid, f'/ipset/{name}/{cidr}'), timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete IP set entry')}), 500
 
@@ -2470,7 +2470,7 @@ def delete_vm_firewall_ipset(cluster_id, node, vmtype, vmid, name):
         r = manager._create_session().delete(_vm_fw_url(manager, node, vmtype, vmid, f'/ipset/{name}'), timeout=10)
         if r.status_code == 200:
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete VM firewall IP set')}), 500
 
@@ -2689,12 +2689,15 @@ def _dir_mapping_nodes_refusal(manager, pairs):
 
 def _pve_dir_mapping_refusal(resp, what):
     msg = parse_pve_error(resp.text, f'Proxmox refused to {what} the directory mapping')
+    # a 403 of Proxmox is about the account PegaProx signs in with, not the caller (#1142)
+    if resp.status_code in (401, 403):
+        return upstream_failure(resp.status_code, msg)
     low = msg.lower()
     if 'already defined' in low or 'modified configuration' in low or 'digest' in low:
         return jsonify({'error': msg}), 409
     # the node that answered checks its own path, and dies (500) on one it does not have
-    if resp.status_code in (400, 403) or 'does not exist' in low or 'not a directory' in low:
-        return jsonify({'error': msg}), 403 if resp.status_code == 403 else 400
+    if resp.status_code == 400 or 'does not exist' in low or 'not a directory' in low:
+        return jsonify({'error': msg}), 400
     return jsonify({'error': msg}), 502
 
 
@@ -3120,7 +3123,9 @@ def test_node_connection(cluster_id):
         })
         
     except paramiko.AuthenticationException:
-        return jsonify({'success': False, 'error': 'Authentication failed. Check username/password.'}), 401
+        # the node refused the login typed here, the caller's session is fine (#1142)
+        return jsonify({'success': False, 'error': 'Authentication failed. Check username/password.',
+                        'code': 'UPSTREAM_AUTH'}), 502
     except paramiko.SSHException as e:
         return jsonify({'success': False, 'error': safe_error(e, 'SSH error')}), 500
     except socket.timeout:
@@ -3366,7 +3371,7 @@ def join_node_to_cluster(cluster_id):
         })
         
     except paramiko.AuthenticationException:
-        return jsonify({'success': False, 'error': 'SSH authentication failed'}), 401
+        return jsonify({'success': False, 'error': 'SSH authentication failed', 'code': 'UPSTREAM_AUTH'}), 502
     except Exception as e:
         logging.error(f"Error joining node to cluster: {e}")
         return jsonify({'success': False, 'error': safe_error(e, 'Failed to join node to cluster')}), 500
@@ -3770,7 +3775,8 @@ def remove_node_from_cluster(cluster_id, node_name):
         })
         
     except paramiko.AuthenticationException:
-        return jsonify({'success': False, 'error': 'SSH authentication failed. Check cluster credentials.'}), 401
+        return jsonify({'success': False, 'error': 'SSH authentication failed. Check cluster credentials.',
+                        'code': 'UPSTREAM_AUTH'}), 502
     except Exception as e:
         logging.error(f"Error removing node from cluster: {e}")
         return jsonify({'success': False, 'error': safe_error(e, 'Failed to remove node from cluster')}), 500
@@ -5492,7 +5498,7 @@ def get_vm_guest_file_read_api(cluster_id, node, vm_type, vmid):
                 'truncated': bool(data.get('truncated', False)),
                 'bytes_read': data.get('bytes-read') or data.get('content-size'),
             })
-        return jsonify({'error': resp.text or f'HTTP {resp.status_code}'}), resp.status_code
+        return upstream_failure(resp.status_code, resp.text or f'HTTP {resp.status_code}')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 

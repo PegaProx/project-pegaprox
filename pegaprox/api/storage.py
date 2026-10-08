@@ -26,6 +26,7 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import upstream_failure
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_for, ssh_blocked_for
 from pegaprox import globals as _g
 from pegaprox.utils.ssh import read_capped as _read_capped
@@ -1044,7 +1045,7 @@ def execute_storage_migration(cluster_id):
             })
         else:
             error_msg = response.json().get('errors', response.text) if response.text else 'Migration failed'
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error executing storage migration: {e}")
@@ -1630,7 +1631,8 @@ def create_storage(cluster_id):
                 error_msg = f'PVE {response.status_code}: {raw[:300] if raw else "no body"}'
 
             logging.error(f"Failed to create storage [{response.status_code}]: {error_msg}; raw_body={response.text[:500]!r}")
-            return jsonify({'error': error_msg, 'pve_status': response.status_code, 'pve_body': response.text[:500]}), response.status_code
+            return upstream_failure(response.status_code, error_msg, pve_status=response.status_code,
+                                    pve_body=response.text[:500])
             
     except Exception as e:
         logging.error(f"Error creating storage: {e}")
@@ -1716,7 +1718,7 @@ def update_storage(cluster_id, storage_id):
                     error_msg = ', '.join([f"{k}: {v}" for k, v in error_msg.items()])
             except:
                 error_msg = response.text
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error updating storage: {e}")
@@ -1756,7 +1758,7 @@ def delete_storage(cluster_id, storage_id):
                 error_msg = error_data.get('errors', error_data.get('message', response.text))
             except:
                 error_msg = response.text
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error deleting storage: {e}")
@@ -2239,7 +2241,7 @@ def scan_storage(cluster_id):
                 error_msg = scan_resp.json().get('errors', scan_resp.text)
             except:
                 error_msg = scan_resp.text
-            return jsonify({'error': error_msg}), scan_resp.status_code
+            return upstream_failure(scan_resp.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error scanning storage: {e}")
@@ -2384,7 +2386,7 @@ def download_template(cluster_id):
                 error_msg = resp.json().get('errors', resp.text)
             except:
                 error_msg = resp.text
-            return jsonify({'error': error_msg}), resp.status_code
+            return upstream_failure(resp.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error downloading template: {e}")
@@ -2470,7 +2472,7 @@ def get_node_storage_identity(cluster_id, node, storage):
         if resp.status_code == 200:
             data = resp.json().get('data') or {}
             return jsonify({'supported': True, **data})
-        return jsonify({'error': resp.text or f'HTTP {resp.status_code}'}), resp.status_code
+        return upstream_failure(resp.status_code, resp.text or f'HTTP {resp.status_code}')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 
@@ -2559,7 +2561,7 @@ def download_from_url(cluster_id, node, storage):
                 error_msg = resp.json().get('errors', resp.text)
             except:
                 error_msg = resp.text
-            return jsonify({'error': error_msg}), resp.status_code
+            return upstream_failure(resp.status_code, error_msg)
             
     except Exception as e:
         # the exception text repeats the URL, pre-signed query and all
@@ -2679,7 +2681,7 @@ def create_backup_job(cluster_id):
                 err_msg = ', '.join(f'{k}: {v}' for k, v in err_msg.items())
         except Exception:
             err_msg = r.text or f'PVE {r.status_code}'
-        return jsonify({'error': err_msg, 'pve_status': r.status_code}), r.status_code
+        return upstream_failure(r.status_code, err_msg, pve_status=r.status_code)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create backup job')}), 500
 
@@ -2770,7 +2772,7 @@ def update_backup_job(cluster_id, job_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'backup.job_updated', f"Updated backup job {job_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Backup job updated'})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update backup job')}), 500
 
@@ -2824,7 +2826,7 @@ def delete_backup_job(cluster_id, job_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'backup.job_deleted', f"Deleted backup job {job_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Backup job deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete backup job')}), 500
 

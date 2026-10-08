@@ -32036,7 +32036,7 @@
           }
         },
         "summary": "PegaProx auto-update from GitHub",
-        "description": "NS: Rewritten feb 2026 - archive-based (no manual releases needed)\nPRIMARY: downloads GitHub source archive, extracts, copies.\nFALLBACK: expands update_files globs via GitHub API, downloads individually.\n\nProtected paths (NEVER overwritten):\n- config/, ssl/, certs/   (settings, encrypted data)\n- *.db, *.enc             (databases, encrypted files)\n- *.pem, *.key, *.crt    (certificates, private keys)",
+        "description": "NS: Rewritten feb 2026 - archive-based (no manual releases needed)\nPRIMARY: downloads GitHub source archive, extracts, copies.\nFALLBACK: expands update_files globs via GitHub API, downloads individually.\n\nProtected paths (NEVER overwritten):\n- config/, ssl/, certs/   (settings, encrypted data)\n- *.db, *.enc             (databases, encrypted files)\n- *.pem, *.key, *.crt    (certificates, private keys)\n- plugins/<id>/config.json once it exists (a plugin's settings, #1134)",
         "requestBody": {
           "required": false,
           "content": {

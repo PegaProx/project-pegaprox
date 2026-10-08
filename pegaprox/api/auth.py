@@ -1183,7 +1183,7 @@ def list_own_sessions():
     session_id = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     current = validate_session(session_id)
     if not current:
-        return jsonify({'error': 'not authenticated'}), 401
+        return jsonify({'error': 'not authenticated', 'code': 'AUTH_REQUIRED'}), 401
     from pegaprox.utils.auth import active_sessions, sessions_lock
     username = current['user']
     out = []
@@ -1215,7 +1215,7 @@ def revoke_own_session(token):
     session_id = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     current = validate_session(session_id)
     if not current:
-        return jsonify({'error': 'not authenticated'}), 401
+        return jsonify({'error': 'not authenticated', 'code': 'AUTH_REQUIRED'}), 401
     from pegaprox.utils.auth import active_sessions, sessions_lock
     import hmac as _hmac
     username = current['user']
@@ -1471,11 +1471,11 @@ def get_cluster_creds_internal(cluster_id):
     session_id = request.cookies.get('session') or request.cookies.get('session_id')
     
     if not session_id:
-        return jsonify({'error': 'No session'}), 401
+        return jsonify({'error': 'No session', 'code': 'AUTH_REQUIRED'}), 401
     
     session = validate_session(session_id)
     if not session:
-        return jsonify({'error': 'Invalid session'}), 401
+        return jsonify({'error': 'Invalid session', 'code': 'INVALID_SESSION'}), 401
 
     # MK May 2026 - check_cluster_access reads request.session['user'], which
     # @require_auth normally sets. This endpoint does its own cookie-based session

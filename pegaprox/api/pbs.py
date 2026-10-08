@@ -15,6 +15,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, bounded_limit, acts_as_admin, caller_acts_as_admin
+from pegaprox.api.helpers import upstream_failure
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server, pbs_config_from_row, pbs_target_refusal
 
 bp = Blueprint('pbs', __name__)
@@ -675,7 +676,7 @@ def get_pbs_snapshots(pbs_id, store):
     result = mgr.get_snapshots(store, ns=ns, backup_type=backup_type, backup_id=backup_id)
     # #143: don't mask errors as empty arrays
     if 'error' in result:
-        return jsonify({'error': result['error']}), result.get('status_code', 502)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server', default=502)
     snaps = result.get('data', []) or []
     # NS — enrich with vm_name from linked clusters
     owners = _BackupOwners(mgr)
@@ -705,7 +706,7 @@ def get_pbs_groups(pbs_id, store):
     ns = request.args.get('ns', None)
     result = mgr.get_groups(store, ns=ns)
     if 'error' in result:
-        return jsonify({'error': result['error']}), result.get('status_code', 502)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server', default=502)
     groups = result.get('data', []) or []
     # NS — enrich with vm_name
     owners = _BackupOwners(mgr)
@@ -1631,7 +1632,7 @@ def download_pbs_file(pbs_id, store):
         resp = mgr.download_file_from_snapshot(store, bt, bid, int(btime), filepath)
         if resp is None or resp.status_code != 200:
             status = resp.status_code if resp else 502
-            return jsonify({'error': f'Download failed: HTTP {status}'}), status
+            return upstream_failure(status, f'Download failed: HTTP {status}', system='The PBS server')
         # Extract filename from filepath + sanitize for Content-Disposition header injection
         import re as _re
         filename = filepath.rstrip('/').split('/')[-1] or 'download'
@@ -1672,7 +1673,7 @@ def get_pbs_datastore_config(pbs_id, store):
     mgr = pbs_managers[pbs_id]
     result = mgr.get_datastore_config(store)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server')
     return jsonify(result.get('data', result))
 
 
@@ -2194,7 +2195,7 @@ def get_pbs_disk_smart(pbs_id, disk):
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_disk_smart(disk)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server')
     return jsonify(result.get('data', result))
 
 
@@ -3697,7 +3698,7 @@ def run_backup_job_now(cluster_id, job_id):
             log_audit(request.session.get('user', 'system'), 'backup.run_now',
                       f"Triggered backup job {job_id} on {pve_node}", cluster=cm.config.name)
             return jsonify({'success': True, 'upid': upid, 'node': pve_node})
-        return jsonify({'error': r.text or f'HTTP {r.status_code}'}), r.status_code
+        return upstream_failure(r.status_code, r.text or f'HTTP {r.status_code}')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 
@@ -3769,7 +3770,7 @@ def restore_backup(cluster_id):
                       f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode})",
                       cluster=cm.config.name)
             return jsonify({'success': True, 'upid': got['upid'], 'mode': mode, 'target_vmid': target_vmid})
-        return jsonify({'error': got['error'], 'pve_status': got['status']}), got['status']
+        return upstream_failure(got['status'], got['error'], pve_status=got['status'])
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 

@@ -12,6 +12,7 @@ from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, require_unconfined
+from pegaprox.api.helpers import upstream_failure, upstream_status
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('ceph', __name__)
@@ -463,7 +464,7 @@ def get_node_ceph_status(cluster_id, node):
             return jsonify(r.json().get('data', {}))
         if r.status_code in (501, 500):
             return jsonify({'available': False})
-        return jsonify({}), r.status_code
+        return jsonify({}), upstream_status(r.status_code)
     except:
         return jsonify({})
 
@@ -557,7 +558,7 @@ def create_ceph_osd(cluster_id, node):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.osd.create', f"Created OSD on {node}: {data.get('dev', '')}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
     finally:
@@ -599,7 +600,7 @@ def destroy_ceph_osd(cluster_id, node, osdid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.osd.destroy', f"Destroyed OSD {osdid} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
     finally:
@@ -627,7 +628,7 @@ def ceph_osd_action(cluster_id, node, osdid, action):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, f'ceph.osd.{action}', f"OSD {osdid} {action} on {node}", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
 
@@ -671,7 +672,7 @@ def create_ceph_mon(cluster_id, node, monid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mon.create', f"Created monitor {monid} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph monitor operation failed')}), 500
 
@@ -693,7 +694,7 @@ def destroy_ceph_mon(cluster_id, node, monid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mon.destroy', f"Destroyed monitor {monid} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph monitor operation failed')}), 500
 
@@ -736,7 +737,7 @@ def create_ceph_mds(cluster_id, node, name):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mds.create', f"Created MDS {name} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
 
@@ -758,7 +759,7 @@ def destroy_ceph_mds(cluster_id, node, name):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mds.destroy', f"Destroyed MDS {name} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
 
@@ -806,7 +807,7 @@ def create_ceph_mgr(cluster_id, node, mgrid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mgr.create', f"Created manager {mgrid} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
 
@@ -828,7 +829,7 @@ def destroy_ceph_mgr(cluster_id, node, mgrid):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.mgr.destroy', f"Destroyed manager {mgrid} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
 
@@ -872,7 +873,7 @@ def create_ceph_pool(cluster_id, node):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.pool.create', f"Created pool {data.get('name', '')}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
 
@@ -895,7 +896,7 @@ def update_ceph_pool(cluster_id, node, name):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.pool.update', f"Updated pool {name}", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
 
@@ -926,7 +927,7 @@ def destroy_ceph_pool(cluster_id, node, name):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.pool.destroy', f"Destroyed pool {name}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
 
@@ -980,7 +981,7 @@ def create_ceph_fs(cluster_id, node):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.fs.create', f"Created CephFS {fs_name}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'CephFS operation failed')}), 500
 
@@ -1016,7 +1017,7 @@ def destroy_ceph_fs(cluster_id, node, name):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.fs.destroy', f"Destroyed CephFS {name}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'CephFS operation failed')}), 500
 
@@ -1066,7 +1067,7 @@ def ceph_service_action(cluster_id, node, action):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, f'ceph.service.{action}', f"Ceph {action} on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
 
@@ -1089,7 +1090,7 @@ def init_ceph(cluster_id, node):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'ceph.init', f"Initialized Ceph on {node}", cluster=manager.config.name)
             return jsonify(r.json().get('data', ''))
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Ceph init failed')}), 500
 

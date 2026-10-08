@@ -32,7 +32,7 @@ from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
-                                  bounded_limit, node_maintenance_for_caller)
+                                  bounded_limit, node_maintenance_for_caller, upstream_failure)
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -320,7 +320,7 @@ def rotate_cluster_api_token(cluster_id):
                 elif resp.status_code in (404, 405, 501):
                     preserved = False  # fall through to delete+create
                 else:
-                    return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+                    return upstream_failure(resp.status_code, parse_pve_error(resp.text))
             except Exception as probe_err:
                 mgr.logger.warning(f"[token-rotate] in-place regenerate probe failed ({probe_err}); falling back")
                 preserved = False
@@ -332,7 +332,7 @@ def rotate_cluster_api_token(cluster_id):
             mgr._create_session().delete(base, timeout=10)
             create_resp = mgr._api_post(base, data={})
             if create_resp.status_code != 200:
-                return jsonify({'error': parse_pve_error(create_resp.text)}), create_resp.status_code
+                return upstream_failure(create_resp.status_code, parse_pve_error(create_resp.text))
             data = create_resp.json().get('data') or {}
             new_secret = data.get('value') or data.get('secret')
             preserved = False

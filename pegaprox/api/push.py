@@ -512,7 +512,7 @@ def subscribe():
 
     user = _current_user()
     if not user:
-        return jsonify({'error': 'session missing'}), 401
+        return jsonify({'error': 'session missing', 'code': 'AUTH_REQUIRED'}), 401
 
     try:
         # sec (audit): the upsert used to overwrite `username` too, so anyone who knew a victim's
@@ -579,7 +579,7 @@ def list_subs():
 def send_test():
     user = _current_user()
     if not user:
-        return jsonify({'error': 'session missing'}), 401
+        return jsonify({'error': 'session missing', 'code': 'AUTH_REQUIRED'}), 401
     _push_to_inbox(user,
                    'PegaProx — Test Push',
                    'If you see this, browser notifications are working.',
