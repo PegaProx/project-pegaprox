@@ -319,6 +319,8 @@ SYNC_TABLES = (
     'suspended_ha_rules',
     # node recoveries an automatic leader left half done (5.6); made on its first write
     'ha_recovery_journal',
+    # where the group's schedules were last checked and reported (5.7); made on its first write
+    'ha_schedule_marks',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
@@ -355,6 +357,8 @@ VOLATILE_COLUMNS = {
     'plugin_state': ('loaded_at', 'error'),
     'siem_targets': ('last_status', 'last_ok_at', 'last_error_at', 'last_error',
                      'sent_count', 'error_count'),
+    # every scheduler pass of the active writes it; it goes along with the next pull
+    'ha_schedule_marks': ('checked',),
 }
 
 # Encrypted columns, the same inventory db.rotate_encryption_key walks. A value
@@ -8029,6 +8033,9 @@ class _LeaseRuntime:
         self.armed = False              # the watchdog counts from the loop's first majority round
         self.exit_at = None             # lease time at which the way out was asked for
         self.seen = {}                  # member id -> what its last status answer said
+        # member id -> that answer once an ask after it went unanswered: for the status
+        # only, nothing that decides reads it (_note_lease_gone)
+        self.gone = {}
         self.acked = {}                 # member id -> when it last acked a renewal (lease time)
         self.reach = {'at': None, 'clusters': {}}
         self.write_failed = None        # why the last write of the lease state failed
@@ -9109,15 +9116,21 @@ def _lease_seen(data, sent, back):
 def _note_lease_seen(member_id, seen):
     if not ha_vote.AUTO_MODE_SHIPPED:
         return
-    _rt().seen[member_id] = dict(seen or {'mark': None}, at=time.monotonic())
+    rt = _rt()
+    rt.seen[member_id] = dict(seen or {'mark': None}, at=time.monotonic())
+    rt.gone.pop(member_id, None)
 
 
 def _note_lease_gone(member_id):
     """The member did not answer the last time it was asked: what it said before that
-    counts for nothing in the checks before the switch."""
+    counts for nothing in the checks before the switch, nor anywhere else that decides.
+    It is kept apart in rt.gone, where only the status of a running group reads it: one
+    ask that fell into a restart is no member down for 2 minutes (lab C1)."""
     rt = _rts.get(_load()['instance_id'])
     if rt is not None:
-        rt.seen.pop(member_id, None)
+        last = rt.seen.pop(member_id, None)
+        if last is not None:
+            rt.gone[member_id] = last
 
 
 def _note_lease_clock(member_id, err):
@@ -9134,6 +9147,7 @@ def _note_lease_clock(member_id, err):
     if wire is not None:
         rec['wire'] = wire
     rt.seen[member_id] = rec
+    rt.gone.pop(member_id, None)
 
 
 def _ask_witness():
@@ -9387,6 +9401,13 @@ def _group_checks(st=None, lease_s=ha_vote.LEASE_DEFAULT):
             label = f'the witness {label}'
         start = len(out)
         seen = rt.seen.get(mid)
+        if seen is None and running:
+            # MK Oct 2026 (#625, lab C1) - one ask that fell into its restart dropped its
+            # record, and VOTER_DOWN "within the last 2 minutes" stood 2 s after its last
+            # answer until the next look. While the group runs, its last answer stands
+            # here until it is as old as the text says; the switch, and whatever decides,
+            # still go by rt.seen alone
+            seen = rt.gone.get(mid)
         if running and mid not in named:
             out.append(_finding('NOT_IN_CONFIG', 'warn', f'{label} is ' + (
                 'paired' if mid == wid else 'a member') + ', and the voter config does not name '
@@ -10775,6 +10796,8 @@ def _lease_housekeeping():
         known.add(witness['instance_id'])
     for mid in [m for m in rt.seen if m not in known]:
         rt.seen.pop(mid, None)
+    for mid in [m for m in rt.gone if m not in known]:
+        rt.gone.pop(mid, None)
     for step in (announce_fingerprint, measure_reach, _ask_witness, _witness_update_check, lease_start,
                  lambda: _say_downgraded(rt), _switch_back_again, _witness_into_config):
         try:
@@ -13180,11 +13203,12 @@ def schedule_held(at=None):
     before it acts, plus the largest clock skew to a member (5 s while none was
     measured), so a minute the former leader may have fired is not fired again. A leader
     that took the lead in its own process (the switch) had no former leader, and its own
-    last runs are here: nothing held. False anywhere but in an automatic group.
+    last runs are here: nothing held. Outside an automatic group only the minute Force
+    leader took over in (_forced_hold), nothing anywhere else.
     `at`: an earlier minute of the schedule_now() clock, one the scheduler catches up."""
     st = _load()
     if not _lease_mode(st):
-        return False
+        return _forced_hold(st, at)
     node = _lease_live(st)
     if node is None or not node.is_active():
         return True
@@ -13192,6 +13216,28 @@ def schedule_held(at=None):
     if rt is None or not rt.came_up:
         return False
     until = _acting_wall(node) + _largest_skew()
+    if at is not None:
+        return at < schedule_at(until)
+    wall = _wall()
+    return wall - (wall % 60) < until
+
+
+def _forced_hold(st, at=None):
+    """Force leader makes this instance the active while the leader it cut out may act on
+    until it hears of it (the accepted overlap, 7.3), and in lab E8 a task of the minute
+    it took over in ran on both sides. That minute, plus the largest skew, is held as
+    after a takeover. Not reported: the other side may have run it. Only ever holds, and
+    only on the instance Force leader made the active at its epoch."""
+    forced = st.get('forced')
+    if (not isinstance(forced, dict) or st['role'] != ROLE_ACTIVE
+            or forced.get('epoch') != int(st.get('epoch') or 0)):
+        return False
+    try:
+        took = datetime.fromisoformat(str(forced.get('at'))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return False
+    # 'at' is to the second
+    until = took + 1 + _largest_skew()
     if at is not None:
         return at < schedule_at(until)
     wall = _wall()
@@ -13227,12 +13273,145 @@ def send_on(what):
         logging.warning(f"[HA] could not send {what} on at once: {e}")
 
 
+# MK Oct 2026 (#625, lab E6c) - six leaders in a row lost the lease before their first
+# scheduler pass, and the minutes between them were neither run nor reported: the report
+# came with a pass, over a window from the last renewal the reporting leader could have
+# heard, a guess of its own. The window starts now where the group's schedules were last
+# settled, two marks per kind of schedule in a shared table: `checked`, the minute the
+# last pass of the active got through, and `reported`, the last minute a report covered.
+# checked is volatile: written every minute, it steps no config version and goes to the
+# members with whatever they pull next (a run or an edit of a schedule makes them pull,
+# and takes it along). reported is written, sent on and confirmed before its report goes
+# out, so every later leader holds it and starts after it.
+_marks_lock = threading.Lock()
+# the report looks this far back at most, whatever the marks say
+REPORT_SPAN = 7 * 86400
+
+
+def _marks_table(cur):
+    cur.execute('CREATE TABLE IF NOT EXISTS ha_schedule_marks (kind TEXT PRIMARY KEY, '
+                'checked REAL, reported REAL)')
+
+
+def _wall_mark(v):
+    return float(v) if type(v) in (int, float) and 0 < v < 1e11 else None
+
+
+def _marks(kind):
+    """(checked, reported) of `kind` as held here, each the start of a minute as a wall
+    time, None for a mark there is none of."""
+    try:
+        from pegaprox.core.db import get_db
+        cur = get_db().conn.cursor()
+        if 'ha_schedule_marks' not in _existing_tables(cur):
+            return None, None
+        row = cur.execute('SELECT checked, reported FROM ha_schedule_marks WHERE kind = ?',
+                          (kind,)).fetchone()
+    except Exception as e:
+        logging.warning(f"[HA] could not read the schedule marks: {e}")
+        return None, None
+    return (_wall_mark(row[0]), _wall_mark(row[1])) if row else (None, None)
+
+
+def _mark_write(kind, column, value, forward=True):
+    """The `column` mark of `kind` set to the minute of `value` (None clears it); with
+    `forward` it never goes back. False when it could not be written."""
+    if column not in ('checked', 'reported'):
+        raise ValueError(column)
+    value = None if value is None else value - value % 60
+    try:
+        from pegaprox.core.db import get_db
+        conn = get_db().conn
+        with _marks_lock:
+            cur = conn.cursor()
+            _marks_table(cur)
+            cur.execute('INSERT OR IGNORE INTO ha_schedule_marks (kind) VALUES (?)', (kind,))
+            if forward and value is not None:
+                cur.execute(f'UPDATE ha_schedule_marks SET {column} = MAX(COALESCE({column}, ?), ?) '
+                            'WHERE kind = ?', (value, value, kind))
+            else:
+                cur.execute(f'UPDATE ha_schedule_marks SET {column} = ? WHERE kind = ?', (value, kind))
+            conn.commit()
+        return True
+    except Exception as e:
+        try:
+            get_db().conn.rollback()
+        except Exception:
+            pass
+        logging.warning(f"[HA] could not write the schedule mark of the {kind}: {e}")
+        return False
+
+
+def _report_owed(st, kind):
+    """This instance leads since a start (a takeover) and its report of the gap behind it
+    did not go out (yet): missed_settled() said no."""
+    node = _lease_live(st)
+    rt = _rts.get(st['instance_id'])
+    if node is None or rt is None:
+        return True
+    return rt.came_up and _missed_said.get(kind) != (st['instance_id'], rt.gen, node.acting_from)
+
+
+def schedules_checked(kind, wall):
+    """A pass of the leader of an automatic group got through the schedules of `kind` up
+    to the minute of `wall`, a wall time: the group's mark says so, for the next leader's
+    report. Not while the report this leader owes is out: the mark stays where it is, and
+    the gap stays in the next window. Nothing anywhere else; never raises."""
+    try:
+        st = _load()
+        # MK Oct 2026 - not in a manual group: nothing reads the mark there, and its first
+        # write would make a shared table under every manual active, a new etag and a
+        # snapshot for its standbys out of a pass that ran nothing
+        if not _lease_mode(st) or st['role'] != ROLE_ACTIVE or _report_owed(st, kind):
+            return
+        _mark_write(kind, 'checked', wall)
+    except Exception as e:
+        logging.warning(f"[HA] could not note the schedules checked: {e}")
+
+
+def report_settled(kind, upto, what):
+    """Before a report of schedules that did not run goes out in an automatic group: the
+    last minute it covers (`upto`, a wall time) is the group's `reported` mark, sent on,
+    and the lease confirmed, so the report of the next leader starts after it. A no puts
+    the mark back, sends that on as well and says False: the report does not go out from
+    here, and the minutes stay in the next window. Anywhere else confirm_step() as before."""
+    if not guard_on():
+        return confirm_step(what)
+    before = _marks(kind)[1]
+    wrote = _mark_write(kind, 'reported', upto)
+    if wrote:
+        send_on(what)
+    if confirm_step(what):
+        # without the mark (a disk that takes no write) it goes out all the same: it may
+        # come twice then, but it comes
+        return True
+    if wrote and _mark_write(kind, 'reported', before, forward=False):
+        # back on its way at once as well: a member that pulled the mark during the round
+        # could win next and start its report after minutes nobody said, and the cv tick
+        # of the lease loop stops with the lease
+        send_on(what)
+    return False
+
+
+def missed_settled(kind, window):
+    """report_settled() for the report of a takeover (5.7). On a no the next pass of this
+    leader gets the same window again from missed_schedule_window(), whatever a mark
+    written since says."""
+    if report_settled(kind, window[1], f'the report of the {kind} that did not run'):
+        return True
+    said = _missed_said.get(kind)
+    if isinstance(said, tuple):
+        _missed_said[kind] = {'again': said, 'window': window}
+    return False
+
+
 def missed_schedule_window(kind):
     """Once per acting process of a leader that came up by a restart (a takeover, or a
     restart of its own) and per kind of schedule: (from, to) as wall times, the stretch
-    in which no leader fired schedules, from before the last renewal its process could
-    have heard to the end of what schedule_held() skips. None otherwise, and anywhere
-    but in an automatic group."""
+    in which no leader fired schedules, to the end of what schedule_held() skips. It
+    starts after the minute the group's marks say was settled last, as far back as
+    REPORT_SPAN; without marks before the last renewal its process could have heard.
+    None otherwise, and anywhere but in an automatic group."""
     st = _load()
     if not _lease_mode(st):
         return None
@@ -13245,25 +13424,38 @@ def missed_schedule_window(kind):
         # it took the lead in this process (the switch to automatic mode): no gap
         return None
     mark = (st['instance_id'], rt.gen, node.acting_from)
-    if _missed_said.get(kind) == mark:
+    said = _missed_said.get(kind)
+    if said == mark:
         return None
     _missed_said[kind] = mark
-    # the vote round it won, from take_after on this boot; W_take covers the restart
-    # after it, so it lies no further back than that from the start of this process (a
-    # take_after from long ago is a restart of a leader that kept the lease)
-    take = ((st.get('lease') or {}).get('led') or {}).get('take_after') or {}
-    won = node.started - t.W_take
-    if take.get('boot_id') == node.boot_id and type(take.get('at')) in (int, float):
-        won = min(max(take['at'] - t.W_take, won), node.started)
-    # its timer fired at most P + L/4 (+ L/2 at a lower reach) after the last renewal it
-    # heard, and the vote took T_vote
-    heard = _wall() - (ha_clock() - won) - (t.P + t.L / 4 + t.L / 2 + t.T_vote)
-    return heard, _acting_wall(node) + _largest_skew()
+    if isinstance(said, dict) and said.get('again') == mark:
+        # its report found no confirm at the pass before (missed_settled)
+        return said['window']
+    end = _acting_wall(node) + _largest_skew()
+    settled = [m for m in _marks(kind) if m is not None]
+    if settled:
+        start = max(settled) + 60
+    else:
+        # the vote round it won, from take_after on this boot; W_take covers the restart
+        # after it, so it lies no further back than that from the start of this process
+        # (a take_after from long ago is a restart of a leader that kept the lease)
+        take = ((st.get('lease') or {}).get('led') or {}).get('take_after') or {}
+        won = node.started - t.W_take
+        if take.get('boot_id') == node.boot_id and type(take.get('at')) in (int, float):
+            won = min(max(take['at'] - t.W_take, won), node.started)
+        # its timer fired at most P + L/4 (+ L/2 at a lower reach) after the last renewal
+        # it heard, and the vote took T_vote
+        start = _wall() - (ha_clock() - won) - (t.P + t.L / 4 + t.L / 2 + t.T_vote)
+    start = max(start, end - REPORT_SPAN)
+    if start > end:
+        # the passes before reached past the hold (a former leader's clock ran ahead)
+        return None
+    return start, end
 
 
 def missed_schedules(kind, names, window, why='while the group changed its leader'):
-    """Say and audit which schedules of `kind` fell in `window` and did not run. The
-    window is two wall times, or two minutes of the schedule_now() clock."""
+    """Say, audit and alert which schedules of `kind` fell in `window` and did not run.
+    The window is two wall times, or two minutes of the schedule_now() clock."""
     if not names:
         return
     a, b = (x if isinstance(x, datetime) else datetime.fromtimestamp(x) for x in window)
@@ -13271,3 +13463,13 @@ def missed_schedules(kind, names, window, why='while the group changed its leade
             f"{why} and did not run: {', '.join(sorted(names)[:20])}")
     logging.warning(f"[HA] {text}")
     _audit('ha.schedules_missed', text)
+    st = _load()
+    me = st.get('own_url') or st['instance_id'][:8]
+    # design 5.7 says audit and alert; webhooks and push take their time
+    alert = {'alert_name': 'HA group: schedules missed', 'metric': 'ha_schedules_missed',
+             'severity': 'warning', 'target_type': 'instance', 'target_name': me, 'cluster_id': '',
+             'current_value': f'{len(names)} {kind}', 'timestamp': _now(), 'message': text}
+    try:
+        _later(0, lambda: _alert_out(alert, 'schedules missed'), 'ha-schedules-alert')
+    except Exception as e:
+        logging.warning(f"[HA] could not hand on the schedules missed alert: {e}")

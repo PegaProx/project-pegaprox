@@ -167,6 +167,59 @@ def test_a_member_that_restarted_ahead_of_our_clock_says_it_started_after_we_sig
         assert re.search(r'started [23] s ago', error) and re.search(r'3[01] s behind', error), error
 
 
+# --- a member that missed one ask (lab C1 on 3f43b7e) -------------------------------------
+
+def test_one_unanswered_ask_is_no_voter_down_in_a_running_group(auto, seed):
+    """c answered, then restarted while the watch of a asked it: the status said
+    VOTER_DOWN "has not answered within the last 2 minutes" seconds after its last answer,
+    until the next look. Now only once that answer is as old as the text says. Nothing
+    that decides counts the answer it kept."""
+    auto.form(seed)
+    auto.past_the_hold()
+    auto.watch('a')
+    auto.crash('c')
+    auto.watch('a')
+
+    assert 'VOTER_DOWN' not in _findings(auto, 'a', 'c')
+    with auto.at('a') as ha:
+        rt = ha._rt()
+        # what decides goes by rt.seen, and there it has no record
+        assert IDS['c'] not in rt.seen and not ha._says_it_holds(IDS['c'])
+        rt.gone[IDS['c']]['at'] -= ha.LEASE_SEEN_FRESH + 1
+    found = _findings(auto, 'a', 'c')
+    assert found['VOTER_DOWN']['level'] == 'warn'
+    assert 'has not answered within the last 2 minutes' in found['VOTER_DOWN']['text']
+    # it answers again
+    auto.back('c')
+    auto.watch('a')
+    assert 'VOTER_DOWN' not in _findings(auto, 'a', 'c')
+    with auto.at('a') as ha:
+        assert IDS['c'] not in ha._rt().gone
+
+
+def test_a_member_off_the_clock_that_restarts_stays_clock_skew(auto, seed, monkeypatch):
+    """C1 phase A: the members showed CLOCK_SKEW for the jumped leader, then VOTER_DOWN for
+    30 s once one ask fell into its restart."""
+    auto.form(seed)
+    auto.past_the_hold()
+    _refuses_for_its_clock(auto, monkeypatch, 'c')
+    auto.watch('a')
+    assert set(_findings(auto, 'a', 'c')) == {'CLOCK_SKEW'}
+    auto.crash('c')
+    auto.watch('a')
+    assert set(_findings(auto, 'a', 'c')) == {'CLOCK_SKEW'}
+
+
+def test_before_the_switch_one_unanswered_ask_still_blocks_it(auto, seed):
+    auto.pair(seed)
+    auto.crash('c')
+    auto.watch('a')
+    assert _findings(auto, 'a', 'c')['VOTER_DOWN']['level'] == 'block'
+    r = auto.put('a', '/api/ha/mode', ON)
+    assert r.status_code == 409 and r.get_json()['code'] == 'HA_AUTO_REFUSED'
+    assert ('VOTER_DOWN', IDS['c']) in {(f['code'], f['member']) for f in r.get_json()['findings']}
+
+
 # --- the text of an early call ----------------------------------------------------------
 
 def test_a_call_signed_before_the_receiver_started_hears_that(group, seed, monkeypatch):

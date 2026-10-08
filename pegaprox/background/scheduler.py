@@ -172,11 +172,15 @@ def run_scheduled_tasks(last=None):
     first, skipped = _first_minute(last, now, wall)
     if skipped:
         # a leader whose clock leapt ahead has its lease calls refused from then on: the
-        # confirm says no, and the next leader reports the gap by the true clock (5.7)
-        if not ha.confirm_step('the report of the minutes the scheduler stepped over'):
+        # confirm says no, and the next leader reports the gap by the true clock (5.7).
+        # In an automatic group the gap is the group's mark first, so that one does not
+        # report it again
+        if not ha.report_settled('scheduled tasks', wall - 60,
+                                 'the report of the minutes the scheduler stepped over'):
             return now, wall, 0.0
         _report_skipped(tasks, *skipped)
 
+    lost, through = [], True
     for task in tasks:
         if not task.get('enabled', True):
             continue
@@ -193,14 +197,27 @@ def run_scheduled_tasks(last=None):
         # one caught up is stamped with its own minute, or the next run comes late
         stamp = (current_time if slot == now else slot).isoformat()
 
-        if ha.schedule_fire_first():
+        first_run = ha.schedule_fire_first()
+        if first_run:
+            if not ha.is_active():
+                # the lease went during this pass: the rest is the next leader's, and its
+                # report covers them (the mark below stays where it was)
+                through = False
+                break
             # at most once: the run is written and on its way to the members before
             # the task acts, so a leader that takes over does not run it again
             task['last_run'] = stamp
             _touch_last_run(task.get('id'), task['last_run'])
             ha.schedule_fired()
         if not ha.confirm_step(f"scheduled task {_sl(task.get('name'))}"):
-            break
+            if not first_run:
+                through = False
+                break
+            # MK Oct 2026 - lab E6b_2: written first and then not started, and only a
+            # WARNING said so. Used up (no leader runs it now), so it is reported; the
+            # ones after it try a round of their own instead of being dropped
+            lost.append((task, slot))
+            continue
         execute_scheduled_task(task)
         # fix (audit): this used to write the WHOLE config back - a snapshot taken before
         # the tick began. execute_scheduled_task starts and stops VMs, so it can run for a
@@ -208,6 +225,11 @@ def run_scheduled_tasks(last=None):
         # reverted by this save. Touch just this task's last_run instead.
         task['last_run'] = stamp
         _touch_last_run(task.get('id'), task['last_run'])
+    if lost:
+        _report_lost(lost)
+    if through:
+        # the group's mark for the report of the next leader (5.7)
+        ha.schedules_checked('scheduled tasks', wall)
     return now, wall, time.monotonic() - started
 
 
@@ -318,30 +340,36 @@ def _report_skipped(tasks, first, last):
     log_audit('system', 'scheduled_task.missed', text)
 
 
-def _due_minute(task, at):
-    """Whether `task` falls due in the minute `at`, its last run aside (the report of what
-    a change of leader missed, 5.7)."""
-    try:
-        return _last_due(task, _minute(at), _minute(at)) is not None
-    except (TypeError, ValueError):
-        return False
-
-
 def _report_missed(tasks):
     """Once a new leader of an automatic group acts: the tasks that fell due in the gap."""
     window = ha.missed_schedule_window('scheduled tasks')
     if not window:
         return
+    # the latest slot of each task in the gap (the marks let it reach back days, so not
+    # minute by minute); a last run from that minute on: the former leader got to it
+    first, last = (_minute(ha.schedule_at(w)) for w in window)
     missed = set()
-    at = window[0] - window[0] % 60
-    while at <= window[1]:
-        when = ha.schedule_at(at)
-        # a last run from that minute on: the former leader got to it
-        missed.update(str(t.get('name') or t.get('id')) for t in tasks
-                      if t.get('enabled', True) and _due_minute(t, when)
-                      and str(t.get('last_run') or '') < when.isoformat())
-        at += 60
+    for t in tasks:
+        try:
+            slot = _last_due(t, first, last) if t.get('enabled', True) else None
+        except (TypeError, ValueError):
+            continue
+        if slot is not None and str(t.get('last_run') or '') < slot.isoformat():
+            missed.add(str(t.get('name') or t.get('id')))
+    # the end of the gap is the group's mark before the report goes out: the next leader
+    # starts after it. A no leaves it to the next pass
+    if missed and not ha.missed_settled('scheduled tasks', window):
+        return
     ha.missed_schedules('scheduled tasks', sorted(missed), window)
+
+
+def _report_lost(lost):
+    """Tasks whose last run went out and whose lease confirm then failed: no leader runs
+    them now, so they are reported as missed (5.7), not run late."""
+    slots = [slot for _task, slot in lost]
+    names = sorted({str(t.get('name') or t.get('id')) for t, _slot in lost})
+    ha.missed_schedules('scheduled tasks', names, (min(slots), max(slots) + timedelta(seconds=59)),
+                        'while the lease of this instance could not be confirmed')
 
 def _touch_last_run(task_id, when):
     """Record a single task's last_run without rewriting the table around it."""
