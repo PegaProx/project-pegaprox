@@ -5,6 +5,9 @@ Every member is an ha_vote.Node driven by this module, one event at a time in tr
     freezes (a paused VM) and host reboots (a new boot id, the clock starts over)
   * a wall clock per member with an offset, and steps; signed calls outside the 120 s
     window, or signed before the receiver's process started, are refused (ha.py)
+  * the watch of every data member: every WATCH_EVERY seconds it measures the wall clock
+    of each member that answers (the witness too), and a member off the majority of
+    what it measured within SEEN_FRESH puts its timer campaign off (Q15, ha._clock_off)
   * directed links with a delay, jitter (so answers cross and come late), drops and
     blackholes; a cut also takes what is in flight
   * pauses (SIGSTOP: the clock runs on, calls queue up) and crashes; a restart builds a
@@ -30,6 +33,11 @@ from pegaprox.core import ha_vote as hv
 
 INF = math.inf
 SIGNATURE_WINDOW = 120
+# the watch: one look at the members per pass of the HA loop (ha.DEFAULT_INTERVAL), the
+# first a few seconds after a start, and what it saw counts for LEASE_SEEN_FRESH
+WATCH_EVERY = 30.0
+WATCH_FIRST = 5.0
+SEEN_FRESH = 120.0
 
 
 class Violation(AssertionError):
@@ -173,6 +181,8 @@ class Member:
         self.applied_epoch = 0
         self.same_instant = (None, 0)
         self.booted_at = None
+        # what the watch of this process measured: member -> (skew or 'window', true time)
+        self.seen = {}
 
     def wall(self):
         if self.wall_frozen is not None:
@@ -369,8 +379,13 @@ class Sim:
         m.node = hv.Node(m.iid, m.kind, store=m.store, clock=m.lease_clock, wall=m.wall,
                          send=m.send, hooks=m.hooks, rng=random.Random(self.rng.random()),
                          sign=m.sign, verify=self.verify, boot_id=m.clock.boot_id,
-                         restart_on_win=self.restart_on_win, keep_w_take=self.keep_w_take)
+                         restart_on_win=self.restart_on_win, keep_w_take=self.keep_w_take,
+                         skewed=lambda m=m: self.skewed(m.iid))
         m.booted_at = self.now
+        # memory only, like the runtime of the process: the watch starts over
+        m.seen = {}
+        if m.kind == hv.KIND_DATA:
+            self.after(WATCH_FIRST, self._watch, m, m.inc)
         if m.hold_disabled:
             # a fault: this process behaves as if it had run for long, it forgot its promise
             # and grants at once
@@ -479,8 +494,50 @@ class Sim:
             self._after(m, check=False)
 
     def wall_step(self, iid, delta):
-        self.members[iid].wall_offset += delta
+        m = self.members[iid]
+        m.wall_offset += delta
+        # ha._process_started is the wall clock now less the lease clock's age: it moves
+        # with a step
+        m.start_wall += delta
         self.note(f'{iid} wall clock steps {delta:+.0f} s')
+
+    def set_walls(self, offsets):
+        """Every wall clock in `offsets` at true time + its offset, as steps."""
+        for iid, off in offsets.items():
+            self.wall_step(iid, off - self.members[iid].wall_offset)
+
+    # --- the watch and the clock skew (Q15) ---
+
+    def _watch(self, m, inc):
+        """One look of m's watch at the others, as ha._ask_members and ha._ask_witness take
+        it: the skew of each member that answers its status call, 'window' for one that
+        refuses it for its time. A data member that does not answer is forgotten at once,
+        the witness only once what it said is stale."""
+        if m.inc != inc:
+            return
+        if not m.paused:
+            for o in self.members.values():
+                if o is m:
+                    continue
+                answers = (o.up and not o.paused and self.link(m.iid, o.iid) == 'up'
+                           and self.link(o.iid, m.iid) == 'up')
+                if answers:
+                    skew = o.wall() - m.wall()
+                    m.seen[o.iid] = ('window' if abs(skew) > SIGNATURE_WINDOW else skew, self.now)
+                elif o.kind == hv.KIND_DATA:
+                    m.seen.pop(o.iid, None)
+        self.after(WATCH_EVERY, self._watch, m, inc)
+
+    def skewed(self, iid):
+        """ha._clock_off for member `iid`: more than SKEW_LIMIT off more than half of the
+        members it measured within SEEN_FRESH, False with none measured."""
+        measured = off = 0
+        for skew, at in self.members[iid].seen.values():
+            if self.now - at > SEEN_FRESH:
+                continue
+            measured += 1
+            off += skew == 'window' or abs(skew) > hv.SKEW_LIMIT
+        return measured > 0 and 2 * off > measured
 
     # --- the network ---
 

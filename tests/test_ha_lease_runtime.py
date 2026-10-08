@@ -25,6 +25,7 @@ import pytest
 
 from pegaprox.core import ha as _ha
 from pegaprox.core import ha_vote as hv
+from test_ha_api import ADMIN_PW
 from test_ha_members import IDS, _built, _promote, _sync, group  # noqa: F401
 from _ha_lease_harness import T, auto  # noqa: F401
 
@@ -1294,6 +1295,124 @@ def test_what_a_member_reaches_goes_out_with_its_status(auto, seed):
         assert ha._rt().seen[IDS['b']]['reach'] == {'c1': True, 'c2': False}
         rows = {m['instance_id']: m for m in ha.lease_status()['members']}
     assert rows[IDS['b']]['reach'] == {'c1': True, 'c2': False}
+
+
+# --- a clock off the majority of the members (Q15) -----------------------------------------
+
+def _measured(ha, rt, mid, skew, age=0.0, **extra):
+    """What the watch notes for a member that answered with its wall clock `skew` seconds
+    off ours, `age` seconds ago."""
+    now = time.time()
+    seen = {'mark': None}
+    if skew is not None:
+        seen = ha._lease_seen({'lease_mark': ha.LEASE_MARK, 'wall': now + skew}, now, now)
+    rt.seen[mid] = dict(seen, at=time.monotonic() - age, **extra)
+
+
+def test_a_clock_is_off_where_it_is_off_more_than_half_of_what_was_measured(auto, seed):
+    """More than SKEW_LIMIT off more than half of the members measured within two minutes,
+    the witness among them (its answer goes the same way, _ask_witness). Half is not more
+    than half, and with nothing measured the clock is not off."""
+    auto.form(seed)
+    witness = 'f' * 32
+    with auto.at('c') as ha:
+        rt = ha._rt()
+        rt.seen.clear()
+        assert ha._clock_off(rt) is None
+        _measured(ha, rt, IDS['a'], -30.0)
+        _measured(ha, rt, IDS['b'], 0.4)
+        assert ha._clock_off(rt) is None
+        _measured(ha, rt, witness, -31.0)
+        assert ha._clock_off(rt) == {'off_s': 30.0, 'members_off': 2, 'measured': 3}
+        assert auto.node('c').skewed() is True
+        # what it measured two minutes ago says nothing any more: one of two
+        rt.seen[IDS['a']]['at'] -= 121
+        assert ha._clock_off(rt) is None and auto.node('c').skewed() is False
+        # a member that refused the call for its time is off (past the signature window)
+        _measured(ha, rt, IDS['a'], None, clock='window')
+        assert ha._clock_off(rt) == {'off_s': 31.0, 'members_off': 2, 'measured': 3}
+        # one that answered from an older release says nothing about its clock
+        rt.seen.clear()
+        _measured(ha, rt, IDS['a'], None)
+        assert ha._clock_off(rt) is None
+
+
+def test_a_member_off_the_majority_loses_the_race_to_one_with_a_right_clock(auto, seed, caplog):
+    """Lab C2: b's clock is 30 s ahead. Its timer fires first and it puts its campaign off
+    by a lease; c, whose clock is right, campaigns later and wins. The status says why."""
+    auto.form(seed)
+    auto.past_the_hold()
+    auto.skew['b'] = 30.0
+    auto.watch('b', 'c')
+    with auto.at('b') as ha:
+        off = ha._clock_off(ha._rt())
+        status = ha.lease_status()
+    assert off['off_s'] == pytest.approx(30, abs=1) and (off['members_off'], off['measured']) == (2, 2)
+    assert status['defers_campaigns'] == off
+    with auto.at('c') as ha:
+        assert ha._clock_off(ha._rt()) is None and ha.lease_status()['defers_campaigns'] is None
+    # b's timer fires first, c's last; one renewal arms both
+    auto.node('b').rng = types.SimpleNamespace(uniform=lambda lo, hi: lo)
+    auto.node('c').rng = types.SimpleNamespace(uniform=lambda lo, hi: hi)
+    auto.run(T.R + 0.5)
+
+    auto.crash('a')
+    auto.members = 'bc'
+    auto.run(T.P + T.L / 4 + T.R + 2, until=lambda: auto.holders() != [])
+
+    assert auto.holders() == ['c']
+    assert 'waits one lease longer before it campaigns' in caplog.text
+
+
+def test_the_leader_says_nothing_of_deferring_whatever_its_clock(auto, seed):
+    """The leader runs no election timer: its status does not say it defers campaigns,
+    even with its clock off the majority. A standby off the majority does say so."""
+    auto.form(seed)
+    auto.skew.update(a=60.0, b=30.0)
+    auto.watch('a', 'b')
+    with auto.at('a') as ha:
+        assert ha._clock_off(ha._rt())['members_off'] == 2 and ha.holds_lease()
+        assert ha.lease_status()['defers_campaigns'] is None
+    with auto.at('b') as ha:
+        off = ha._clock_off(ha._rt())
+        assert off is not None and ha.lease_status()['defers_campaigns'] == off
+
+
+def test_members_whose_clocks_all_drifted_apart_still_elect_one(auto, seed):
+    """Each one is off the other and the leader that went: both put their campaigns off,
+    and one of them leads a lease later all the same."""
+    auto.form(seed)
+    auto.past_the_hold()
+    auto.skew.update(b=30.0, c=-30.0)
+    auto.watch('b', 'c')
+    for n in 'bc':
+        with auto.at(n) as ha:
+            assert ha._clock_off(ha._rt())['members_off'] == 2
+    auto.crash('a')
+    auto.members = 'bc'
+    auto.run(T.P + T.L / 4 + T.L + T.R + 2, until=lambda: auto.holders() != [])
+    assert len(auto.holders()) == 1
+
+
+def test_a_manual_group_says_nothing_about_deferring(auto, seed):
+    """Nobody campaigns in a manual group: no member says it defers, whatever its clock."""
+    auto.pair(seed)
+    auto.skew['b'] = 30.0
+    auto.watch('b')
+    with auto.at('b') as ha:
+        assert ha._clock_off(ha._rt()) is not None
+        assert ha.lease_status()['defers_campaigns'] is None
+    # and switched off again, with a voter config of its own
+    auto.skew.clear()
+    auto.switch_on()
+    assert auto.put('a', '/api/ha/mode', {'mode': 'manual', 'user_password': ADMIN_PW}).status_code == 200
+    auto.run(2 * T.R, dt=1.0)
+    auto.skew['b'] = 30.0
+    auto.watch('b')
+    with auto.at('b') as ha:
+        assert ha.mode() == 'manual' and auto.node('b') is not None
+        assert ha._clock_off(ha._rt()) is not None
+        assert ha.lease_status()['defers_campaigns'] is None
 
 
 # --- what it costs ----------------------------------------------------------------------------

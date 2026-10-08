@@ -616,6 +616,74 @@ def test_a_caller_nobody_checked_hears_only_that_changes_are_paused(auto, seed):
     assert 1 <= int(r.headers['Retry-After']) <= int(T.W_take) + 1
 
 
+def _lease_left(auto, n, left):
+    """Turn every clock until `left` seconds of n's lease are left. Nothing ticks, so no
+    renewal comes in between."""
+    auto.advance(auto.node(n).lease_until - auto.clock[n] - left)
+
+
+def test_a_leader_takes_a_write_only_while_two_seconds_of_its_lease_are_left(auto, seed):
+    """Q16: a write let in with less left may commit after the lease ran out, a change the
+    next leader never sees (lab E6b, 25 ms past it). The lease still runs: the leader
+    acts, reads go on, and the next renewal lets writes in again."""
+    from pegaprox.core.db import get_db
+    auto.form(seed)
+    _lease_left(auto, 'a', 3.0)
+    assert _write(auto, 'a').status_code == 200
+
+    auto.advance(1.5)
+    with auto.at('a') as ha:
+        assert ha.is_active() and not ha.takes_writes()
+    for probe in WRITES:
+        r = _write(auto, 'a', probe)
+        assert r.status_code == 503 and r.get_json()['code'] == 'HA_NO_LEASE', r.data
+        assert r.get_json()['error'] == auto.ha.LEASE_ENDING_ERROR
+        assert r.headers['Retry-After'] == '2'
+    assert get_db().get_user('newbie') is None
+    with auto.at('a'):
+        assert auto.admin.get('/api/users').status_code == 200
+
+    auto.step('a')
+    with auto.at('a') as ha:
+        assert ha.takes_writes()
+    assert _write(auto, 'a', WRITES[1]).status_code == 200
+
+
+def test_a_forwarded_write_meets_the_same_margin(auto, seed):
+    """Handed over by a member, the write takes the same gate: 503 HA_NO_LEASE with less
+    than two seconds left, and the browser on the member hears it with its Retry-After."""
+    auto.form(seed)
+    envelope = {'method': 'PUT', 'path': '/api/user/preferences', 'query': '',
+                'content_type': 'application/json', 'body_b64': 'eyJ0aGVtZSI6ICJjb3Jwb3JhdGVEYXJrIn0=',
+                'user': 'root', 'client_ip': '203.0.113.9'}
+    with auto.at('b') as ha:
+        envelope['sign_in'] = ha.sign_in_digest('root')
+    _lease_left(auto, 'a', 3.0)
+    r = _signed_send(auto, 'b', 'a', '/api/ha/peer/forward', envelope)
+    assert r.status_code == 200 and r.get_json()['status'] == 200, r.data
+
+    auto.advance(1.5)
+    r = _signed_send(auto, 'b', 'a', '/api/ha/peer/forward', envelope)
+    assert r.status_code == 503 and r.get_json()['code'] == 'HA_NO_LEASE', r.data
+    assert r.headers['Retry-After'] == '2'
+    r = _write(auto, 'b')
+    assert r.status_code == 503 and r.get_json()['code'] == 'HA_NO_LEASE', r.data
+    assert r.get_json()['error'] == auto.ha.LEASE_ENDING_ERROR and r.headers['Retry-After'] == '2'
+
+
+def test_in_a_manual_group_a_write_needs_no_lease_left(auto, seed):
+    """Switched back to manual mode the lease means nothing, and neither does the margin."""
+    auto.form(seed)
+    r = auto.put('a', '/api/ha/mode', {'mode': 'manual', 'user_password': ADMIN_PW})
+    assert r.status_code == 200
+    auto.run(2 * T.R, dt=1.0)
+    assert auto.mode('a') == 'manual' and auto.node('a') is not None
+    auto.advance(3 * T.L)
+    with auto.at('a') as ha:
+        assert ha.takes_writes() and ha.no_lease() is None
+    assert _write(auto, 'a').status_code == 200
+
+
 # --- gates: the snapshot and the forwarded write ------------------------------------------------
 
 def _snapshot(auto, frm, to):

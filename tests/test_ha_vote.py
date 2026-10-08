@@ -1507,6 +1507,26 @@ def test_a_leader_that_acts_at_once_says_so_at_its_boot():
     assert box.names().count('acting') == 1
 
 
+def test_the_first_gate_past_the_takeover_wait_says_acting_before_the_tick():
+    """take_after lies ahead at boot, and the loop wakes late for it (lab E6b: a write
+    38 ms after acting_from, before the line). The gate that finds the wait over says
+    'acting' (acting_seen), once; is_active() itself says nothing."""
+    led = {'epoch': 2, 'cv': (1, 5), 'take_after': {'boot_id': 'boot-1', 'at': 1010.0}}
+    box = Box('a', genesis(), role=hv.ROLE_LEADER, led=led, epoch=2)
+    box.answer_all('renew', _ok)
+    assert 'booted' in box.names() and 'acting' not in box.names()
+    assert box.node.acting_from == pytest.approx(1010.0)
+    assert not box.node.acting_seen() and not box.node.acting_said
+    box.now = 1010.04
+    said = box.names()
+    assert box.node.is_active() and box.names() == said
+    assert box.node.acting_seen() and box.names() == said + ['acting']
+    assert box.events[-1][1] == {'epoch': 2}
+    assert box.node.acting_said and not box.node.acting_seen()
+    box.later(T.R)
+    assert box.names().count('acting') == 1
+
+
 def test_a_promise_that_ends_before_the_timer_leaves_the_timer_as_it_was():
     """The normal case: the promise from a renewal ends before heard_at + P + jitter, so
     no second random part is drawn on top of the timer's own."""
@@ -1523,3 +1543,106 @@ def test_a_promise_that_ends_before_the_timer_leaves_the_timer_as_it_was():
     assert box.node.promise_until < box.node.election_at
     assert heard + T.P <= box.node.election_at <= heard + T.P + T.L / 4
     assert draws == [(0, T.L / 4)]
+
+
+# --- a clock off the majority of the members (Q15) ---
+
+def _timer_box(me, skewed, seed=7):
+    """A member past its hold that took a renewal of a: its timer runs from there.
+    skewed() is what the host says about its clock."""
+    box = settled(Box(me, genesis(), skewed=skewed))
+    box.node.rng = random.Random(seed)
+    box.renew('a', 1)
+    return box
+
+
+def _fire(box):
+    """Turn the clock to the timer and tick: the vote calls sent so far."""
+    box.now = box.node.election_at
+    box.node.tick()
+    return [b for _to, kind, b, _tag in box.sent if kind == 'vote']
+
+
+def test_a_member_whose_clock_is_off_the_majority_campaigns_one_lease_later():
+    """Two timers fire at the same moment. The member with a right clock asks for votes,
+    the one off the majority waits one lease more, and by then the other one won."""
+    right = _timer_box('b', lambda: False)
+    off = _timer_box('c', lambda: True)
+    fired = off.node.election_at
+    assert right.node.election_at == fired
+
+    votes = _fire(right)
+    assert votes and all(b['pre'] for b in votes)
+    assert _fire(off) == []
+    assert off.node.election_at == pytest.approx(fired + T.L)
+    assert [info for name, info in off.events if name == 'campaign_deferred'] == [{'until': fired + T.L}]
+
+
+def test_a_member_off_the_majority_still_campaigns_after_the_extra_lease():
+    """The deferral never blocks an election: once the extra lease is over the member
+    campaigns, its clock as far off as before. A group whose clocks all drifted apart
+    still elects one."""
+    off = _timer_box('c', lambda: True)
+    assert _fire(off) == []
+    votes = _fire(off)
+    assert votes and all(b['pre'] for b in votes) and off.node.campaigning()
+
+
+def test_the_extra_lease_comes_with_a_renewal_or_a_vote_granted():
+    """A renewal and a vote it grants arm the timer anew: the next time it fires the
+    member waits again, so a member with a right clock gets the first try."""
+    off = _timer_box('c', lambda: True)
+    assert _fire(off) == []
+    off.renew('a', 1)
+    assert off.node.deferred_at is None
+    fired = off.node.election_at
+    assert _fire(off) == [] and off.node.election_at == pytest.approx(fired + T.L)
+    # b asks for votes in the meantime and gets c's: its timer starts over, and so does
+    # the wait
+    assert off.vote('b', 2)['granted'] and off.node.deferred_at is None
+    off.sent.clear()
+    fired = off.node.election_at
+    assert _fire(off) == [] and off.node.election_at == pytest.approx(fired + T.L)
+
+
+def test_a_lost_try_of_its_own_brings_no_second_wait():
+    """It waited its lease and nobody with a right clock won meanwhile: after a campaign
+    of its own that failed it tries again at the back-off as every member does. One more
+    lease per try would leave a group whose clocks all drifted apart without a leader for
+    a lease longer with every round it loses (the bound is I6 plus one lease)."""
+    off = _timer_box('c', lambda: True)
+    assert _fire(off) == []
+    deferred = off.node.deferred_at
+    assert _fire(off)
+    off.answer_all('vote', lambda to, b: {'granted': False, 'epoch': 1, 'reason': 'PROMISED'})
+    assert not off.node.campaigning() and off.node.deferred_at == deferred
+    off.sent.clear()
+    lost_at = off.now
+    votes = _fire(off)
+    assert votes and all(b['pre'] for b in votes)
+    assert T.L / 2 <= off.now - lost_at <= T.L
+    assert off.names().count('campaign_deferred') == 1
+
+
+def test_a_member_whose_clock_is_off_votes_as_before():
+    """It only waits with its own campaign: its vote keeps the majority there."""
+    box = settled(Box('c', genesis(), skewed=lambda: True))
+    assert box.vote('b', 2, pre=True)['granted']
+    assert box.vote('b', 2)['granted'] and box.store.state['voted_for'] == 'b'
+    assert box.renew('b', 2)['ok'] and box.node.promise_to == 'b'
+
+
+def test_make_leader_is_not_put_off_by_the_clock():
+    """The admin picked this member: the pre-vote goes out at once."""
+    box = settled(Box('c', genesis(), skewed=lambda: True))
+    assert box.node.campaign_now() == ''
+    assert [b for _to, kind, b, _tag in box.sent if kind == 'vote']
+
+
+def test_a_clock_off_changes_nothing_in_manual_mode():
+    """A member of a manual group never campaigns, and nobody asks about its clock."""
+    asked = []
+    box = settled(Box('c', genesis(mode=hv.MODE_MANUAL), skewed=lambda: asked.append(1) or True))
+    box.renew('a', 1)
+    box.later(10 * T.L)
+    assert box.sent == [] and asked == [] and 'campaign_deferred' not in box.names()

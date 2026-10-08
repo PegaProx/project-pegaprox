@@ -657,8 +657,8 @@ class Witness:
         if verdict in ('window', 'early'):
             # the signature is good: the member itself, with a clock that is off
             self._note_skew(sender, headers)
-            return 401, {'code': 'HA_CLOCK', 'error': f'The clocks of the two instances are more '
-                         f'than {ha_wire.SIGNATURE_WINDOW} seconds apart - set both by NTP'}
+            return 401, ha_wire.clock_refusal(verdict, self.wall(), self.started,
+                                              int(headers.get(ha_wire.PEER_TS_HEADER)))
         if verdict == 'ok' and self._spend(sender, kind, headers) != 'ok':
             verdict = ''
         if verdict != 'ok':

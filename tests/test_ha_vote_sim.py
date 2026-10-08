@@ -980,12 +980,110 @@ def reboot_on_a_fast_clock(seed):
     assert hold_end <= seen['grant'] < seen['t'] + seen['left'] / 0.9
 
 
-def fuzz(seed):
+# --- clocks off the majority of the members (Q15) ---
+
+def skewed_member_loses_the_race(seed):
+    """Lab C2: b's wall clock is 30 s off every other one. The leader goes away (for good
+    or for a while): a member with a right clock wins every time, within I6 as S-1 has
+    it. Returns whether b voted for the winner (it keeps voting)."""
+    sim = group(seed, 'abcd', 'w')
+    settle(sim)
+    # up for longer than the step: a process estimates its start by the wall clock as it
+    # reads now, and refuses calls signed before that (ha._process_started)
+    sim.run(sim.now + 60)
+    sim.wall_step('b', 30 if seed % 2 else -30)
+    sim.run(sim.now + hs.WATCH_EVERY + 1)
+    assert sim.skewed('b') and not any(sim.skewed(i) for i in 'acd')
+    sim.run(sim.now + sim.rng.uniform(0, 20))
+    t = sim.now
+    lost = sim.counts.get('lost', 0)
+    if seed % 4 < 2:
+        sim.stop('a')
+    else:
+        sim.crash('a')
+    sim.mark_heal()
+    sim.run(t + I6 + 5)
+    took = sim.time_to_leader()
+    bound = I6_TIGHT if sim.counts.get('lost', 0) == lost else I6
+    assert took is not None and took <= bound, f'took {took}'
+    ups = elections_after(sim, t)
+    assert all(who != 'b' for _t, who, _e, _why in ups), f'b won: {ups}'
+    if not ups:
+        # a came back and renewed before anybody's timer ran out
+        assert seed % 4 >= 2 and sim.leader() == 'a'
+        return False
+    _t, who, e, _why = ups[0]
+    return any(v == 'b' for v, *_rest in sim.grants.get((who, e), ()))
+
+
+def all_clocks_apart(seed):
+    """Every wall clock 12 s off the next one, the witness's too: every data member is off
+    the majority of what it measures and puts its campaign off. One is elected all the
+    same, at most one lease later than I6 allows. Returns how long it took."""
+    sim = group(seed, 'abcd', 'w')
+    settle(sim)
+    sim.run(sim.now + 60)
+    order = list('abcdw')
+    sim.rng.shuffle(order)
+    sim.set_walls({iid: 12.0 * k for k, iid in enumerate(order)})
+    sim.run(sim.now + hs.WATCH_EVERY + 1)
+    assert all(sim.skewed(i) for i in 'abcd')
+    sim.run(sim.now + sim.rng.uniform(0, 20))
+    t = sim.now
+    lost = sim.counts.get('lost', 0)
+    sim.stop('a')
+    sim.mark_heal()
+    sim.run(t + I6 + T.L / 0.9 + 5)
+    took = sim.time_to_leader()
+    bound = (I6_TIGHT if sim.counts.get('lost', 0) == lost else I6) + T.L / 0.9
+    assert took is not None and took <= bound, f'took {took}'
+    assert sim.counts.get('campaign_deferred')
+    return took
+
+
+def only_member_off_loses_twice(seed):
+    """b is the last data member that can lead, 30 s off a and the witness, and the first
+    two campaigns it runs fail (the witness misses them). It waits its lease once, not
+    once per try: a leader within I6 plus one lease, as any group whose clocks drifted
+    apart. Returns how often b put its campaign off."""
+    sim = group(seed, 'ab', 'w')
+    settle(sim)
+    sim.run(sim.now + 60)
+    sim.wall_step('b', 30 if seed % 2 else -30)
+    sim.run(sim.now + hs.WATCH_EVERY + 1)
+    assert sim.skewed('b') and not sim.skewed('a')
+    sim.run(sim.now + sim.rng.uniform(0, 20))
+    tries = []
+
+    def on_prevote(m, name, info):
+        if m.iid == 'b' and name == 'prevote':
+            tries.append(sim.now)
+            if len(tries) <= 2:
+                sim.cut('b', 'w')
+                sim.after(T.T_vote + 0.5, sim.heal, 'b', 'w')
+    sim.on_event_hook = on_prevote
+    t = sim.now
+    before = sim.counts.get('campaign_deferred', 0)
+    sim.stop('a')
+    sim.mark_heal()
+    sim.run(t + I6 + T.L / 0.9 + 5)
+    took = sim.time_to_leader()
+    assert took is not None and took <= I6 + T.L / 0.9, f'took {took}'
+    assert sim.leader() == 'b' and len(tries) == 3
+    return sim.counts.get('campaign_deferred', 0) - before
+
+
+def fuzz(seed, walls=False):
     """Random faults for 400 s on a random layout - partitions, directed and dropping
     cuts, crashes, SIGSTOP pauses, slews, host reboots, transfers, planned restarts,
     changes of the lease length anywhere in 15-120 s, a disk that fails the next few
     writes, and early campaigns - then a heal: I1-I8 throughout, a leader within I6 by
     the longest lease in play, no write lost. Half the seeds start at a random lease.
+    With `walls` the wall clocks step as well, a few seconds or past the signature
+    window, and the heal leaves them apart (within the window): the members off the
+    majority put their campaigns off (Q15), and the leader may come one lease later,
+    plus the time a member that restarts at the heal refuses calls signed before its
+    start by the clocks behind its own.
     Returns whether the leader came later than I6 as the design states it."""
     layouts = (('abc', ''), ('abcd', ''), ('abc', 'w'), ('ab', 'w'), ('abcd', 'w'))
     lease_s = hv.LEASE_DEFAULT if seed % 2 else random.Random(seed).randint(hv.LEASE_MIN, hv.LEASE_MAX)
@@ -1004,6 +1102,13 @@ def fuzz(seed):
 
     def fault():
         if sim.now > end:
+            return
+        if walls and rng.random() < 0.2:
+            # a step a member's watch sees as skew, or one past the signature window
+            far = rng.random() < 0.3
+            step = rng.uniform(130, 300) if far else rng.uniform(6, 40)
+            sim.wall_step(rng.choice(ids), step if rng.random() < 0.5 else -step)
+            sim.after(rng.uniform(3, 25), fault)
             return
         r = rng.random()
         x = rng.choice(ids)
@@ -1059,6 +1164,19 @@ def fuzz(seed):
     sim.at(30, fault)
     sim.run(end)
     sim.heal_all()
+    spread = 0.0
+    if walls:
+        # apart but inside the window: every clock 6-12 s off the next in half the seeds
+        # (each member off the majority), within +-15 s of each other in the rest
+        order = list(ids)
+        rng.shuffle(order)
+        if seed % 4 < 2:
+            gap = rng.uniform(6, 12)
+            offsets = {iid: gap * k for k, iid in enumerate(order)}
+        else:
+            offsets = {iid: rng.uniform(-15, 15) for iid in order}
+        sim.set_walls(offsets)
+        spread = max(offsets.values()) - min(offsets.values())
     for i in ids:
         sim.members[i].store.fail = 0
         sim.resume(i)
@@ -1068,6 +1186,10 @@ def fuzz(seed):
     # holds after start and W_take follow the longest lease a chain may still hold
     t = hv.Timings(max(longest))
     bound = (hs.bound_i6(t) + t.hold_after_start + t.L) / 0.9
+    if walls:
+        # one lease of deferral (Q15), and a member that restarted at the heal is deaf to
+        # the clocks behind its own for up to the spread
+        bound += (t.L + spread) / 0.9
     sim.run(end + bound + 20)
     took = sim.time_to_leader()
     assert took is not None and took <= bound, f'no leader {took} s after the heal'
@@ -1364,6 +1486,83 @@ def test_random_faults():
     # I6 as the design states it holds in nearly every run; what goes past it is a heal
     # that restarted members or a vote that lost an answer (see I6 above)
     assert sum(late) <= max(2, len(late) // 50)
+
+
+# --- clocks off the majority (Q15) ---
+
+def fuzz_walls(seed):
+    return fuzz(seed, walls=True)
+
+
+def test_a_member_off_the_majority_loses_the_race_and_keeps_voting():
+    voted = _each(skewed_member_loses_the_race)
+    # whenever its vote was asked in time, it gave it
+    assert any(voted)
+
+
+def test_a_group_whose_clocks_all_drifted_apart_still_elects():
+    _each(all_clocks_apart)
+
+
+def test_random_faults_with_wall_clocks_apart():
+    """I1-I8 with clocks that step, some past the signature window, and a leader after
+    the heal with the clocks still apart."""
+    _each(fuzz_walls)
+
+
+def _on_time(self, now):
+    # Node._maybe_campaign without Q15: the timer alone decides
+    if not self._timer_candidate():
+        return
+    if self._promise_live(now):
+        self.election_at = self.promise_until + self.rng.uniform(0, self.t.L / 4)
+        return
+    self._prevote(now, 'timer')
+
+
+def _first_failure(scenario, seeds):
+    """The first assertion or violation of `scenario` over `seeds`, '' for none."""
+    for seed in seeds:
+        try:
+            scenario(seed)
+        except AssertionError as e:
+            return f'seed {seed}: {e}'
+    return ''
+
+
+def test_without_the_deferral_a_member_off_the_majority_wins(monkeypatch):
+    assert _first_failure(skewed_member_loses_the_race, range(20)) == ''
+    monkeypatch.setattr(hv.Node, '_maybe_campaign', _on_time)
+    assert 'b won' in _first_failure(skewed_member_loses_the_race, range(40))
+
+
+def test_a_deferral_without_end_elects_nobody(monkeypatch):
+    """The deferral counts once per timer. One that holds for as long as the clock is off
+    leaves a group whose clocks all drifted apart without a leader."""
+    def every_time(self, now):
+        if self._timer_candidate() and not self._promise_live(now) and self.skewed():
+            self.election_at = now + self.t.L
+            return
+        _on_time(self, now)
+    monkeypatch.setattr(hv.Node, '_maybe_campaign', every_time)
+    assert 'took None' in _first_failure(all_clocks_apart, range(5))
+
+
+def test_a_member_off_the_majority_waits_its_lease_once_not_once_per_try():
+    """A lost try of its own brings no second wait (I6 plus one lease, not one per round)."""
+    assert set(_each(only_member_off_loses_twice)) == {1}
+
+
+def test_a_wait_per_lost_try_leaves_the_group_without_a_leader_too_long(monkeypatch):
+    """Counterproof: a back-off that brings a deferral of its own adds a lease to every
+    round the member loses, and the leader comes later than I6 plus one lease."""
+    arm = hv.Node._arm_timer
+
+    def every_try(self, now, backoff=None):
+        arm(self, now, backoff)
+        self.deferred_at = None
+    monkeypatch.setattr(hv.Node, '_arm_timer', every_try)
+    assert 'took' in _first_failure(only_member_off_loses_twice, range(20))
 
 
 def _isolated_after_shrink(seed):
