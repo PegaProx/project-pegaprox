@@ -1831,7 +1831,7 @@ def browse_backup_files(cluster_id, node, vm_type, vmid):
         # Strict PBS volid parse: storage:(vm|ct)/VMID/snapshot — no extra segments.
         # Derives both vmid and container type from the explicit type field, not substrings.
         _volid_path = volid.split(':', 1)[1] if ':' in volid else ''
-        _m = re.fullmatch(r'(vm|ct)/(\d+)/[^/]+', _volid_path)
+        _m = re.fullmatch(r'backup/(vm|ct)/(\d+)/[^/]+', _volid_path)
         if _m is None:
             return jsonify({'error': 'Permission denied for source backup'}), 403
         _src_vmid = int(_m.group(2))
@@ -1946,7 +1946,7 @@ def restore_backup_file(cluster_id, node, vm_type, vmid):
         # Strict PBS volid parse: storage:(vm|ct)/VMID/snapshot — no extra segments.
         # Derives both vmid and container type from the explicit type field, not substrings.
         _volid_path = volid.split(':', 1)[1] if ':' in volid else ''
-        _m = re.fullmatch(r'(vm|ct)/(\d+)/[^/]+', _volid_path)
+        _m = re.fullmatch(r'backup/(vm|ct)/(\d+)/[^/]+', _volid_path)
         if _m is None:
             return jsonify({'error': 'Permission denied for source backup'}), 403
         _src_vmid = int(_m.group(2))

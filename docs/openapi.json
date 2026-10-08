@@ -7184,7 +7184,7 @@
                 "properties": {
                   "volid": {
                     "type": "string",
-                    "description": "The backup volume id (e.g. pbs-storage:vm/105/2026-10-08T09:28:43Z)"
+                    "description": "The backup volume id (e.g. pbs-storage:backup/vm/105/2026-10-08T09:28:43Z)"
                   },
                   "filepath": {
                     "type": "string",
