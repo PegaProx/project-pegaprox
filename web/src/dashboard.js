@@ -11015,6 +11015,11 @@
             const [expandedSidebarNodes, setExpandedSidebarNodes] = useState({});
             const [selectedSidebarVm, setSelectedSidebarVm] = useState(null);
             const [selectedSidebarNode, setSelectedSidebarNode] = useState(null); // LW: Feb 2026 - corporate node detail
+            // LW Oct 2026 (#1137) - the QDevice next to the nodes: what /qdevice said per cluster, the
+            // cluster whose QDevice the corporate view shows, the one in the modern dialog
+            const [qdeviceByCluster, setQdeviceByCluster] = useState({});
+            const [selectedSidebarQdevice, setSelectedSidebarQdevice] = useState(null);
+            const [qdeviceOpen, setQdeviceOpen] = useState(null);
             // NS: Mar 2026 - recent items for corporate sidebar
             const [recentItems, setRecentItems] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('corp-recent') || '[]'); } catch { return []; }
@@ -11082,9 +11087,13 @@
                 setSelectedSidebarVm(prev => prev && prev._clusterId === selectedCluster?.id ? prev : null);
                 setSelectedSidebarNode(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
                 setSelectedSidebarDatastore(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
+                setSelectedSidebarQdevice(prev => prev === selectedCluster?.id ? prev : null);
+                setQdeviceOpen(null);
                 if (selectedCluster && isCorporate) setExpandedSidebarClusters(prev => ({ ...prev, [selectedCluster.id]: true }));
             }, [selectedCluster?.id]);
-            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') setSelectedSidebarNode(null); if (activeTab !== 'datastore') setSelectedSidebarDatastore(null); }, [activeTab]);
+            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') { setSelectedSidebarNode(null); setSelectedSidebarQdevice(null); } if (activeTab !== 'datastore') setSelectedSidebarDatastore(null); }, [activeTab]);
+            // whatever else the tree opens takes the place of the QDevice view
+            useEffect(() => { if (selectedSidebarNode || selectedSidebarVm || selectedSidebarDatastore) setSelectedSidebarQdevice(null); }, [selectedSidebarNode, selectedSidebarVm, selectedSidebarDatastore]);
             useEffect(() => { localStorage.setItem('pegaprox-sidebar-view', sidebarViewMode); }, [sidebarViewMode]);
 
             // NS: track recent items for corporate sidebar
@@ -11138,7 +11147,7 @@
             // handlers and patching each one would rot the moment somebody adds another.
             useEffect(() => { setMobileSidebarOpen(false); }, [
                 selectedGroup, selectedCluster, selectedPBS, selectedVMware,
-                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, activeTab,
+                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, selectedSidebarQdevice, activeTab,
                 // the global views set no selection, so they never closed the drawer
                 sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall, sidebarGuests,
             ]);
@@ -11276,7 +11285,7 @@
             const [alertMutes, setAlertMutes] = useState([]);
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
-            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop'];
+            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
             const [sessionExpired, setSessionExpired] = useState(false);  // any 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -11759,6 +11768,32 @@
                                 </div>
                             );
                         })}
+                        {/* LW Oct 2026 (#1137) - the QDevice right after the nodes, only where the cluster has one */}
+                        {showNodes && qdeviceByCluster[clusterId]?.present && (!searchLower || 'qdevice'.includes(searchLower)) && (() => {
+                            const isQSelected = selectedSidebarQdevice === clusterId;
+                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
+                            return (
+                                <div
+                                    key={`qdevice-${clusterId}`}
+                                    data-qdevice-entry={clusterId}
+                                    className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
+                                    tabIndex={0}
+                                    onClick={openQ}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') { e.preventDefault(); openQ(); }
+                                        else if (e.key === 'ArrowDown') treeNavDown(e);
+                                        else if (e.key === 'ArrowUp') treeNavUp(e);
+                                    }}
+                                    style={isQSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
+                                    onMouseEnter={(e) => { if (!isQSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; } }}
+                                    onMouseLeave={(e) => { if (!isQSelected) { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--corp-text-secondary)'; } }}
+                                >
+                                    <span className="flex flex-shrink-0" style={{color: 'var(--corp-accent)'}}><Icons.Scale className="w-4 h-4" /></span>
+                                    <span className="truncate flex-1">{t('qdeviceTitle')}</span>
+                                    <QdeviceDot q={qdeviceByCluster[clusterId]} />
+                                </div>
+                            );
+                        })()}
                         {/* Then VMs/CTs at same level */}
                         {filteredVms.map(vm => {
                             const vmRunning = vm.status === 'running';
@@ -13184,6 +13219,7 @@
                 if (alert.metric === 'zfs_health') return `${t('zfsAlertTitle')}: ${Number(n) >= 1 ? t('zfsAlertStateOnly') : t('zfsAlertAny')}`;
                 if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
                 if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
+                if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
                 return `${alert.metric?.toUpperCase()} ${alert.operator} ${alert.threshold}%`;
             };
 
@@ -15866,6 +15902,41 @@
                 return () => clearInterval(iv);
             }, []);
 
+            // LW Oct 2026 (#1137) - the QDevice of the clusters someone looks at: the selected one and
+            // those open in the corporate tree, every 30 s. The server reads a cluster at most that
+            // often whoever asks. A refusal (a confined account) is not asked again
+            const qdeviceClustersRef = useRef([]);
+            qdeviceClustersRef.current = clusters;
+            const fetchQdevice = async (clusterId) => {
+                const c = (qdeviceClustersRef.current || []).find(x => x.id === clusterId);
+                if (!c || c.cluster_type === 'xcpng' || c.connected === false || !can('node.view')) return;
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/qdevice`, { timeout: POLL_TIMEOUT_MS, quiet: true });
+                if (res && res.ok) {
+                    const data = await res.json().catch(() => null);
+                    if (data) { setQdeviceByCluster(prev => ({ ...prev, [clusterId]: data })); return; }
+                } else if (res && (res.status === 403 || res.status === 404)) {
+                    setQdeviceByCluster(prev => ({ ...prev, [clusterId]: { present: false, refused: true } }));
+                    return;
+                }
+                // no answer (timeout, 503): the last one stays, marked as old, so its dot does not
+                // keep saying connected while nothing can be read
+                setQdeviceByCluster(prev => prev[clusterId]?.present && !prev[clusterId].stale
+                    ? { ...prev, [clusterId]: { ...prev[clusterId], stale: true } } : prev);
+            };
+            const qdeviceSeenRef = useRef({});
+            qdeviceSeenRef.current = qdeviceByCluster;
+            useEffect(() => {
+                const round = () => {
+                    const ids = new Set();
+                    if (selectedClusterRef.current?.id) ids.add(selectedClusterRef.current.id);
+                    if (isCorporate) Object.entries(expandedSidebarClustersRef.current || {}).forEach(([cid, open]) => { if (open) ids.add(cid); });
+                    ids.forEach(cid => { if (!(qdeviceSeenRef.current[cid] || {}).refused) fetchQdevice(cid); });
+                };
+                round();
+                const iv = setInterval(round, 30000);
+                return () => clearInterval(iv);
+            }, [selectedCluster?.id, expandedSidebarClusters, isCorporate, clusters.length]);
+
             const fetchClusterNetworks = async (clusterId) => {
                 setLoadingNetworks(true);
                 try {
@@ -17291,7 +17362,10 @@
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Server className="w-3 h-3" />{selectedCluster.display_name || selectedCluster.name}</span></>
                                         )}
                                         {activeTab && selectedCluster && (
-                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); }}>{t(activeTab)}</span></>
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t(activeTab)}</span></>
+                                        )}
+                                        {selectedSidebarQdevice && activeTab === 'overview' && (
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current" data-qdevice-crumb=""><Icons.Scale className="w-3 h-3" />{t('qdeviceTitle')}</span></>
                                         )}
                                         {selectedSidebarVm && activeTab === 'resources' && (
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Monitor className="w-3 h-3" />{selectedSidebarVm.name || `VM ${selectedSidebarVm.vmid}`}</span></>
@@ -18601,6 +18675,13 @@
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
                                             />
+                                            ) : isCorporate && selectedSidebarQdevice ? (
+                                            <QdeviceDetail
+                                                corporate
+                                                q={qdeviceByCluster[selectedSidebarQdevice]}
+                                                clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
+                                                onClose={() => setSelectedSidebarQdevice(null)}
+                                            />
                                             ) : (
                                             <div className={isCorporate ? 'space-y-3' : 'grid grid-cols-1 xl:grid-cols-3 gap-6'}>
                                                 {/* LW: Mar 2026 - content header strip for corporate overview */}
@@ -18913,7 +18994,34 @@
                                                                     </div>
                                                                 </div>
                                                             ))}
+                                                            {/* LW Oct 2026 (#1137) - the QDevice next to the nodes, only where the cluster has one */}
+                                                            {qdeviceByCluster[selectedCluster.id]?.present && (
+                                                                <button
+                                                                    type="button"
+                                                                    data-qdevice-entry={selectedCluster.id}
+                                                                    onClick={() => setQdeviceOpen(selectedCluster.id)}
+                                                                    className="self-start text-left card-hover bg-proxmox-card border border-proxmox-border rounded-xl p-5 animate-slide-up"
+                                                                >
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className="p-2 bg-proxmox-dark rounded-lg text-gray-300">
+                                                                            <Icons.Scale />
+                                                                        </div>
+                                                                        <div className="min-w-0 flex-1">
+                                                                            <h3 className="font-semibold text-white flex items-center gap-2">{t('qdeviceTitle')} <QdeviceDot q={qdeviceByCluster[selectedCluster.id]} /></h3>
+                                                                            <p className="text-xs text-gray-400 truncate">{t('qdeviceQnetdHost')}: {qdeviceByCluster[selectedCluster.id].qnetd_host || '-'}</p>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="mt-3 text-xs text-gray-400">{qdeviceConnectedText(qdeviceByCluster[selectedCluster.id], t)}</div>
+                                                                </button>
+                                                            )}
                                                         </div>
+                                                        )}
+                                                        {!isCorporate && qdeviceOpen && (
+                                                            <QdeviceDetail
+                                                                q={qdeviceByCluster[qdeviceOpen]}
+                                                                clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
+                                                                onClose={() => setQdeviceOpen(null)}
+                                                            />
                                                         )}
                                                         {Object.keys(clusterMetrics).length === 0 && Object.keys(nodeAlerts).length === 0 && (
                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
@@ -27595,7 +27703,7 @@
                                             <select name="target_type" defaultValue={editingAlert ? editingAlert.target_type : 'cluster'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cluster">{t('entireCluster') || 'Entire Cluster'}</option>
                                                 <option value="node">{t('specificNode') || 'Specific Node'}</option>
-                                                {alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
+                                                {alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && alertMetricSel !== 'qdevice' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
                                             </select>
                                         </div>
                                         <div>
@@ -27625,6 +27733,7 @@
                                                 <option value="zfs_health">{t('zfsAlertTitle')}</option>
                                                 <option value="clock_drift">{t('clockDriftTitle')}</option>
                                                 <option value="restart_loop">{t('restartLoopTitle')}</option>
+                                                <option value="qdevice">{t('qdeviceAlertTitle')}</option>
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -27640,6 +27749,7 @@
                                                     : alertMetricSel === 'zfs_health' ? t('zfsAlertHelp')
                                                     : alertMetricSel === 'clock_drift' ? t('clockDriftHelp')
                                                     : alertMetricSel === 'restart_loop' ? t('restartLoopHelp')
+                                                    : alertMetricSel === 'qdevice' ? t('qdeviceAlertHelp')
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>

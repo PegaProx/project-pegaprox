@@ -429,7 +429,8 @@ def test_runtime_the_dialog_asks_for_what_a_zfs_rule_needs(open_app):
     _shot(page, 'modern_alerts_dialog_zfs.png')
     page.locator('form button[type="submit"]').click()
     assert _wait_for_call(app, ('POST', '/api/clusters/c1/alerts'))
-    body = app.server.bodies['/api/clusters/c1/alerts'][-1]
+    # the list is read again on the same path right after, with no body
+    body = [b for b in app.server.bodies['/api/clusters/c1/alerts'] if b][-1]
     for k, v in {'name': 'Pools', 'metric': 'zfs_health', 'operator': 'event', 'threshold': 1,
                  'target_type': 'node', 'target_id': 'pve1', 'notify_resolved': True}.items():
         assert body.get(k) == v, (k, body)

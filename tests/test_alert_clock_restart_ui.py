@@ -96,9 +96,10 @@ def test_every_class_is_in_the_static_tailwind_build():
 
 def test_a_clock_rule_offers_no_guest_target():
     dash = _read('web', 'src', 'dashboard.js')
+    # the QDevice rule (#1137) is a node rule as well and sits in the same condition
     assert ("{alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && "
-            "<option value=\"vm\">") in dash
-    assert "'zfs_health', 'clock_drift', 'restart_loop'];" in dash
+            "alertMetricSel !== 'qdevice' && <option value=\"vm\">") in dash
+    assert "'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];" in dash
     assert "payload.restart_window_minutes = parseInt(form.restart_window_minutes.value)" in dash
 
 
@@ -220,7 +221,8 @@ def test_runtime_the_dialog_asks_for_what_a_clock_rule_needs(open_app):
     _shot(page, 'modern_alerts_dialog_clock.png')
     page.locator('form button[type="submit"]').click()
     assert _wait_for_call(app, ('POST', '/api/clusters/c1/alerts'))
-    body = app.server.bodies['/api/clusters/c1/alerts'][-1]
+    # the list is read again on the same path right after, with no body
+    body = [b for b in app.server.bodies['/api/clusters/c1/alerts'] if b][-1]
     for k, v in {'name': 'Clocks', 'metric': 'clock_drift', 'operator': 'event', 'threshold': 5,
                  'target_type': 'node', 'target_id': 'pve1', 'notify_resolved': True}.items():
         assert body.get(k) == v, (k, body)
@@ -245,7 +247,7 @@ def test_runtime_the_dialog_asks_for_what_a_restart_rule_needs(open_app):
     _shot(page, 'corporate_alerts_dialog_restart.png')
     page.locator('form button[type="submit"]').click()
     assert _wait_for_call(app, ('POST', '/api/clusters/c1/alerts'))
-    body = app.server.bodies['/api/clusters/c1/alerts'][-1]
+    body = [b for b in app.server.bodies['/api/clusters/c1/alerts'] if b][-1]
     for k, v in {'metric': 'restart_loop', 'operator': 'event', 'threshold': 4, 'restart_window_minutes': 45,
                  'target_type': 'vm', 'target_id': '100'}.items():
         assert body.get(k) == v, (k, body)

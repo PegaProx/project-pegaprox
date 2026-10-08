@@ -1245,6 +1245,181 @@
             );
         }
 
+        // LW Oct 2026 (#1137) - the QDevice of a cluster as GET /clusters/<id>/qdevice has it: what
+        // the QDevice daemon of each node PegaProx reaches says. Shows only, on every instance; the
+        // QNetd host is no Proxmox node, there is nothing of it to act on from here.
+        function qdeviceTone(q) {
+            const answered = ((q && q.nodes) || []).filter(n => n.answered);
+            // stale: the last read failed, what is kept says nothing about now
+            if (!q || !q.present || q.stale || !answered.length) return 'none';
+            const up = answered.filter(n => n.connected).length;
+            return up === answered.length ? 'ok' : up === 0 ? 'bad' : 'warn';
+        }
+        const QDEVICE_TONES = { ok: '#60b515', warn: '#efc006', bad: '#f54f47', none: '#728b9a' };
+
+        function qdeviceConnectedText(q, t) {
+            if (q && q.stale) return t('qdeviceStale');
+            const answered = ((q && q.nodes) || []).filter(n => n.answered);
+            return t('qdeviceConnectedOf').replace('{up}', answered.filter(n => n.connected).length).replace('{n}', answered.length);
+        }
+
+        function QdeviceDot({ q }) {
+            const { t } = useTranslation();
+            const tone = qdeviceTone(q);
+            return <span data-qdevice-dot={tone} title={qdeviceConnectedText(q, t)} className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: QDEVICE_TONES[tone] }} />;
+        }
+
+        function QdeviceDetail({ q, clusterName, corporate = false, onClose }) {
+            const { t } = useTranslation();
+            const d = q && q.present ? q : null;
+            const muted = corporate ? { color: 'var(--corp-text-secondary)' } : undefined;
+            const nodeState = (n) => {
+                if (!n.asked) return { tone: 'none', text: n.online ? t('qdeviceNotAsked') : t('offline') };
+                if (!n.answered) return { tone: 'none', text: n.error ? `${t('qdeviceNoAnswer')} (${n.error})` : t('qdeviceNoAnswer') };
+                if (!n.present) return { tone: 'bad', text: t('qdeviceNoDaemon') };
+                return { tone: n.connected ? 'ok' : 'bad', text: n.state || '-' };
+            };
+            const fields = d ? [
+                ['qnetd_host', t('qdeviceQnetdHost'), d.qnetd_host],
+                ['state', t('qdeviceState'), d.state],
+                ['model', t('qdeviceModel'), d.model],
+                ['algorithm', t('qdeviceAlgorithm'), d.algorithm],
+                ['tie_breaker', t('qdeviceTieBreaker'), d.tie_breaker],
+                ['last_poll', t('qdeviceLastPoll'), d.last_poll],
+                ['echo_reply', t('qdeviceEchoReply'), d.echo_reply],
+                ['answered_by', t('qdeviceAnsweredBy'), d.answered_by],
+            ] : [];
+            const readAt = d && d.read_at ? new Date(d.read_at) : null;
+            const readText = readAt && !isNaN(readAt.getTime()) ? `${t('qdeviceReadAt')} ${readAt.toLocaleTimeString()}` : '';
+            const note = (
+                <div data-qdevice-note className={corporate ? 'flex items-start gap-2 p-2 text-[12px]' : 'flex items-start gap-2 bg-blue-500/10 border border-blue-500/30 rounded p-3 text-sm text-gray-300'}
+                    style={corporate ? { border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)' } : undefined}>
+                    <Icons.Info />
+                    <span>{t('qdeviceNote')}</span>
+                </div>
+            );
+            const staleNote = d && d.stale ? (
+                <div data-qdevice-stale="" className={corporate ? 'p-2 text-[12px]' : 'bg-yellow-500/10 border border-yellow-500/30 rounded p-3 text-sm text-yellow-300'}
+                    style={corporate ? { border: '1px solid var(--color-warning)', color: 'var(--color-warning)' } : undefined}>
+                    {t('qdeviceStale')}
+                </div>
+            ) : null;
+            const rows = ((d && d.nodes) || []).map(n => {
+                const s = nodeState(n);
+                const cell = corporate ? '' : 'p-2';
+                return (
+                    <tr key={n.node} data-qdevice-node={n.node} className={corporate ? '' : 'border-t border-proxmox-border'}>
+                        <td className={cell}>
+                            {n.node}{n.api_host && <span className="ml-2 text-xs" style={muted || { color: '#9ca3af' }}>({t('qdeviceApiHost')})</span>}
+                        </td>
+                        <td className={cell}>
+                            <span className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: QDEVICE_TONES[s.tone] }} />
+                                <span data-qdevice-node-state>{s.text}</span>
+                            </span>
+                        </td>
+                        <td className={`${cell} text-xs`} style={muted}>{n.last_poll || '-'}</td>
+                        <td className={`${cell} text-xs`} style={muted}>{n.echo_reply || '-'}</td>
+                    </tr>
+                );
+            });
+            const table = (
+                <div className="overflow-x-auto">
+                    <table className={corporate ? 'corp-datagrid' : 'w-full text-sm'}>
+                        <thead className={corporate ? '' : 'bg-proxmox-dark text-xs text-gray-400'}>
+                            <tr>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('node')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceState')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceLastPoll')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceEchoReply')}</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            );
+
+            if (corporate) return (
+                <div className="space-y-0" data-qdevice-view="">
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{ background: 'var(--corp-header-bg)' }}>
+                        <div className="flex items-center gap-2">
+                            <button onClick={onClose} className="p-1 hover:text-white" style={{ color: 'var(--corp-text-secondary)' }} title={t('backToList')}>
+                                <Icons.ChevronLeft className="w-4 h-4" />
+                            </button>
+                            <span className="flex" style={{ color: '#49afd9' }}><Icons.Scale className="w-4 h-4" /></span>
+                            <span className="text-[14px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdeviceTitle')}</span>
+                            <span className="text-[12px]" style={muted}>{clusterName}</span>
+                            <QdeviceDot q={q} />
+                        </div>
+                        <span className="text-[11px]" style={{ color: 'var(--corp-text-muted)' }}>{readText}</span>
+                    </div>
+                    <div className="p-4 space-y-4">
+                        {note}
+                        {staleNote}
+                        {!d &&<div className="text-[13px]" style={muted}>{t('qdeviceNoDaemon')}</div>}
+                        {d && (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <div style={{ border: '1px solid var(--corp-border-medium)' }}>
+                                    <div className="px-3 py-2" style={{ background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)' }}>
+                                        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdeviceTitle')}</span>
+                                    </div>
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            {fields.map(([k, label, v]) => <tr key={k} data-qdevice-field={k}><td>{label}</td><td>{v || '-'}</td></tr>)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div style={{ border: '1px solid var(--corp-border-medium)' }}>
+                                    <div className="px-3 py-2" style={{ background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)' }}>
+                                        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdevicePerNode')}</span>
+                                    </div>
+                                    {table}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+            return (
+                <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+                    <div data-qdevice-view="" className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                            <div>
+                                <h3 className="font-medium text-white flex items-center gap-2">
+                                    <Icons.Scale />
+                                    {t('qdeviceTitle')}
+                                    <QdeviceDot q={q} />
+                                </h3>
+                                <div className="text-xs text-gray-500 mt-1">{clusterName}{readText ? ` - ${readText}` : ''}</div>
+                            </div>
+                            <button onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+                            {note}
+                            {staleNote}
+                            {!d &&<div className="text-gray-400">{t('qdeviceNoDaemon')}</div>}
+                            {d && (
+                                <>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {fields.map(([k, label, v]) => (
+                                            <div key={k} data-qdevice-field={k}>
+                                                <div className="text-xs text-gray-400 mb-1">{label}</div>
+                                                <div className="text-white">{v || '-'}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div>
+                                        <div className="text-xs text-gray-400 mb-1">{t('qdevicePerNode')}</div>
+                                        {table}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
         // Node Management Modal Component
         // NS: Full node management - shell, network, disks, etc.
         // Shell tab uses xterm.js (web terminal), pretty cool
