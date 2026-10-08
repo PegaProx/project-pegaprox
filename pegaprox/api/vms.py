@@ -8527,6 +8527,16 @@ def _untagged_replica_error(job_id, vmid, node, detail):
             f"target, so tag it by hand or the job stays stuck here.")
 
 
+def _running_replica_error(vmid, node):
+    """A replica is kept stopped; one that runs is a guest in use, most likely failed over
+    by a recovery plan whose mark the run did not see (a leader gone before it reached
+    the members, #625). Nothing stops, purges or writes into it."""
+    return (f"Target VM {vmid} on {node} is running. A replica is kept stopped, so this is a "
+            f"guest in use there (failed over by a recovery plan?) - nothing was stopped, "
+            f"removed or written. Fail it back, or stop it if it really is the replica, and run "
+            f"the job again.")
+
+
 # ============================================================================
 # #174 aderumier — incremental cross-cluster replication (RBD)
 # ============================================================================
@@ -8573,20 +8583,26 @@ def _xcincr_zfs_pool(ssh, storage):
     return p or storage
 
 
-def _xcincr_vm_node(mgr, vmid):
-    """(node or None, readable): where the guest with this VMID lives. NS Oct 2026 - a list
-    that could not be read is not an empty one (#1051): read as "nobody there" it sent a
-    seed onto the VMID, and a seed replaces whatever disk carries that name."""
+def _xcincr_vm_entry(mgr, vmid):
+    """(its cluster/resources entry or None, readable) of the guest with this VMID."""
     try:
         r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/resources", params={'type': 'vm'})
         if r.status_code != 200:
             return None, False
         for x in r.json().get('data', []):
             if int(x.get('vmid', 0)) == int(vmid):
-                return x.get('node') or None, True
+                return x, True
         return None, True
     except Exception:
         return None, False
+
+
+def _xcincr_vm_node(mgr, vmid):
+    """(node or None, readable): where the guest with this VMID lives. NS Oct 2026 - a list
+    that could not be read is not an empty one (#1051): read as "nobody there" it sent a
+    seed onto the VMID, and a seed replaces whatever disk carries that name."""
+    entry, readable = _xcincr_vm_entry(mgr, vmid)
+    return ((entry or {}).get('node') or None), readable
 
 
 def _xcincr_vm_exists(mgr, vmid):
@@ -8597,13 +8613,17 @@ def _xcincr_vm_exists(mgr, vmid):
 
 def _xcincr_replica_node(target_mgr, tgt_vmid, vm_type, job_id):
     """(node, None) of the guest at the target VMID when it is THIS job's replica, (None,
-    None) when there is none, (None, error) when it is somebody else's or cannot be told."""
-    node, readable = _xcincr_vm_node(target_mgr, tgt_vmid)
+    None) when there is none, (None, error) when it is somebody else's, runs, or cannot be
+    told. The gate of both the delta and the removal before a reseed."""
+    entry, readable = _xcincr_vm_entry(target_mgr, tgt_vmid)
     if not readable:
         return None, (f"Cannot read the guests of the target cluster to check VMID {tgt_vmid} - "
                       f"refusing to write to it this run")
+    node = (entry or {}).get('node') or None
     if not node:
         return None, None
+    if entry.get('status') == 'running':
+        return None, _running_replica_error(tgt_vmid, node)
     if not _is_replica_of_job(target_mgr, node, tgt_vmid, vm_type, job_id):
         return None, (f"Target VM {tgt_vmid} on {node} is not tagged as this job's replica "
                       f"({_job_tag(job_id)} missing) - refusing to overwrite. Pick a free target VMID "
@@ -9159,6 +9179,8 @@ def _execute_replication(job):
             # A replication job's whole point is to REPLACE the old copy, so remove it here
             # before remote_migrate tries to create-from-empty (which errors on existing VMID).
             existing_target_node = None
+            existing_running = False
+            listed = False
             try:
                 tgt_res = target_mgr._api_get(
                     f"https://{target_mgr.host}:{target_mgr.api_port}/api2/json/cluster/resources",
@@ -9168,9 +9190,30 @@ def _execute_replication(job):
                     for r in tgt_res.json().get('data', []):
                         if int(r.get('vmid', 0)) == tgt_vmid:
                             existing_target_node = r.get('node')
+                            existing_running = r.get('status') == 'running'
                             break
+                    listed = True
             except Exception as e:
                 logging.warning(f"[XCREPL] Job {job_id}: target existence check failed: {e}")
+
+            if not listed:
+                # unread is not empty (#1051): a replica that runs cannot be told from none
+                target_mgr.delete_api_token(token_name)
+                _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                err_msg = (f"Cannot read the guests of the target cluster to check VMID {tgt_vmid} - "
+                           f"nothing was written this run")
+                _update_repl_status(db, job_id, 'error', err_msg)
+                logging.error(f"[XCREPL] Job {job_id}: ABORT - {err_msg}")
+                return
+
+            if existing_target_node and existing_running:
+                # never stopped and purged, tagged or not (#625)
+                target_mgr.delete_api_token(token_name)
+                _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
+                err_msg = _running_replica_error(tgt_vmid, existing_target_node)
+                _update_repl_status(db, job_id, 'error', err_msg)
+                logging.error(f"[XCREPL] Job {job_id}: ABORT - {err_msg}")
+                return
 
             if existing_target_node:
                 # MK May 2026 (#413 @blackshocks) — refuse to delete unless the existing

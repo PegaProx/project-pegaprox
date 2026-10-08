@@ -220,6 +220,8 @@ def test_failback_after_an_emergency_says_the_old_source_copy_is_in_the_way(api,
     """An emergency failover leaves the source guest; it is not dropped on its own."""
     site.db.execute("UPDATE site_recovery_vms SET failed_over = 'emergency' WHERE vmid = 100")
     monkeypatch.setattr(srw, '_target_vmid_exists', lambda mgr, vmid: mgr.cluster_id == SRC)
+    # the guest runs on the DR site, so the copy at home is the older one
+    monkeypatch.setattr(srw, '_source_vm_is_running', lambda mgr, vmid: (mgr.cluster_id == TGT, True))
     assert _admin(api, site).post('/api/site-recovery/plans/p1/failback').status_code == 200
     ev = _done(site.db, 'failback')
     err = ev['details']['100']['error']
@@ -567,9 +569,14 @@ def test_an_old_database_gets_the_columns_and_its_state_once(db):
     db._init_db()
     cols = {r[1] for r in c.execute('PRAGMA table_info(site_recovery_vms)').fetchall()}
     assert {'failed_over', 'failed_over_at'} <= cols
+    # the events are this instance's own (#625): replayed once it acts, not at the start
+    assert _state(db) == {100: '', 101: ''}
+    assert srw.replay_failover_state() == 1
     assert _state(db) == {100: 'emergency', 101: ''}
-    # a second start replays nothing: the failback the operator ran since stays
+    # once: the failback the operator ran since stays, in this process and after a start
     c.execute("UPDATE site_recovery_vms SET failed_over = '' WHERE vmid = 100")
     c.commit()
+    assert srw.replay_failover_state() is None
     db._init_db()
+    assert srw.replay_failover_state() is None
     assert _state(db) == {100: '', 101: ''}

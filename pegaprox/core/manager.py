@@ -594,7 +594,7 @@ def balancer_cooldown_secs(mgr):
 def recent_balancer_moves(mgr):
     """{vmid: when the balancer last moved it}, the cooldown table. The first look after a
     start fills it from the history: a restart used to hand the balancer a guest it had
-    moved a minute before."""
+    moved a minute before. In a group the cluster's own task list goes in as well."""
     table = mgr._vm_migration_cooldown
     cid = getattr(mgr, 'id', None)
     if isinstance(cid, str) and not getattr(mgr, '_cooldown_seeded', False):
@@ -610,7 +610,35 @@ def recent_balancer_moves(mgr):
                 table[vmid] = max(table.get(vmid, 0), ts)
         except Exception as e:
             logging.debug(f"[BAL] cooldown not read back from the history: {e}")
+    if isinstance(cid, str) and isinstance(mgr, PegaProxManager):
+        _cooldown_from_tasks(mgr, table)
     return table
+
+
+# a task list that did not answer is asked again at a later look, not sooner than this
+COOLDOWN_TASKS_RETRY = 60
+
+
+def _cooldown_from_tasks(mgr, table):
+    """#625 - migration_history is per instance: after a change of leader it holds what this
+    instance moved when it led before, not the moves of the leader before it. Those are in
+    the cluster's task list, so a process in a group (a new leader always is a new process)
+    adds the guest migrations from there at its first look - one read for the whole
+    cluster, never one per guest. A list that did not answer is asked again later."""
+    if getattr(mgr, '_cooldown_tasks_read', False) or ha.role() == ha.ROLE_STANDALONE:
+        return
+    if time.monotonic() < getattr(mgr, '_cooldown_tasks_retry', 0):
+        return
+    moved = mgr.recent_guest_migrations(time.time() - balancer_cooldown_secs(mgr))
+    if moved is None:
+        mgr._cooldown_tasks_retry = time.monotonic() + COOLDOWN_TASKS_RETRY
+        return
+    mgr._cooldown_tasks_read = True
+    for vmid, ts in moved.items():
+        table[vmid] = max(table.get(vmid, 0), ts)
+    if moved:
+        logging.info(f"[BAL] {mgr.id}: {len(moved)} guest(s) migrated within the cooldown, "
+                     f"from the cluster's task list: {', '.join(str(v) for v in sorted(moved)[:20])}")
 
 
 class UnreadList(list):
@@ -3137,6 +3165,38 @@ class PegaProxManager:
             self.logger.info(f"[AFFINITY] Completed {migrations} affinity enforcement migration(s)")
         return migrations
 
+    def recent_guest_migrations(self, since):
+        """{vmid: when it moved} of the guest migrations in the cluster's task list (qmigrate,
+        vzmigrate) that ended well at `since` or later, or run now (stamped now). One read of
+        /cluster/tasks for the whole cluster; None when it did not answer."""
+        try:
+            resp = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/cluster/tasks")
+            tasks = resp.json().get('data') if resp.status_code == 200 else None
+        except Exception as e:
+            self.logger.debug(f"[BAL] task list unreadable: {e}")
+            return None
+        if not isinstance(tasks, list):
+            return None
+        now, out = time.time(), {}
+        for task in tasks:
+            if not isinstance(task, dict) or task.get('type') not in ('qmigrate', 'vzmigrate'):
+                continue
+            try:
+                vmid = int(task.get('id'))
+                end = task.get('endtime')
+                status = str(task.get('status') or '')
+                if end is None and not status:
+                    at = now
+                elif status == 'OK' or status.startswith('WARNINGS'):
+                    at = float(end)
+                else:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if at >= since:
+                out[vmid] = max(out.get(vmid, 0), at)
+        return out
+
     def find_migration_candidate(self, source_node: str, target_node: str, exclude_vmids: list = None, include_containers: bool = None, node_status: dict = None, target_mgr=None) -> Optional[Dict]:
         """
         Find the best VM to migrate from source to target node.
@@ -3819,9 +3879,18 @@ class PegaProxManager:
             rules = [r for r in rules if not r['off']]
             if not rules and not joined:
                 return [], []
+            # #625 - the rows go in before the confirm round, and to the members with it: a
+            # leader gone after the first PUT leaves the next one the list to switch back on
+            # (_restore_suspended_ha_rules_if_due). A row of a rule that stayed on only makes
+            # that a switch-on of an enabled rule
+            names = joined + [r['rule'] for r in rules]
+            db.save_suspended_ha_rules(self.id, names, owner=owner)
+            ha.send_on('the HA rules switched off')
             if not ha.confirm_step('switching off the negative affinity rules'):
+                for name in names:
+                    if owner not in held.get(name, ()):
+                        db.remove_suspended_ha_rule(self.id, name, owners=owner)
                 return [], [r['rule'] for r in rules]
-            db.save_suspended_ha_rules(self.id, joined + [r['rule'] for r in rules], owner=owner)
             off, failed = [], []
             for r in rules:
                 try:

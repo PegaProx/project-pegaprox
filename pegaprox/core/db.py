@@ -183,6 +183,9 @@ class PegaProxDB:
     
     _instance = None
     _lock = threading.Lock()
+    # the failed_over columns came in with this process and their replay waits for it to act
+    _sr_replay_owed = False
+    _sr_replay_lock = threading.Lock()
     
     def __new__(cls):
         # singleton - only one db connection
@@ -1800,14 +1803,16 @@ class PegaProxDB:
             # MK Oct 2026 - where each guest of a plan is: '' at the source, else the kind of
             # failover that moved it ('planned' / 'emergency'). A plan can be failed over guest
             # by guest, so the plan's status alone no longer says it. A database from before
-            # gets it replayed from its failover events once.
+            # gets it replayed from its failover events once - by the instance that acts,
+            # when it may (replay_sr_failover_state): the events are per instance (#625)
             try:
                 vm_cols = [row[1] for row in cursor.execute("PRAGMA table_info(site_recovery_vms)").fetchall()]
                 if 'failed_over' not in vm_cols:
                     cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over TEXT DEFAULT ''")
                     cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_at TEXT DEFAULT ''")
-                    marked = _replay_sr_failover_state(cursor)
-                    logging.info(f"Added failed_over columns to site_recovery_vms ({marked} guest(s) failed over)")
+                    self._sr_replay_owed = True
+                    logging.info("Added failed_over columns to site_recovery_vms, their state is "
+                                 "replayed from the failover events once this instance acts")
             except Exception as e:
                 logging.error(f"Failed to add failed_over columns: {e}")
             logging.info("Ensured site_recovery tables exist")
@@ -5458,6 +5463,25 @@ class PegaProxDB:
         for tenant in tenants:
             self.save_tenant(tenant.get('id', str(uuid.uuid4())[:8]), tenant)
     
+    def replay_sr_failover_state(self):
+        """The replay the failed_over columns owe since this process added them: the marks
+        of the guests from this instance's failover events, once. Returns how many it
+        marked, None when nothing is owed.
+
+        #625 - the events are a LOCAL table, the marks a synced one. Only the instance that
+        acts runs this (background/site_recovery.py replay_failover_state); a member takes
+        the active's marks with the sync. A member's process never acts, and the one that
+        acts after its promotion is a new process that owes nothing."""
+        with self._sr_replay_lock:
+            if not self._sr_replay_owed:
+                return None
+            cursor = self.conn.cursor()
+            marked = _replay_sr_failover_state(cursor)
+            self.conn.commit()
+            self._sr_replay_owed = False
+        logging.info(f"site_recovery_vms: {marked} guest(s) failed over, replayed from the failover events")
+        return marked
+
     # Generic query methods for custom tables like scripts
     def execute(self, sql: str, params: tuple = ()):
         """Execute SQL statement (CREATE, INSERT, UPDATE, DELETE)"""
