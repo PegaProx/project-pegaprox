@@ -1828,16 +1828,25 @@ def browse_backup_files(cluster_id, node, vm_type, vmid):
     from pegaprox.utils.rbac import acts_as_admin
     _authz_user = build_authz_user(request.session.get('user', ''), request.session)
     if not acts_as_admin(_authz_user):
-        _sm = re.search(r'/(?:vm|ct)/(\d+)/', volid) or re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
-        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+        # Strict PBS volid parse: storage:(vm|ct)/VMID/snapshot — no extra segments.
+        # Derives both vmid and container type from the explicit type field, not substrings.
+        _volid_path = volid.split(':', 1)[1] if ':' in volid else ''
+        _m = re.fullmatch(r'(vm|ct)/(\d+)/[^/]+', _volid_path)
+        if _m is None:
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+        _src_vmid = int(_m.group(2))
+        _src_is_lxc = _m.group(1) == 'ct'
+        if not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                   'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
             return jsonify({'error': 'Permission denied for source backup'}), 403
 
     if ':' not in volid:
         return jsonify({'error': 'Invalid volid format (expected storage:path)'}), 400
     storage = volid.split(':')[0]
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return jsonify({'error': 'Invalid node name'}), 400
+    if not _STORAGE_ID_RE.fullmatch(storage):
+        return jsonify({'error': 'Invalid storage id'}), 400
 
     # PVE's file-restore/list API only works with PBS (Proxmox Backup Server) backups.
     # vzdump VMA archives (QEMU) and vzdump tar archives (LXC) stored on local/dir/NFS
@@ -1934,16 +1943,25 @@ def restore_backup_file(cluster_id, node, vm_type, vmid):
     from pegaprox.utils.rbac import acts_as_admin
     _authz_user = build_authz_user(request.session.get('user', ''), request.session)
     if not acts_as_admin(_authz_user):
-        _sm = re.search(r'/(?:vm|ct)/(\d+)/', volid) or re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
-        if _src_vmid is None or not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+        # Strict PBS volid parse: storage:(vm|ct)/VMID/snapshot — no extra segments.
+        # Derives both vmid and container type from the explicit type field, not substrings.
+        _volid_path = volid.split(':', 1)[1] if ':' in volid else ''
+        _m = re.fullmatch(r'(vm|ct)/(\d+)/[^/]+', _volid_path)
+        if _m is None:
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+        _src_vmid = int(_m.group(2))
+        _src_is_lxc = _m.group(1) == 'ct'
+        if not user_can_access_vm(_authz_user, cluster_id, _src_vmid,
+                                   'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
             return jsonify({'error': 'Permission denied for source backup'}), 403
 
     if ':' not in volid:
         return jsonify({'error': 'Invalid volid format (expected storage:path)'}), 400
     storage = volid.split(':')[0]
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return jsonify({'error': 'Invalid node name'}), 400
+    if not _STORAGE_ID_RE.fullmatch(storage):
+        return jsonify({'error': 'Invalid storage id'}), 400
 
     # 50 MB cap — file restore is meant for config files, not bulk data
     MAX_BYTES = 50 * 1024 * 1024
