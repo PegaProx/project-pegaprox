@@ -6,8 +6,9 @@ the witness (a one-time code with the commands for the witness host, then the wi
 and its removal) and one for the time zone the schedules run in. The members table gets the
 columns the voter config adds. A member reads all of it and changes nothing.
 
-On this release the status says auto: null and the server refuses the switch and the witness
-code with 409 HA_AUTO_NOT_SHIPPED: that is a note on the card, never an error toast. The
+A release without automatic failover says auto: null in the status and refuses the switch and
+the witness code with 409 HA_AUTO_NOT_SHIPPED: that is a note on the card, never an error toast
+(the beta badge of the release that offers it, tests/test_ha_beta_ui.py). The
 runtime tests drive the built bundle in headless Chromium against the fake server of
 test_ha_ui.py, with the stage 2 routes answering in the order of their checks in
 pegaprox/api/ha.py. They skip where Playwright is not installed.
@@ -428,6 +429,8 @@ def _value(block, key):
 
 def test_placeholders_survive_and_every_text_is_translated():
     blocks = _blocks()
+    # the badge: Beta is the same word in most of them
+    same_word = {'haAutoBeta': 'Beta'}
     for key in _used_keys():
         en = _value(blocks['en'], key)
         for lang in LANGS:
@@ -435,7 +438,7 @@ def test_placeholders_survive_and_every_text_is_translated():
             assert value.strip(), (lang, key)
             assert sorted(re.findall(r'\{\w+\}', value)) == sorted(re.findall(r'\{\w+\}', en)), (lang, key)
             assert EM_DASH not in value, (lang, key)
-            if lang != 'en':
+            if lang != 'en' and same_word.get(key) != value:
                 assert value != en, (lang, key)
 
 
