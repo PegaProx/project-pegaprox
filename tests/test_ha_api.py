@@ -374,16 +374,16 @@ def test_an_admin_reaches_every_route(ha_env, seed):
         f'/api/ha/members/{B_ID}/serve': 409,   # not the leader
         f'/api/ha/orphans/{ORPHAN}/download': 404,  # no such copy
         f'/api/ha/orphans/{ORPHAN}/dismiss': 404,
-        '/api/ha/mode': 409,                        # not offered by this release yet
+        '/api/ha/mode': 409,                        # not the leader of a group
         f'/api/ha/members/{B_ID}/readmit': 409,     # a manual group quarantines nobody
         '/api/ha/timezone': 409,                    # not the leader of a group
-        '/api/ha/witness/pairing-code': 409,        # not offered by this release yet
+        '/api/ha/witness/pairing-code': 409,        # not the leader of a group
         '/api/ha/witness/remove': 409,              # not the leader of a group
-        '/api/ha/make-leader': 409,                 # not offered by this release yet
-        '/api/ha/force-leader': 409,                # not offered by this release yet
+        '/api/ha/make-leader': 409,                 # not an automatic group
+        '/api/ha/force-leader': 409,                # not a member that follows
         f'/api/ha/members/{B_ID}/agent-vmid': 409,  # not the leader of a group
         f'/api/ha/members/{B_ID}/site': 409,        # not the leader of a group
-        f'/api/ha/members/{B_ID}/vote': 409,        # not offered by this release yet
+        f'/api/ha/members/{B_ID}/vote': 409,        # not the leader of a group
     }
     for method, path, body in ADMIN_ROUTES:
         r = _send(c, method, path, body)
@@ -421,8 +421,13 @@ def test_peer_routes_want_the_peer_header(ha_env):
 
     r = _peer(api, 'GET', '/api/ha/peer/status', GOOD)
     assert r.status_code == 200
-    assert r.get_json() == {'instance_id': A_ID, 'role': 'active', 'epoch': 2, 'group': 1,
-                            'serving': False}
+    # this release offers automatic failover: what the watch reads about it comes along,
+    # and nothing else (the wall clock moved on between the two reads)
+    said, lease = r.get_json(), ha.peer_lease_status()
+    assert abs(said.pop('wall') - lease.pop('wall')) < 5
+    assert said == dict({'instance_id': A_ID, 'role': 'active', 'epoch': 2, 'group': 1,
+                         'serving': False}, **lease)
+    assert said['mode'] == 'manual'
     assert _peer(api, 'GET', '/api/ha/peer/snapshot', GOOD).status_code == 200
     r = _peer(api, 'POST', '/api/ha/peer/step-down', GOOD, json={'epoch': 1})
     assert r.status_code == 200 and r.get_json()['stepped_down'] is False
@@ -663,7 +668,18 @@ def test_status_does_not_show_the_secrets(ha_env, seed):
     text = admin.get('/api/ha/status').get_data(as_text=True)
     assert json.loads(text)['peer']['instance_id'] == B_ID
     assert 'y' * 43 not in text and ha._hash_secret(PEER_SECRET) not in text
-    assert 'secret' not in text
+
+    # no field named after one, however deep; the checks of automatic failover may say
+    # the word in a sentence (a member that still signs by the secret of an old pairing)
+    def names(value):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                yield k
+                yield from names(v)
+        elif isinstance(value, list):
+            for v in value:
+                yield from names(v)
+    assert not [k for k in names(json.loads(text)) if 'secret' in k.lower()]
 
 
 # --- join -------------------------------------------------------------------------
@@ -866,8 +882,10 @@ def test_promote_goes_ahead_when_the_old_active_is_gone(ha_env, seed, monkeypatc
     _wire_to(ha_env, monkeypatch, str(ha_env.tmp / 'gone.json'), down=True)
     r = admin.post('/api/ha/promote', json={'confirm': 'PROMOTE', 'user_password': ADMIN_PW})
     assert r.status_code == 200, r.data
-    # the sync first finds nobody, which is the failover this is for
+    # the sync first finds nobody, which is the failover this is for; then the members are
+    # asked whether the group fails over automatically (nobody answers that either)
     assert ha_env.calls == [('GET', ACTIVE_URL, '/api/ha/peer/snapshot'),
+                            ('GET', ACTIVE_URL, '/api/ha/peer/status'),
                             ('POST', ACTIVE_URL, '/api/ha/peer/step-down')]
     assert ha.role() == 'active' and ha.epoch() == 3
     assert ha_env.restarts == ['promoted to active']

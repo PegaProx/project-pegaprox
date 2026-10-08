@@ -457,12 +457,12 @@ def test_the_housekeeping_runs_nothing_until_automatic_mode_ships(auto, seed, mo
     assert auto.g.calls == [] and auto.state('a')['members'][IDS['b']]['fingerprint'] == ''
 
 
-def test_the_pin_announce_takes_nothing_until_automatic_mode_ships(group, seed):
+def test_the_pin_announce_takes_nothing_where_automatic_mode_does_not_ship(group, seed, monkeypatch):
     """Its sender is part of automatic failover and switched off with it: a call to the
     receiving half changes no pin that the pairing took, on the active or a standby."""
+    monkeypatch.setattr(hv, 'AUTO_MODE_SHIPPED', False)
     g = group
     _built(g, seed, 'bc')
-    assert hv.AUTO_MODE_SHIPPED is False
     before = {n: g.file(n) for n in 'ac'}
     for frm, to in (('b', 'a'), ('b', 'c'), ('a', 'c')):
         raw = g.ha._wire_body({'fingerprint': FP1})

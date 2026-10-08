@@ -79,7 +79,7 @@ config/ha_orphans first. See "config version" further down.
 A state file from before the groups holds a single peer. It reads as a group of two
 (_from_pair_format), and both sides keep talking without pairing again.
 
-Automatic failover (stage 2, off until ha_vote.AUTO_MODE_SHIPPED): a group of three
+Automatic failover (stage 2, a beta behind ha_vote.AUTO_MODE_SHIPPED): a group of three
 votes or more can elect its leader by majority instead. The leader then holds a lease
 its members renew, acts only while it holds it, and a member takes over by itself once
 the lease of a lost leader ran out. The rules are in ha_vote.py; the section
@@ -7315,7 +7315,7 @@ def banner():
 # the one the group follows) and acting_process() (did this process come up to act).
 #
 # A group runs in manual mode until an admin switches it (switch_auto_on), and the
-# server refuses that while ha_vote.AUTO_MODE_SHIPPED is off. Until then nothing here
+# server refuses that while ha_vote.AUTO_MODE_SHIPPED is off. With it off nothing here
 # runs, answers or shows: no loop, no call, nothing more in a status answer.
 
 AUTO_MODE_ERROR = ('This group fails over automatically: its members elect the leader, and '

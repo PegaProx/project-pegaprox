@@ -9,8 +9,9 @@ findings the switch goes by are the ones the panel shows (auto_findings, split_s
 Every signed-in user hears when the group has no leader, when one is taking over and,
 for ten minutes, that the leader changed.
 
-The group is the one of tests/_ha_lease_harness.py; automatic mode is switched on by
-monkeypatch there, the server still refuses it (ha_vote.AUTO_MODE_SHIPPED).
+The group is the one of tests/_ha_lease_harness.py, with automatic mode offered as this
+release ships it; a test that sets ha_vote.AUTO_MODE_SHIPPED off checks what a server
+without it answers.
 
 MK Oct 2026 (#625)
 """

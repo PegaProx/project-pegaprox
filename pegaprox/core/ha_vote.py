@@ -54,8 +54,8 @@ nor requests: a Node reads the time from the clock it is handed, sends through t
 transport it is handed and writes its state through the store it is handed. ha.py
 drives it (its section "automatic failover"); tests/test_ha_vote_sim.py drives it in a
 simulator with a clock per member, directed cuts, pauses and restarts.
-AUTO_MODE_SHIPPED keeps automatic mode off until the confirm sites, the cluster claim
-and the transfer routes are in.
+AUTO_MODE_SHIPPED says whether this release offers automatic mode at all; it ships as a
+beta, every group still starts in manual mode.
 
 MK Oct 2026 (#625)
 """
@@ -65,9 +65,13 @@ import json
 import math
 import time
 
-# Automatic mode is refused until the confirm sites, the cluster claim and Make leader
-# are in (slices S4, S6 and S7). Every group runs in manual mode until then.
-AUTO_MODE_SHIPPED = False
+# Automatic failover ships as a beta (owner decision 08.10.2026, after the lab re-test).
+# Manual mode stays the default of every group, new or updated: switching to automatic
+# is a step the admin takes on the HA page of the leader, and the way back to manual is
+# always open. Set to False, the server refuses the switch, the vote and the renewal
+# the way the releases before it did.
+AUTO_MODE_SHIPPED = True
+# what a server that refuses it answers (older releases, and tests of that path)
 NOT_SHIPPED_ERROR = 'Automatic failover is not available in this release yet'
 
 MODE_MANUAL = 'manual'

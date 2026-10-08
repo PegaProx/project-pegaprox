@@ -181,8 +181,12 @@ def test_body_limits():
     assert hv.body_error(body(lease_s=121)) == 'lease_s'
 
 
-def test_automatic_mode_cannot_be_switched_on_yet():
-    assert hv.AUTO_MODE_SHIPPED is False
+def test_automatic_mode_ships_as_a_beta():
+    assert hv.AUTO_MODE_SHIPPED is True
+
+
+def test_a_release_without_it_cannot_switch_it_on(monkeypatch):
+    monkeypatch.setattr(hv, 'AUTO_MODE_SHIPPED', False)
     box = Box('a', genesis(mode=hv.MODE_MANUAL), role=hv.ROLE_ACTIVE, voted_for=None)
     assert box.node.switch_on() == 'NOT_SHIPPED'
     assert box.node.view.mode == hv.MODE_MANUAL and not box.store.saves
