@@ -175,6 +175,9 @@ _HEALTH_FAMILIES = (
     ('pegaprox_guest_tag_info', 'gauge',
      'One series per tag of a VM or LXC container (Proxmox and PegaProx tags, lower case); '
      'join it on cluster_id and vmid'),
+    ('pegaprox_cluster_qdevice_connected', 'gauge',
+     '1 if the QDevice daemon of the node is connected to the QNetd host, 0 if it is not or runs '
+     'none; from the last QDevice read of the UI or the alert rule, a scrape never reads'),
 )
 
 
@@ -409,6 +412,20 @@ def _put_node_health(fam, base, mgr, names, clock, pressure):
             _put(fam, 'pegaprox_node_power_watts', _round_num(watts, places=1), labels)
         if pressure and name in pressure['nodes']:
             _put_pressure(fam, 'node', pressure['nodes'][name], labels)
+
+
+def _put_qdevice(fam, base, cid, now):
+    """Per node that answered the last QDevice read (core/qdevice.py), kept there for the
+    QDevice view and the alert rule. A node that was not asked or did not answer has no
+    series, and neither has a cluster without a QDevice."""
+    from pegaprox.core import qdevice
+    v = qdevice.cached(cid, now)
+    if v is None or not (v['present'] or v.get('seen')):
+        return
+    for r in v['nodes']:
+        if r['answered']:
+            _put(fam, 'pegaprox_cluster_qdevice_connected', 1 if r['connected'] else 0,
+                 {**base, 'node': r['node']})
 
 
 def _guest_tags(cid, vms):
@@ -742,6 +759,11 @@ def prometheus_metrics():
             _put(fam, 'pegaprox_cluster_source_up', 1 if pressure is not None and not pressure['failed'] else 0,
                  {**base, 'source': 'node_pressure'})
         _put_node_health(fam, base, mgr, node_names, clock, pressure)
+        if ctype == 'proxmox':
+            try:
+                _put_qdevice(fam, base, cid, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} qdevice failed: {e}")
 
         # VM counts
         try:

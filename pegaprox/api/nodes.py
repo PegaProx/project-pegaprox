@@ -182,6 +182,36 @@ def get_node_cluster_health_api(cluster_id, node):
     return jsonify(result)
 
 
+# MK Oct 2026 (#1137) - the QDevice as the QDevice daemons of the nodes report it
+# (core/qdevice.py). The QNetd host is no node of the cluster: its connection state and
+# answer times are all there is of it. Cluster infrastructure, so no pool or guest grant
+# reaches it.
+@bp.route('/api/clusters/<cluster_id>/qdevice', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_qdevice_api(cluster_id):
+    """The QDevice of a Proxmox VE cluster and the state of the QDevice daemon on each node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'present': False})   # an XCP-ng pool has no corosync
+    if not getattr(mgr, 'is_connected', False):
+        return jsonify({'error': 'The cluster is not connected'}), 503
+    from pegaprox.core import qdevice
+    view = qdevice.view(cluster_id, mgr)
+    if view is None:
+        return jsonify({'error': 'The cluster did not answer'}), 503
+    if not view['present'] and not any(r['answered'] for r in view['nodes']):
+        return jsonify({'error': 'No node answered',
+                        'nodes': [{'node': r['node'], 'error': r['error']} for r in view['nodes'] if r['asked']]}), 503
+    return jsonify(qdevice.public(view))
+
+
 # MK May 2026 — lm-sensors readings (CPU temp, fan rpm, voltages).
 # Graceful on hosts without lm-sensors installed (returns error string the
 # UI can show as "not available").

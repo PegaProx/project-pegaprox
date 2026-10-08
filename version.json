@@ -139,6 +139,7 @@
     "pegaprox/core/keystore.py",
     "pegaprox/core/manager.py",
     "pegaprox/core/pbs.py",
+    "pegaprox/core/qdevice.py",
     "pegaprox/core/redfish.py",
     "pegaprox/core/v2p.py",
     "pegaprox/core/vmware.py",

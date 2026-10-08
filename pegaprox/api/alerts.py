@@ -427,7 +427,7 @@ def delete_cluster_alert(cluster_id, alert_id):
 
 
 # incidents about a node itself, not about anything on it a confined caller may see
-_NODE_ONLY_METRICS = ('zfs_health', 'clock_drift')
+_NODE_ONLY_METRICS = ('zfs_health', 'clock_drift', 'qdevice')
 
 
 @bp.route('/api/clusters/<cluster_id>/active-alerts', methods=['GET'])
@@ -452,8 +452,8 @@ def get_active_alerts(cluster_id):
         incidents = [dict(zip(_q, r)) for r in rows]
         _ok = _alert_scoper(cluster_id)
         if _ok is not None:
-            # MK Oct 2026 - a ZFS pool is storage of a node, and a node's clock is the node's:
-            # a pool or guest grant reaches neither
+            # MK Oct 2026 - a ZFS pool is storage of a node, and a node's clock and QDevice
+            # daemon are the node's: a pool or guest grant reaches none of them
             incidents = [i for i in incidents if i.get('metric') not in _NODE_ONLY_METRICS
                          and (i.get('target_type') != 'vm' or _ok(i.get('target_id')))]
         mutes = alert_events.active_mutes(cluster_id)
@@ -529,7 +529,7 @@ def list_alert_mutes(cluster_id):
                     if a.get('target_type') == 'vm'}
 
         def _visible(m):
-            if str(m.get('object_key') or '').startswith(('zfs:', 'clock:')):
+            if str(m.get('object_key') or '').startswith(('zfs:', 'clock:', 'qdevice:')):
                 return False
             vmid = alert_events.object_vmid(m.get('object_key'))
             if vmid is not None and not _ok(vmid):

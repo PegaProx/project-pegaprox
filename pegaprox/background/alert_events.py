@@ -2,7 +2,8 @@
 """
 PegaProx Event Alerts - Layer 7
 Failed Proxmox tasks, Ceph health, replication, stale snapshots, guests without a
-backup job, ZFS pools in trouble, node clocks that drift and guests in a restart loop.
+backup job, ZFS pools in trouble, node clocks that drift, guests in a restart loop and
+a QDevice that is not connected.
 
 The metric rules in alerts.py compare a number on every tick and send again after each
 cooldown for as long as it stays over the line. The rules here watch a condition: one
@@ -27,6 +28,8 @@ What it reads, per cluster that has such a rule:
     exporter (api/metrics_exporter.py), whichever asked last
   - restart loops need no read of their own: the start and reboot tasks of the task list
     above, kept per guest for RESTART_WINDOW_MAX minutes
+  - /cluster/status and /cluster/config/qdevice of each node that can be asked, at most
+    every qdevice.FRESH seconds, shared with the QDevice view of the UI (core/qdevice.py)
 Nothing here asks a cluster per guest on every tick. Only the active instance runs any
 of it (alerts.alert_check_loop, #625); active_alerts is a table of its own, so after a
 takeover a condition that still holds is said once more by the new active.
@@ -43,6 +46,7 @@ from datetime import datetime
 from urllib.parse import quote
 
 from pegaprox.globals import cluster_managers
+from pegaprox.core import qdevice
 from pegaprox.core.db import get_db
 from pegaprox.utils.concurrent import run_concurrent, run_per_node
 from pegaprox.utils import zpool
@@ -54,7 +58,9 @@ except ImportError:  # python < 3.11
 
 
 EVENT_METRICS = ('task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage',
-                 'zfs_health', 'clock_drift', 'restart_loop')
+                 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice')
+# the rules that have no number to set; a threshold sent along is ignored
+_NO_THRESHOLD = ('task_failed', 'qdevice')
 
 # the fields a matching decision rests on; a rule whose one of these changed starts over
 MATCH_FIELDS = ('metric', 'target_type', 'target_id', 'threshold', 'task_type', 'task_status',
@@ -109,6 +115,7 @@ _THRESHOLDS = {
     'zfs_health': (0, 0, 1),            # 0: not ONLINE or with errors, 1: not ONLINE only
     'clock_drift': (2, 1, 3600),        # seconds a node's clock may be off ours
     'restart_loop': (3, 2, 100),        # starts within restart_window_minutes
+    'qdevice': (0, 0, 0),               # nothing to set: connected or not
 }
 _SNAPSHOT_TASKS = frozenset(('qmsnapshot', 'qmdelsnapshot', 'qmrollback',
                              'vzsnapshot', 'vzdelsnapshot', 'vzrollback'))
@@ -257,7 +264,7 @@ def normalize_rule(rule, data, prev_metric=None):
     rule['operator'] = 'event'
     rule.setdefault('notify_resolved', True)
     default, lo, hi = _THRESHOLDS[metric]
-    if 'threshold' in data and metric != 'task_failed':
+    if 'threshold' in data and metric not in _NO_THRESHOLD:
         n = _int_in(data.get('threshold'), lo, hi)
         if n is None:
             return f'threshold must be a whole number from {lo} to {hi} for {metric}'
@@ -308,6 +315,8 @@ def normalize_rule(rule, data, prev_metric=None):
         return 'a ZFS rule watches the pools of the cluster or of one node'
     if ttype == 'vm' and metric == 'clock_drift':
         return 'a clock rule watches the nodes of the cluster or one node'
+    if ttype == 'vm' and metric == 'qdevice':
+        return 'a QDevice rule watches the nodes of the cluster or one node'
     if ttype == 'vm' and not str(tid or '').isdigit():
         return 'a VM target needs its numeric ID'
     if ttype == 'node' and not (isinstance(tid, str) and tid.strip()):
@@ -970,6 +979,17 @@ def _read_cluster(cid, mgr, kinds, now):
     if 'clock_drift' in kinds:
         hit = _clock.get(cid)
         seen['clock_due'] = hit is None or not 0 <= now - hit['at'] < CLOCK_EVERY
+    if 'qdevice' in kinds:
+        seen['qdevice'] = v = qdevice.view(cid, mgr, now=now)
+        if v is None:
+            _note(cid, 'qdevice', False, 'node list unreadable')
+        else:
+            rows = v['nodes']
+            asked = [r for r in rows if r['asked']]
+            _note(cid, 'qdevice', all(r['answered'] for r in asked),
+                  f"{sum(1 for r in asked if r['answered'])} of {len(asked)} node(s) asked answered, "
+                  f"{len(rows) - len(asked)} not reachable on an address of their own"
+                  + (f", {sum(1 for r in rows if r['connected'])} connected" if v['present'] else ', no QDevice'))
     return seen
 
 
@@ -1327,6 +1347,58 @@ def _eval_clock(rule, seen, cname):
     return p
 
 
+def _eval_qdevice(rule, seen):
+    """One incident per node whose QDevice daemon is not connected to the QNetd host, or
+    that answers without a daemon while the cluster has a QDevice; closed once it is
+    connected again. A node that was not asked or did not answer stays as it is. Every
+    node asked answering without a daemon is a QDevice taken out of the cluster: what was
+    open closes without a word. Without a QDevice seen since this process started, an
+    open incident is left alone too - after a restart it is the only trace of one."""
+    v = seen.get('qdevice')
+    if v is None:
+        return None
+    p = _Pass()
+    p.known = {f"qdevice:{r['node']}" for r in v['nodes']}
+    if v.get('removed'):
+        p.known = set()
+        return p
+    if not v['present'] and not v.get('seen'):
+        return p
+    answered = [r for r in v['nodes'] if r['answered']]
+    qnetd = v.get('qnetd_host') or 'the QNetd host'
+    # two nodes or more and none of them connected: likelier the QNetd host or the way to it
+    lost = len(answered) >= 2 and not any(r['connected'] for r in answered)
+    for r in answered:
+        node = r['node']
+        if not _target_ok(rule, node, None):
+            continue
+        obj = f"qdevice:{node}"
+        if r['connected']:
+            p.fine[obj] = (f"Resolved: QDevice on {node}",
+                           f"The QDevice daemon of node {node} is connected to {qnetd} again.")
+            continue
+        if r['present']:
+            state = r.get('state') or 'unknown'
+            name = f"QDevice not connected on {node}"
+            message = f"The QDevice daemon of node {node} reports {state} for {qnetd}."
+        else:
+            state = 'no daemon'
+            name = f"QDevice daemon not answering on {node}"
+            message = (f"Node {node} answers without a QDevice: its corosync-qdevice daemon is not "
+                       f"running, so it does not reach {qnetd}.")
+        if lost:
+            message += (f" None of the {len(answered)} nodes PegaProx asked is connected: the cluster "
+                        f"may have lost the vote of the QDevice.")
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'node', 'target_id': node, 'target_name': node,
+            'target_key': f"node:{node}", 'name': name, 'message': message,
+            'value': 0.0, 'display': state, 'severity': 'critical' if lost else 'warning',
+            'details': [('Node', node), ('State', state), ('QNetd host', qnetd),
+                        ('Last poll', r.get('last_poll') or '-')],
+        }
+    return p
+
+
 def _eval_restarts(rule, seen, cname, cid, now):
     """One incident per guest that started `threshold` times within the window; it closes
     once the guest stayed quiet for a whole window, so a loop is said once, not on every
@@ -1448,7 +1520,7 @@ def _target_key_of(obj):
     vmid = object_vmid(obj)
     if vmid is not None:
         return f"vm:{vmid}"
-    if obj.startswith(('task:', 'zfs:', 'clock:')):
+    if obj.startswith(('task:', 'zfs:', 'clock:', 'qdevice:')):
         return f"node:{obj.split(':')[1]}"
     return ''
 
@@ -1577,6 +1649,8 @@ def _evaluate(A, rule, cid, seen, mutes, settings, now):
             p = _eval_clock(rule, seen, cname)
         elif metric == 'restart_loop':
             p = _eval_restarts(rule, seen, cname, cid, now)
+        elif metric == 'qdevice':
+            p = _eval_qdevice(rule, seen)
         else:
             p = _eval_snapshots(rule, seen, cname, cid, now)
     except ValueError as e:

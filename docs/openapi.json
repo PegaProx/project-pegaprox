@@ -16013,6 +16013,51 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/qdevice": {
+      "get": {
+        "operationId": "nodes.get_cluster_qdevice_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The QDevice of a Proxmox VE cluster and the state of the QDevice daemon on each node",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/sensors": {
       "get": {
         "operationId": "nodes.get_node_sensors_api_get",
@@ -47311,7 +47356,7 @@
           }
         },
         "summary": "A write a standby would have refused, handed to us to run as the user it names.",
-        "description": "The body is {method, path, query, content_type, body_b64, user, sign_in,\nclient_ip}, the browser's request as the standby took it, and the peer signature\ncovers it like the body of every peer call: neither the request nor the user can\nchange on the way. Only on the active (409 anywhere else, which also stops a write\nthat would travel on; 503 HA_NO_LEASE on a leader without its lease, said to a\nmember before the body is read, and 503 HA_TRANSFER for a write while it hands its\nlead on), only from a member that signs its calls, only a\nwrite under\n/api/ and never under /api/ha/ - or a GET of ha.FORWARDED_READS, the progress of a\njob or a view only our tables hold, or of a plugin route that opens no console -\nand only for an account that exists and is enabled here. sign_in is the\nstandby's digest of the account's password (ha.sign_in_digest): 403\nHA_FORWARD_STALE_SIGN_IN when ours differs, the password changed here since.\nThe request then goes through our routing and every check on the way, CSRF and\nthe IP list included, under a session for that user that holds for this one\nrequest: role, tenant and permissions are ours, whatever the standby thinks of\nthem. Its audit lines name the standby and carry the client address the standby\nsaw. The answer is {status, headers, body_b64}.",
+        "description": "The body is {method, path, query, content_type, body_b64, user, sign_in,\nclient_ip}, the browser's request as the standby took it, and the peer signature\ncovers it like the body of every peer call: neither the request nor the user can\nchange on the way. Only on the active (409 anywhere else, which also stops a write\nthat would travel on; 503 HA_NO_LEASE on a leader without its lease or with less of\nit left than ha_vote.WRITE_LEASE_MARGIN, said to a member before the body is read,\nand 503 HA_TRANSFER for a write while it hands its lead on), only from a member that\nsigns its calls, only a write under\n/api/ and never under /api/ha/ - or a GET of ha.FORWARDED_READS, the progress of a\njob or a view only our tables hold, or of a plugin route that opens no console -\nand only for an account that exists and is enabled here. sign_in is the\nstandby's digest of the account's password (ha.sign_in_digest): 403\nHA_FORWARD_STALE_SIGN_IN when ours differs, the password changed here since.\nThe request then goes through our routing and every check on the way, CSRF and\nthe IP list included, under a session for that user that holds for this one\nrequest: role, tenant and permissions are ours, whatever the standby thinks of\nthem. Its audit lines name the standby and carry the client address the standby\nsaw. The answer is {status, headers, body_b64}.",
         "requestBody": {
           "required": false,
           "content": {
