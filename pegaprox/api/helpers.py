@@ -674,6 +674,28 @@ def require_unconfined(cluster_id):
     return None
 
 
+def node_shell_address(mgr, node):
+    """The address a shell for `node` logs in at, or None: then there is no shell.
+
+    MK Oct 2026 (#1143) - both node shells fell back to the cluster's connection host
+    when the node's own address was not found (the main port one always, its lookup
+    read an undefined port), so the shell of every node opened on that one host under
+    the clicked node's name. Only a member of the cluster resolves, through the
+    manager's own lookup; nothing stands in for it, least of all an address the
+    browser sends along.
+    """
+    if not node or not isinstance(node, str):
+        return None
+    try:
+        # an XCP-ng pool answers membership from XAPI itself, its nodes are a poll cache
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng' and node not in (mgr.nodes or {}):
+            return None
+        return mgr.member_node_ip(node) or None
+    except Exception as e:
+        logging.warning(f"[SHELL] no address for node {node!r}: {e}")
+        return None
+
+
 # NS Oct 2026 - an XCP-ng pool asks for its own xapi.vm.* permission next to the vm.* one,
 # as its power, config and migrate routes already did (#1110)
 XAPI_TWINS = {'vm.config': 'xapi.vm.config', 'vm.snapshot': 'xapi.vm.snapshot',

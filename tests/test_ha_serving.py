@@ -1008,8 +1008,9 @@ def test_the_ssh_server_pins_nothing_on_a_standby(tmp_path, monkeypatch, known_o
     pytest.importorskip('paramiko')
     pytest.importorskip('websockets')
     monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', str(tmp_path / 'known_hosts'))
+    # the node's own address, as the main app names it (#1143)
     answer = _Resp(200, {'valid': True, 'known_hosts_only': known_only,
-                         'cluster_context': {'host': '192.0.2.10', 'node_ips': {}}})
+                         'cluster_context': {'host': '192.0.2.10', 'node_ips': {'n1': '192.0.2.10'}}})
     ns, _asked = _ssh_server({'/api/ws/token/validate': answer})
     fake = _fake_paramiko(known)
     ns['paramiko'] = fake

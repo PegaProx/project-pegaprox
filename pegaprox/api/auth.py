@@ -1545,7 +1545,12 @@ def get_cluster_creds_internal(cluster_id):
             for n in nodes:
                 nname = n.get('node', '')
                 if nname:
-                    ip = mgr._get_host_ip(nname)
+                    # #1143 - not _get_host_ip, which answers the pool's own host for a
+                    # host it cannot find: the shell of that node would open there
+                    ip = mgr.member_node_ip(nname)
+                    if not ip:
+                        logging.warning(f"[CLUSTER-CREDS] no address for XCP-ng node {nname}")
+                        continue
                     node_ips[nname] = ip
                     node_ips[nname.lower()] = ip
                     logging.info(f"[CLUSTER-CREDS] XCP-ng node {nname} ip={ip}")

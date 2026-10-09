@@ -474,6 +474,9 @@ def validate_ws_token_api():
             # from the DB. Multi-node clusters where the frontend prefetched a
             # per-node IP that isn't in this set will need to re-resolve through
             # the normal cluster-creds endpoint with a session cookie.
+            # MK Oct 2026 (#1143) - except for a node shell: it has to land on the node it
+            # was opened for, and without that node's address the SSH server put it on the
+            # primary host, which is another node. Its call waits long enough for the probe.
             try:
                 from pegaprox.globals import cluster_managers
                 mgr = cluster_managers.get(requested_cluster)
@@ -488,6 +491,12 @@ def validate_ws_token_api():
                     for i, host in enumerate(fb):
                         if host:
                             node_ips[f'_fallback_{i}'] = host
+                    if (request.args.get('shell') or '') == 'node':
+                        from pegaprox.api.helpers import node_shell_address
+                        shell_node = request.args.get('node') or ''
+                        shell_ip = node_shell_address(mgr, shell_node)
+                        if shell_ip:
+                            node_ips[shell_node] = shell_ip
                     cluster_context = {
                         'host': cluster_host,
                         'node_ips': node_ips,

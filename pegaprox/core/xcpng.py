@@ -3162,6 +3162,26 @@ class XcpngManager:
         """Public wrapper - used by API layer for shell connections."""
         return self._get_host_ip(node_name)
 
+    def member_node_ip(self, node_name):
+        """Address of the pool host named node_name, None when no host has that name or
+        XAPI does not answer. Same contract as the Proxmox manager's: None means refuse.
+
+        MK Oct 2026 (#1143) - _get_host_ip answers config.host for a name it cannot
+        find, which is another host; a node shell must not open there.
+        """
+        if not node_name or not isinstance(node_name, str):
+            return None
+        api = self._api()
+        if not api:
+            return None
+        try:
+            for href in api.host.get_all():
+                if node_name in (api.host.get_hostname(href), api.host.get_name_label(href)):
+                    return api.host.get_address(href) or None
+        except Exception as e:
+            self.logger.warning(f"[NodeIP] XAPI host lookup for {node_name!r} failed: {e}")
+        return None
+
     def _ssh_connect(self, host, retries=3):
         """Open SSH connection to XCP-ng host."""
         import paramiko

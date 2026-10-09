@@ -61,33 +61,20 @@ def get_node_ip_api(cluster_id, node):
     # (never used here), which AttributeError'd BEFORE the cluster-type branch below on XCP-ng
     # (XcpngManager has no api_port) → 500 on the node-IP endpoint for XCP-ng clusters.
     cluster_host = mgr.host
-    node_ip = None
-    source = None
 
-    # NS Mar 2026: XCP-ng uses XAPI host.get_address instead of Proxmox REST
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-        try:
-            node_ip = mgr._get_host_ip(node)
-            source = 'xapi_host_address'
-        except Exception as e:
-            logging.error(f"XCP-ng get_node_ip: {e}")
-            node_ip = cluster_host
-            source = 'xcpng_fallback'
+    # MK Oct 2026 (#1143) - the node shell's own lookup, members only. _get_node_ip took any
+    # name, so a node.view caller had this server resolve it and knock on its SSH port, and
+    # XCP-ng's _get_host_ip named the pool's host as the address of a host it did not find.
+    # (NS Mar 2026: XCP-ng answers from XAPI's host.get_address, not Proxmox REST)
+    from pegaprox.api.helpers import node_shell_address
+    xcpng = getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng'
+    node_ip = node_shell_address(mgr, node)
+    if node_ip:
+        source = 'xapi_host_address' if xcpng else 'manager_get_node_ip'
     else:
-        # NS Apr 2026 (PR #324): let manager._get_node_ip do the heavy lifting
-        # (scores interfaces, filters corosync IPs out of the mgmt net, probes
-        # the SSH port). This endpoint is informational -- fall back to
-        # cluster_host only when we truly couldn't resolve anything.
-        try:
-            node_ip = mgr._get_node_ip(node)
-            if node_ip:
-                source = 'manager_get_node_ip'
-        except Exception as e:
-            logging.error(f"Error getting node IP: {e}")
-
-        if not node_ip:
-            node_ip = cluster_host
-            source = 'cluster_host_fallback'
+        # informational: the cluster host, said to be a stand-in
+        node_ip = cluster_host
+        source = 'xcpng_fallback' if xcpng else 'cluster_host_fallback'
 
     return jsonify({
         'ip': node_ip,

@@ -51,6 +51,7 @@ def _xapi_refusal(cluster_id, user, perm):
 from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immediate_update, hold_websocket
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
+from pegaprox.api.helpers import node_shell_address
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
@@ -11470,7 +11471,7 @@ async def ssh_handler(websocket):
     """SSH WebSocket handler with user credential prompt and SSH key support
     
     MK: Supports both password and SSH key authentication
-    Frontend can pre-fetch the IP and pass it as query parameter
+    The node's address comes from the main app, the page's ?ip= is not read (#1143)
     """
     path = websocket.request.path if hasattr(websocket, 'request') else websocket.path
     print(f"SSH WebSocket connection: {path}")
@@ -11480,12 +11481,6 @@ async def ssh_handler(websocket):
     query = parse_qs(parsed.query)
     ws_token = query.get('token', [None])[0]
     session_id = query.get('session', [None])[0]  # LW: backwards compat
-    prefetched_ip = query.get('ip', [None])[0]  # IP pre-fetched by frontend
-    if prefetched_ip:
-        prefetched_ip = unquote(prefetched_ip)
-        # NS Jul 2026 (CodeAnt CWE-117) — prefetched_ip is unquoted user input; strip CR/LF so
-        # it can't forge log lines (self-contained: this runs in the standalone WS subprocess).
-        print("Frontend provided IP: " + str(prefetched_ip).replace(chr(10), ' ').replace(chr(13), ' '))
 
     # NS May 2026 — accept both shell and termproxy paths.
     # termproxy: /api/clusters/<cid>/vms/<node>/<vm_type>/<vmid>/termwebsocket
@@ -11527,9 +11522,11 @@ async def ssh_handler(websocket):
         if ws_token:
             # NS Aug 2026 (Aikido pentest) — shell=node makes /validate enforce the node.shell
             # permission for this node SSH shell (the VM termproxy path deliberately omits it).
+            # MK Oct 2026 (#1143) - the token quoted too: ?token=x%26shell%3D1 came out as a
+            # shell=1 ahead of ours, and /validate reads the first one, node.shell skipped.
             validate_url = (
                 f"{PEGAPROX_URL}/api/ws/token/validate"
-                f"?token={ws_token}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}&shell=node"
+                f"?token={quote_plus(ws_token)}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}&shell=node"
             )
             print(f"Validating WS token (cluster={cluster_id}, node={node})...")
         else:
@@ -11541,7 +11538,9 @@ async def ssh_handler(websocket):
         # nosec B501 — localhost-to-PegaProx (PEGAPROX_URL = 127.0.0.1:port) with our
         # own self-signed cert. Same-host trust boundary; attacker with local
         # cert-read access already has more direct attack paths. MK 2026-06-04.
-        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=8, verify=False)
+        # MK Oct 2026 (#1143) - the token check also looks up the node's address now, which
+        # can probe the node: more time than a bare check needs.
+        r = requests.get(validate_url, cookies=cookies, headers=headers, timeout=30, verify=False)
 
         if await _refused_as_standby(websocket, r):
             return
@@ -11570,8 +11569,7 @@ async def ssh_handler(websocket):
                 ctx = payload.get('cluster_context') or {}
                 cluster_host = ctx.get('host')
                 node_ips = ctx.get('node_ips') or {}
-                node_ip = node_ips.get(node) or node_ips.get(node.lower())
-                print(f"validate→ host={cluster_host} node_ips={node_ips} resolved_node_ip={node_ip}")
+                print(f"validate→ host={cluster_host} node_ips={node_ips}")
             except Exception as e:
                 print(f"Could not parse validate payload: {e}")
 
@@ -11588,7 +11586,6 @@ async def ssh_handler(websocket):
                     creds = rc.json()
                     cluster_host = creds.get('host')
                     node_ips = creds.get('node_ips', {})
-                    node_ip = node_ips.get(node) or node_ips.get(node.lower())
             except Exception as e:
                 print(f"Could not get node IP from API: {e}")
 
@@ -11605,50 +11602,27 @@ async def ssh_handler(websocket):
         await websocket.close(1011, "Auth error")
         return
 
-    # cluster_host fallback for node_ip (single-node setups where only the host
-    # was registered).
-    if not node_ip and cluster_host:
-        node_ip = cluster_host
-        print(f"Using cluster host as fallback: {cluster_host}")
-
-    # MK May 2026 (CodeAnt CWE-918) - build the SSH allow-list. prefetched_ip from
-    # URL and user-supplied creds.host below must both be in this set; otherwise
-    # an authenticated user could turn PegaProx into an SSH jump host for any
-    # internal IP. Set comes from server-side resolution only.
-    allowed_hosts = set()
-    if cluster_host:
-        allowed_hosts.add(cluster_host)
-    allowed_hosts.update(v for v in (node_ips or {}).values() if v)
-
-    if prefetched_ip:
-        if prefetched_ip in allowed_hosts:
-            node_ip = prefetched_ip
-            print(f"Using prefetched IP (allow-list match): {node_ip}")
-        else:
-            print(f"REJECT prefetched ?ip={prefetched_ip!r} not in {sorted(allowed_hosts)}")
-            await websocket.send(json.dumps({
-                'status': 'error',
-                'message': f"Prefetched IP {prefetched_ip!r} is not a known node of cluster {cluster_id}."
-            }))
-            await websocket.close(1008, "prefetched ip not allowed")
-            return
-
-    # If we still don't have an IP, allow manual entry (but allow-list still applies)
-    allow_manual_ip = False
+    # MK Oct 2026 (#1143) - the shell logs in on the node it was opened for, at the address
+    # the main app resolved under that node's name. The connection host used to stand in
+    # when there was none, and the validate answer never named the node, so every shell on
+    # this port that the page's ?ip= did not move landed on that host under this node's
+    # name. No stand-in now, and neither ?ip= nor the dialog's host field moves the shell:
+    # the target is only ever an address the server resolved, which the CWE-918 allow-list
+    # they were checked against stood for. _fallback_0 and _default are keys of the
+    # context, no node names.
+    node_ip = None if node.startswith('_') else (node_ips.get(node) or node_ips.get(node.lower()))
     if not node_ip:
-        print(f"No IP found - allowing manual entry")
-        node_ip = ""  # Empty - user must provide
-        allow_manual_ip = True
-
-    print(f"Final node IP for {node}: {node_ip or '(manual entry required)'}")
-    print(f"Allow-list for host override: {sorted(allowed_hosts) or '(empty - no manual override permitted)'}")
+        print(f"No address for node {node} (connection host {cluster_host}) - no shell")
+        await websocket.send(json.dumps({'status': 'error', 'message': f'Could not find the address of node {node}'}))
+        await websocket.close(1008, "node address unknown")
+        return
+    print(f"Final node IP for {node}: {node_ip}")
 
     # Send need_credentials status - frontend will show login dialog
     await websocket.send(json.dumps({
         'status': 'need_credentials',
         'node': node,
         'ip': node_ip,
-        'allowManualIp': allow_manual_ip
     }))
 
     # Wait for credentials from user
@@ -11659,25 +11633,11 @@ async def ssh_handler(websocket):
         ssh_pass = creds.get('password', '')
         ssh_key = creds.get('privateKey', '')
 
-        # MK May 2026 (CodeAnt CWE-918) - host override is gated by allow_hosts.
-        # Empty set rejects all overrides (no-resolved-cluster case).
-        user_ip = creds.get('host', '').strip()
-        if user_ip:
-            if user_ip not in allowed_hosts:
-                print(f"REJECT user host override: {user_ip!r} not in {sorted(allowed_hosts)}")
-                await websocket.send(json.dumps({
-                    'status': 'error',
-                    'message': f"Host {user_ip!r} is not a known node of cluster {cluster_id}. Manual override blocked."
-                }))
-                await websocket.close(1008, "host not allowed")
-                return
-            node_ip = user_ip
-            print(f"Using user-provided IP (allow-list match): {node_ip}")
+        # #1143 - the dialog's host is shown to the user, the target stays the node's own
+        user_ip = str(creds.get('host') or '').strip()
+        if user_ip and user_ip != node_ip:
+            print(f"Ignoring host {user_ip!r} from the page, the shell of {node} opens on {node_ip}")
 
-        if not node_ip:
-            await websocket.send('{"status":"error","message":"Host/IP address required"}')
-            return
-        
         if not ssh_pass and not ssh_key:
             await websocket.send('{"status":"error","message":"Password or SSH key required"}')
             return
@@ -11887,7 +11847,7 @@ async def termproxy_handler(client_ws, query, m_term, ws_token, session_id):
         if ws_token:
             validate_url = (
                 f"{PEGAPROX_URL}/api/ws/token/validate"
-                f"?token={ws_token}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}"
+                f"?token={quote_plus(ws_token)}&cluster_id={quote_plus(cluster_id)}&node={quote_plus(node)}"
             )
         else:
             validate_url = f"{PEGAPROX_URL}/api/auth/validate"
@@ -12300,20 +12260,34 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         return
 
     # NS Feb 2026: Authentication + authorization (was missing entirely - critical security fix)
+    # MK Oct 2026 (#1143) - the WS token first, the session as fallback, as both VNC sockets
+    # do. The page only sends ?token=, so behind a reverse proxy (the one way to this route)
+    # every shell ended in "Authentication required".
+    from pegaprox.utils.realtime import validate_ws_token
+    ws_token = request.args.get('token')
     session_id = request.args.get('session')
-    if not session_id:
-        logging.error("SHELL WS: No session provided")
+    if ws_token:
+        session = validate_ws_token(ws_token)
+        if not session:
+            logging.error("SHELL WS: Invalid or expired token")
+            try:
+                ws.send('{"status":"error","message":"Invalid or expired token"}')
+            except:
+                pass
+            return
+    elif session_id:
+        session = validate_session(session_id)
+        if not session:
+            logging.error("SHELL WS: Invalid session")
+            try:
+                ws.send('{"status":"error","message":"Invalid session"}')
+            except:
+                pass
+            return
+    else:
+        logging.error("SHELL WS: No token or session provided")
         try:
             ws.send('{"status":"error","message":"Authentication required"}')
-        except:
-            pass
-        return
-
-    session = validate_session(session_id)
-    if not session:
-        logging.error("SHELL WS: Invalid session")
-        try:
-            ws.send('{"status":"error","message":"Invalid session"}')
         except:
             pass
         return
@@ -12362,8 +12336,8 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
 
     logging.info(f"SHELL WS: User {session['user']} authenticated for shell on {cluster_id}/{node}")
     # #988 - counted against the account until the request ends, the credential wait included,
-    # and hung up with its session (#1038)
-    hold_websocket(session['user'], ws, sid=session_id)
+    # and hung up with its session (#1038), the one the token was minted under
+    hold_websocket(session['user'], ws, sid=session.get('sid') if ws_token else session_id)
 
     logging.info(f"")
     logging.info(f"========================================")
@@ -12390,7 +12364,6 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
         return
     
     manager = cluster_managers[cluster_id]
-    cluster_host = manager.config.host
     
     # Get node IP address from cluster status
     logging.info(f"Step 1: Getting IP for node {node}...")
@@ -12404,27 +12377,23 @@ def node_shell_websocket_proxy(ws, cluster_id, node):
             pass
         return
     
-    node_ip = None
-    try:
-        cluster_url = f"https://{cluster_host}:{cluster_port}/api2/json/cluster/status"
-        cluster_response = manager._create_session().get(cluster_url, timeout=5)
-        if cluster_response.status_code == 200:
-            cluster_data = cluster_response.json().get('data', [])
-            for item in cluster_data:
-                if item.get('type') == 'node' and item.get('name') == node:
-                    node_ip = item.get('ip')
-                    logging.info(f"  Found node IP: {node_ip}")
-                    break
-    except Exception as e:
-        logging.error(f"  Error getting cluster status: {e}")
-    
+    # MK Oct 2026 (#1143) - the cluster/status lookup here read a cluster_port that was never
+    # set, raised, and node_ip fell back to the connection host: every shell logged in on
+    # that node while the terminal named the clicked one. The node's own address now, from
+    # the manager, and no shell without it. ?ip= and the dialog's host field pick nothing.
+    node_ip = node_shell_address(manager, node)
     if not node_ip:
-        node_ip = cluster_host
-        logging.info(f"  Using cluster host: {node_ip}")
+        logging.error(f"  No address for node {_sl(node)}, no shell")
+        try:
+            ws.send(json.dumps({'status': 'error', 'message': f'Could not find the address of node {node}'}))
+        except Exception:
+            pass
+        return
+    logging.info(f"  Found node IP: {node_ip}")
     
     # Request credentials from client
     try:
-        ws.send(f'{{"status":"need_credentials","node":"{node}","ip":"{node_ip}"}}')
+        ws.send(json.dumps({'status': 'need_credentials', 'node': node, 'ip': node_ip}))
     except Exception as e:
         logging.error(f"Failed to send need_credentials: {e}")
         return

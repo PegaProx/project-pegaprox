@@ -12915,10 +12915,21 @@ echo "AGENT_INSTALLED_OK"
             # NS Apr 2026 (PR #324): only fall back to the connected host when
             # the requested node is literally that host -- otherwise multi-node
             # clusters would silently SSH into the wrong box.
-            connected = self.host or self.config.host
-            if connected and (node_name in connected or node_name in self.config.host):
-                self.logger.debug(f"[NodeIP] {node_name} matches connected host, using {connected}")
-                return connected
+            # MK Oct 2026 (#1143) - "literally" was a substring test: pve1 matched a host
+            # named pve10.lab, and in a failover the configured host's name handed back the
+            # one connected to. The whole name or a host name's first label, and that host.
+            for h in (self.host, self.config.host):
+                bare = (h or '').strip('[]').lower()
+                if not bare:
+                    continue
+                try:
+                    ipaddress.ip_address(bare)
+                    names = {bare}
+                except ValueError:
+                    names = {bare, bare.split('.')[0]}
+                if node_name.lower() in names:
+                    self.logger.debug(f"[NodeIP] {node_name} is the host {h}, using it")
+                    return h
 
             self.logger.warning(f"[NodeIP] No reachable management IP for {node_name}")
             return None
