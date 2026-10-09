@@ -16,12 +16,13 @@
             const [showLogin, setShowLogin] = useState(false);
             const [nodeInfo, setNodeInfo] = useState({});
             const [sshPort, setSshPort] = useState(null);
+            // LW Oct 2026 (#1143) - no host here any more: the server logs in on the node's
+            // own address and ignored a typed one anyway, the dialog only shows it
             const [credentials, setCredentials] = useState({ 
                 username: 'root', 
                 password: '',
                 privateKey: '',
                 authMethod: 'password',  // 'password' or 'key'
-                host: ''  // SSH host/IP (can be edited by user)
             });
             const wsRef = useRef(null);
             const termRef = useRef(null);
@@ -46,7 +47,7 @@
                     setStatus('connecting');
                     if (termRef.current) {
                         const method = authData.privateKey ? '(SSH Key)' : '';
-                        termRef.current.write(`\r\n${t('shellConnectingAs')} ${authData.username}@${authData.host} ${method}...\r\n`);
+                        termRef.current.write(`\r\n${t('shellConnectingAs')} ${authData.username}@${authData.host || node} ${method}...\r\n`);
                     }
                     return true;
                 }
@@ -58,7 +59,7 @@
                     username: credentials.username,
                     password: credentials.authMethod === 'password' ? credentials.password : '',
                     privateKey: credentials.authMethod === 'key' ? credentials.privateKey : '',
-                    host: credentials.host || nodeInfo.ip,
+                    host: nodeInfo.ip || '',
                 };
                 // If WS already open, send now. Otherwise queue and let the
                 // onopen handler flush as soon as the handshake completes.
@@ -82,6 +83,8 @@
                 let ws = null;
                 let fitAddon = null;
                 let cleanup = false;
+                let handleResize = null;
+                let boxWatch = null;
 
                 const loadTerminal = async () => {
                     try {
@@ -167,7 +170,8 @@
                         fitAddon = new window.FitAddon.FitAddon();
                         term.loadAddon(fitAddon);
                         term.open(terminalRef.current);
-                        setTimeout(() => fitAddon && fitAddon.fit(), 50);  // idk why 50ms but it works
+                        // not on a terminal the tab already disposed again (fit throws there)
+                        setTimeout(() => !cleanup && fitAddon && fitAddon.fit(), 50);  // idk why 50ms but it works
 
                         setStatus('connecting');
                         term.write(`${t('connectingToServer')}\r\n`);
@@ -180,7 +184,9 @@
                             });
                             if (ipResponse.ok) {
                                 const ipData = await ipResponse.json();
-                                nodeIp = ipData.ip || '';
+                                // the connection host stands in there when the node's own
+                                // address is unknown, and the shell does not open on it (#1143)
+                                nodeIp = /_fallback$/.test(ipData.source || '') ? '' : (ipData.ip || '');
                                 if (nodeIp) {
                                     term.write(`Node-IP: ${nodeIp} (${ipData.source})\r\n`);
                                 }
@@ -199,8 +205,7 @@
                         // the form on a server message that never arrived, so
                         // the user just saw a blank terminal with no way to
                         // enter credentials. Proactive form ⇒ always visible.
-                        setNodeInfo({ node, ip: nodeIp || '', allowManualIp: !nodeIp });
-                        setCredentials(prev => ({ ...prev, host: nodeIp || prev.host || '' }));
+                        setNodeInfo({ node, ip: nodeIp || '' });
                         setShowLogin(true);
                         setStatus('login');
 
@@ -215,6 +220,9 @@
                         } catch(e) {
                             console.warn('WS token fetch failed, falling back');
                         }
+                        // LW Oct 2026 (#1143) - closed while the two lookups ran: open no session
+                        // that nothing shows and nothing closes
+                        if (cleanup) return;
 
                         // Connect WebSocket - Shell runs on main port + 2 (unless reverse proxy port set)
                         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -226,7 +234,8 @@
                         }
 
                         setSshPort(sshPortNum);
-                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}&ip=${encodeURIComponent(nodeIp)}`;
+                        // no ?ip= any more: the server resolves the node and would not take one (#1143)
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
                         
                         term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
                         // NS: Mar 2026 - don't log wsUrl, contains session token
@@ -257,18 +266,10 @@
                                         
                                         if (msg.status === 'need_credentials') {
                                             // NS May 2026 — dialog may already be visible (we open
-                                            // it proactively after IP fetch). Refresh metadata but
-                                            // don't trample a host the user has already edited.
-                                            setNodeInfo({
-                                                node: msg.node,
-                                                ip: msg.ip || '',
-                                                allowManualIp: msg.allowManualIp || !msg.ip
-                                            });
-                                            if (msg.ip) {
-                                                setCredentials(prev => (
-                                                    !prev.host ? { ...prev, host: msg.ip } : prev
-                                                ));
-                                            }
+                                            // it proactively after IP fetch). Refresh metadata.
+                                            // LW Oct 2026 (#1143) - the server's address is the
+                                            // one the shell logs in at, so it replaces ours
+                                            setNodeInfo({ node: msg.node, ip: msg.ip || '' });
                                             setShowLogin(true);
                                             setStatus('login');
                                             return;
@@ -279,9 +280,14 @@
                                             setStatus('connected');
                                             statusRef.current = 'connected';
                                             term.clear();
+                                            // the PTY starts at 120x40, tell it the real size
+                                            if (handleResize) handleResize();
                                             return;
                                         } else if (msg.status === 'error') {
                                             term.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`);
+                                            // a refusal before the login (no address for the node, say)
+                                            // stays readable instead of under the open dialog
+                                            setShowLogin(false);
                                             setStatus('error');
                                             // Show login again on auth failure
                                             if (msg.message.includes('Login') || msg.message.includes('auth') || msg.message.includes('Host')) {
@@ -366,10 +372,15 @@
                         });
 
                         // handle resize
-                        const handleResize = () => {
-                            if (fitAddon) {
-                                fitAddon.fit();
-                                if (ws && ws.readyState === WebSocket.OPEN && term && statusRef.current === 'connected') {
+                        // LW Oct 2026 (#1143) - also when only the box changes: fullscreen of the
+                        // panel around it resizes no window. The PTY hears of a new size once.
+                        let sentSize = '';
+                        handleResize = () => {
+                            if (fitAddon && term) {
+                                try { fitAddon.fit(); } catch (e) { return; }
+                                const size = `${term.cols}x${term.rows}`;
+                                if (ws && ws.readyState === WebSocket.OPEN && statusRef.current === 'connected' && size !== sentSize) {
+                                    sentSize = size;
                                     ws.send(JSON.stringify({
                                         type: 'resize',
                                         cols: term.cols,
@@ -379,6 +390,10 @@
                             }
                         };
                         window.addEventListener('resize', handleResize);
+                        if (window.ResizeObserver && terminalRef.current) {
+                            boxWatch = new ResizeObserver(() => handleResize && handleResize());
+                            boxWatch.observe(terminalRef.current);
+                        }
 
                     } catch (err) {
                         console.error('Terminal error:', err);
@@ -390,6 +405,9 @@
 
                 return () => {
                     cleanup = true;
+                    if (handleResize) window.removeEventListener('resize', handleResize);
+                    handleResize = null;
+                    if (boxWatch) boxWatch.disconnect();
                     if (ws) ws.close();
                     if (term) term.dispose();
                 };
@@ -411,27 +429,26 @@
                     
                     {/* Login form overlay - use fixed for reliable centering */}
                     {showLogin && (
-                        <div className="fixed inset-0 flex items-center justify-center bg-black/90 z-[100] p-4">
+                        <div data-shell-login className="fixed inset-0 flex items-center justify-center bg-black/90 z-[100] p-4">
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md shadow-2xl max-h-[85vh] overflow-y-auto">
                                 <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
                                     <Icons.Terminal />
                                     SSH Login - {nodeInfo.node}
                                 </h3>
                                 
-                                {/* Host/IP - editable */}
+                                {/* Host/IP - LW Oct 2026 (#1143) shown, not chosen: the server
+                                    opens the shell on the node's own address */}
                                 <div className="mb-4">
                                     <label className="block text-gray-400 text-sm mb-1">
                                         Host / IP
-                                        {nodeInfo.allowManualIp && (
-                                            <span className="text-yellow-500 ml-2 text-xs">({t('autoDetectionFailed')})</span>
-                                        )}
                                     </label>
                                     <input
                                         type="text"
-                                        value={credentials.host || nodeInfo.ip || ''}
-                                        onChange={(e) => setCredentials({...credentials, host: e.target.value})}
-                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none font-mono"
-                                        placeholder="192.168.1.100 oder hostname"
+                                        value={nodeInfo.ip || ''}
+                                        readOnly
+                                        data-shell-host
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 focus:outline-none font-mono cursor-default"
+                                        placeholder={t('nodeShellAddressFromServer')}
                                     />
                                 </div>
                                 
@@ -576,10 +593,7 @@
                                         </button>
                                         <button
                                             onClick={sendCredentials}
-                                            disabled={
-                                                !(credentials.host || nodeInfo.ip) ||
-                                                (credentials.authMethod === 'password' ? !credentials.password : !credentials.privateKey)
-                                            }
+                                            disabled={credentials.authMethod === 'password' ? !credentials.password : !credentials.privateKey}
                                             className="flex-1 py-2 bg-proxmox-orange text-white rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
                                             {t('connect') || 'Connect'}
@@ -589,6 +603,43 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 (#1143) - the node shell tab with its fullscreen. Fullscreen used to mount
+        // a second NodeShellTerminal on top: a second WebSocket and SSH login, the credentials
+        // asked again, no scrollback, and the first session left open underneath. Now the one
+        // terminal's box fills the window, as that overlay did, and the terminal refits itself
+        // to it (ResizeObserver). Not the browser's fullscreen: that keeps Escape for itself,
+        // and a shell needs it (vim, less). Escape stays the shell's, the button leaves.
+        function NodeShellPanel({ node, clusterId, addToast }) {
+            const { t } = useTranslation();
+            const [full, setFull] = useState(false);
+
+            // same tree in both states, so React keeps the terminal and its session
+            return (
+                <div data-node-shell={full ? 'window' : 'tab'}
+                    className={full ? 'fixed inset-0 z-[70] bg-black flex flex-col' : 'h-full flex flex-col'}>
+                    <div className={full ? 'flex items-center justify-between px-4 py-2 bg-proxmox-dark border-b border-proxmox-border' : 'flex items-center justify-between mb-4'}>
+                        <div className="flex items-center gap-3">
+                            <Icons.Terminal />
+                            <span className="text-white font-medium">{full ? `${node} - Shell` : 'Node Shell'}</span>
+                        </div>
+                        <button
+                            onClick={() => setFull(f => !f)}
+                            data-node-shell-toggle
+                            title={full ? t('exitFullscreen') : t('fullscreen')}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 hover:text-white text-sm"
+                        >
+                            {full ? <Icons.Minimize /> : <Icons.Maximize />}
+                            {full ? t('exitFullscreen') : t('fullscreen')}
+                        </button>
+                    </div>
+                    <div className={full ? 'flex-1 bg-black overflow-hidden' : 'flex-1 bg-black rounded-lg border border-proxmox-border overflow-hidden min-h-[400px]'}
+                        style={full ? { minHeight: 0 } : undefined}>
+                        <NodeShellTerminal node={node} clusterId={clusterId} addToast={addToast} />
+                    </div>
                 </div>
             );
         }
@@ -1487,6 +1538,9 @@
             useEffect(() => { loadTabData(activeTab); }, [activeTab, perfTimeframe]);
 
             const loadTabData = async (tab) => {
+                // LW Oct 2026 (#1143) - the shell loads nothing here, and the spinner in between
+                // unmounted its terminal right after it mounted: two sessions per visit
+                if (tab === 'shell') return;
                 setLoading(true);
                 try {
                     const endpoints = {
@@ -2285,28 +2339,7 @@
                                     {activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}
 
                                     {activeTab === 'shell' && !haConsolesElsewhere && (
-                                        <div className="h-full flex flex-col">
-                                            <div className="flex items-center justify-between mb-4">
-                                                <div className="flex items-center gap-3">
-                                                    <Icons.Terminal />
-                                                    <span className="text-white font-medium">Node Shell</span>
-                                                </div>
-                                                <button
-                                                    onClick={() => setData({...data, shellFullscreen: true})}
-                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 hover:text-white text-sm"
-                                                >
-                                                    <Icons.Maximize />
-                                                    Fullscreen
-                                                </button>
-                                            </div>
-                                            <div className="flex-1 bg-black rounded-lg border border-proxmox-border overflow-hidden min-h-[400px]">
-                                                <NodeShellTerminal 
-                                                    node={node} 
-                                                    clusterId={clusterId} 
-                                                    addToast={addToast}
-                                                />
-                                            </div>
-                                        </div>
+                                        <NodeShellPanel node={node} clusterId={clusterId} addToast={addToast} />
                                     )}
 
                                     {activeTab === 'network' && (
@@ -3965,31 +3998,6 @@
                             )}
                         </div>
                     </div>
-
-                    {/* Fullscreen Shell Modal */}
-                    {!haConsolesElsewhere && data.shellFullscreen && (
-                        <div className="fixed inset-0 z-[70] bg-black flex flex-col">
-                            <div className="flex items-center justify-between px-4 py-2 bg-proxmox-dark border-b border-proxmox-border">
-                                <div className="flex items-center gap-3">
-                                    <Icons.Terminal />
-                                    <span className="text-white font-medium">{node} - Shell</span>
-                                </div>
-                                <button
-                                    onClick={() => setData({...data, shellFullscreen: false})}
-                                    className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400"
-                                >
-                                    <Icons.X />
-                                </button>
-                            </div>
-                            <div className="flex-1">
-                                <NodeShellTerminal
-                                    node={node}
-                                    clusterId={clusterId}
-                                    addToast={addToast}
-                                />
-                            </div>
-                        </div>
-                    )}
 
                     {/* LW May 2026 — SMART Modal (replaces the alert(JSON) call site) */}
                     {smartModal && (

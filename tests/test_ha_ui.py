@@ -1344,8 +1344,9 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
     assert "const lockedTab = haReadOnly && !['summary', 'performance', 'tasks'].includes(activeTab);" in body
     assert "{activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}" in body
     assert "{activeTab === 'shell' && !haConsolesElsewhere && (" in body
-    assert '{!haConsolesElsewhere && data.shellFullscreen && (' in body
-    assert body.count('<NodeShellTerminal') == 2
+    # fullscreen is the same panel behind that gate, no second terminal of its own (#1143)
+    assert 'shellFullscreen' not in body
+    assert body.count('<NodeShellPanel ') == 1 and '<NodeShellTerminal' not in body
     assert "const haLock = { disabled: lockedTab, 'data-ha-locked': lockedTab ? '' : undefined };" in body
     # (#625 v2 review) no fieldset around all tab bodies any more, it disabled Refresh and
     # SMART too: each tab that changes the node locks its changing parts itself
@@ -3963,7 +3964,6 @@ CONSOLE_GATES = [
     ('dashboard.js', '}, [consoleKey, haConsolesElsewhere]);', 1),
     ('node_modals.js', "{activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}", 1),
     ('node_modals.js', "{activeTab === 'shell' && !haConsolesElsewhere && (", 1),
-    ('node_modals.js', '{!haConsolesElsewhere && data.shellFullscreen && (', 1),
     ('node_modals.js', "{activeDetailTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}", 1),
     ('node_modals.js', "{activeDetailTab === 'shell' && !haConsolesElsewhere && (", 1),
     ('tables.js', 'const consoles = !haConsolesElsewhere;', 1),
