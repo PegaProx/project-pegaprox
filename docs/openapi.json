@@ -7079,8 +7079,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Browse files inside a backup archive using PVE's file-restore API (PVE 7.2+).",
-        "description": "NS: Lists entries at a given path inside a PBS backup volume. Only works for PBS backups (not VMA/tar). path is the base64-encoded filepath token returned by a prior listing call; omit to list the root. Requires vm.view on the destination VM (the vmid in the URL). Non-admin callers additionally need vm.backup on the source VM identified by the volid.",
+        "summary": "Browse the files inside a Proxmox Backup Server backup (PVE's file-restore API, PVE 7.2+).",
+        "description": "Returns the directory listing at ?path= (the base64 filepath of an entry of an earlier\nlisting, the root when left out) of the backup ?volid=. vzdump archives (VMA, tar) are\nrefused: PVE cannot open them file by file.\n\nNeeds backup.view, vm.view on this guest, and for anyone but an admin vm.backup on\nthe guest the backup was taken of.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -7112,22 +7112,6 @@
             "required": true,
             "schema": {
               "type": "integer"
-            }
-          },
-          {
-            "name": "volid",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "path",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
             }
           }
         ],
@@ -7163,13 +7147,10 @@
           },
           "403": {
             "description": "Insufficient permissions"
-          },
-          "413": {
-            "description": "File exceeds the size limit for direct restore"
           }
         },
-        "summary": "Restore a single file from a backup directly to the running guest.",
-        "description": "NS: QEMU uses the QEMU Guest Agent file-write endpoint; LXC uses SSH + pct exec with stdin. The VM or container must be running. Requires vm.backup on the destination VM (the vmid in the URL). Non-admin callers additionally need vm.backup on the source VM identified by the volid.",
+        "summary": "Restore one file from a Proxmox Backup Server backup into this running guest.",
+        "description": "The file comes out of the backup through PVE's file-restore API: a regular file as the\nlisting of its directory shows it, and only all of its bytes. Then:\n\nQEMU: the guest agent writes it (POST .../agent/file-write) in one call. The agent\n      takes 45 KB at most (60 KiB of base64); a larger file is refused with 413\n      before the guest is asked. The VM must run with the guest agent enabled.\nLXC:  `pct exec <vmid> -- sh -c 'cat > <dest>'` on the guest's node takes it on stdin,\n      over SSH with the cluster's SSH settings, at the node's own address (through\n      sudo -n for a login that is not root). Up to 50 MB. The container must be running.\n\nNeeds backup.restore, vm.backup and vm.console on this guest (writing a file as root\nin the guest is as good as its console), and for anyone but an admin vm.backup on the\nguest the backup was taken of.\n\nBody JSON: { volid, filepath (as the files listing names it), dest_path (absolute) }",
         "parameters": [
           {
             "name": "cluster_id",
@@ -7205,26 +7186,11 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
-                "type": "object",
-                "required": ["volid", "filepath", "dest_path"],
-                "properties": {
-                  "volid": {
-                    "type": "string",
-                    "description": "The backup volume id (e.g. pbs-storage:backup/vm/105/2026-10-08T09:28:43Z)"
-                  },
-                  "filepath": {
-                    "type": "string",
-                    "description": "Base64-encoded path of the file inside the backup (as returned by the files endpoint)"
-                  },
-                  "dest_path": {
-                    "type": "string",
-                    "description": "Absolute destination path inside the guest (e.g. /etc/myapp/config.yaml)"
-                  }
-                }
+                "type": "object"
               }
             }
           }

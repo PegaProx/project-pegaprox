@@ -394,8 +394,8 @@ EXITS = {
     ('pegaprox/api/vms.py', 'test_node_connection', 'ssh-exec'): (4, 'read'),
     ('pegaprox/api/vms.py', 'join_node_to_cluster', 'ssh-exec'): (2, 'client'),
     ('pegaprox/api/vms.py', 'remove_node_from_cluster', 'ssh-exec'): (3, 'client'),
-    # LXC file restore: pushes a file into a running container via pct exec on stdin;
-    # the SSH client comes from secure_ssh_client (a guarded factory)
+    # a file from a backup into a running container, pct exec on stdin, on a client from
+    # the guarded _ssh_connect at the node's own address (#1139)
     ('pegaprox/api/vms.py', 'restore_backup_file', 'ssh-exec'): (1, 'client'),
     # `id -u` on the guarded client, the shutdown on a channel of its transport after
     # guard_ssh (see test_a_channel_of_a_transport_asks_guard_ssh_first)

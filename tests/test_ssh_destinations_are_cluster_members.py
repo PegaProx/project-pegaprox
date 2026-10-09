@@ -37,6 +37,7 @@ MEMBER_RESOLVERS = {
     '_resolve_node_ip',    # api/ceph.py — cluster/status, falls back to raw_host
     '_get_host_ip',
     '_xcincr_node_ip',     # api/vms.py — cluster/status, None when not a member
+    'node_shell_address',  # api/helpers.py - member_node_ip for cluster members only (#1143)
 }
 OWN_HOST_ATTRS = {'host', 'raw_host', 'config'}
 
