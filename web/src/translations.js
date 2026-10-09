@@ -2380,6 +2380,18 @@
                 backupNotes: 'Notizen (optional)',
                 backupNotesPlaceholder: 'z.B. Vor großem Update, wöchentliches Backup...',
 
+                // File restore
+                fileRestore: 'Datei-Wiederherstellung',
+                fileRestoreBrowseFailed: 'Die Dateien des Backups konnten nicht gelesen werden',
+                fileRestoreSuccess: 'Datei wiederhergestellt',
+                fileRestoreFailed: 'Datei-Wiederherstellung fehlgeschlagen',
+                fileRestoreNoteQemu: 'Die VM muss laufen und der QEMU Guest Agent aktiv sein. Der Agent nimmt Dateien bis 45 KB an.',
+                fileRestoreNoteLxc: 'Der Container muss laufen. Dafür braucht der Cluster einen SSH-Zugang.',
+                selectedForRestore: 'ausgewählt. Zielpfad im Gast:',
+                destPath: 'Zielpfad im Gast',
+                restoreFile: 'Datei wiederherstellen',
+                emptyDirectory: 'Leeres Verzeichnis',
+
                 // HA
                 ha: 'HA',
                 haStatus: 'HA Status',
@@ -8945,6 +8957,18 @@
                 backupNotes: 'Notes (optional)',
                 backupNotesPlaceholder: 'e.g. Before major update, weekly backup...',
 
+                // File restore
+                fileRestore: 'File Restore',
+                fileRestoreBrowseFailed: 'Failed to browse backup files',
+                fileRestoreSuccess: 'File restored successfully',
+                fileRestoreFailed: 'File restore failed',
+                fileRestoreNoteQemu: 'The VM must be running with the QEMU Guest Agent enabled. The agent takes files up to 45 KB.',
+                fileRestoreNoteLxc: 'Container must be running. Requires SSH access configured on the cluster.',
+                selectedForRestore: 'selected. Destination path in the guest:',
+                destPath: 'Destination path in guest',
+                restoreFile: 'Restore File',
+                emptyDirectory: 'Empty directory',
+
                 // HA
                 ha: 'HA',
                 haStatus: 'HA Status',
@@ -14901,6 +14925,19 @@
                 compressNone: '无',
                 backupNotes: '注释（可选）',
                 backupNotesPlaceholder: '例如在重大更新之前，每周备份...',
+
+                // File restore
+                fileRestore: '文件恢复',
+                fileRestoreBrowseFailed: '无法浏览备份文件',
+                fileRestoreSuccess: '文件已恢复',
+                fileRestoreFailed: '文件恢复失败',
+                fileRestoreNoteQemu: '虚拟机必须正在运行并已启用 QEMU Guest Agent。代理最多接受 45 KB 的文件。',
+                fileRestoreNoteLxc: '容器必须正在运行。需要在集群上配置 SSH 访问。',
+                selectedForRestore: '已选择。客户机中的目标路径：',
+                destPath: '客户机中的目标路径',
+                restoreFile: '恢复文件',
+                emptyDirectory: '空目录',
+
                 ha: 'HA',
                 haResources: '高可用资源',
                 haGroups: 'HA 组',
@@ -20503,6 +20540,19 @@
                 compressNone: 'Brak',
                 backupNotes: 'Notatki (opcjonalnie)',
                 backupNotesPlaceholder: 'np. przed dużą aktualizacją, cotygodniowa kopia...',
+
+                // File restore
+                fileRestore: 'Przywracanie pliku',
+                fileRestoreBrowseFailed: 'Nie udało się przeglądać plików kopii zapasowej',
+                fileRestoreSuccess: 'Plik został przywrócony',
+                fileRestoreFailed: 'Przywracanie pliku nie powiodło się',
+                fileRestoreNoteQemu: 'Maszyna wirtualna musi działać z włączonym QEMU Guest Agent. Agent przyjmuje pliki do 45 KB.',
+                fileRestoreNoteLxc: 'Kontener musi działać. Wymaga dostępu SSH skonfigurowanego w klastrze.',
+                selectedForRestore: 'wybrano. Ścieżka docelowa w gościu:',
+                destPath: 'Ścieżka docelowa w gościu',
+                restoreFile: 'Przywróć plik',
+                emptyDirectory: 'Pusty katalog',
+
                 ha: 'HA',
                 haResources: 'Zasoby HA',
                 haGroups: 'Grupy HA',
@@ -25682,6 +25732,18 @@
                 compressNone: 'Aucune',
                 backupNotes: 'Notes (optionnel)',
                 backupNotesPlaceholder: 'Avant une mise à jour majeure, sauvegarde hebdomadaire...',
+
+                // File restore
+                fileRestore: 'Restauration de fichier',
+                fileRestoreBrowseFailed: 'Impossible de parcourir les fichiers de la sauvegarde',
+                fileRestoreSuccess: 'Fichier restauré',
+                fileRestoreFailed: 'Échec de la restauration du fichier',
+                fileRestoreNoteQemu: "La VM doit être en marche avec le QEMU Guest Agent activé. L'agent accepte des fichiers jusqu'à 45 Ko.",
+                fileRestoreNoteLxc: 'Le conteneur doit être en marche. Nécessite un accès SSH configuré sur le cluster.',
+                selectedForRestore: "sélectionné. Chemin de destination dans l'invité :",
+                destPath: "Chemin de destination dans l'invité",
+                restoreFile: 'Restaurer le fichier',
+                emptyDirectory: 'Répertoire vide',
 
                 // HA
                 ha: 'HA',
@@ -31591,6 +31653,19 @@
                 compressNone: 'Nada',
                 backupNotes: 'Notas (opcional)',
                 backupNotesPlaceholder: 'p.ej. Antes de una actualización mayor, copia semanal...',
+
+                // File restore
+                fileRestore: 'Restauración de archivo',
+                fileRestoreBrowseFailed: 'No se pudieron explorar los archivos de la copia',
+                fileRestoreSuccess: 'Archivo restaurado',
+                fileRestoreFailed: 'Error al restaurar el archivo',
+                fileRestoreNoteQemu: 'La VM debe estar en ejecución con el QEMU Guest Agent activado. El agente acepta archivos de hasta 45 KB.',
+                fileRestoreNoteLxc: 'El contenedor debe estar en ejecución. Requiere acceso SSH configurado en el clúster.',
+                selectedForRestore: 'seleccionado. Ruta de destino en el invitado:',
+                destPath: 'Ruta de destino en el invitado',
+                restoreFile: 'Restaurar archivo',
+                emptyDirectory: 'Directorio vacío',
+
                 backupServers: "Servidores de copia",
 
                 // HA / Alta Disponibilidad
@@ -37583,6 +37658,18 @@
                 backupNotes: 'Notas (opcional)',
                 backupNotesPlaceholder: 'ex: Antes de atualização importante, backup semanal...',
 
+                // File restore
+                fileRestore: 'Restauração de arquivo',
+                fileRestoreBrowseFailed: 'Não foi possível navegar pelos arquivos do backup',
+                fileRestoreSuccess: 'Arquivo restaurado',
+                fileRestoreFailed: 'Falha ao restaurar o arquivo',
+                fileRestoreNoteQemu: 'A VM precisa estar em execução com o QEMU Guest Agent ativado. O agente aceita arquivos de até 45 KB.',
+                fileRestoreNoteLxc: 'O contêiner precisa estar em execução. Requer acesso SSH configurado no cluster.',
+                selectedForRestore: 'selecionado. Caminho de destino no convidado:',
+                destPath: 'Caminho de destino no convidado',
+                restoreFile: 'Restaurar arquivo',
+                emptyDirectory: 'Diretório vazio',
+
                 // HA
                 ha: 'HA',
                 haResources: 'Recursos de HA',
@@ -43340,6 +43427,18 @@
                 compressNone: '없음',
                 backupNotes: '메모 (선택 사항)',
                 backupNotesPlaceholder: '예: 주요 업데이트 전, 주간 백업...',
+
+                // File restore
+                fileRestore: '파일 복원',
+                fileRestoreBrowseFailed: '백업 파일을 탐색하지 못했습니다',
+                fileRestoreSuccess: '파일이 복원되었습니다',
+                fileRestoreFailed: '파일 복원 실패',
+                fileRestoreNoteQemu: 'VM이 실행 중이고 QEMU Guest Agent가 활성화되어 있어야 합니다. 에이전트는 최대 45 KB 파일을 받습니다.',
+                fileRestoreNoteLxc: '컨테이너가 실행 중이어야 합니다. 클러스터에 SSH 접근이 구성되어 있어야 합니다.',
+                selectedForRestore: '선택됨. 게스트 내 대상 경로:',
+                destPath: '게스트 내 대상 경로',
+                restoreFile: '파일 복원',
+                emptyDirectory: '빈 디렉터리',
 
                 // HA
                 ha: 'HA',
@@ -49434,6 +49533,18 @@
                 compressNone: 'Nessuna',
                 backupNotes: 'Note (opzionale)',
                 backupNotesPlaceholder: 'es. Prima di aggiornamento importante, backup settimanale...',
+
+                // File restore
+                fileRestore: 'Ripristino file',
+                fileRestoreBrowseFailed: 'Impossibile sfogliare i file del backup',
+                fileRestoreSuccess: 'File ripristinato',
+                fileRestoreFailed: 'Ripristino del file non riuscito',
+                fileRestoreNoteQemu: "La VM deve essere in esecuzione con il QEMU Guest Agent attivo. L'agente accetta file fino a 45 KB.",
+                fileRestoreNoteLxc: "Il container deve essere in esecuzione. Richiede l'accesso SSH configurato sul cluster.",
+                selectedForRestore: 'selezionato. Percorso di destinazione nel guest:',
+                destPath: 'Percorso di destinazione nel guest',
+                restoreFile: 'Ripristina file',
+                emptyDirectory: 'Directory vuota',
 
                 // HA
                 ha: 'HA',

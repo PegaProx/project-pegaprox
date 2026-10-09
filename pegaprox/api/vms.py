@@ -1800,6 +1800,328 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
         return jsonify({'error': safe_error(e, 'Failed to restore backup')}), 500
 
 
+# The guest agent's file-write takes its content as at most 60 KiB of base64 (PVE's
+# Agent.pm) and opens the file 'wb' on every call: one call is the whole file, 45 KiB
+# of it (#1139)
+_AGENT_WRITE_MAX_B64 = 60 * 1024
+_AGENT_WRITE_MAX_BYTES = _AGENT_WRITE_MAX_B64 // 4 * 3
+# a container takes the file on stdin over SSH; meant for config files, not bulk data
+_CT_FILE_RESTORE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _vzdump_refusal(volid):
+    """400 for a vzdump archive (VMA or tar), else None. PVE's file-restore API opens
+    Proxmox Backup Server snapshots only, so it is not asked about anything else."""
+    name = volid.rsplit('/', 1)[-1].rsplit(':', 1)[-1]
+    if re.search(r'\.vma(\.(zst|gz|lzo))?$', name):
+        return jsonify({'error': (
+            f"File-level restore is not available for vzdump VMA backups ({name}). "
+            "PVE's file-browse API only supports Proxmox Backup Server (PBS) backups. "
+            "To restore individual files: use PBS storage for your backups, or restore "
+            "the full VM and copy files from inside the running guest.")}), 400
+    if re.search(r'\.tar(\.(zst|gz|lzo))?$', name):
+        return jsonify({'error': (
+            f"File-level restore is not available for vzdump tar backups ({name}). "
+            "PVE's file-browse API only supports Proxmox Backup Server (PBS) backups. "
+            "To restore individual files from an LXC backup, use PBS storage.")}), 400
+    return None
+
+
+def _backup_source_refusal(user, cluster_id, volid):
+    """403 unless the caller may back up the guest the backup was taken of, as
+    restore_vm_backup asks. An admin passes; for anyone else the volid has to name its
+    guest plainly, storage:backup/(vm|ct)/<vmid>/<time> and nothing more (#1139)."""
+    from pegaprox.utils.rbac import acts_as_admin
+    if acts_as_admin(user):
+        return None
+    m = re.fullmatch(r'[^:]*:backup/(vm|ct)/(\d+)/[^/]+', volid)
+    if m and user_can_access_vm(user, cluster_id, int(m.group(2)), 'vm.backup',
+                                'lxc' if m.group(1) == 'ct' else 'qemu'):
+        return None
+    return jsonify({'error': 'Permission denied for source backup'}), 403
+
+
+def _file_restore_storage(volid, node):
+    """(storage, None) for a volid and node the file-restore API may be asked about,
+    else (None, the refusal)."""
+    if ':' not in volid:
+        return None, (jsonify({'error': 'Invalid volid format (expected storage:path)'}), 400)
+    storage = volid.split(':', 1)[0]
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return None, (jsonify({'error': 'Invalid node name'}), 400)
+    if not _STORAGE_ID_RE.fullmatch(storage):
+        return None, (jsonify({'error': 'Invalid storage id'}), 400)
+    return storage, None
+
+
+def _b64_path(value):
+    """The path a base64 filepath of PVE's file-restore API names, without the slashes
+    around it, or b'' for anything that is not one."""
+    import base64
+    import binascii
+    try:
+        return base64.b64decode(value, validate=True).strip(b'/')
+    except (binascii.Error, ValueError, TypeError):
+        return b''
+
+
+def _backup_file_entry(session, base, volid, filepath):
+    """(entry, None) for the regular file `filepath` names in the backup, as the listing
+    of its directory shows it, size included, else (None, the refusal).
+
+    The download is a stream PVE answers 200 for before the extraction has run: one that
+    failed sends nothing or a part, and written into the guest that empties its own copy.
+    The listing says what the entry is and how big; the download has to match it (#1139)."""
+    import base64
+    path = _b64_path(filepath)
+    if not path:
+        return None, (jsonify({'error': 'filepath does not name a file of the backup'}), 400)
+    parent = path.rsplit(b'/', 1)[0] if b'/' in path else b''
+    resp = session.get(f'{base}/list', timeout=30, params={
+        'volume': volid, 'filepath': base64.b64encode(parent).decode('ascii') if parent else '/'})
+    if resp.status_code != 200:
+        return None, upstream_failure(resp.status_code, parse_pve_error(resp.text))
+    entry = next((e for e in (resp.json().get('data') or [])
+                  if isinstance(e, dict) and _b64_path(e.get('filepath')) == path), None)
+    name = path.rsplit(b'/', 1)[-1].decode('utf-8', 'replace')
+    if entry is None:
+        return None, (jsonify({'error': f'{name} is not in this backup'}), 404)
+    if entry.get('type') != 'f':
+        return None, (jsonify({'error': f'{name} is not a regular file. Only a single file can be '
+                                        'restored into the guest'}), 400)
+    size = entry.get('size')
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        return None, (jsonify({'error': f'Proxmox VE did not say how big {name} is, so a cut off '
+                                        'download could not be told apart. Nothing was written'}), 502)
+    return entry, None
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/files', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def browse_backup_files(cluster_id, node, vm_type, vmid):
+    """Browse the files inside a Proxmox Backup Server backup (PVE's file-restore API, PVE 7.2+).
+
+    Returns the directory listing at ?path= (the base64 filepath of an entry of an earlier
+    listing, the root when left out) of the backup ?volid=. vzdump archives (VMA, tar) are
+    refused: PVE cannot open them file by file.
+
+    Needs backup.view, vm.view on this guest, and for anyone but an admin vm.backup on
+    the guest the backup was taken of.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', vm_type)
+    if denied:
+        return denied
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+
+    volid = request.args.get('volid', '')
+    path = request.args.get('path', '/')
+
+    if not volid:
+        return jsonify({'error': 'volid is required'}), 400
+    refusal = _vzdump_refusal(volid)
+    if refusal:
+        return refusal
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    refusal = _backup_source_refusal(user, cluster_id, volid)
+    if refusal:
+        return refusal
+    storage, refusal = _file_restore_storage(volid, node)
+    if refusal:
+        return refusal
+
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+
+        url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/file-restore/list"
+        # filepath is base64 in PVE's schema: '/' for the root, else the filepath of an
+        # entry PVE listed before, handed back as it came
+        import base64 as _b64
+        if not path or path == '/':
+            api_filepath = _b64.b64encode(b'/').decode('ascii')
+        else:
+            api_filepath = path
+        params = {'volume': volid, 'filepath': api_filepath}
+        logging.debug(f"[FILE-RESTORE-BROWSE] {url} params={params}")
+        resp = session.get(url, params=params, timeout=30)
+
+        if resp.status_code == 200:
+            return jsonify(resp.json().get('data', []))
+        # a 401/403 of PVE is about the stored credentials, not this session (#1142)
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+
+    except Exception as e:
+        logging.error(f"[FILE-RESTORE] Error browsing backup files: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to browse backup files')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/file-restore', methods=['POST'])
+@require_auth(perms=['backup.restore'])
+def restore_backup_file(cluster_id, node, vm_type, vmid):
+    """Restore one file from a Proxmox Backup Server backup into this running guest.
+
+    The file comes out of the backup through PVE's file-restore API: a regular file as the
+    listing of its directory shows it, and only all of its bytes. Then:
+
+    QEMU: the guest agent writes it (POST .../agent/file-write) in one call. The agent
+          takes 45 KB at most (60 KiB of base64); a larger file is refused with 413
+          before the guest is asked. The VM must run with the guest agent enabled.
+    LXC:  `pct exec <vmid> -- sh -c 'cat > <dest>'` on the guest's node takes it on stdin,
+          over SSH with the cluster's SSH settings, at the node's own address (through
+          sudo -n for a login that is not root). Up to 50 MB. The container must be running.
+
+    Needs backup.restore, vm.backup and vm.console on this guest (writing a file as root
+    in the guest is as good as its console), and for anyone but an admin vm.backup on the
+    guest the backup was taken of.
+
+    Body JSON: { volid, filepath (as the files listing names it), dest_path (absolute) }
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': f'File restore is not supported for vm_type: {vm_type}'}), 400
+
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(user, cluster_id, vmid, 'vm.backup', vm_type):
+        return jsonify({'error': 'Permission denied: vm.backup'}), 403
+    # (#1139) a file written as root in the guest is a console's worth of access
+    if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
+        return jsonify({'error': 'Permission denied: vm.console'}), 403
+
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+
+    data = request.get_json(silent=True) or {}
+    volid = data.get('volid', '')
+    filepath = data.get('filepath', '')
+    dest_path = data.get('dest_path', '')
+
+    if not all(isinstance(v, str) and v for v in (volid, filepath, dest_path)):
+        return jsonify({'error': 'volid, filepath, and dest_path are required'}), 400
+
+    # dest_path must be absolute to prevent accidental relative-path writes
+    if not dest_path.startswith('/'):
+        return jsonify({'error': 'dest_path must be an absolute path'}), 400
+    # no path holds a NUL, and the guest agent's C side would cut it there
+    if '\x00' in dest_path or len(dest_path.encode('utf-8', 'replace')) > 4096:
+        return jsonify({'error': 'dest_path is not a path the guest can take'}), 400
+
+    refusal = _vzdump_refusal(volid)
+    if refusal:
+        return refusal
+    refusal = _backup_source_refusal(user, cluster_id, volid)
+    if refusal:
+        return refusal
+    storage, refusal = _file_restore_storage(volid, node)
+    if refusal:
+        return refusal
+
+    node_ip = None
+    if vm_type == 'lxc':
+        # the stored SSH login goes to a member of this cluster or nowhere (#1143)
+        blocked = ssh_blocked_for(manager)
+        if blocked:
+            return jsonify({'code': blocked,
+                            'error': 'Restoring a file into a container goes over SSH, which is '
+                                     'not available for this cluster'}), 409
+        node_ip = node_shell_address(manager, node)
+        if not node_ip:
+            return jsonify({'error': f'Could not find the address of node {node}'}), 400
+
+    limit = _AGENT_WRITE_MAX_BYTES if vm_type == 'qemu' else _CT_FILE_RESTORE_MAX_BYTES
+
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+
+        base = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/file-restore"
+        entry, refusal = _backup_file_entry(session, base, volid, filepath)
+        if refusal:
+            return refusal
+        size = entry['size']
+        if size > limit:
+            if vm_type == 'qemu':
+                msg = ('VMs take files of up to 45 KB through the guest agent. Restore the '
+                       'whole VM for a larger file.')
+            else:
+                msg = f'File exceeds the {limit // (1024 * 1024)} MB limit for direct restore'
+            return jsonify({'error': msg, 'limit_bytes': limit}), 413
+
+        with session.get(f'{base}/download', params={'volume': volid, 'filepath': filepath},
+                         stream=True, timeout=60) as dl_resp:
+            if dl_resp.status_code != 200:
+                return upstream_failure(dl_resp.status_code,
+                                        f'Could not download file from backup: {parse_pve_error(dl_resp.text)}')
+            buf = bytearray()
+            for chunk in dl_resp.iter_content(chunk_size=65536):
+                buf += chunk
+                if len(buf) > size:
+                    break
+        # all of it or nothing: a short file would replace the guest's whole copy
+        if len(buf) != size:
+            return jsonify({'error': f"The download of {entry.get('text') or 'the file'} brought "
+                                     f"{len(buf)} bytes, the backup lists {size}. Nothing was "
+                                     'written into the guest', 'code': 'SHORT_DOWNLOAD'}), 502
+        file_content = bytes(buf)
+
+        audit_user = getattr(request, 'session', {}).get('user', 'system')
+
+        if vm_type == 'qemu':
+            import base64
+            # encode=0: the content is base64 already, with 1 PVE encodes it once more
+            b64 = base64.b64encode(file_content).decode('ascii')
+            agent_url = f"https://{host}:{port}/api2/json/nodes/{node}/qemu/{vmid}/agent/file-write"
+            agent_resp = session.post(agent_url, data={'file': dest_path, 'content': b64, 'encode': 0},
+                                      timeout=60)
+            if agent_resp.status_code != 200:
+                return upstream_failure(agent_resp.status_code,
+                                        f'Guest agent file-write failed: {parse_pve_error(agent_resp.text)}')
+        else:
+            ssh_failure = {}
+            ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, failure=ssh_failure)
+            if not ssh:
+                why = ssh_failure.get('kind') or 'error'
+                return jsonify({'error': f'SSH to node {node} failed ({why})', 'code': 'SSH_FAILED'}), 502
+            try:
+                inner_cmd = 'cat > ' + shlex.quote(dest_path)
+                cmd = f'pct exec {vmid} -- sh -c {shlex.quote(inner_cmd)}'
+                # pct wants root: the login _ssh_connect made, when it is not root, asks
+                # sudo, never with a prompt
+                cfg = manager.config
+                if (cfg.ssh_user or (cfg.user or 'root').split('@')[0]) != 'root':
+                    cmd = 'sudo -n ' + cmd
+                stdin_ch, stdout_ch, stderr_ch = ssh.exec_command(cmd, timeout=60)
+                try:
+                    stdin_ch.write(file_content)
+                    stdin_ch.flush()
+                except (OSError, EOFError):
+                    pass  # the remote is gone already, its exit status says why
+                stdin_ch.channel.shutdown_write()
+                err_out = _read_capped(stderr_ch).strip()
+                exit_status = stdout_ch.channel.recv_exit_status()
+            finally:
+                ssh.close()
+            if exit_status != 0:
+                return jsonify({'error': f'pct exec failed (exit {exit_status}): {err_out[:200]}'}), 500
+
+        restored = _b64_path(filepath).decode('utf-8', 'replace')
+        log_audit(audit_user, 'backup.file_restored',
+                  f"Restored '/{_sl(restored)}' from {_sl(volid)} to {vm_type}/{vmid}:{_sl(dest_path)}",
+                  cluster=manager.config.name)
+        return jsonify({'success': True})
+
+    except Exception as e:
+        logging.error(f"[FILE-RESTORE] Error restoring file: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to restore file')}), 500
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/backups/<path:volid>', methods=['DELETE'])
 @require_auth(perms=['backup.delete'])
 def delete_vm_backup(cluster_id, node, vm_type, vmid, volid):

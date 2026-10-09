@@ -7059,6 +7059,156 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/files": {
+      "get": {
+        "operationId": "vms.browse_backup_files_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Browse the files inside a Proxmox Backup Server backup (PVE's file-restore API, PVE 7.2+).",
+        "description": "Returns the directory listing at ?path= (the base64 filepath of an entry of an earlier\nlisting, the root when left out) of the backup ?volid=. vzdump archives (VMA, tar) are\nrefused: PVE cannot open them file by file.\n\nNeeds backup.view, vm.view on this guest, and for anyone but an admin vm.backup on\nthe guest the backup was taken of.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/file-restore": {
+      "post": {
+        "operationId": "vms.restore_backup_file_post",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Restore one file from a Proxmox Backup Server backup into this running guest.",
+        "description": "The file comes out of the backup through PVE's file-restore API: a regular file as the\nlisting of its directory shows it, and only all of its bytes. Then:\n\nQEMU: the guest agent writes it (POST .../agent/file-write) in one call. The agent\n      takes 45 KB at most (60 KiB of base64); a larger file is refused with 413\n      before the guest is asked. The VM must run with the guest agent enabled.\nLXC:  `pct exec <vmid> -- sh -c 'cat > <dest>'` on the guest's node takes it on stdin,\n      over SSH with the cluster's SSH settings, at the node's own address (through\n      sudo -n for a login that is not root). Up to 50 MB. The container must be running.\n\nNeeds backup.restore, vm.backup and vm.console on this guest (writing a file as root\nin the guest is as good as its console), and for anyone but an admin vm.backup on the\nguest the backup was taken of.\n\nBody JSON: { volid, filepath (as the files listing names it), dest_path (absolute) }",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.restore"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/backups/{volid}": {
       "delete": {
         "operationId": "vms.delete_vm_backup_delete",
