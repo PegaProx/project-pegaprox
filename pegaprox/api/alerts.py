@@ -529,9 +529,12 @@ def list_alert_mutes(cluster_id):
                     if a.get('target_type') == 'vm'}
 
         def _visible(m):
-            if str(m.get('object_key') or '').startswith(('zfs:', 'clock:', 'qdevice:')):
+            key = str(m.get('object_key') or '')
+            vmid = alert_events.object_vmid(key)
+            # an object that is no guest (a node, a node task, a pool, the clock or the
+            # QDevice of a node) names the cluster's nodes: not for a confined caller
+            if key and vmid is None:
                 return False
-            vmid = alert_events.object_vmid(m.get('object_key'))
             if vmid is not None and not _ok(vmid):
                 return False
             if m.get('rule_id') in vm_rules and not _ok(vm_rules[m['rule_id']]):
