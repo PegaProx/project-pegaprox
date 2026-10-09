@@ -35,7 +35,7 @@ from pegaprox.utils.ldap import (get_ldap_settings, ldap_authenticate, ldap_prov
                                  ldap_build_user_row, LDAP_AUTH_SOURCES)
 from pegaprox.utils.oidc import (
     get_oidc_settings, get_oidc_endpoints, oidc_build_auth_url,
-    oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info,
+    oidc_exchange_code, oidc_decode_id_token, oidc_get_user_info, oidc_name_from_id_token,
     oidc_get_user_groups, oidc_get_user_groups_ex, oidc_map_groups_to_role, oidc_provision_user,
     oidc_derive_username, oidc_build_user_row, OIDC_AUTH_SOURCES,
 )
@@ -206,6 +206,10 @@ def oidc_callback():
     if not user_info:
         # MK: Fallback to ID token claims
         user_info = id_claims
+    else:
+        # MK Oct 2026 (#1141) - a userinfo answer without a name takes it from the
+        # signature-checked ID token, so the account is not keyed on the sub
+        user_info = oidc_name_from_id_token(user_info, id_claims)
     
     if not user_info or not (user_info.get('preferred_username') or user_info.get('email') or user_info.get('sub')):
         return jsonify({'error': 'Could not retrieve user information from provider'}), 401
@@ -1179,7 +1183,7 @@ def list_own_sessions():
     session_id = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     current = validate_session(session_id)
     if not current:
-        return jsonify({'error': 'not authenticated'}), 401
+        return jsonify({'error': 'not authenticated', 'code': 'AUTH_REQUIRED'}), 401
     from pegaprox.utils.auth import active_sessions, sessions_lock
     username = current['user']
     out = []
@@ -1211,7 +1215,7 @@ def revoke_own_session(token):
     session_id = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
     current = validate_session(session_id)
     if not current:
-        return jsonify({'error': 'not authenticated'}), 401
+        return jsonify({'error': 'not authenticated', 'code': 'AUTH_REQUIRED'}), 401
     from pegaprox.utils.auth import active_sessions, sessions_lock
     import hmac as _hmac
     username = current['user']
@@ -1467,11 +1471,11 @@ def get_cluster_creds_internal(cluster_id):
     session_id = request.cookies.get('session') or request.cookies.get('session_id')
     
     if not session_id:
-        return jsonify({'error': 'No session'}), 401
+        return jsonify({'error': 'No session', 'code': 'AUTH_REQUIRED'}), 401
     
     session = validate_session(session_id)
     if not session:
-        return jsonify({'error': 'Invalid session'}), 401
+        return jsonify({'error': 'Invalid session', 'code': 'INVALID_SESSION'}), 401
 
     # MK May 2026 - check_cluster_access reads request.session['user'], which
     # @require_auth normally sets. This endpoint does its own cookie-based session
@@ -1541,7 +1545,12 @@ def get_cluster_creds_internal(cluster_id):
             for n in nodes:
                 nname = n.get('node', '')
                 if nname:
-                    ip = mgr._get_host_ip(nname)
+                    # #1143 - not _get_host_ip, which answers the pool's own host for a
+                    # host it cannot find: the shell of that node would open there
+                    ip = mgr.member_node_ip(nname)
+                    if not ip:
+                        logging.warning(f"[CLUSTER-CREDS] no address for XCP-ng node {nname}")
+                        continue
                     node_ips[nname] = ip
                     node_ips[nname.lower()] = ip
                     logging.info(f"[CLUSTER-CREDS] XCP-ng node {nname} ip={ip}")

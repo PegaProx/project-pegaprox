@@ -532,22 +532,23 @@ def create_app():
         if not ha.is_standby():
             # MK Oct 2026 (#625) - the leader hands its lead on: writes wait until the
             # member it goes to caught up (design 7.1)
-            active = ha.is_active()
+            active = ha.takes_writes()
             pausing = active and ha.handing_over()
             if active and not pausing:
                 return None
             # MK Oct 2026 (#625) - automatic failover: this instance leads and holds no
-            # lease right now (it ran out, or the takeover wait is on). A change taken now
-            # might be one the next leader never sees. The consoles stay: they are the
-            # user's, on the instance the browser is on.
+            # lease right now (it ran out, or the takeover wait is on), or less of it than
+            # a write may take (Q16). A change taken now might be one the next leader never
+            # sees. The consoles stay: they are the user's, on the instance the browser is on.
             if (request.method, rule) in _STANDBY_CONSOLES or (
                     plugin_call and view_args.get('subpath') in _PLUGIN_CONSOLE_PATHS):
                 return None
             if pausing:
                 from pegaprox.api.ha import transfer_refusal
                 return transfer_refusal()
-            # never None: is_active() said no, and a second look at the state may find a
-            # standby by now, which would wave the write through
+            # never None: takes_writes() said no, and a second look at the state may find
+            # a standby by now, or a lease that a renewal just extended. Either would wave
+            # the write through
             from pegaprox.api.ha import write_gate_refusal
             return write_gate_refusal()
         if plugin_call and view_args.get('subpath') in _PLUGIN_CONSOLE_PATHS:
@@ -1280,7 +1281,10 @@ def _write_atomic(path, data, mode):
     tmp = path + '.tmp'
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
     try:
-        os.write(fd, data)
+        # a short write (disk filling up) must not get renamed over the target
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
         os.fsync(fd)
     finally:
         os.close(fd)

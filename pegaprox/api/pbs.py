@@ -2,6 +2,7 @@
 """PBS (proxmox backup server) routes - split from monolith dec 2025, NS"""
 
 import logging
+import re
 import uuid
 from flask import Blueprint, jsonify, request
 
@@ -14,6 +15,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, bounded_limit, acts_as_admin, caller_acts_as_admin
+from pegaprox.api.helpers import upstream_failure
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server, pbs_config_from_row, pbs_target_refusal
 
 bp = Blueprint('pbs', __name__)
@@ -674,7 +676,7 @@ def get_pbs_snapshots(pbs_id, store):
     result = mgr.get_snapshots(store, ns=ns, backup_type=backup_type, backup_id=backup_id)
     # #143: don't mask errors as empty arrays
     if 'error' in result:
-        return jsonify({'error': result['error']}), result.get('status_code', 502)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server', default=502)
     snaps = result.get('data', []) or []
     # NS — enrich with vm_name from linked clusters
     owners = _BackupOwners(mgr)
@@ -704,7 +706,7 @@ def get_pbs_groups(pbs_id, store):
     ns = request.args.get('ns', None)
     result = mgr.get_groups(store, ns=ns)
     if 'error' in result:
-        return jsonify({'error': result['error']}), result.get('status_code', 502)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server', default=502)
     groups = result.get('data', []) or []
     # NS — enrich with vm_name
     owners = _BackupOwners(mgr)
@@ -1630,7 +1632,7 @@ def download_pbs_file(pbs_id, store):
         resp = mgr.download_file_from_snapshot(store, bt, bid, int(btime), filepath)
         if resp is None or resp.status_code != 200:
             status = resp.status_code if resp else 502
-            return jsonify({'error': f'Download failed: HTTP {status}'}), status
+            return upstream_failure(status, f'Download failed: HTTP {status}', system='The PBS server')
         # Extract filename from filepath + sanitize for Content-Disposition header injection
         import re as _re
         filename = filepath.rstrip('/').split('/')[-1] or 'download'
@@ -1671,7 +1673,7 @@ def get_pbs_datastore_config(pbs_id, store):
     mgr = pbs_managers[pbs_id]
     result = mgr.get_datastore_config(store)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server')
     return jsonify(result.get('data', result))
 
 
@@ -2193,7 +2195,7 @@ def get_pbs_disk_smart(pbs_id, disk):
         return jsonify({'error': 'PBS server not found'}), 404
     result = pbs_managers[pbs_id].get_disk_smart(disk)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return upstream_failure(result.get('status_code'), result['error'], system='The PBS server')
     return jsonify(result.get('data', result))
 
 
@@ -3696,7 +3698,7 @@ def run_backup_job_now(cluster_id, job_id):
             log_audit(request.session.get('user', 'system'), 'backup.run_now',
                       f"Triggered backup job {job_id} on {pve_node}", cluster=cm.config.name)
             return jsonify({'success': True, 'upid': upid, 'node': pve_node})
-        return jsonify({'error': r.text or f'HTTP {r.status_code}'}), r.status_code
+        return upstream_failure(r.status_code, r.text or f'HTTP {r.status_code}')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 
@@ -3737,48 +3739,11 @@ def restore_backup(cluster_id):
     if mode not in ('new', 'overwrite', 'test'):
         return jsonify({'error': "mode must be 'new', 'overwrite', or 'test'"}), 400
 
-    # NS Aug 2026 (audit) — authorize the SOURCE backup, not only the target. Every mode reads the
-    # backup's disk image (overwrite→qmrestore --force, test→boot, new→into a fresh VMID), so a
-    # vm.backup holder scoped to their own VM could otherwise restore/boot ANOTHER VM's backup and
-    # read its contents. Resolve the backup's owning VMID from the volid and require access to it.
-    import re as _re
     from pegaprox.utils.auth import build_authz_user
-    from pegaprox.utils.rbac import user_can_access_vm
-    _src_authz_user = build_authz_user(request.session.get('user', ''), request.session)
-    if not acts_as_admin(_src_authz_user):
-        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
-        _src_vmid = int(_sm.group(1)) if _sm else None
-        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
-        if _src_vmid is None or not user_can_access_vm(_src_authz_user, cluster_id, _src_vmid,
-                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
-            return jsonify({'error': 'Permission denied for source backup'}), 403
-
-    # MK Sep 2026 - mode='new' creates a guest, so it has to respect the same boundaries the
-    # create routes do. Only the SOURCE backup and (below) an existing target were authorized,
-    # which left the destination free: a scoped caller could restore into any VMID on any node,
-    # including one inside another tenant's configured VMID range, and onto storage they have
-    # no claim to. vms.py has enforced the range on create since the tenant-limits work; the
-    # restore path never learned about it.
-    if mode == 'new' and not acts_as_admin(_src_authz_user):
-        from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID as _DT
-        _rok, _rmsg = check_tenant_vmid(_src_authz_user.get('tenant_id') or _DT, target_vmid)
-        if not _rok:
-            return jsonify({'error': _rmsg}), 403
-        # and the node has to be one this caller may actually place a guest on
-        _nerr = _authz_restore_node(cluster_id, target_node, _src_authz_user)
-        if _nerr:
-            return _nerr
-
-    # NS Aug 2026 (Aikido pentest) — overwrite (destructive qmrestore --force) and test (boots into
-    # the VMID) both act on an EXISTING target VM, so require the same per-VM ACL as a direct VM op;
-    # cluster reachability alone let a vm.backup holder clobber/boot any VM in a reachable cluster.
-    if mode in ('overwrite', 'test'):
-        from pegaprox.utils.auth import build_authz_user
-        from pegaprox.utils.rbac import user_can_access_vm
-        _is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
-        if not user_can_access_vm(build_authz_user(request.session.get('user', ''), request.session),
-                                  cluster_id, target_vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
-            return jsonify({'error': 'Permission denied for target VM'}), 403
+    _refused = _restore_refusal(cluster_id, build_authz_user(request.session.get('user', ''), request.session),
+                                volid, target_node, target_vmid, mode)
+    if _refused:
+        return _refused
 
     # Test-mode = verify pipeline without cleanup
     if mode == 'test':
@@ -3788,45 +3753,347 @@ def restore_backup(cluster_id):
                 'cluster_id': cluster_id,
                 'node': target_node, 'vmid': target_vmid,
                 'backup_volid': volid,
-                # NS — pass auto_cleanup=False so the test VM survives for inspection
+                # NS - pass auto_cleanup=False so the test VM survives for inspection
                 'auto_cleanup': False,
             })
             return jsonify({'success': True, 'task_id': task_id, 'mode': 'test'})
         except Exception as e:
             return jsonify({'error': safe_error(e)}), 500
 
-    # Choose vm_type from volid: pbs:backup/vm/100/... vs pbs:backup/ct/100/...
-    is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
-    cmd_path = 'lxc' if is_lxc else 'qemu'
-    restore_url = f'https://{cm.host}:{cm.api_port}/api2/json/nodes/{target_node}/{cmd_path}'
-
-    params = {
-        'vmid': target_vmid,
-        'archive': volid,
-    }
-    if target_storage:
-        params['storage'] = target_storage
-    if mode == 'overwrite':
-        params['force'] = 1
-
+    # qmrestore or pct restore by the backup (pbs:backup/vm/100/... vs pbs:backup/ct/100/...);
+    # a batch restore hands each of its backups through here too
+    from pegaprox.core.batch_restore import start_restore
     try:
-        r = cm._api_post(restore_url, data=params, timeout=30)
-        if r.status_code == 200:
-            upid = r.json().get('data')
+        got = start_restore(cm, volid, target_node, target_vmid, target_storage, mode == 'overwrite')
+        if 'upid' in got:
             log_audit(request.session.get('user', 'system'), 'backup.restored',
-                      f"Restoring {volid} → {cmd_path}/{target_vmid} on {target_node} (mode={mode})",
+                      f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode})",
                       cluster=cm.config.name)
-            return jsonify({'success': True, 'upid': upid, 'mode': mode, 'target_vmid': target_vmid})
-        # surface PVE body
-        try:
-            err = r.json().get('errors') or r.json().get('message') or r.text
-            if isinstance(err, dict):
-                err = ', '.join(f'{k}: {v}' for k, v in err.items())
-        except Exception:
-            err = r.text or f'HTTP {r.status_code}'
-        return jsonify({'error': err, 'pve_status': r.status_code}), r.status_code
+            return jsonify({'success': True, 'upid': got['upid'], 'mode': mode, 'target_vmid': target_vmid})
+        return upstream_failure(got['status'], got['error'], pve_status=got['status'])
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
+
+
+def _restore_refusal(cluster_id, user, volid, target_node, target_vmid, mode, node_checked=False):
+    """The checks of a restore: an error response when `user` may not restore `volid` into
+    `target_vmid` on `target_node` this way, else None. node_checked: the caller asked
+    _authz_restore_node already (a batch does once, for all of its backups)."""
+    import re as _re
+    from pegaprox.utils.rbac import user_can_access_vm
+
+    # NS Aug 2026 (audit) — authorize the SOURCE backup, not only the target. Every mode reads the
+    # backup's disk image (overwrite→qmrestore --force, test→boot, new→into a fresh VMID), so a
+    # vm.backup holder scoped to their own VM could otherwise restore/boot ANOTHER VM's backup and
+    # read its contents. Resolve the backup's owning VMID from the volid and require access to it.
+    if not acts_as_admin(user):
+        _sm = _re.search(r'/(?:vm|ct)/(\d+)/', volid) or _re.search(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-', volid)
+        _src_vmid = int(_sm.group(1)) if _sm else None
+        _src_is_lxc = '/ct/' in volid or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid or volid.endswith('.lxc.tar')
+        if _src_vmid is None or not user_can_access_vm(user, cluster_id, _src_vmid,
+                                                       'vm.backup', 'lxc' if _src_is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for source backup'}), 403
+
+    # MK Sep 2026 - mode='new' creates a guest, so it has to respect the same boundaries the
+    # create routes do. Only the SOURCE backup and (below) an existing target were authorized,
+    # which left the destination free: a scoped caller could restore into any VMID on any node,
+    # including one inside another tenant's configured VMID range, and onto storage they have
+    # no claim to. vms.py has enforced the range on create since the tenant-limits work; the
+    # restore path never learned about it.
+    if mode == 'new' and not acts_as_admin(user):
+        from pegaprox.utils.rbac import check_tenant_vmid, DEFAULT_TENANT_ID as _DT
+        _rok, _rmsg = check_tenant_vmid(user.get('tenant_id') or _DT, target_vmid)
+        if not _rok:
+            return jsonify({'error': _rmsg}), 403
+        # and the node has to be one this caller may actually place a guest on
+        if not node_checked:
+            _nerr = _authz_restore_node(cluster_id, target_node, user)
+            if _nerr:
+                return _nerr
+
+    # NS Aug 2026 (Aikido pentest) — overwrite (destructive qmrestore --force) and test (boots into
+    # the VMID) both act on an EXISTING target VM, so require the same per-VM ACL as a direct VM op;
+    # cluster reachability alone let a vm.backup holder clobber/boot any VM in a reachable cluster.
+    if mode in ('overwrite', 'test'):
+        _is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid
+        if not user_can_access_vm(user, cluster_id, target_vmid, 'vm.backup', 'lxc' if _is_lxc else 'qemu'):
+            return jsonify({'error': 'Permission denied for target VM'}), 403
+    return None
+
+
+# MK Oct 2026 - several backups restored in one go (core/batch_restore.py). Each backup is
+# checked as the single restore above checks it before any of them starts; the batch asks
+# again before each one whether its starter may still restore it.
+_STORAGE_ID_RE = re.compile(r'[A-Za-z][A-Za-z0-9_.-]{0,63}')
+_VOLID_RE = re.compile(r'(?P<storage>[A-Za-z][A-Za-z0-9_.-]{0,63}):[^\s\x00]{1,400}')
+_SOURCE_RES = (re.compile(r'/(?:vm|ct)/(\d+)/'), re.compile(r'vzdump-(?:qemu|lxc|openvz)-(\d+)-'))
+
+
+def _vmid_arg(value):
+    """A VMID from a request body, None when it is none"""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return None
+    return v if 100 <= v <= 999999999 else None
+
+
+def _batch_items(cluster_id, cm, body):
+    """(rows, storage, None, clash) for the backups of a batch, or (None, None, error response,
+    None). clash is the answer for a VMID another batch or guest has already, or None: the
+    caller gives it only once the backups are checked, so it says nothing about guests
+    beyond them."""
+    from pegaprox.core import batch_restore as batch
+
+    def bad(msg, status=400):
+        return None, None, (jsonify({'error': msg}), status), None
+
+    items = body.get('items')
+    if not isinstance(items, list) or not 1 <= len(items) <= batch.MAX_ITEMS:
+        return bad(f'items lists 1 to {batch.MAX_ITEMS} backups')
+    mode = body['mode']
+    nxt = 100
+    if mode == 'new' and body.get('first_vmid') is not None:
+        nxt = _vmid_arg(body.get('first_vmid'))
+        if nxt is None:
+            return bad('first_vmid is a number from 100 on')
+    picked, storage = [], None
+    for item in items:
+        volid = item.get('volid') if isinstance(item, dict) else None
+        m = _VOLID_RE.fullmatch(volid) if isinstance(volid, str) else None
+        if not m:
+            return bad('Every item names a backup volume (storage:backup/...)')
+        if storage not in (None, m.group('storage')):
+            return bad('The backups of a batch come from one storage')
+        storage = m.group('storage')
+        src = next((r.search(volid) for r in _SOURCE_RES if r.search(volid)), None)
+        if src is None:
+            return bad(f'Cannot tell which guest {volid} belongs to')
+        is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
+        want = None
+        if mode == 'new' and item.get('target_vmid') is not None:
+            want = _vmid_arg(item.get('target_vmid'))
+            if want is None:
+                return bad('target_vmid is a number from 100 on')
+        picked.append((volid, int(src.group(1)), 'lxc' if is_lxc else 'qemu', want))
+    if len({p[1] for p in picked}) != len(picked):
+        return bad('One backup per guest: two items restore the same guest')
+    wanted = [p[3] for p in picked if p[3] is not None]
+    if len(set(wanted)) != len(wanted):
+        return bad('Two items name the same target_vmid')
+
+    # the guests as the live view has them: which VMIDs are taken, and where a guest that is
+    # overwritten lives (Proxmox restores over a guest only on its own node). An empty
+    # cluster is fine - a restore after a loss starts from one
+    try:
+        where = {int(g.get('vmid')): g.get('node') for g in (cm.get_vm_resources(max_age=5) or [])
+                 if str(g.get('vmid', '')).isdigit()}
+    except Exception as e:
+        logging.error(f"[PBS] guest list of {cluster_id} unreadable for a batch restore: {e}")
+        return bad('Cannot read the guests of this cluster right now', 503)
+    busy = batch.busy_targets(cluster_id)
+    rows, clash = [], None
+    if mode == 'overwrite':
+        if busy & {p[1] for p in picked}:
+            clash = (jsonify({'error': 'Another batch restore is restoring one of these guests'}), 409)
+        for volid, src, kind, _want in picked:
+            rows.append(batch.new_row(src, kind, volid, src, where.get(src) or body['target_node']))
+        return rows, storage, None, clash
+    taken = set(where) | busy
+    if taken & set(wanted):
+        clash = (jsonify({'error': 'A target VMID is taken already'}), 409)
+    taken |= set(wanted)
+    for volid, src, kind, want in picked:
+        if want is None:
+            while nxt in taken:
+                nxt += 1
+            want, nxt = nxt, nxt + 1
+            taken.add(want)
+        rows.append(batch.new_row(src, kind, volid, want, body['target_node']))
+    return rows, storage, None, clash
+
+
+@bp.route('/api/clusters/<cluster_id>/backup-restore/batch', methods=['POST'])
+@require_auth(perms=['vm.backup'])
+def restore_backup_batch(cluster_id):
+    """Restore several backups in one go
+
+    Body: {items: [{volid, target_vmid?}], mode: 'new'|'overwrite', target_node,
+    target_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?}.
+    One backup per guest, all from one storage, 1 to 100 of them. 'new' restores each on
+    target_node into a VMID of its own (its target_vmid, else the next free one from
+    first_vmid on). 'overwrite' restores each over the guest it came from, on the node that
+    guest is on (target_node for one that is gone), and only with confirm: true. Every backup
+    is checked as POST /backup-restore checks it before anything starts: one refused and
+    none starts (403, refused names each). Answers 202 {run}, to follow with GET
+    /api/batch-restores/<run_id>.
+    """
+    from pegaprox.core import batch_restore as batch
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.sanitization import validate_hostname
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    cm = cluster_managers[cluster_id]
+    if getattr(cm, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Batch restore is for Proxmox VE clusters'}), 400
+    if not cm.is_connected:
+        return jsonify({'error': 'cluster offline'}), 503
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({'error': 'A JSON object is expected'}), 400
+    if body.get('mode') not in batch.MODES:
+        return jsonify({'error': "mode is 'new' or 'overwrite'"}), 400
+    how = body.get('run', 'sequential')
+    if how not in batch.HOW:
+        return jsonify({'error': "run is 'sequential' or 'parallel'"}), 400
+    parallel = 1
+    if how == 'parallel':
+        parallel = body.get('parallel', 2)
+        if isinstance(parallel, bool) or not isinstance(parallel, int) or not 2 <= parallel <= batch.PARALLEL_MAX:
+            return jsonify({'error': f'parallel is a number from 2 to {batch.PARALLEL_MAX}'}), 400
+    if body['mode'] == 'overwrite' and body.get('confirm') is not True:
+        return jsonify({'error': 'Overwriting guests needs confirm: true', 'code': 'CONFIRM_REQUIRED'}), 400
+    target_node = body.get('target_node')
+    if not isinstance(target_node, str) or not validate_hostname(target_node):
+        return jsonify({'error': 'target_node is required'}), 400
+    nodes = cm.get_node_status() or {}
+    tinfo = nodes.get(target_node)
+    if not isinstance(tinfo, dict):
+        return jsonify({'error': f'{target_node} is no node of this cluster'}), 400
+    if tinfo.get('offline') or tinfo.get('status', 'online') != 'online':
+        return jsonify({'error': f'{target_node} is not online'}), 400
+    target_storage = body.get('target_storage') or ''
+    if not isinstance(target_storage, str) or (target_storage and not _STORAGE_ID_RE.fullmatch(target_storage)):
+        return jsonify({'error': 'target_storage is a storage ID'}), 400
+
+    rows, storage, rerr, clash = _batch_items(cluster_id, cm, body)
+    if rerr:
+        return rerr
+
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    refused = []
+    if body['mode'] == 'new' and not acts_as_admin(user):
+        # one node for the whole batch: asked once, it walks the guests of the cluster
+        _nerr = _authz_restore_node(cluster_id, target_node, user)
+        if _nerr:
+            return _nerr
+    for row in rows:
+        r = _restore_refusal(cluster_id, user, row['volid'], row['node'], row['target_vmid'],
+                             body['mode'], node_checked=True)
+        if r:
+            refused.append({'volid': row['volid'], 'vmid': row['vmid'],
+                            'error': (r[0].get_json(silent=True) or {}).get('error') or 'Refused'})
+    if refused:
+        return jsonify({'error': f'{len(refused)} of these backups cannot be restored by you - nothing was started',
+                        'refused': refused}), 403
+    if clash:
+        return clash
+
+    usr = request.session.get('user', 'system')
+    from pegaprox.utils.audit import get_client_ip
+    run = batch.BatchRun(cluster_id, cm.config.name, usr, request.session, get_client_ip(), storage,
+                         body['mode'], target_node, target_storage, how, parallel, rows)
+    try:
+        batch.register(run)
+    except batch.TooMany as e:
+        return jsonify({'error': str(e)}), 409
+    listed = ', '.join(f"{r['vmid']}->{r['target_vmid']}" for r in rows[:50]) + (' ...' if len(rows) > 50 else '')
+    log_audit(usr, 'backup.batch_restore',
+              f"Batch restore {run.id} of {len(rows)} backup(s) from {storage} onto {target_node} "
+              f"(mode={body['mode']}, {how}{f' {parallel}' if how == 'parallel' else ''}): {listed}",
+              cluster=cm.config.name)
+    batch.launch(run)
+    return jsonify({'run': run.view(run.rows_copy(), me=usr)}), 202
+
+
+def _batch_view(run, with_rows=True):
+    """The batch as the caller may see it, None when they may see none of it: the cluster
+    out of their reach, or not one of its guests theirs to see"""
+    if run is None:
+        return None
+    ok, _err = check_cluster_access(run.cluster_id)
+    if not ok:
+        return None
+    rows = scope_vm_rows(run.cluster_id, run.rows_copy())
+    if not rows:
+        return None
+    return run.view(rows, with_rows=with_rows, me=request.session.get('user', ''))
+
+
+def _may_cancel_batch(run):
+    """Who started it, or a caller with vm.backup on the whole cluster"""
+    if request.session.get('user') == run.user:
+        return True
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import has_permission
+    from pegaprox.api.helpers import caller_is_scoped
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    return has_permission(user, 'vm.backup') and not caller_is_scoped(user, run.cluster_id)
+
+
+@bp.route('/api/batch-restores', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def list_batch_restores():
+    """Batch restores of the last hour
+
+    The batches on the clusters the caller reaches, newest first, with their counts and
+    without the backups. A batch counts only the guests the caller may see. They run in
+    the process of the active instance: a restart ends them."""
+    from pegaprox.core import batch_restore as batch
+    out = []
+    for run in batch.runs():
+        view = _batch_view(run, with_rows=False)
+        if view:
+            out.append(view)
+    return jsonify({'runs': out})
+
+
+@bp.route('/api/batch-restores/<run_id>', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_batch_restore(run_id):
+    """One batch restore, a line per backup
+
+    Each with its state (wait, restoring, done, failed, skipped, cancelled, unknown), a
+    note, its task and the VMID it restores into; may_cancel says whether the caller may
+    cancel the rest."""
+    from pegaprox.core import batch_restore as batch
+    run = batch.get(run_id)
+    view = _batch_view(run)
+    if not view:
+        return jsonify({'error': 'Batch restore not found'}), 404
+    view['may_cancel'] = view['state'] == 'running' and not view['cancelled_by'] and _may_cancel_batch(run)
+    return jsonify({'run': view})
+
+
+@bp.route('/api/batch-restores/<run_id>/cancel', methods=['POST'])
+@require_auth(perms=['vm.backup'])
+def cancel_batch_restore(run_id):
+    """Cancel the rest of a batch restore
+
+    No further backup is restored. What is restoring finishes in Proxmox."""
+    from pegaprox.core import batch_restore as batch
+    run = batch.get(run_id)
+    if not _batch_view(run, with_rows=False):
+        return jsonify({'error': 'Batch restore not found'}), 404
+    if not _may_cancel_batch(run):
+        return jsonify({'error': 'Only who started it, or someone who restores on the whole '
+                                 'cluster, cancels a batch restore'}), 403
+    usr = request.session.get('user', 'system')
+    if not batch.cancel(run, usr):
+        return jsonify({'error': 'This batch restore is over'}), 409
+    waiting = sum(1 for r in run.rows_copy() if r['state'] == batch.WAITING)
+    log_audit(usr, 'backup.batch_restore_cancelled',
+              f"Batch restore {run.id} (started by {run.user}): {waiting} backup(s) not started",
+              cluster=run.cluster_name)
+    view = _batch_view(run) or {}
+    view['may_cancel'] = False
+    return jsonify({'run': view})
 
 
 @bp.route('/api/pbs/<pbs_id>/backup-diff', methods=['GET'])

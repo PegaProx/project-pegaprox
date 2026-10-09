@@ -196,6 +196,8 @@ else
         # never overwrite user data / secrets, even if they show up in the tree
         case "$file" in
             config/*|ssl/*|logs/*|backups/*|.git/*|*.db|*.pem|*.key|*.crt|*.enc) return 0 ;;
+            # a plugin's settings: only a missing config.json comes from the release (#1134)
+            plugins/*/config.json) [ -e "$file" ] && return 0 ;;
         esac
         local dir=$(dirname "$file")
         [ "$dir" != "." ] && mkdir -p "$dir"
@@ -352,22 +354,41 @@ if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
 
     if [ -f "$CONTENT_DIR/pegaprox_multi_cluster.py" ]; then
         # Copy files, preserving directory structure
-        # Skip: config/, ssl/, logs/, backups/, cert.pem, key.pem, .git/
+        # Skip: config/, ssl/, logs/, backups/, cert.pem, key.pem, .git/, plugins/ (below)
         if command -v rsync &> /dev/null; then
             rsync -a --exclude='config/' --exclude='ssl/' --exclude='logs/' \
                   --exclude='backups/' --exclude='cert.pem' --exclude='key.pem' \
-                  --exclude='.git/' --exclude='.gitignore' \
+                  --exclude='.git/' --exclude='.gitignore' --exclude='/plugins/' \
                   "$CONTENT_DIR/" "$SCRIPT_DIR/"
         else
             # Fallback: cp + tar (works without rsync)
             cd "$CONTENT_DIR"
             tar cf - --exclude='config' --exclude='ssl' --exclude='logs' \
                      --exclude='backups' --exclude='cert.pem' --exclude='key.pem' \
-                     --exclude='.git' --exclude='.gitignore' \
+                     --exclude='.git' --exclude='.gitignore' --exclude='./plugins' \
                      . | tar xf - -C "$SCRIPT_DIR"
             cd "$SCRIPT_DIR"
         fi
         echo -e "${GREEN}OK${NC}"
+        # NS Oct 2026 (#1134): the copy above put every plugin's config.json back to the
+        # defaults. The plugins go through the sync instead: code replaced, a plugin's
+        # config.json and a plugin you added left alone.
+        PLUGIN_SYNC="$CONTENT_DIR/packaging/plugins/sync_plugins.py"
+        [ -f "$PLUGIN_SYNC" ] || PLUGIN_SYNC="$SCRIPT_DIR/packaging/plugins/sync_plugins.py"
+        # as root they go to the owner of the install: the sync writes them 0640/0600, and
+        # with config/ moved elsewhere (#826) nothing below would hand them over, so a
+        # service that does not run as root could not read them
+        PLUGIN_OWNER=""
+        if [ "$EUID" -eq 0 ]; then
+            for _ref in config cert.pem ssl .; do
+                if [ -e "$SCRIPT_DIR/$_ref" ]; then
+                    PLUGIN_OWNER=$(stat -c '%u:%g' "$SCRIPT_DIR/$_ref" 2>/dev/null || true)
+                    break
+                fi
+            done
+        fi
+        python3 "$PLUGIN_SYNC" "$CONTENT_DIR/plugins" "$SCRIPT_DIR/plugins" ${PLUGIN_OWNER:+--owner "$PLUGIN_OWNER"} \
+            || echo -e "${YELLOW}Not every plugin could be updated (see above)${NC}"
     else
         echo -e "${RED}FAILED${NC}"
         echo "Archive does not contain pegaprox_multi_cluster.py"
@@ -411,6 +432,8 @@ if [ "$EUID" -eq 0 ] && [ -n "$ORIGINAL_OWNER" ] && [ "$ORIGINAL_OWNER" != "root
     chown -R "$ORIGINAL_OWNER" backups/ 2>/dev/null
     # images/ was missing here - left root:root on a non-root install (#633)
     [ -d "images" ] && chown -R "$ORIGINAL_OWNER" images/ 2>/dev/null
+    # a plugin writes its own config.json (#1134)
+    [ -d "plugins" ] && chown -R "$ORIGINAL_OWNER" plugins/ 2>/dev/null
     # config/ too: we chmod 700 it further down, so a single root-owned file in
     # there (a root-run import can create config/ssl/cert.pem) locks the service
     # user out of its own certs. ORIGINAL_OWNER is read from config/ itself, so

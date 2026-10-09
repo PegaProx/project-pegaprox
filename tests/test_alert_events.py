@@ -997,6 +997,21 @@ def test_a_confined_caller_sees_only_mutes_of_guests_it_sees(routes, monkeypatch
     assert len(routes.admin.get('/api/clusters/c1/alert-mutes').get_json()['mutes']) == 4
 
 
+def test_a_confined_caller_sees_no_mute_of_a_node_object(routes, monkeypatch, db):
+    _store(monkeypatch, [_rule()])
+    _mute(db, object_key='vm:101')
+    _mute(db, object_key='node:pve2')
+    _mute(db, object_key='task:pve2:aptupdate:')
+    _mute(db, object_key='zfs:pve2:tank')
+    from pegaprox.utils import rbac
+    monkeypatch.setattr(rbac, 'user_can_access_vm', lambda u, cid, vmid, perm='vm.view', vt=None: int(vmid) == 101)
+    c = _who(routes, 'pool_confined')
+    keys = [m['object_key'] for m in c.get('/api/clusters/c1/alert-mutes').get_json()['mutes']]
+    assert keys == ['vm:101']
+    # counterproof: the admin sees the node objects too
+    assert len(routes.admin.get('/api/clusters/c1/alert-mutes').get_json()['mutes']) == 4
+
+
 def test_a_standby_refuses_mute_writes(routes, monkeypatch, db):
     from pegaprox.core import ha
     _store(monkeypatch, [_rule()])

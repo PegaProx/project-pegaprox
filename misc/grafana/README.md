@@ -55,5 +55,36 @@ pegaprox_guest_last_backup_age_seconds > 86400 * 2
 time() - pegaprox_guest_last_backup_timestamp_seconds > 86400 * 2
 ```
 
+### Node health and guest tag series
+| Series | Labels | Where it comes from |
+|---|---|---|
+| `pegaprox_node_clock_offset_seconds` | `node` | The node's clock minus the clock of the PegaProx host, from `/nodes/<node>/time` of every online node, read at most every five minutes and shared with the node clock drift alert. Proxmox answers whole seconds, so read it as about 0.5 s plus half the round trip either way. |
+| `pegaprox_node_temperature_celsius` | `node` | The hottest sensor of the node from the 5-minute hardware poll (lm-sensors or the kernel's hwmon over SSH). A scrape reads the cache only. |
+| `pegaprox_node_power_watts` | `node` | The power draw the node's BMC reports (in-band IPMI or Redfish), from the same poll, for nodes whose hardware health PegaProx is allowed to read. |
+| `pegaprox_node_pressure_some_percent`, `pegaprox_node_pressure_full_percent` | `node`, `resource` = `cpu`, `memory` or `io` | Pressure stall information: the share of time in which some (or all non-idle) tasks waited, 10 s average, from the newest point of the node's RRD, read once a minute. Proxmox VE 9 and later; a node whose RRD has none is asked again an hour later. |
+| `pegaprox_guest_pressure_some_percent`, `pegaprox_guest_pressure_full_percent` | the guest labels, `resource` | The same for running guests, where Proxmox VE lists it with the guests in `/cluster/resources`. Never read per guest. |
+| `pegaprox_guest_tag_info` | `cluster_id`, `cluster`, `vmid`, `tag` | Always 1: one series per tag of a guest, the Proxmox tags and the tags set in PegaProx, in lower case, at most 10 per guest. |
+| `pegaprox_cluster_source_up` | `source` = `clock` or `node_pressure` | 1 when every online node answered the last read. |
+| `pegaprox_cluster_qdevice_connected` | `node` | 1 when the QDevice daemon (corosync-qdevice) of the node is connected to the QNetd host, 0 when it is not or the node runs no daemon while the cluster has a QDevice. From `/cluster/config/qdevice` of each node PegaProx can reach at an address of its own (the API host and the fallback hosts); the other nodes have no series. A scrape never reads it: it is the last read of the QDevice view in the UI or of the QDevice alert rule, at most 30 seconds apart while either runs, and left out once it is older than 5 minutes. Clusters without a QDevice have no series. |
+
+The tags are their own series so the guest series keep their labels when a tag changes. Join them on `cluster_id` and `vmid`:
+```
+pegaprox_guest_cpu_percent * on(cluster_id, vmid) group_left() pegaprox_guest_tag_info{tag="prod"}
+count by (tag) (pegaprox_guest_tag_info)
+max by (cluster, node) (abs(pegaprox_node_clock_offset_seconds)) > 2
+pegaprox_node_pressure_some_percent{resource="io"} > 20
+min by (cluster) (pegaprox_cluster_qdevice_connected) == 0
+```
+
+Node clock drift, guest restart loops and a QDevice that is not connected are alert rules in PegaProx as well (Automation > Alerts), with one message when it starts and one when it clears, through e-mail, push and the webhook channels like every alert.
+
+The QNetd host of a QDevice is no Proxmox node. PegaProx sees it only through the QDevice daemons of the cluster nodes, so there is no CPU, memory or update series for it: watch it with an exporter on that host itself.
+
 ## Grafana Dashboard
 You can simply import the dashboard or JSON file to your Grafana instance.
+
+| File | What it shows |
+|---|---|
+| `pegaprox_grafana_dashboard_v1.1.json` | Clusters, nodes, guests, sessions, PBS and ESXi connectivity |
+| `pegaprox_grafana_dashboard_node_health_v1.0.json` | Clock offset, temperature, measured power and CPU, memory and IO pressure per node |
+| `pegaprox_grafana_dashboard_guests_by_tag_v1.0.json` | Load, network, disk, pressure and backup age of the guests that carry the tags you pick |

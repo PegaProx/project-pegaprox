@@ -1,6 +1,7 @@
 # site recovery plans & failover orchestration - NS Mar 2026
 
 import json
+import re
 import uuid
 import logging
 import time
@@ -65,9 +66,19 @@ def _get_plan_vms(plan_id):
     return [dict(r) for r in rows] if rows else []
 
 
+def _failover_state(total, moved):
+    """'none', 'partial' or 'all': how much of a plan is failed over, guest by guest."""
+    if not moved:
+        return 'none'
+    return 'all' if moved >= total else 'partial'
+
+
 def _plan_with_vms(plan):
     """Enrich plan with VMs and replication status"""
     plan['vms'] = _get_plan_vms(plan['id'])
+    moved = sum(1 for v in plan['vms'] if v.get('failed_over'))
+    plan['failed_over_count'] = moved
+    plan['failover_state'] = _failover_state(len(plan['vms']), moved)
     # attach RPO info from replication jobs
     db = get_db()
     for vm in plan['vms']:
@@ -179,6 +190,74 @@ def _console_vmids(plan):
     return out
 
 
+# MK Oct 2026 - an emergency failover or a failback of single guests: the body names them as
+# {"vmids": [...]}. Without it both take the whole plan, as they always did.
+_PICK_CAP = 20000
+
+
+def _picked_vmids(plan):
+    """(the guests picked, or None for the whole plan; an error response or None).
+
+    Called after _authz_plan_vms: what may be picked is what that approved. A body that is
+    there but is not a JSON object is refused instead of read as "no selection" - a pick of
+    one guest that arrives garbled must not fail over every guest of the plan."""
+    raw = request.get_data(cache=True) or b''
+    if not raw.strip():
+        return None, None
+    data = request.get_json(silent=True, force=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({'error': 'The body must be a JSON object'}), 400)
+    picked = data.get('vmids')
+    if picked is None:
+        return None, None
+    if not isinstance(picked, list) or not picked:
+        return None, (jsonify({'error': 'vmids must be a non-empty list of VM ids'}), 400)
+    if len(picked) > _PICK_CAP:
+        return None, (jsonify({'error': f'vmids takes at most {_PICK_CAP} entries'}), 400)
+    out = []
+    for v in picked:
+        if isinstance(v, bool):
+            v = None
+        elif isinstance(v, str) and re.fullmatch(r'[0-9]{1,9}', v):
+            v = int(v)
+        if not isinstance(v, int) or not 0 < v < 1000000000:
+            return None, (jsonify({'error': 'vmids must be a non-empty list of VM ids'}), 400)
+        out.append(v)
+    out = list(dict.fromkeys(out))
+    in_plan = set()
+    for v in _approved_vmids(plan):
+        try:
+            in_plan.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    stray = [v for v in out if v not in in_plan]
+    if stray:
+        return None, (jsonify({'error': f'Not a guest of this plan: {_vmid_list(stray)}'}), 400)
+    return out, None
+
+
+def _release_held_replication(plan, vm):
+    """A failed-over guest leaving its plan: switch its replication jobs off, returns how many.
+
+    The plan held them (background/site_recovery.py HELD_JOB_SQL). Without it the next run
+    would replace the guest running on the target with its old source."""
+    if not vm.get('failed_over'):
+        return 0
+    db = get_db()
+    cur = db.conn.cursor()
+    cur.execute('UPDATE cross_cluster_replications SET enabled = 0 WHERE enabled = 1 AND (id = ? '
+                'OR (vmid = ? AND source_cluster = ? AND target_cluster = ?))',
+                (vm.get('replication_job_id') or None, vm['vmid'], plan['source_cluster'], plan['target_cluster']))
+    db.conn.commit()
+    return cur.rowcount
+
+
+def _vmid_list(vmids, cap=20):
+    vmids = list(vmids)
+    text = ', '.join(str(v) for v in vmids[:cap])
+    return text + (f' and {len(vmids) - cap} more' if len(vmids) > cap else '')
+
+
 # ---- CRUD: Plans ----
 
 @bp.route('/api/site-recovery/plans', methods=['GET'])
@@ -217,9 +296,12 @@ def list_plans():
                 p[k] = json.loads(p[k] or '{}')
             except Exception:
                 p[k] = {}
-        # include vm count
-        cnt = db.query_one('SELECT COUNT(*) as c FROM site_recovery_vms WHERE plan_id = ?', (p['id'],))
+        # include vm count, and how many of them are failed over
+        cnt = db.query_one("SELECT COUNT(*) as c, SUM(CASE WHEN COALESCE(failed_over, '') != '' "
+                           "THEN 1 ELSE 0 END) as f FROM site_recovery_vms WHERE plan_id = ?", (p['id'],))
         p['vm_count'] = cnt['c'] if cnt else 0
+        p['failed_over_count'] = (cnt['f'] or 0) if cnt else 0
+        p['failover_state'] = _failover_state(p['vm_count'], p['failed_over_count'])
         plans.append(p)
     return jsonify(plans)
 
@@ -380,15 +462,17 @@ def delete_plan(plan_id):
         logging.warning(f"[SR] Force-deleting plan '{_sl(plan['name'])}' while status={_sl(plan['status'])}")
 
     db = get_db()
+    held = sum(_release_held_replication(plan, vm) for vm in _get_plan_vms(plan_id))
     db.execute('DELETE FROM site_recovery_vms WHERE plan_id = ?', (plan_id,))
     db.execute('DELETE FROM site_recovery_events WHERE plan_id = ?', (plan_id,))
     db.execute('DELETE FROM site_recovery_screenshots WHERE plan_id = ?', (plan_id,))
     db.execute('DELETE FROM site_recovery_plans WHERE id = ?', (plan_id,))
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'site_recovery.plan_deleted', f"Deleted recovery plan '{plan['name']}'")
+    log_audit(usr, 'site_recovery.plan_deleted', f"Deleted recovery plan '{plan['name']}'"
+              + (f", {held} replication job(s) of failed-over guests disabled" if held else ''))
 
-    return jsonify({'message': 'Plan deleted'})
+    return jsonify({'message': 'Plan deleted', 'replications_disabled': held})
 
 
 # ---- CRUD: Protected VMs ----
@@ -541,11 +625,13 @@ def remove_plan_vm(plan_id, vm_id):
         return err
 
     db = get_db()
-    row = db.query_one('SELECT vmid FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
+    row = db.query_one('SELECT * FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
+    held = _release_held_replication(plan, dict(row)) if row else 0
     db.execute('DELETE FROM site_recovery_vms WHERE id = ? AND plan_id = ?', (vm_id, plan_id))
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'site_recovery.vm_removed', f"VM {row['vmid'] if row else vm_id} removed from plan {plan_id}")
+    log_audit(usr, 'site_recovery.vm_removed', f"VM {row['vmid'] if row else vm_id} removed from plan {plan_id}"
+              + (f", {held} replication job(s) of the failed-over guest disabled" if held else ''))
 
     return jsonify({'message': 'VM removed from plan'})
 
@@ -594,6 +680,11 @@ def check_readiness(plan_id):
     # check replication status per VM
     db = get_db()
     for vm in vms:
+        if vm.get('failed_over'):
+            # its replication is held until it is failed back, so its age says nothing here
+            issues.append({'severity': 'info', 'msg': f"VM {vm['vmid']}: failed over ({vm['failed_over']}), "
+                                                      f"replication waits for its failback"})
+            continue
         if vm.get('replication_job_id'):
             repl = db.query_one('SELECT last_run, last_status, enabled FROM cross_cluster_replications WHERE id = ?',
                                 (vm['replication_job_id'],))
@@ -691,6 +782,9 @@ def execute_planned_failover(plan_id):
     vms = _get_plan_vms(plan_id)
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
+    # the worker passes over a guest failed over already; with none left there is nothing to do
+    if all(v.get('failed_over') for v in vms):
+        return jsonify({'error': 'Every guest of this plan is failed over already'}), 409
 
     # MK May 2026 (#413 layer 5) - was `WHERE status = 'ready'` which broke the moment
     # a plan had been failed-over once before: a successful run sets status='completed',
@@ -724,7 +818,10 @@ def execute_planned_failover(plan_id):
 @bp.route('/api/site-recovery/plans/<plan_id>/emergency', methods=['POST'])
 @require_auth(perms=['site_recovery.failover'])
 def execute_emergency_failover(plan_id):
-    """Emergency failover - source may be unreachable"""
+    """Emergency failover - source may be unreachable
+
+    An optional body {"vmids": [...]} fails over only those guests of the plan; the
+    others stay at the source and keep replicating."""
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
@@ -741,6 +838,9 @@ def execute_emergency_failover(plan_id):
     ok, err = _authz_plan_vms(plan, starts_vms=True)
     if not ok:
         return err
+    picked, err = _picked_vmids(plan)
+    if err:
+        return err
 
     if plan['status'] == 'running':
         return jsonify({'error': 'Failover already in progress'}), 409
@@ -752,6 +852,13 @@ def execute_emergency_failover(plan_id):
     vms = _get_plan_vms(plan_id)
     if not vms:
         return jsonify({'error': 'No VMs in plan'}), 400
+    moved = {int(v['vmid']) for v in vms if v.get('failed_over')}
+    if picked is not None:
+        again = [v for v in picked if v in moved]
+        if again:
+            return jsonify({'error': f'Failed over already: {_vmid_list(again)}'}), 409
+    elif len(moved) >= len(vms):
+        return jsonify({'error': 'Every guest of this plan is failed over already'}), 409
 
     # MK May 2026 (#413 layer 5) - mirror the planned-failover relaxation: a successful
     # prior emergency leaves status='completed', which `WHERE status='ready'` rejected.
@@ -770,12 +877,13 @@ def execute_emergency_failover(plan_id):
         return jsonify({'error': f"Cannot start emergency failover — plan is in state '{actual}' (need ready/completed/failed)"}), 409
 
     from pegaprox.background.site_recovery import execute_failover
-    _safe_spawn_failover(execute_failover, plan_id, 'emergency', _approved_vmids(plan))
+    _safe_spawn_failover(execute_failover, plan_id, 'emergency', _approved_vmids(plan), picked)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'site_recovery.emergency', f"Emergency failover started: {plan['name']}")
+    log_audit(usr, 'site_recovery.emergency', f"Emergency failover started: {plan['name']}"
+              + (f" (guests {_vmid_list(picked)})" if picked is not None else ''))
 
-    return jsonify({'message': 'Emergency failover started', 'status': 'running'})
+    return jsonify({'message': 'Emergency failover started', 'status': 'running', 'vmids': picked})
 
 
 @bp.route('/api/site-recovery/plans/<plan_id>/test', methods=['POST'])
@@ -848,7 +956,10 @@ def cleanup_test_failover(plan_id):
 @bp.route('/api/site-recovery/plans/<plan_id>/failback', methods=['POST'])
 @require_auth(perms=['site_recovery.failover'])
 def execute_failback(plan_id):
-    """Reverse direction - migrate VMs back to original source"""
+    """Reverse direction - migrate VMs back to original source
+
+    Only guests that are failed over go back: all of them, or the ones a body
+    {"vmids": [...]} names."""
     plan = _get_plan(plan_id)
     if not plan:
         return jsonify({'error': 'Plan not found'}), 404
@@ -865,9 +976,22 @@ def execute_failback(plan_id):
     ok, err = _authz_plan_vms(plan, starts_vms=True)
     if not ok:
         return err
+    picked, err = _picked_vmids(plan)
+    if err:
+        return err
 
     if plan['status'] == 'running':
         return jsonify({'error': 'Action already in progress'}), 409
+
+    # MK Oct 2026 - per guest: a guest still at the source has no copy to bring home, and
+    # migrating its replica over it is what the worker refuses anyway
+    moved = {int(v['vmid']) for v in _get_plan_vms(plan_id) if v.get('failed_over')}
+    if picked is not None:
+        home = [v for v in picked if v not in moved]
+        if home:
+            return jsonify({'error': f'Not failed over: {_vmid_list(home)}'}), 409
+    elif not moved:
+        return jsonify({'error': 'No guest of this plan is failed over'}), 409
 
     # for failback, the original target is now source and vice versa
     original_src = cluster_managers.get(plan['source_cluster'])
@@ -882,12 +1006,13 @@ def execute_failback(plan_id):
     db.execute("UPDATE site_recovery_plans SET status = 'running', updated_at = ? WHERE id = ?", (now, plan_id))
 
     from pegaprox.background.site_recovery import execute_failover
-    _safe_spawn_failover(execute_failover, plan_id, 'failback', _approved_vmids(plan))
+    _safe_spawn_failover(execute_failover, plan_id, 'failback', _approved_vmids(plan), picked)
 
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'site_recovery.failback', f"Failback started: {plan['name']}")
+    log_audit(usr, 'site_recovery.failback', f"Failback started: {plan['name']}"
+              + (f" (guests {_vmid_list(picked)})" if picked is not None else ''))
 
-    return jsonify({'message': 'Failback started', 'status': 'running'})
+    return jsonify({'message': 'Failback started', 'status': 'running', 'vmids': picked})
 
 
 @bp.route('/api/site-recovery/plans/<plan_id>/cancel', methods=['POST'])

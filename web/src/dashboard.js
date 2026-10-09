@@ -5439,6 +5439,153 @@
             );
         }
 
+        // LW Oct 2026 - what the balancer moved on this cluster and why. The server keeps it in
+        // the migration history, so it outlives a restart; read when the settings open and on
+        // demand, a page at a time, never polled. The reason is worded here from the numbers the
+        // server stored; a caller confined to some guests gets their rows without them.
+        // BAL_HIST_TRIGGERS sits beside MigrationHistory (vm_modals.js)
+        const BAL_HIST_PAGE = 50;
+        const BAL_HIST_STATUS = {
+            success: ['balHistStatusSuccess', 'text-green-400'],
+            failed: ['balHistStatusFailed', 'text-red-400'],
+            dry_run: ['balHistStatusDryRun', 'text-yellow-400'],
+        };
+        function balHistReason(e, t) {
+            const d = e.details || {};
+            const fill = (key, vals) => Object.keys(vals).reduce(
+                (s, k) => s.split(`{${k}}`).join(String(vals[k] ?? '?')), t(key));
+            const load = (l) => l || {};
+            let text = '';
+            if (e.trigger === 'balance' && d.source_load) {
+                const s = load(d.source_load), g = load(d.target_load);
+                text = fill('balHistWhyBalance', { src: d.source, srcScore: s.score, srcCpu: s.cpu, srcMem: s.mem,
+                    tgt: d.target, tgtScore: g.score, tgtCpu: g.cpu, tgtMem: g.mem, diff: d.diff,
+                    threshold: d.threshold, tolerance: d.tolerance });
+            } else if (e.trigger === 'predictive' && d.forecast !== undefined) {
+                text = fill('balHistWhyPredictive', { src: d.source, forecast: d.forecast, threshold: d.threshold,
+                    confidence: d.confidence, tgt: d.target, tgtScore: load(d.target_load).score });
+            } else if (e.trigger === 'affinity' && d.rule !== undefined) {
+                text = fill('balHistWhyAffinity', { rule: d.rule, src: d.source, tgt: d.target });
+            } else if (e.trigger === 'pin' && d.pinned) {
+                text = fill('balHistWhyPin', { nodes: d.pinned.join(', '), src: d.source, tgt: d.target });
+            } else {
+                return e.reason || '';
+            }
+            if (d.manual) text += ' ' + t('balHistManual');
+            if (d.requested_target) text += ' ' + fill('balHistRerouted', { node: e.target_node, requested: d.requested_target });
+            if (d.error) text += ' ' + fill('balHistFailedWith', { error: d.error });
+            return text;
+        }
+
+        function BalancerHistory({ clusterId, authFetch, t }) {
+            const [rows, setRows] = React.useState([]);
+            const [next, setNext] = React.useState(null);
+            const [loaded, setLoaded] = React.useState(false);
+            const [failed, setFailed] = React.useState(false);
+            const [loading, setLoading] = React.useState(false);
+            const [trigger, setTrigger] = React.useState('');
+            const [status, setStatus] = React.useState('');
+            const [leaderAway, setLeaderAway] = React.useState(false);
+            const gen = React.useRef(0);
+
+            const load = React.useCallback(async (before) => {
+                const mine = before ? gen.current : ++gen.current;
+                setLoading(true);
+                try {
+                    const q = new URLSearchParams({ limit: String(BAL_HIST_PAGE) });
+                    if (trigger) q.set('trigger', trigger);
+                    if (status) q.set('status', status);
+                    if (before) q.set('before', String(before));
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/balance-history?${q.toString()}`);
+                    // only the instance whose balancer runs keeps these rows (#625)
+                    const away = await haLeaderAway(r);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (mine !== gen.current) return;
+                    setLeaderAway(away);
+                    setFailed(!d && !away);
+                    if (!d) return;
+                    setRows(prev => before ? prev.concat(d.entries || []) : (d.entries || []));
+                    setNext(d.next_before || null);
+                    setLoaded(true);
+                } finally {
+                    if (mine === gen.current) setLoading(false);
+                }
+            }, [clusterId, authFetch, trigger, status]);
+
+            React.useEffect(() => {
+                setRows([]); setNext(null); setLoaded(false);
+                load(null);
+                return () => { gen.current += 1; };
+            }, [load]);
+
+            const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
+            const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
+
+            return (
+                <div className="space-y-3 min-w-0" data-balancer-history>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                            <h3 className="font-semibold flex items-center gap-2">
+                                <span className="text-blue-400 flex-shrink-0"><Icons.Activity /></span>
+                                {t('balHistTitle')}
+                            </h3>
+                            <p className="text-xs text-gray-500 mt-1">{t('balHistDesc')}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <select value={trigger} onChange={e => setTrigger(e.target.value)} className={selectCls} data-bal-filter-trigger aria-label={t('balHistFilterTrigger')}>
+                                <option value="">{t('balHistAllTriggers')}</option>
+                                {Object.keys(BAL_HIST_TRIGGERS).map(k => <option key={k} value={k}>{t(BAL_HIST_TRIGGERS[k][0])}</option>)}
+                            </select>
+                            <select value={status} onChange={e => setStatus(e.target.value)} className={selectCls} data-bal-filter-status aria-label={t('balHistFilterStatus')}>
+                                <option value="">{t('balHistAllOutcomes')}</option>
+                                {Object.keys(BAL_HIST_STATUS).map(k => <option key={k} value={k}>{t(BAL_HIST_STATUS[k][0])}</option>)}
+                            </select>
+                            <button type="button" onClick={() => load(null)} disabled={loading} title={t('refresh')}
+                                className="p-1 text-gray-400 hover:text-white disabled:opacity-40" data-bal-refresh>
+                                {loading ? <Icons.RotateCw /> : <Icons.RefreshCw />}
+                            </button>
+                        </div>
+                    </div>
+                    {leaderAway && <div className="text-xs text-yellow-400" data-bal-leader-away>{t('pgHaLeaderAwayView')}</div>}
+                    {failed && <div className="text-xs text-red-400">{t('balHistLoadError')}</div>}
+                    {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
+                    {loaded && rows.length === 0 && (
+                        <div className="text-xs text-gray-500 p-2 bg-proxmox-dark rounded-lg" data-bal-empty>
+                            {t(trigger || status ? 'balHistNoMatch' : 'balHistNone')}
+                        </div>
+                    )}
+                    {rows.length > 0 && (
+                        <div className="space-y-2 max-h-96 overflow-y-auto">
+                            {rows.map(e => {
+                                const [tKey, tTone] = BAL_HIST_TRIGGERS[e.trigger] || ['', 'bg-gray-500/20 text-gray-400'];
+                                const [sKey, sTone] = BAL_HIST_STATUS[e.status] || ['', 'text-gray-400'];
+                                const why = balHistReason(e, t);
+                                return (
+                                    <div key={e.id} data-bal-row={e.id}
+                                        className="flex flex-col gap-1 bg-proxmox-dark rounded-lg px-3 py-2 text-xs min-w-0">
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0">
+                                            <span className="text-gray-500 whitespace-nowrap">{when(e.timestamp)}</span>
+                                            <span className="text-sm text-gray-200 truncate">{e.vm_name || `VM ${e.vmid}`} <span className="text-gray-500">({e.vmid})</span></span>
+                                            <span className="flex items-center gap-1 font-mono text-gray-300">{e.source_node}<Icons.ArrowRight />{e.target_node}</span>
+                                            <span className={`px-1.5 py-0.5 rounded ${tTone}`} data-bal-trigger={e.trigger}>{tKey ? t(tKey) : e.trigger}</span>
+                                            <span className={sTone} data-bal-status={e.status}>{sKey ? t(sKey) : e.status}</span>
+                                        </div>
+                                        {why && <div className="text-gray-400 leading-relaxed" data-bal-why>{why}</div>}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                    {next && (
+                        <button type="button" onClick={() => load(next)} disabled={loading} data-bal-more
+                            className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40">
+                            {t('balHistLoadMore')}
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
         // NS May 2026 — Config Drift Detection.
         // Tracks open events grouped by kind (vm_config, storage, network, cluster_options).
         // Admin can rescan, set baseline, acknowledge/promote events.
@@ -8500,6 +8647,7 @@
             const [drDrillData, setDrDrillData] = useState(null);
             const [drDrillPolling, setDrDrillPolling] = useState(false);
             const [expandedEvent, setExpandedEvent] = useState(null);
+            const [guestPick, setGuestPick] = useState(null);
             const [sourceVms, setSourceVms] = useState([]);
             const [replJobs, setReplJobs] = useState([]);
             const [sourceBridges, setSourceBridges] = useState([]);
@@ -8539,6 +8687,10 @@
             useEffect(() => { fetchPlans(); }, []);
             useEffect(() => { if (selectedPlan) { fetchPlanDetail(selectedPlan); setSrSubTab('overview'); } else setPlanDetail(null); }, [selectedPlan]);
             useEffect(() => { if (selectedPlan && srSubTab === 'events') fetchEvents(selectedPlan); }, [srSubTab, selectedPlan]);
+            // a finished run moved guests: read where they are now
+            useEffect(() => {
+                if (selectedPlan && srProgress?.plan_id === selectedPlan && srProgress.progress >= 100) { fetchPlanDetail(selectedPlan); fetchPlans(); }
+            }, [srProgress?.plan_id, srProgress?.progress]);
             // a test's boot screenshots arrive after its event completed: while one of the
             // listed tests still takes them, read the list again every few seconds
             const shotsPending = srSubTab === 'events' && events.some(ev => ev.details?.screenshots?.state === 'capturing');
@@ -8645,15 +8797,23 @@
                 if (r && r.ok) { addToast('Plan deleted'); setSelectedPlan(null); fetchPlans(); }
                 else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Delete failed', 'error'); }
             };
-            const handleAction = async (planId, action, confirmMsg) => {
+            const handleAction = async (planId, action, confirmMsg, body) => {
                 if (confirmMsg && !confirm(confirmMsg)) return;
                 setActionRunning(true);
                 try {
-                    const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/${action}`, { method: 'POST' });
+                    const opts = body ? { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) } : { method: 'POST' };
+                    const r = await authFetch(`${API_URL}/site-recovery/plans/${planId}/${action}`, opts);
                     if (r && r.ok) { const d = await r.json(); addToast(d.message || 'Action started'); fetchPlanDetail(planId); fetchPlans(); }
                     else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Action failed', 'error'); }
                 } catch(e) { addToast('Action failed', 'error'); }
                 finally { setTimeout(() => setActionRunning(false), 2000); }
+            };
+            // LW Oct 2026 - emergency failover and failback of single guests. The picker hands
+            // over the guests ticked; all of them is the whole plan, sent without a list as before
+            const startPicked = (planId, action, vmids, all) => {
+                if (!confirm(action === 'failback' ? t('srConfirmFailback') : t('confirmEmergency'))) return;
+                setGuestPick(null);
+                handleAction(planId, action, null, all ? null : { vmids });
             };
             // readiness check with modal
             const handleReadiness = async (planId) => {
@@ -8919,14 +9079,15 @@
                                 <button onClick={() => setSelectedPlan(null)} className="text-gray-400 hover:text-white"><Icons.ChevronLeft className="w-5 h-5" /></button>
                                 <h2 className="text-lg font-semibold flex items-center gap-2"><Icons.Shield className="w-5 h-5 text-proxmox-orange" />{pd.name}</h2>
                                 <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${statusColors[pd.status] || 'bg-gray-500/20 text-gray-400'}`}>{pd.status}</span>
+                                <SrFailoverBadge plan={pd} total={(pd.vms || []).length} t={t} />
                             </div>
                             <div className="flex items-center gap-2 flex-wrap">
                                 {canFailover && <button onClick={() => handleReadiness(pd.id)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-gray-600/50 text-gray-300 hover:bg-gray-600 disabled:opacity-40">{t('readinessCheck')}</button>}
                                 {canFailover && <button onClick={() => startDrDrill(pd)} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 disabled:opacity-40">{t('drDrillRun') || 'DR Drill'}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'test', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 disabled:opacity-40">{t('testFailover')}</button>}
                                 {canFailover && <button onClick={() => handleAction(pd.id, 'failover', t('confirmFailover'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 disabled:opacity-40">{t('plannedFailover')}</button>}
-                                {canFailover && <button onClick={() => handleAction(pd.id, 'emergency', t('confirmEmergency'))} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
-                                {canFailover && pd.status === 'completed' && <button onClick={() => handleAction(pd.id, 'failback', t('confirmFailover'))} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-40">{t('failback')}</button>}
+                                {canFailover && <button data-sr-action="emergency" onClick={() => setGuestPick('emergency')} disabled={actionRunning || pd.status === 'running' || pd.failover_state === 'all'} className="px-3 py-1.5 text-xs rounded-lg bg-red-500/20 text-red-400 hover:bg-red-500/30 disabled:opacity-40">{t('emergencyFailover')}</button>}
+                                {canFailover && pd.failed_over_count > 0 && <button data-sr-action="failback" onClick={() => setGuestPick('failback')} disabled={actionRunning || pd.status === 'running'} className="px-3 py-1.5 text-xs rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-40">{t('failback')}</button>}
                                 {canFailover && pd.status === 'testing' && <button onClick={() => handleAction(pd.id, 'test/cleanup', t('confirmTestCleanup'))} disabled={actionRunning} className="px-3 py-1.5 text-xs rounded-lg bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 disabled:opacity-40">{t('testCleanup')}</button>}
                             </div>
                         </div>
@@ -8980,12 +9141,13 @@
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
-                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
+                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
                                             <tbody>
                                                 {groupVms.map(vm => (
                                                     <tr key={vm.id} className="border-t border-proxmox-border/30 hover:bg-proxmox-hover/30">
                                                         <td className="px-4 py-2 font-mono text-xs">{vm.vmid}</td>
                                                         <td className="py-2">{vm.vm_name || '-'}</td>
+                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} /></td>
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_group'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_group} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_group'})}>{vm.boot_group}</span>
@@ -8994,7 +9156,9 @@
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_delay} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_delay'})}>{vm.boot_delay}s</span>
                                                         }</td>
-                                                        <td className="py-2"><span className={rpoColor(vm)}>{vm.last_replication ? fmtDate(vm.last_replication) : '-'}</span></td>
+                                                        <td className="py-2">{vm.failed_over
+                                                            ? <span className="text-xs text-gray-500">{t('srReplicationHeld')}</span>
+                                                            : <span className={rpoColor(vm)}>{vm.last_replication ? fmtDate(vm.last_replication) : '-'}</span>}</td>
                                                         {canManage && <td className="py-2"><button onClick={() => handleRemoveVm(vm.id)} className="text-red-400 hover:text-red-300"><Icons.Trash2 className="w-3.5 h-3.5" /></button></td>}
                                                     </tr>
                                                 ))}
@@ -9078,10 +9242,10 @@
                                                     <table className="w-full text-xs">
                                                         <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
-                                                            <tr key={vmid} className="border-t border-proxmox-border/30">
+                                                            <tr key={vmid} className="border-t border-proxmox-border/30" data-sr-result={vmid}>
                                                                 <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
-                                                                <td className="py-1">{r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
-                                                                <td className="py-1 text-gray-500">{r.error || '-'}</td>
+                                                                <td className="py-1">{r.skipped ? <span className="text-gray-400">{t('skipped')}</span> : r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
+                                                                <td className="py-1 text-gray-500">{r.skipped ? (r.reason === 'not failed over' ? t('srSkipNotFailedOver') : t('srSkipFailedOver')) : (r.error || '-')}</td>
                                                             </tr>
                                                         ))}</tbody>
                                                     </table>
@@ -9145,6 +9309,11 @@
                                     </div>
                                 </div>
                             </div>
+                        )}
+
+                        {guestPick && canFailover && (
+                            <SrGuestPicker plan={pd} action={guestPick} t={t} onCancel={() => setGuestPick(null)}
+                                onStart={(vmids, all) => startPicked(pd.id, guestPick, vmids, all)} />
                         )}
 
                         {/* ---- Readiness check results modal ---- */}
@@ -9298,6 +9467,7 @@
                                 <div key={plan.id} onClick={() => setSelectedPlan(plan.id)} className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 cursor-pointer hover:border-proxmox-orange/50 transition-colors">
                                     <div className="flex items-center justify-between mb-3"><h3 className="font-medium text-sm">{plan.name}</h3><span className={`px-2 py-0.5 rounded-full text-xs ${statusColors[plan.status] || 'bg-gray-500/20 text-gray-400'}`}>{plan.status}</span></div>
                                     <div className="text-xs text-gray-500 space-y-1"><p>{getClusterName(plan.source_cluster)} → {getClusterName(plan.target_cluster)}</p><p>{plan.vm_count} {t('protectedVMs')}</p>{plan.last_failover && <p>Last failover: {fmtDate(plan.last_failover)}</p>}</div>
+                                    {plan.failed_over_count > 0 && <div className="mt-2"><SrFailoverBadge plan={plan} total={plan.vm_count} t={t} /></div>}
                                     {canManage && <div className="mt-3 flex justify-end"><button onClick={(e) => { e.stopPropagation(); handleDeletePlan(plan.id, plan.status === 'running' || plan.status === 'testing'); }} className="text-red-400 hover:text-red-300 text-xs"><Icons.Trash2 className="w-3.5 h-3.5" /></button></div>}
                                 </div>
                             ))}
@@ -9314,6 +9484,110 @@
                             </div>
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - a recovery plan can be failed over guest by guest: how much of it is
+        // on the target now ('partial' or 'all', nothing while every guest is at the source)
+        function SrFailoverBadge({ plan, total, t }) {
+            const n = plan.failed_over_count || 0;
+            if (!n) return null;
+            const all = plan.failover_state === 'all';
+            return (
+                <span data-sr-failover-state={plan.failover_state}
+                    className={`px-2 py-0.5 rounded-full text-xs font-medium ${all ? 'bg-purple-500/20 text-purple-400' : 'bg-yellow-500/20 text-yellow-400'}`}>
+                    {all ? t('srFailoverAll') : fillText(t('srFailoverPartial'), { n, total })}
+                </span>
+            );
+        }
+
+        function SrGuestPlace({ vm, t }) {
+            if (!vm.failed_over) return <span className="text-xs text-gray-500">{t('srGuestAtSource')}</span>;
+            return (
+                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
+                    title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
+                    {t('srGuestFailedOver')}
+                </span>
+            );
+        }
+
+        // the guests an emergency failover or a failback takes. Every guest it can take is
+        // ticked to begin with; the others are listed with where they are. A plan of thousands
+        // renders the first SR_PICK_SHOWN rows of the filter, and "all" ticks what it matches
+        const SR_PICK_SHOWN = 200;
+        function SrGuestPicker({ plan, action, t, onCancel, onStart }) {
+            const back = action === 'failback';
+            const guests = plan.vms || [];
+            const takes = (vm) => !!vm.failed_over === back;
+            const eligible = useMemo(() => guests.filter(takes), [guests, back]);
+            const [picked, setPicked] = useState(() => new Set(eligible.map(v => v.vmid)));
+            const [filter, setFilter] = useState('');
+            const q = filter.trim().toLowerCase();
+            const rows = useMemo(() => q ? guests.filter(v => String(v.vmid).includes(q) || (v.vm_name || '').toLowerCase().includes(q)) : guests, [guests, q]);
+            const matching = rows.filter(takes);
+            const allOn = matching.length > 0 && matching.every(v => picked.has(v.vmid));
+            const flip = (vmids, on) => setPicked(prev => {
+                const next = new Set(prev);
+                vmids.forEach(id => on ? next.add(id) : next.delete(id));
+                return next;
+            });
+            const count = eligible.filter(v => picked.has(v.vmid)).length;
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+                    <div data-sr-pick={action} className="bg-proxmox-dark border border-proxmox-border rounded-xl p-6 w-full max-w-lg space-y-4" onClick={e => e.stopPropagation()}>
+                        <h3 className={`font-semibold flex items-center gap-2 ${back ? 'text-purple-400' : 'text-red-400'}`}>
+                            {back ? <Icons.RotateCcw className="w-5 h-5" /> : <Icons.Zap className="w-5 h-5" />}
+                            {back ? t('failback') : t('emergencyFailover')}<span className="text-gray-400 font-normal">- {plan.name}</span>
+                        </h3>
+                        <p className="text-xs text-gray-400">{back ? t('srPickFailbackHint') : t('srPickEmergencyHint')}</p>
+                        <div className="flex items-center gap-3">
+                            <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer shrink-0">
+                                <input type="checkbox" className="rounded" data-sr-pick-all checked={allOn} disabled={!matching.length}
+                                    onChange={() => flip(matching.map(v => v.vmid), !allOn)} />
+                                {t('selectAll')}
+                            </label>
+                            <div className="flex items-center gap-1.5 flex-1 min-w-0 bg-proxmox-card border border-proxmox-border rounded-lg px-2">
+                                <Icons.Search className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                                <input value={filter} onChange={e => setFilter(e.target.value)} placeholder={t('search')}
+                                    className="flex-1 min-w-0 bg-transparent py-1 text-sm focus:outline-none" />
+                            </div>
+                        </div>
+                        <div className="max-h-80 overflow-y-auto border border-proxmox-border rounded-lg">
+                            <table className="w-full text-sm">
+                                <thead><tr className="text-left text-gray-500 text-xs"><th className="px-3 py-2 w-8"></th><th className="py-2">VMID</th><th className="py-2">{t('name')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2 pr-4">{t('srGuestLocation')}</th></tr></thead>
+                                <tbody>
+                                    {rows.slice(0, SR_PICK_SHOWN).map(vm => {
+                                        const can = takes(vm);
+                                        return (
+                                            <tr key={vm.vmid} data-sr-pick-row={vm.vmid} className={`border-t border-proxmox-border/50 ${can ? 'hover:bg-proxmox-hover/30 cursor-pointer' : 'opacity-50'}`}
+                                                onClick={() => can && flip([vm.vmid], !picked.has(vm.vmid))}>
+                                                <td className="px-3 py-1.5"><input type="checkbox" className="rounded" disabled={!can} checked={can && picked.has(vm.vmid)} onChange={() => {}} /></td>
+                                                <td className="py-1.5 font-mono text-xs">{vm.vmid}</td>
+                                                <td className="py-1.5">{vm.vm_name || '-'}</td>
+                                                <td className="py-1.5 text-xs text-gray-400">{vm.boot_group ?? 0}</td>
+                                                <td className="py-1.5 pr-4"><SrGuestPlace vm={vm} t={t} /></td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                            {rows.length > SR_PICK_SHOWN && (
+                                <p className="text-xs text-gray-500 px-3 py-2 border-t border-proxmox-border/50" data-sr-pick-more>{fillText(t('srPickMore'), { n: rows.length - SR_PICK_SHOWN })}</p>
+                            )}
+                        </div>
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs text-gray-400" data-sr-pick-count>{fillText(t('srPickCount'), { n: count, total: eligible.length })}</span>
+                            <div className="flex gap-2">
+                                <button onClick={onCancel} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                                <button data-sr-pick-start disabled={!count}
+                                    onClick={() => onStart(eligible.filter(v => picked.has(v.vmid)).map(v => v.vmid), count === eligible.length)}
+                                    className={`px-4 py-1.5 text-sm rounded-lg text-white disabled:opacity-40 ${back ? 'bg-purple-600 hover:bg-purple-700' : 'bg-red-600 hover:bg-red-700'}`}>
+                                    {fillText(back ? t('srPickStartFailback') : t('srPickStartEmergency'), { n: count })}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             );
         }
@@ -9453,10 +9727,15 @@
         // the server dedup) lets us keep the SAME array reference on a no-op frame, so
         // ResourceTable's filter/sort useMemos + the whole grid stay idle instead of
         // re-rendering every second.
+        // LW Oct 2026 - the agent column of the list redraws when the agent comes or goes; the
+        // disk rates are fed from every frame through pegaprox-resources-frame instead
         function _resSig(r) {
             return r.vmid + '|' + (r.status || '') + '|' + (r.node || '') + '|' + (r.name || '') +
                    '|' + Math.floor((r.cpu_percent || 0) / 5) + '|' + Math.floor((r.mem_percent || 0) / 2) +
-                   '|' + (r.ip || '') + '|' + (r.tags || '');
+                   '|' + (r.ip || '') + '|' + (r.tags || '') + '|' + (r.agent_running === undefined ? '' : r.agent_running);
+        }
+        function announceResourcesFrame(clusterId, rows) {
+            try { window.dispatchEvent(new CustomEvent('pegaprox-resources-frame', { detail: { cluster_id: clusterId, rows } })); } catch (e) {}
         }
         function areResourcesEqual(a, b) {
             if (a === b) return true;
@@ -10417,6 +10696,8 @@
             const [error, setError] = useState(null);
             const [toasts, setToasts] = useState([]);
             const [activeTab, setActiveTab] = useState('overview');
+            // LW Oct 2026 - the datacenter section an overview link opens (the Ceph one), once
+            const [datacenterSection, setDatacenterSection] = useState(null);
             const [resourcesSubTab, setResourcesSubTab] = useState('management');
             const [sidebarTopology, setSidebarTopology] = useState(false);
             // MK May 2026 — Worldmap top-level sidebar entry (offline cluster geo-view)
@@ -10612,6 +10893,8 @@
             const [vmwareDsDetail, setVmwareDsDetail] = useState(null);
             const [vmwareClusters, setVmwareClusters] = useState([]);
             const [vmwareConnectionOk, setVmwareConnectionOk] = useState(true);
+            // what the VM list of the server answered when it failed: {code, message} (#1142)
+            const [vmwareError, setVmwareError] = useState(null);
             const [vmwareSelectedMigration, setVmwareSelectedMigration] = useState(null);
             const [vmwareMigrationDetail, setVmwareMigrationDetail] = useState(null);
             const [showVmwareRename, setShowVmwareRename] = useState(false);
@@ -10624,6 +10907,7 @@
             const [sidebarXHM, setSidebarXHM] = useState(false);
             const [sidebarMultiSdn, setSidebarMultiSdn] = useState(false); // #612 — Multi-Cluster EVPN view
             const [sidebarAutoInstall, setSidebarAutoInstall] = useState(false);
+            const [sidebarGuests, setSidebarGuests] = useState(false);  // All Guests, every guest in one table
             const [autoInstallIntent, setAutoInstallIntent] = useState(null); // {wizard, target_cluster_id} handed to the panel once
             const [xhmMigrations, setXhmMigrations] = useState([]);
             const [xhmSelectedMigration, setXhmSelectedMigration] = useState(null);
@@ -10691,21 +10975,23 @@
             };
 
             // NS: auto-clear topology/xhm sidebar when navigating to something else
-            useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
+            useEffect(() => { if (selectedCluster || selectedPBS || selectedVMware || selectedGroup) { setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); } }, [selectedCluster, selectedPBS, selectedVMware, selectedGroup]);
 
             // All Clusters used to check only XHM, so it stayed lit next to World Map / EVPN
-            const onGlobalView = sidebarTopology || sidebarWorldmap || sidebarXHM || sidebarMultiSdn || sidebarAutoInstall;
+            const onGlobalView = sidebarTopology || sidebarWorldmap || sidebarXHM || sidebarMultiSdn || sidebarAutoInstall || sidebarGuests;
             // one way in for every auto-install shortcut, intent opens the wizard on arrival
             const openAutoInstall = (intent = null) => {
-                setSidebarAutoInstall(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false);
+                setSidebarAutoInstall(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarGuests(false);
                 setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null);
                 setAutoInstallIntent(intent);
             };
             // the other global views, one place for the Modern rows and the corporate Tools section
-            const openTopology = () => { setSidebarTopology(true); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); };
-            const openWorldmap = () => { setSidebarWorldmap(true); setSidebarTopology(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
-            const openXhm = () => { setSidebarXHM(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
-            const openMultiSdn = () => { setSidebarMultiSdn(true); setSidebarXHM(false); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openTopology = () => { setSidebarTopology(true); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); };
+            const openWorldmap = () => { setSidebarWorldmap(true); setSidebarTopology(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openXhm = () => { setSidebarXHM(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            const openMultiSdn = () => { setSidebarMultiSdn(true); setSidebarXHM(false); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarAutoInstall(false); setSidebarGuests(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            // LW Oct 2026 - All Guests, the guest table of every cluster
+            const openGuests = () => { setSidebarGuests(true); setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
             // XHM needs a cluster on each side
             const hasXhmPair = clusters.some(c => c.type === 'xcpng' || c.cluster_type === 'xcpng') && clusters.some(c => c.type !== 'xcpng' && c.cluster_type !== 'xcpng');
 
@@ -10731,6 +11017,11 @@
             const [expandedSidebarNodes, setExpandedSidebarNodes] = useState({});
             const [selectedSidebarVm, setSelectedSidebarVm] = useState(null);
             const [selectedSidebarNode, setSelectedSidebarNode] = useState(null); // LW: Feb 2026 - corporate node detail
+            // LW Oct 2026 (#1137) - the QDevice next to the nodes: what /qdevice said per cluster, the
+            // cluster whose QDevice the corporate view shows, the one in the modern dialog
+            const [qdeviceByCluster, setQdeviceByCluster] = useState({});
+            const [selectedSidebarQdevice, setSelectedSidebarQdevice] = useState(null);
+            const [qdeviceOpen, setQdeviceOpen] = useState(null);
             // NS: Mar 2026 - recent items for corporate sidebar
             const [recentItems, setRecentItems] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('corp-recent') || '[]'); } catch { return []; }
@@ -10798,9 +11089,13 @@
                 setSelectedSidebarVm(prev => prev && prev._clusterId === selectedCluster?.id ? prev : null);
                 setSelectedSidebarNode(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
                 setSelectedSidebarDatastore(prev => prev && prev.clusterId === selectedCluster?.id ? prev : null);
+                setSelectedSidebarQdevice(prev => prev === selectedCluster?.id ? prev : null);
+                setQdeviceOpen(null);
                 if (selectedCluster && isCorporate) setExpandedSidebarClusters(prev => ({ ...prev, [selectedCluster.id]: true }));
             }, [selectedCluster?.id]);
-            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') setSelectedSidebarNode(null); if (activeTab !== 'datastore') setSelectedSidebarDatastore(null); }, [activeTab]);
+            useEffect(() => { if (activeTab !== 'resources') setSelectedSidebarVm(null); if (activeTab !== 'overview') { setSelectedSidebarNode(null); setSelectedSidebarQdevice(null); } if (activeTab !== 'datastore') setSelectedSidebarDatastore(null); }, [activeTab]);
+            // whatever else the tree opens takes the place of the QDevice view
+            useEffect(() => { if (selectedSidebarNode || selectedSidebarVm || selectedSidebarDatastore) setSelectedSidebarQdevice(null); }, [selectedSidebarNode, selectedSidebarVm, selectedSidebarDatastore]);
             useEffect(() => { localStorage.setItem('pegaprox-sidebar-view', sidebarViewMode); }, [sidebarViewMode]);
 
             // NS: track recent items for corporate sidebar
@@ -10854,9 +11149,9 @@
             // handlers and patching each one would rot the moment somebody adds another.
             useEffect(() => { setMobileSidebarOpen(false); }, [
                 selectedGroup, selectedCluster, selectedPBS, selectedVMware,
-                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, activeTab,
+                selectedSidebarVm, selectedSidebarNode, selectedSidebarDatastore, selectedSidebarQdevice, activeTab,
                 // the global views set no selection, so they never closed the drawer
-                sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall,
+                sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall, sidebarGuests,
             ]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
@@ -10992,8 +11287,8 @@
             const [alertMutes, setAlertMutes] = useState([]);
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
-            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health'];
-            const [sessionExpired, setSessionExpired] = useState(false);  // any 401 -> clear "session expired" overlay instead of silent failure
+            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
+            const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
             
@@ -11074,6 +11369,8 @@
             // addToast and t exist. A ref, because authFetch keeps one identity for good.
             // And with the 503 HA_ACTIVE_UNREACHABLE of a forwarding standby
             const haRefusedRef = useRef(null);
+            // when a 401 without one of our codes last made us ask /auth/check (#1142)
+            const sessionProbeRef = useRef(0);
             const authFetch = React.useCallback(async (url, opts = {}) => {
                 const { timeout, quiet, ...rest } = opts;
                 let ctrl, timer;
@@ -11090,11 +11387,24 @@
                     });
                     // #144: detect session loss early — don't auto-logout on auth/check or SSE
                     if (res.status === 401 && !url.includes('/auth/') && !url.includes('/sse')) {
-                        console.warn('[authFetch] 401 on', url.split('?')[0]);
-                        // Session invalid/expired (server restart, timeout, revoked token) — surface a
-                        // clear overlay instead of letting every poll fail silently. Idempotent, so
-                        // a burst of concurrent 401s only shows the prompt once.
-                        setSessionExpired(true);
+                        // LW Oct 2026 (#1142) - only a 401 with one of PegaProx's own codes means the
+                        // session is gone. Any other one (an ESXi server refusing its stored password,
+                        // a proxy) is the caller's error: the overlay threw the user out at every click
+                        // on such a server. /auth/check is asked once whether the session is still there.
+                        const body = await res.clone().json().catch(() => null);
+                        if (PegaProxApiErrors.sessionLost(body)) {
+                            console.warn('[authFetch] 401 on', url.split('?')[0]);
+                            // Session invalid/expired (server restart, timeout, revoked token) - surface a
+                            // clear overlay instead of letting every poll fail silently. Idempotent, so
+                            // a burst of concurrent 401s only shows the prompt once.
+                            setSessionExpired(true);
+                        } else if (Date.now() - sessionProbeRef.current > 15000) {
+                            sessionProbeRef.current = Date.now();
+                            fetch(`${API_URL}/auth/check?t=${Date.now()}`, { credentials: 'include', headers: getAuthHeaders() })
+                                .then(r => r.status === 401 ? { authenticated: false } : r.json())
+                                .then(d => { if (d && d.authenticated === false) setSessionExpired(true); })
+                                .catch(() => {});
+                        }
                     }
                     setConnectionError(null);
                     // #625 v2 - a standby refuses what acts. One translated toast here, and the
@@ -11475,6 +11785,32 @@
                                 </div>
                             );
                         })}
+                        {/* LW Oct 2026 (#1137) - the QDevice right after the nodes, only where the cluster has one */}
+                        {showNodes && qdeviceByCluster[clusterId]?.present && (!searchLower || 'qdevice'.includes(searchLower)) && (() => {
+                            const isQSelected = selectedSidebarQdevice === clusterId;
+                            const openQ = () => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode(null); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(clusterId); setActiveTab('overview'); };
+                            return (
+                                <div
+                                    key={`qdevice-${clusterId}`}
+                                    data-qdevice-entry={clusterId}
+                                    className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
+                                    tabIndex={0}
+                                    onClick={openQ}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter') { e.preventDefault(); openQ(); }
+                                        else if (e.key === 'ArrowDown') treeNavDown(e);
+                                        else if (e.key === 'ArrowUp') treeNavUp(e);
+                                    }}
+                                    style={isQSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
+                                    onMouseEnter={(e) => { if (!isQSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; } }}
+                                    onMouseLeave={(e) => { if (!isQSelected) { e.currentTarget.style.background = ''; e.currentTarget.style.color = 'var(--corp-text-secondary)'; } }}
+                                >
+                                    <span className="flex flex-shrink-0" style={{color: 'var(--corp-accent)'}}><Icons.Scale className="w-4 h-4" /></span>
+                                    <span className="truncate flex-1">{t('qdeviceTitle')}</span>
+                                    <QdeviceDot q={qdeviceByCluster[clusterId]} />
+                                </div>
+                            );
+                        })()}
                         {/* Then VMs/CTs at same level */}
                         {filteredVms.map(vm => {
                             const vmRunning = vm.status === 'running';
@@ -12898,6 +13234,9 @@
                     return t('backupCoverageSummary').replace('{n}', n) + (tags.length ? ` - ${t('backupCoverageExcept').replace('{tags}', tags.join(', '))}` : '');
                 }
                 if (alert.metric === 'zfs_health') return `${t('zfsAlertTitle')}: ${Number(n) >= 1 ? t('zfsAlertStateOnly') : t('zfsAlertAny')}`;
+                if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
+                if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
+                if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
                 return `${alert.metric?.toUpperCase()} ${alert.operator} ${alert.threshold}%`;
             };
 
@@ -13707,6 +14046,7 @@
                                     // NS Jul 2026 (render-perf): skip the array swap on a no-op/
                                     // keepalive frame so the VM grid doesn't re-filter/re-render
                                     // every second (window.pegaproxVmList is the last-applied list)
+                                    announceResourcesFrame(data.cluster_id, data.data);
                                     if (!areResourcesEqual(window.pegaproxVmList, data.data)) {
                                         setClusterResources(data.data);
                                         window.pegaproxVmList = data.data;
@@ -14531,11 +14871,18 @@
                 setVmwareLoading(true);
                 try {
                     const resp = await authFetch(`${API_URL}/vmware/${vmwId}/vms`);
-                    if (resp && resp.ok) {
+                    // a slow answer for the server shown before says nothing about this one
+                    const current = !selectedVMwareRef.current || selectedVMwareRef.current.id === vmwId;
+                    if (current && resp && resp.ok) {
                         const data = await resp.json();
                         setVmwareVms(Array.isArray(data) ? data : data.data || []);
                         setVmwareConnectionOk(true);
-                    } else {
+                        setVmwareError(null);
+                    } else if (current) {
+                        // the server's own words, so a refused password is told apart from a
+                        // server that is down (#1142)
+                        const body = resp ? await resp.json().catch(() => ({})) : {};
+                        setVmwareError(resp ? { code: body.code || '', message: body.error || `HTTP ${resp.status}` } : null);
                         setVmwareConnectionOk(false);
                     }
                 } catch (e) { console.warn('VMware VMs error:', e); setVmwareConnectionOk(false); }
@@ -14715,6 +15062,17 @@
                         setShowAddVMware(false);
                         setEditingVMware(null);
                         fetchVMwareServers();
+                        // the server on screen is read again at once, with the password just set (#1142).
+                        // All of it: networks have no poll, hosts and datastores wait a minute for theirs
+                        if (selectedVMware?.id === vmwId) {
+                            const saved = await resp.json().catch(() => null);
+                            if (saved) setSelectedVMware(prev => ({ ...prev, ...saved }));
+                            fetchVMwareVms(vmwId);
+                            fetchVMwareHosts(vmwId);
+                            fetchVMwareDatastores(vmwId);
+                            fetchVMwareNetworks(vmwId);
+                            fetchVMwareClusters(vmwId);
+                        }
                     } else {
                         const err = resp ? await resp.json().catch(() => ({})) : {};
                         addToast(`${t('updateFailed')}: ${err.error || t('unknown')}`, 'error');
@@ -14722,6 +15080,12 @@
                 } catch (e) { addToast(t('error') + ': ' + e.message, 'error'); }
             };
             
+            const openVmwareEdit = (vmw) => {
+                setEditingVMware(vmw);
+                setVmwareForm({ name: vmw.name || '', host: vmw.host, port: vmw.port || 443, username: vmw.username || 'root', password: '', ssl_verify: vmw.ssl_verify || false, notes: vmw.notes || '' });
+                setShowAddVMware(true);
+            };
+
             const handleDeleteVMware = async (vmwId) => {
                 if (haReadOnly) { haRefusedRef.current?.(); return; }  // the active acts (#625)
                 if (!confirm(t('deleteEsxiServerConfirm'))) return;
@@ -14761,6 +15125,10 @@
             // Fetch VMs when a VMware server is selected
             useEffect(() => {
                 if (selectedVMware?.id) {
+                    // nothing of the server shown before stays under this one's name, not when
+                    // this one cannot be read either (#1142)
+                    setVmwareVms([]); setVmwareHosts([]); setVmwareDatastores([]); setVmwareNetworks([]); setVmwareClusters([]);
+                    setVmwareError(null); setVmwareConnectionOk(true);
                     fetchVMwareVms(selectedVMware.id);
                     fetchVMwareHosts(selectedVMware.id);
                     fetchVMwareDatastores(selectedVMware.id);
@@ -15471,6 +15839,7 @@
                             return { ...prev, [clusterId]: { ...cur, resources: data } };
                         });
                         if (selectedClusterRef.current?.id !== clusterId) return;
+                        announceResourcesFrame(clusterId, data);
                         // NS Jul 2026 (render-perf): only swap + re-render on a real change
                         if (!areResourcesEqual(window.pegaproxVmList, data)) {
                             setClusterResources(data);
@@ -15578,6 +15947,41 @@
                 return () => clearInterval(iv);
             }, []);
 
+            // LW Oct 2026 (#1137) - the QDevice of the clusters someone looks at: the selected one and
+            // those open in the corporate tree, every 30 s. The server reads a cluster at most that
+            // often whoever asks. A refusal (a confined account) is not asked again
+            const qdeviceClustersRef = useRef([]);
+            qdeviceClustersRef.current = clusters;
+            const fetchQdevice = async (clusterId) => {
+                const c = (qdeviceClustersRef.current || []).find(x => x.id === clusterId);
+                if (!c || c.cluster_type === 'xcpng' || c.connected === false || !can('node.view')) return;
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/qdevice`, { timeout: POLL_TIMEOUT_MS, quiet: true });
+                if (res && res.ok) {
+                    const data = await res.json().catch(() => null);
+                    if (data) { setQdeviceByCluster(prev => ({ ...prev, [clusterId]: data })); return; }
+                } else if (res && (res.status === 403 || res.status === 404)) {
+                    setQdeviceByCluster(prev => ({ ...prev, [clusterId]: { present: false, refused: true } }));
+                    return;
+                }
+                // no answer (timeout, 503): the last one stays, marked as old, so its dot does not
+                // keep saying connected while nothing can be read
+                setQdeviceByCluster(prev => prev[clusterId]?.present && !prev[clusterId].stale
+                    ? { ...prev, [clusterId]: { ...prev[clusterId], stale: true } } : prev);
+            };
+            const qdeviceSeenRef = useRef({});
+            qdeviceSeenRef.current = qdeviceByCluster;
+            useEffect(() => {
+                const round = () => {
+                    const ids = new Set();
+                    if (selectedClusterRef.current?.id) ids.add(selectedClusterRef.current.id);
+                    if (isCorporate) Object.entries(expandedSidebarClustersRef.current || {}).forEach(([cid, open]) => { if (open) ids.add(cid); });
+                    ids.forEach(cid => { if (!(qdeviceSeenRef.current[cid] || {}).refused) fetchQdevice(cid); });
+                };
+                round();
+                const iv = setInterval(round, 30000);
+                return () => clearInterval(iv);
+            }, [selectedCluster?.id, expandedSidebarClusters, isCorporate, clusters.length]);
+
             const fetchClusterNetworks = async (clusterId) => {
                 setLoadingNetworks(true);
                 try {
@@ -15665,15 +16069,16 @@
                             addToast(t('apiTokenCreated') || 'API token created on PVE', 'success');
                             setTimeout(() => addToast(t('sshPasswordStillNeeded') || 'SSH still uses the password', 'info'), 800);
                         }
-                    } else if (response && response.status === 401) {
-                        // #144: session expired or lost — re-login needed
-                        setError(t('sessionExpired') || 'Session expired — please log in again');
-                        setTimeout(() => logout(), 2000);
                     } else {
-                        const err = await response.json().catch(() => ({}));
-                        // #683 — a 2FA-enabled PVE account can't be added by password; show the
+                        const err = response ? await response.json().catch(() => ({})) : {};
+                        if (response?.status === 401 && PegaProxApiErrors.sessionLost(err)) {
+                            // #144: session expired or lost - re-login needed. Only our own 401 says
+                            // so; Proxmox refusing the login typed here is an error of this form (#1142)
+                            setError(t('sessionExpired') || 'Session expired - please log in again');
+                            setTimeout(() => logout(), 2000);
+                        // #683 - a 2FA-enabled PVE account can't be added by password; show the
                         // localized hint (API token OR temporarily disable 2FA) instead of the raw text.
-                        if (err.error_code === 'NEEDS_2FA') {
+                        } else if (err.error_code === 'NEEDS_2FA') {
                             setError(t('cluster2FAHint') || err.error);
                         } else {
                             setError(err.error || t('connectionFailed'));
@@ -17003,7 +17408,10 @@
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Server className="w-3 h-3" />{selectedCluster.display_name || selectedCluster.name}</span></>
                                         )}
                                         {activeTab && selectedCluster && (
-                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); }}>{t(activeTab)}</span></>
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t(activeTab)}</span></>
+                                        )}
+                                        {selectedSidebarQdevice && activeTab === 'overview' && (
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current" data-qdevice-crumb=""><Icons.Scale className="w-3 h-3" />{t('qdeviceTitle')}</span></>
                                         )}
                                         {selectedSidebarVm && activeTab === 'resources' && (
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Monitor className="w-3 h-3" />{selectedSidebarVm.name || `VM ${selectedSidebarVm.vmid}`}</span></>
@@ -17614,7 +18022,7 @@
                                         <div className={isCorporate ? 'space-y-0' : 'space-y-3'}>
                                             {/* MK: overview button, LW: compact for corporate */}
                                             <button
-                                                onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); }}
+                                                onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); setSidebarTopology(false); setSidebarXHM(false); setSidebarWorldmap(false); setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false); }}
                                                 className={`w-full flex items-center ${
                                                     isCorporate
                                                         ? 'gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5'
@@ -17668,6 +18076,27 @@
                                                         <div>
                                                             <div className="text-sm font-medium">{t('worldMap') || 'World Map'}</div>
                                                             <div className="text-xs text-gray-500">{t('worldMapHint') || 'Cluster locations'}</div>
+                                                        </div>
+                                                    </span>
+                                                </button>
+
+                                                {/* LW Oct 2026 - All Guests, one table of every guest; a standby shows it without the actions */}
+                                                <button
+                                                    onClick={openGuests}
+                                                    data-sidebar-guests=""
+                                                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all mt-1 ${
+                                                        sidebarGuests
+                                                            ? 'bg-gradient-to-r from-blue-500/20 to-blue-600/10 border border-blue-500/30 text-white'
+                                                            : 'bg-proxmox-card border border-proxmox-border hover:border-blue-500/30 text-gray-300 hover:text-white'
+                                                      }`}
+                                                >
+                                                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${sidebarGuests ? 'bg-blue-500/20' : 'bg-proxmox-dark'}`}>
+                                                        <span className="flex text-blue-400"><Icons.Monitor /></span>
+                                                    </div>
+                                                    <span className="flex-1 text-left">
+                                                        <div>
+                                                            <div className="text-sm font-medium">{t('allGuestsTitle')}</div>
+                                                            <div className="text-xs text-gray-500">{t('allGuestsHint')}</div>
                                                         </div>
                                                     </span>
                                                 </button>
@@ -17855,6 +18284,8 @@
                                         cluster; the empty card has the auto-install link. */}
                                     {isCorporate && clusters.length > 0 && (() => {
                                         const tools = [
+                                            { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests,
+                                              icon: <Icons.Monitor /> },
                                             { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology,
                                               icon: <Icons.Network className="w-4 h-4" /> },
                                             // Globe always draws at w-5, zoom puts it in the 16px column of the others
@@ -18290,6 +18721,13 @@
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
                                             />
+                                            ) : isCorporate && selectedSidebarQdevice ? (
+                                            <QdeviceDetail
+                                                corporate
+                                                q={qdeviceByCluster[selectedSidebarQdevice]}
+                                                clusterName={(clusters.find(c => c.id === selectedSidebarQdevice) || {}).display_name || (clusters.find(c => c.id === selectedSidebarQdevice) || {}).name || ''}
+                                                onClose={() => setSelectedSidebarQdevice(null)}
+                                            />
                                             ) : (
                                             <div className={isCorporate ? 'space-y-3' : 'grid grid-cols-1 xl:grid-cols-3 gap-6'}>
                                                 {/* LW: Mar 2026 - content header strip for corporate overview */}
@@ -18602,7 +19040,34 @@
                                                                     </div>
                                                                 </div>
                                                             ))}
+                                                            {/* LW Oct 2026 (#1137) - the QDevice next to the nodes, only where the cluster has one */}
+                                                            {qdeviceByCluster[selectedCluster.id]?.present && (
+                                                                <button
+                                                                    type="button"
+                                                                    data-qdevice-entry={selectedCluster.id}
+                                                                    onClick={() => setQdeviceOpen(selectedCluster.id)}
+                                                                    className="self-start text-left card-hover bg-proxmox-card border border-proxmox-border rounded-xl p-5 animate-slide-up"
+                                                                >
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className="p-2 bg-proxmox-dark rounded-lg text-gray-300">
+                                                                            <Icons.Scale />
+                                                                        </div>
+                                                                        <div className="min-w-0 flex-1">
+                                                                            <h3 className="font-semibold text-white flex items-center gap-2">{t('qdeviceTitle')} <QdeviceDot q={qdeviceByCluster[selectedCluster.id]} /></h3>
+                                                                            <p className="text-xs text-gray-400 truncate">{t('qdeviceQnetdHost')}: {qdeviceByCluster[selectedCluster.id].qnetd_host || '-'}</p>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="mt-3 text-xs text-gray-400">{qdeviceConnectedText(qdeviceByCluster[selectedCluster.id], t)}</div>
+                                                                </button>
+                                                            )}
                                                         </div>
+                                                        )}
+                                                        {!isCorporate && qdeviceOpen && (
+                                                            <QdeviceDetail
+                                                                q={qdeviceByCluster[qdeviceOpen]}
+                                                                clusterName={(clusters.find(c => c.id === qdeviceOpen) || {}).display_name || (clusters.find(c => c.id === qdeviceOpen) || {}).name || ''}
+                                                                onClose={() => setQdeviceOpen(null)}
+                                                            />
                                                         )}
                                                         {Object.keys(clusterMetrics).length === 0 && Object.keys(nodeAlerts).length === 0 && (
                                                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
@@ -19372,7 +19837,8 @@
 
                                         {/* Datacenter Tab */}
                                         {activeTab === 'datacenter' && (
-                                            <DatacenterTab clusterId={selectedCluster.id} addToast={addToast} />
+                                            <DatacenterTab clusterId={selectedCluster.id} addToast={addToast}
+                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)} />
                                         )}
 
                                         {/* Datastore Tab */}
@@ -21460,7 +21926,33 @@
                                                         step={60}
                                                         unit="s"
                                                     />
-                                                    
+
+                                                    {/* LW Oct 2026 - the pause before the balancer moves the same guest again, in
+                                                        minutes here and seconds on the server; the active's to change (#625).
+                                                        Steps, not a slider: 1 min to 24 h on one track left no room for 5 to 60 */}
+                                                    <fieldset disabled={haReadOnly || !can('cluster.config')} className="min-w-0"
+                                                        data-ha-locked={haReadOnly ? '' : undefined} data-bal-cooldown>
+                                                        {(() => {
+                                                            const mins = Math.max(1, Math.round((selectedCluster.migration_cooldown ?? 900) / 60));
+                                                            const steps = [1, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440];
+                                                            const shown = steps.includes(mins) ? steps : [...steps, mins].sort((a, b) => a - b);
+                                                            const label = (m) => m % 60 === 0 && m >= 60 ? `${m / 60}${t('balCooldownHours')}` : `${m}${t('balCooldownUnit')}`;
+                                                            return (
+                                                                <div className="flex items-center justify-between gap-3">
+                                                                    <div className="min-w-0">
+                                                                        <label htmlFor="bal-cooldown" className="text-sm font-medium text-gray-200">{t('balCooldown')}</label>
+                                                                        <p className="text-xs text-gray-500">{t('balCooldownDesc')}</p>
+                                                                    </div>
+                                                                    <select id="bal-cooldown" value={mins}
+                                                                        onChange={e => updateConfig('migration_cooldown', Number(e.target.value) * 60)}
+                                                                        className="flex-shrink-0 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm font-mono font-semibold text-proxmox-orange disabled:opacity-50 disabled:cursor-not-allowed">
+                                                                        {shown.map(m => <option key={m} value={m}>{label(m)}</option>)}
+                                                                    </select>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </fieldset>
+
                                                     {/* LW: Excluded Nodes Section - GitHub Feature Request */}
                                                     <div className="pt-4 border-t border-proxmox-border">
                                                         <h4 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
@@ -21955,9 +22447,16 @@
                                                         </div>
                                                     </div>
                                                 </div>
-                                                
+
+                                                {/* LW Oct 2026 - the balancer's moves with why, under its settings */}
+                                                {can('cluster.view') && (
+                                                    <div className={`lg:col-span-2 min-w-0 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
+                                                        <BalancerHistory key={selectedCluster.id} clusterId={selectedCluster.id} authFetch={authFetch} t={t} />
+                                                    </div>
+                                                )}
+
                                                 {/* Update Manager Section */}
-                                                <div className="lg:col-span-2">
+                                                <div className="lg:col-span-2" data-update-manager>
                                                     <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} addToast={addToast} />
                                                 </div>
                                                 
@@ -23449,10 +23948,10 @@
                                             <div className={isCorporate ? 'corp-toolbar flex items-center gap-1' : 'flex items-center gap-2'}>
                                                 {isAdmin && !haReadOnly && (
                                                     <>
-                                                        <button onClick={() => { setEditingVMware(selectedVMware); setVmwareForm({ name: selectedVMware.name || '', host: selectedVMware.host, port: selectedVMware.port || 443, username: selectedVMware.username || 'root', password: '', ssl_verify: selectedVMware.ssl_verify || false, notes: selectedVMware.notes || '' }); setShowAddVMware(true); }} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm'}>
+                                                        <button onClick={() => openVmwareEdit(selectedVMware)} title={t('esxiEditServer')} data-esxi-edit className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-gray-400 hover:text-white text-sm'}>
                                                             <Icons.Settings className="w-4 h-4" />
                                                         </button>
-                                                        <button onClick={() => handleDeleteVMware(selectedVMware.id)} className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-red-400 hover:text-red-300 text-sm'}>
+                                                        <button onClick={() => handleDeleteVMware(selectedVMware.id)} title={t('esxiRemoveServer')} data-esxi-remove className={isCorporate ? '' : 'px-3 py-2 rounded-lg bg-proxmox-card border border-proxmox-border text-red-400 hover:text-red-300 text-sm'}>
                                                             <Icons.Trash className="w-4 h-4" />
                                                         </button>
                                                     </>
@@ -23496,13 +23995,30 @@
                                         
                                         {/* VMs Tab */}
                                         {/* Connection Warning */}
+                                        {/* LW Oct 2026 (#1142) - a server that refuses its stored password says so,
+                                            with its words, and leads to the settings; edit and remove stay up top */}
                                         {!vmwareConnectionOk && (
-                                            <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-center gap-3">
+                                            <div data-esxi-error={vmwareError?.code || 'connection'} className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-3 flex items-center gap-3">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400 flex-shrink-0" />
-                                                <div className="flex-1">
-                                                    <span className="text-yellow-300 text-sm font-medium">{t('esxiConnectionLost')}</span>
-                                                    <span className="text-yellow-400/70 text-sm ml-2">{t('esxiSessionExpiredDataStale')}</span>
-                                                </div>
+                                                {vmwareError?.code === 'UPSTREAM_AUTH' ? (
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="text-yellow-300 text-sm font-medium">{t('esxiCredentialsRefused')}</div>
+                                                        <div className="text-yellow-400/70 text-sm break-all" data-esxi-error-message>{vmwareError.message}</div>
+                                                        <div className="text-yellow-400/70 text-xs mt-1">{t('esxiCredentialsHint')}</div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex-1 min-w-0">
+                                                        <span className="text-yellow-300 text-sm font-medium">{t('esxiConnectionLost')}</span>
+                                                        <span className="text-yellow-400/70 text-sm ml-2">{t('esxiSessionExpiredDataStale')}</span>
+                                                        {vmwareError?.message && <div className="text-yellow-400/70 text-xs mt-1 break-all" data-esxi-error-message>{vmwareError.message}</div>}
+                                                    </div>
+                                                )}
+                                                {vmwareError?.code === 'UPSTREAM_AUTH' && isAdmin && !haReadOnly && (
+                                                    <button onClick={() => openVmwareEdit(selectedVMware)} data-esxi-error-edit
+                                                        className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-xs font-medium">
+                                                        {t('esxiEditServer')}
+                                                    </button>
+                                                )}
                                                 <button onClick={() => { fetchVMwareVms(selectedVMware.id); fetchVMwareHosts(selectedVMware.id); fetchVMwareDatastores(selectedVMware.id); }} 
                                                     className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-xs font-medium">
                                                     {t('esxiReconnect')}
@@ -25826,6 +26342,20 @@
                                             />
                                         </div>
                                     </div>
+                                ) : sidebarGuests ? (
+                                    <AllGuestsView
+                                        clusters={clusters}
+                                        authFetch={authFetch}
+                                        addToast={addToast}
+                                        onBulkMigrate={handleBulkMigrate}
+                                        onOpenGuest={(cluster, guest) => {
+                                            setSelectedCluster(cluster);
+                                            setSelectedSidebarVm({...guest, _clusterId: cluster.id});
+                                            setSelectedSidebarNode(null);
+                                            setActiveTab('resources');
+                                            setResourcesSubTab('management');
+                                        }}
+                                    />
                                 ) : (
                                     <AllClustersOverview
                                         clusters={clusters}
@@ -25843,7 +26373,21 @@
                                             setActiveTab('resources');
                                             setResourcesSubTab('management');
                                         }}
+                                        onOpenClusterTab={(cluster, tab, section) => {
+                                            setSelectedCluster(cluster);
+                                            setSelectedSidebarVm(null);
+                                            setSelectedSidebarNode(null);
+                                            setSelectedSidebarDatastore(null);
+                                            setDatacenterSection(tab === 'datacenter' ? section : null);
+                                            setActiveTab(tab);
+                                            // the update manager sits further down the settings tab
+                                            if (section === 'updates') setTimeout(() => {
+                                                const el = document.querySelector('[data-update-manager]');
+                                                if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+                                            }, 300);
+                                        }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
+                                        onOpenGuests={openGuests}
                                     />
                                 )}
                             </div>
@@ -26939,11 +27483,11 @@
                     {/* Toast Notifications — rendered via portal to document.body to avoid corporate layout z-index/overflow issues */}
                     {toastPortal}
 
-                    {/* Session-expired overlay — any 401 (server restart, idle timeout, revoked token)
-                        surfaces this instead of silently failing every poll. Portal to body so it sits
-                        above the whole app regardless of layout z-index. */}
+                    {/* Session-expired overlay - a 401 of PegaProx's own (server restart, idle timeout,
+                        revoked token; #1142: its code says so) surfaces this instead of silently failing
+                        every poll. Portal to body so it sits above the whole app regardless of layout z-index. */}
                     {sessionExpired && ReactDOM.createPortal(
-                        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 100000, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(2px)' }}>
+                        <div data-session-expired className="fixed inset-0 flex items-center justify-center p-4" style={{ zIndex: 100000, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(2px)' }}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-sm p-7 text-center">
                                 <div className="mx-auto mb-4 rounded-full bg-yellow-500/15 flex items-center justify-center" style={{ width: 52, height: 52 }}>
                                     <Icons.Lock className="w-6 h-6 text-yellow-400" />
@@ -27202,6 +27746,7 @@
                                     }
                                     if (alertMetricSel === 'snapshot_age') payload.snapshot_ignore_policy = form.snapshot_ignore_policy.checked;
                                     if (alertMetricSel === 'backup_coverage') payload.backup_exclude_tags = form.backup_exclude_tags.value;
+                                    if (alertMetricSel === 'restart_loop') payload.restart_window_minutes = parseInt(form.restart_window_minutes.value);
                                     if (editingAlert) {  // #618 — edit keeps the alert's current enabled state
                                         await updateClusterAlert(editingAlert.id, payload);
                                     } else {
@@ -27221,7 +27766,7 @@
                                             <select name="target_type" defaultValue={editingAlert ? editingAlert.target_type : 'cluster'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cluster">{t('entireCluster') || 'Entire Cluster'}</option>
                                                 <option value="node">{t('specificNode') || 'Specific Node'}</option>
-                                                {alertMetricSel !== 'zfs_health' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
+                                                {alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && alertMetricSel !== 'qdevice' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
                                             </select>
                                         </div>
                                         <div>
@@ -27249,6 +27794,9 @@
                                                 <option value="snapshot_age">{t('alertMetricSnapshots')}</option>
                                                 <option value="backup_coverage">{t('backupCoverageTitle')}</option>
                                                 <option value="zfs_health">{t('zfsAlertTitle')}</option>
+                                                <option value="clock_drift">{t('clockDriftTitle')}</option>
+                                                <option value="restart_loop">{t('restartLoopTitle')}</option>
+                                                <option value="qdevice">{t('qdeviceAlertTitle')}</option>
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -27262,6 +27810,9 @@
                                                     : alertMetricSel === 'replication' ? t('alertReplHelp')
                                                     : alertMetricSel === 'backup_coverage' ? t('backupCoverageHelp')
                                                     : alertMetricSel === 'zfs_health' ? t('zfsAlertHelp')
+                                                    : alertMetricSel === 'clock_drift' ? t('clockDriftHelp')
+                                                    : alertMetricSel === 'restart_loop' ? t('restartLoopHelp')
+                                                    : alertMetricSel === 'qdevice' ? t('qdeviceAlertHelp')
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
@@ -27362,6 +27913,25 @@
                                                         <option value="0">{t('zfsAlertAny')}</option>
                                                         <option value="1">{t('zfsAlertStateOnly')}</option>
                                                     </select>
+                                                </div>
+                                            )}
+                                            {/* LW Oct 2026 - a clock limit in seconds; a restart loop is so many starts within a window */}
+                                            {alertMetricSel === 'clock_drift' && (
+                                                <div data-event-fields="clock_drift">
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('clockDriftLimit')}</label>
+                                                    <input name="threshold" type="number" min="1" max="3600" required defaultValue={saved ? saved.threshold : 2} className={field} />
+                                                </div>
+                                            )}
+                                            {alertMetricSel === 'restart_loop' && (
+                                                <div data-event-fields="restart_loop" className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('restartLoopStarts')}</label>
+                                                        <input name="threshold" type="number" min="2" max="100" required defaultValue={saved ? saved.threshold : 3} className={field} />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('restartLoopWindow')}</label>
+                                                        <input name="restart_window_minutes" type="number" min="1" max="1440" required defaultValue={saved ? (saved.restart_window_minutes || 15) : 15} className={field} />
+                                                    </div>
                                                 </div>
                                             )}
                                             {alertMetricSel !== 'rolling_update' && (

@@ -155,6 +155,7 @@ class XcpngManager:
         self.ha_recovery_in_progress = {}
         self._cached_node_dict = {}
         self.last_migration_log = []
+        self._vm_migration_cooldown = {}  # {vmid: when the balancer moved it}
 
         # task tracking - xapi opaque refs -> our task dicts
         self._active_tasks = {}
@@ -3161,6 +3162,26 @@ class XcpngManager:
         """Public wrapper - used by API layer for shell connections."""
         return self._get_host_ip(node_name)
 
+    def member_node_ip(self, node_name):
+        """Address of the pool host named node_name, None when no host has that name or
+        XAPI does not answer. Same contract as the Proxmox manager's: None means refuse.
+
+        MK Oct 2026 (#1143) - _get_host_ip answers config.host for a name it cannot
+        find, which is another host; a node shell must not open there.
+        """
+        if not node_name or not isinstance(node_name, str):
+            return None
+        api = self._api()
+        if not api:
+            return None
+        try:
+            for href in api.host.get_all():
+                if node_name in (api.host.get_hostname(href), api.host.get_name_label(href)):
+                    return api.host.get_address(href) or None
+        except Exception as e:
+            self.logger.warning(f"[NodeIP] XAPI host lookup for {node_name!r} failed: {e}")
+        return None
+
     def _ssh_connect(self, host, retries=3):
         """Open SSH connection to XCP-ng host."""
         import paramiko
@@ -4929,6 +4950,12 @@ echo DONE""",
         if not exclude_vmids:
             exclude_vmids = set()
         excluded_vms = set(self.get_balancing_excluded_vms()) | set(exclude_vmids)
+        # MK Oct 2026 - the cluster's cooldown holds here too, a pool had none at all
+        from pegaprox.core.manager import recent_balancer_moves, balancer_cooldown_secs
+        if not isinstance(getattr(self, '_vm_migration_cooldown', None), dict):
+            self._vm_migration_cooldown = {}
+        now, cooldown = time.time(), balancer_cooldown_secs(self)
+        excluded_vms |= {v for v, ts in recent_balancer_moves(self).items() if now - ts < cooldown}
 
         vms = self._cached_vms or self.get_vms() or []
         candidates = []
@@ -4977,12 +5004,25 @@ echo DONE""",
 
     def _do_balance_migrate(self, vm_info, target_node):
         """Execute a single balancing migration. Returns True on success."""
+        from pegaprox.core.manager import BALANCE_WHY, record_balance_move
+        why = vm_info.pop(BALANCE_WHY, None)
         vmid = vm_info['vmid']
         source = vm_info['node']
+        started = time.time()
         try:
             self.logger.info(f"[BALANCE] migrating VM {vmid} ({vm_info.get('name','')}) "
                              f"{source} -> {target_node}")
             result = self.migrate_vm_manual(source, vmid, 'qemu', target_node=target_node, online=True)
+            if why:
+                ok = bool(result.get('success'))
+                error = '' if ok else str(result.get('error') or '')[:300]
+                if ok:
+                    self._vm_migration_cooldown[vmid] = time.time()
+                else:
+                    why = dict(why, details=dict(why.get('details') or {}, error=error))
+                record_balance_move(self.id, vm_info, target_node, why, 'success' if ok else 'failed',
+                                    duration=time.time() - started,
+                                    note=f"failed: {error}" if not ok else '')
             if result.get('success'):
                 self.last_migration_log.append({
                     'ts': time.time(),
@@ -4999,6 +5039,11 @@ echo DONE""",
                 self.logger.warning(f"[BALANCE] migration failed: {result.get('error')}")
         except Exception as e:
             self.logger.error(f"[BALANCE] migrate VM {vmid}: {e}")
+            if why:
+                error = str(e)[:300]
+                record_balance_move(self.id, vm_info, target_node,
+                                    dict(why, details=dict(why.get('details') or {}, error=error)),
+                                    'failed', duration=time.time() - started, note=f"failed: {error}")
         return False
 
     def run_balance_check(self):
@@ -5041,12 +5086,17 @@ echo DONE""",
             # an automatic leader that lost its lease starts no migration (#625)
             if not ha.confirm_step(f"balancing VM {candidate['vmid']}"):
                 break
+            from pegaprox.core.manager import BALANCE_WHY, balance_reason
+            candidate[BALANCE_WHY] = balance_reason(
+                'balance', max_node, target, node_status,
+                threshold=getattr(self.config, 'migration_threshold', 30))
             ok = self._do_balance_migrate(candidate, target)
             if ok:
                 migrated += 1
                 time.sleep(5)  # brief pause between migrations
-                # re-check balance after each migration
-                needs, max_node, min_node = self.check_balance_needed()
+                # re-check balance after each migration; the next reason quotes these loads
+                node_status = self.get_node_status() or node_status
+                needs, max_node, min_node = self.check_balance_needed(node_status)
                 if not needs:
                     break
 

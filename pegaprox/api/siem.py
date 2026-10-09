@@ -48,7 +48,7 @@ class _NoSiemRedirect(urllib.request.HTTPRedirectHandler):
     # don't legitimately redirect — refuse to follow (the 30x surfaces as an error).
     def redirect_request(self, *a, **k):
         return None
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request, session
 
 from pegaprox.utils.auth import require_auth
@@ -158,6 +158,17 @@ def _record_result(target_id, ok, msg=''):
 
 # ── Formatters ────────────────────────────────────────────────────────────
 
+def _rfc5424_timestamp(value):
+    """The syslog TIMESTAMP. RFC 5424 6.2.3 makes the TIME-OFFSET mandatory, and audit
+    timestamps are naive local time (datetime.now().isoformat()), so strict parsers dropped
+    every line (#1131). Read a naive value as local time and send it in UTC with a Z."""
+    try:
+        dt = datetime.fromisoformat(str(value).replace('Z', '+00:00')) if value else datetime.now()
+    except ValueError:
+        dt = datetime.now()
+    return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')
+
+
 def _to_syslog_5424(event, app='pegaprox', facility='local0'):
     """Build an RFC 5424 syslog line. PRI = facility*8 + severity."""
     fac_map = {'kern': 0, 'user': 1, 'mail': 2, 'daemon': 3, 'auth': 4,
@@ -168,7 +179,7 @@ def _to_syslog_5424(event, app='pegaprox', facility='local0'):
     fac = fac_map.get(facility, 16)
     sev = {'critical': 2, 'warning': 4, 'info': 6}.get(event.get('severity', 'info'), 6)
     pri = fac * 8 + sev
-    ts = event.get('timestamp', datetime.now().isoformat())
+    ts = _rfc5424_timestamp(event.get('timestamp'))
     host = socket.gethostname() or '-'
     # NS Aug 2026 (AI-pentest) — strip ALL C0 control chars + DEL from every interpolated field, not
     # just \n on details. A WebAuthn key name / audit detail with an embedded \r or ESC otherwise

@@ -563,6 +563,35 @@ def test_force_leader_goes_out_on_both_alert_paths_and_the_event_stream(auto, se
     assert pushed[0][1]['severity'] == 'critical' and pushed[0][1]['event'] == 'ha.forced_leader'
 
 
+def test_the_forced_leader_holds_the_schedules_of_the_minute_it_took_over_in(auto, seed, monkeypatch):
+    """Lab E8: a task of that minute ran on the old leader during the cut and again on
+    the forced one, at its first pass after the restart. The minute it took over in is
+    held, plus the skew, as after a takeover (5.7); a later one runs, and nothing is held
+    once the epoch moved on. A manual active without Force leader holds nothing
+    (test_ha_confirm_sites)."""
+    from datetime import datetime
+    _lost_majority(auto, seed)
+    assert _force(auto, 'b', 'ac').status_code == 200
+    auto.restart('b')
+    took = datetime.fromisoformat(auto.state('b')['forced']['at']).timestamp()
+    wall = {'t': took + 0.5}
+    monkeypatch.setattr(auto.ha, '_wall', lambda: wall['t'])
+
+    with auto.at('b') as ha:
+        assert ha.is_active() and ha.mode() == 'manual'
+        assert ha.schedule_held() is True
+        # a minute the first pass would catch up, the one it took over in
+        assert ha.schedule_held(ha.schedule_at(took)) is True
+        later = took - took % 60 + 120
+        assert ha.schedule_held(ha.schedule_at(later)) is False
+        wall['t'] = later + 0.5
+        assert ha.schedule_held() is False
+        # the epoch moved on (a promotion, the switch): no longer the forced one
+        st = ha._load()
+        wall['t'] = took + 0.5
+        assert ha._forced_hold(dict(st, epoch=st['epoch'] + 1)) is False
+
+
 def test_a_refused_force_leader_alerts_nobody(auto, seed, monkeypatch):
     import pegaprox.utils.webhooks as webhooks
     sent = []

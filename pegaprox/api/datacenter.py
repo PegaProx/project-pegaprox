@@ -18,6 +18,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
+from pegaprox.api.helpers import upstream_failure
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('datacenter', __name__)
@@ -767,7 +768,7 @@ def discover_iscsi_targets(cluster_id, node):
                 'targets': targets
             })
         else:
-            return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+            return upstream_failure(response.status_code, parse_pve_error(response.text))
 
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to discover iSCSI targets')}), 500
@@ -1110,7 +1111,7 @@ def get_sdn_zones(cluster_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN zones')}), 500
 
@@ -1141,7 +1142,7 @@ def create_sdn_zone(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.zone_created', f"Created SDN zone: {data.get('zone', 'unknown')}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Zone created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create SDN zone')}), 500
 
@@ -1171,7 +1172,7 @@ def update_sdn_zone(cluster_id, zone_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.zone_updated', f"Updated SDN zone: {zone_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Zone updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update SDN zone')}), 500
 
@@ -1200,7 +1201,7 @@ def delete_sdn_zone(cluster_id, zone_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.zone_deleted', f"Deleted SDN zone: {zone_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Zone deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete SDN zone')}), 500
 
@@ -1226,7 +1227,7 @@ def get_sdn_vnets(cluster_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN vnets')}), 500
 
@@ -1256,7 +1257,7 @@ def create_sdn_vnet(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.vnet_created', f"Created SDN VNet: {data.get('vnet', 'unknown')}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'VNet created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create SDN vnet')}), 500
 
@@ -1286,7 +1287,7 @@ def update_sdn_vnet(cluster_id, vnet_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.vnet_updated', f"Updated SDN VNet: {vnet_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'VNet updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update SDN vnet')}), 500
 
@@ -1315,7 +1316,7 @@ def delete_sdn_vnet(cluster_id, vnet_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.vnet_deleted', f"Deleted SDN VNet: {vnet_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'VNet deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete SDN vnet')}), 500
 
@@ -1341,7 +1342,7 @@ def get_sdn_subnets(cluster_id, vnet_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN subnets')}), 500
 
@@ -1371,7 +1372,7 @@ def create_sdn_subnet(cluster_id, vnet_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.subnet_created', f"Created subnet in VNet {vnet_id}: {data.get('subnet', 'unknown')}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Subnet created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create SDN subnet')}), 500
 
@@ -1401,7 +1402,7 @@ def delete_sdn_subnet(cluster_id, vnet_id, subnet_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.subnet_deleted', f"Deleted subnet {subnet_id} from VNet {vnet_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Subnet deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete SDN subnet')}), 500
 
@@ -1435,7 +1436,7 @@ def apply_sdn_config(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.config_applied', "Applied SDN configuration to cluster", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'SDN configuration applied'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to apply SDN config')}), 500
 
@@ -1469,7 +1470,7 @@ def get_sdn_fabrics(cluster_id):
             return jsonify([])  # pre-9.2 or feature not enabled
         if resp.status_code == 200:
             return jsonify(resp.json().get('data', []) or [])
-        return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to list SDN fabrics')}), 500
 
@@ -1497,7 +1498,7 @@ def create_sdn_fabric(cluster_id):
                       f"Created SDN fabric: {body['fabric']} ({body['protocol']})",
                       cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create SDN fabric')}), 500
 
@@ -1520,7 +1521,7 @@ def update_sdn_fabric(cluster_id, fabric_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.fabric_updated', f"Updated SDN fabric: {fabric_id}", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update SDN fabric')}), 500
 
@@ -1543,7 +1544,7 @@ def delete_sdn_fabric(cluster_id, fabric_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.fabric_deleted', f"Deleted SDN fabric: {fabric_id}", cluster=manager.config.name)
             return jsonify({'success': True})
-        return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete SDN fabric')}), 500
 
@@ -1575,7 +1576,7 @@ def _sdn_crud_resource(cluster_id, family, item_id=None):
                 return (jsonify([] if not item_id else {}), 200)
             if resp.status_code == 200:
                 return (jsonify(resp.json().get('data', [] if not item_id else {})), 200)
-            return (jsonify({'error': parse_pve_error(resp.text)}), resp.status_code)
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
 
         body = request.json or {}
         if method == 'POST':
@@ -1588,7 +1589,7 @@ def _sdn_crud_resource(cluster_id, family, item_id=None):
             return (jsonify({'error': 'Method not allowed'}), 405)
         if resp.status_code == 200:
             return (jsonify({'success': True}), 200)
-        return (jsonify({'error': parse_pve_error(resp.text)}), resp.status_code)
+        return upstream_failure(resp.status_code, parse_pve_error(resp.text))
     except Exception as e:
         return (jsonify({'error': safe_error(e, 'SDN operation failed')}), 500)
 
@@ -1716,7 +1717,7 @@ def get_sdn_controllers(cluster_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN controllers')}), 500
 
@@ -1746,7 +1747,7 @@ def create_sdn_controller(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.controller_created', f"Created SDN controller: {data.get('controller', 'unknown')} ({data.get('type', '')})", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Controller created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create SDN controller')}), 500
 
@@ -1776,7 +1777,7 @@ def update_sdn_controller(cluster_id, controller_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.controller_updated', f"Updated SDN controller: {controller_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Controller updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update SDN controller')}), 500
 
@@ -1805,7 +1806,7 @@ def delete_sdn_controller(cluster_id, controller_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.controller_deleted', f"Deleted SDN controller: {controller_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Controller deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete SDN controller')}), 500
 
@@ -1835,7 +1836,7 @@ def get_sdn_ipams(cluster_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN IPAMs')}), 500
 
@@ -1865,7 +1866,7 @@ def create_sdn_ipam(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.ipam_created', f"Created IPAM: {data.get('ipam', 'unknown')} ({data.get('type', '')})", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'IPAM created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create IPAM')}), 500
 
@@ -1895,7 +1896,7 @@ def update_sdn_ipam(cluster_id, ipam_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.ipam_updated', f"Updated IPAM: {ipam_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'IPAM updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update IPAM')}), 500
 
@@ -1924,7 +1925,7 @@ def delete_sdn_ipam(cluster_id, ipam_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.ipam_deleted', f"Deleted IPAM: {ipam_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'IPAM deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete IPAM')}), 500
 
@@ -1954,7 +1955,7 @@ def get_sdn_dns(cluster_id):
             return jsonify(response.json().get('data', []))
         elif response.status_code == 501:
             return jsonify([])
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN DNS configs')}), 500
 
@@ -1984,7 +1985,7 @@ def create_sdn_dns(cluster_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.dns_created', f"Created DNS: {data.get('dns', 'unknown')}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'DNS created'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create DNS config')}), 500
 
@@ -2014,7 +2015,7 @@ def update_sdn_dns(cluster_id, dns_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.dns_updated', f"Updated DNS: {dns_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'DNS updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update DNS config')}), 500
 
@@ -2043,7 +2044,7 @@ def delete_sdn_dns(cluster_id, dns_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.dns_deleted', f"Deleted DNS: {dns_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'DNS deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete DNS config')}), 500
 
@@ -2070,7 +2071,7 @@ def get_sdn_zone_details(cluster_id, zone_id):
         
         if response.status_code == 200:
             return jsonify(response.json().get('data', {}))
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN zone details')}), 500
 
@@ -2093,7 +2094,7 @@ def get_sdn_vnet_details(cluster_id, vnet_id):
         
         if response.status_code == 200:
             return jsonify(response.json().get('data', {}))
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get SDN vnet details')}), 500
 
@@ -2127,7 +2128,7 @@ def update_sdn_subnet(cluster_id, vnet_id, subnet_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'sdn.subnet_updated', f"Updated subnet {subnet_id} in VNet {vnet_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Subnet updated'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update SDN subnet')}), 500
 

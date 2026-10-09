@@ -265,6 +265,12 @@ def _execute_drill(drill_id):
         worst_status = 'pass'
         c2 = get_db().conn.cursor()
         for vm in vms:
+            if vm.get('failed_over'):
+                # running on the target already; its replication waits for the failback, so
+                # its age is no RPO breach, and nothing protects the guest meanwhile
+                details.append(f"vmid {vm['vmid']}: failed over, replication waits for its failback")
+                if worst_status != 'fail': worst_status = 'warn'
+                continue
             jid = vm.get('replication_job_id') or ''
             if not jid:
                 details.append(f"vmid {vm['vmid']}: NO replication job linked")

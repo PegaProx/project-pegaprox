@@ -7,8 +7,9 @@ and the member votes at once. On a member it asks the leader for that, and where
 leader answers it campaigns at once with the pre-vote and every rule. A planned restart
 of the leader asks the members to hold its lease until it is back.
 
-The group is the one of tests/_ha_lease_harness.py; automatic mode is switched on by
-monkeypatch there, the server still refuses it (ha_vote.AUTO_MODE_SHIPPED).
+The group is the one of tests/_ha_lease_harness.py, with automatic mode offered as this
+release ships it; a test that sets ha_vote.AUTO_MODE_SHIPPED off checks what a server
+without it answers.
 
 MK Oct 2026 (#625)
 """

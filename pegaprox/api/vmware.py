@@ -19,7 +19,8 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import user_can_access_vmware_vm, acts_as_admin
 from pegaprox.api.helpers import (check_cluster_access, check_vmware_access, caller_is_scoped,
-                                  acting_user, vmware_server_reach)
+                                  acting_user, vmware_server_reach, upstream_failure,
+                                  UPSTREAM_AUTH_STATUSES)
 from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server
 from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
 from pegaprox.background.broadcast import broadcast_resources_loop
@@ -29,6 +30,22 @@ bp = Blueprint('vmware', __name__)
 # V2P migration tracking
 _vmware_migrations = {}
 _migration_lock_v2p = threading.Lock()
+
+
+def _esxi_failed(result):
+    """The answer for a failed call to an ESXi server.
+
+    MK Oct 2026 (#1142) - this was jsonify(result) with the server's own status, so wrong
+    stored credentials came back as a 401 and the browser signed the user off on every click
+    on the server, with no way left to fix or remove it. Its 401/403 is a 502 UPSTREAM_AUTH
+    now, its 5xx a 502; a 400/404 of the server keeps its status.
+    """
+    status = result.get('status_code')
+    if status in UPSTREAM_AUTH_STATUSES:
+        return upstream_failure(status, system='The ESXi server', detail=result.get('error'))
+    if isinstance(status, int) and status >= 500:
+        return jsonify(result), 502
+    return jsonify(result), status or 500
 
 # =============================================================================
 
@@ -373,7 +390,7 @@ def get_vmware_vms(vmware_id):
             if mgr._connection_type == 'soap':
                 result = mgr.get_vms()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     # sec (private disclosure Sep 2026 — audit H2): the list returned the FULL ESXi inventory gated
     # only by server reach (check_vmware_access admits a tenant caller, and returns True when the
     # server has no linked_clusters — the common single-ESXi case). Every sibling per-VM route calls
@@ -408,7 +425,7 @@ def get_vmware_vm_detail(vmware_id, vm_id):
     if 'error' in result and mgr.connect():
         result = mgr.get_vm(vm_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     data = result.get('data', {})
     # Guest info
@@ -444,7 +461,7 @@ def vmware_vm_power(vmware_id, vm_id, action):
     mgr = vmware_managers[vmware_id]
     result = mgr.vm_power_action(vm_id, action)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), f'vmware.vm.{action}',
               f"VM power {action} on {vm_id} @ {mgr.name}")
@@ -470,7 +487,7 @@ def get_vmware_snapshots(vmware_id, vm_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_snapshots(vm_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -497,7 +514,7 @@ def create_vmware_snapshot(vmware_id, vm_id):
     result = mgr.create_snapshot(vm_id, data['name'], data.get('description', ''),
                                   data.get('memory', False), data.get('quiesce', True))
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.snapshot.created',
               f"Snapshot '{data['name']}' created for VM {vm_id} @ {mgr.name}")
@@ -523,7 +540,7 @@ def delete_vmware_snapshot(vmware_id, vm_id, snapshot_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.delete_snapshot(vm_id, snapshot_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.snapshot.deleted',
               f"Snapshot {snapshot_id} deleted from VM {vm_id} @ {mgr.name}")
@@ -553,7 +570,7 @@ def get_vmware_hosts(vmware_id):
             if mgr._connection_type == 'soap':
                 result = mgr.get_hosts()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -578,7 +595,7 @@ def get_vmware_datastores(vmware_id):
             if mgr._connection_type == 'soap':
                 result = mgr.get_datastores()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -596,7 +613,7 @@ def get_vmware_datastore_detail(vmware_id, ds_id):
     mgr.ensure_connected()
     result = mgr.get_datastore_detail(ds_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', {}))
 
 
@@ -621,7 +638,7 @@ def get_vmware_networks(vmware_id):
             if mgr._connection_type == 'soap':
                 result = mgr.get_networks()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -651,7 +668,7 @@ def get_vmware_vcenter_clusters(vmware_id):
         # For standalone ESXi (no clusters), return empty list instead of error
         if result.get('status_code') in (400, 404):
             return jsonify([])
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -669,7 +686,7 @@ def get_vmware_cluster_detail(vmware_id, cluster_id):
     mgr.ensure_connected()
     result = mgr.get_cluster_detail(cluster_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', {}))
 
 
@@ -735,7 +752,7 @@ def get_vmware_vm_performance(vmware_id, vm_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_vm_performance(vm_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', {}))
 
 
@@ -793,7 +810,7 @@ def get_vmware_datacenters(vmware_id):
     mgr.ensure_connected()
     result = mgr.get_datacenters()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -811,7 +828,7 @@ def get_vmware_summary(vmware_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_summary()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', {}))
 
 
@@ -828,7 +845,7 @@ def get_vmware_health(vmware_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_appliance_health()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', {}))
 
 
@@ -846,7 +863,7 @@ def get_vmware_folders(vmware_id):
     folder_type = request.args.get('type')
     result = mgr.get_folders(folder_type)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -863,7 +880,7 @@ def get_vmware_resource_pools(vmware_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_resource_pools()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -880,7 +897,7 @@ def get_vmware_storage_policies(vmware_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_storage_policies()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -897,7 +914,7 @@ def get_vmware_content_libraries(vmware_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.get_content_libraries()
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     return jsonify(result.get('data', []))
 
 
@@ -934,7 +951,7 @@ def get_vmware_console(vmware_id, vm_id):
     
     result = mgr.get_vm_console_ticket(vm_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.console.accessed',
               f"Console ticket issued for VM {vm_id} @ {mgr.name}")
@@ -1045,7 +1062,7 @@ def clone_vmware_vm(vmware_id, vm_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.clone_vm(vm_id, data['name'], data.get('folder'), data.get('resource_pool'), data.get('datastore'))
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.vm.cloned',
               f"Cloned VM {vm_id} as '{data['name']}' @ {mgr.name}")
@@ -1074,7 +1091,7 @@ def delete_vmware_vm(vmware_id, vm_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.delete_vm(vm_id)
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.vm.deleted',
               f"Deleted VM {vm_id} @ {mgr.name}")
@@ -1103,7 +1120,7 @@ def rename_vmware_vm(vmware_id, vm_id):
     mgr = vmware_managers[vmware_id]
     result = mgr.rename_vm(vm_id, data['name'])
     if 'error' in result:
-        return jsonify(result), result.get('status_code', 500)
+        return _esxi_failed(result)
     
     log_audit(request.session.get('user', 'admin'), 'vmware.vm.renamed',
               f"Renamed VM {vm_id} to '{data['name']}' @ {mgr.name}")

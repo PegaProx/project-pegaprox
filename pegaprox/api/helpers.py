@@ -412,6 +412,20 @@ def caller_acts_as_admin():
     return acts_as_admin(acting_user())
 
 
+def find_user_key(users, name):
+    """The key an account is stored under, for a username taken from a route, or None.
+
+    The exact key first, then the lower-cased name. The admin routes used to lower-case
+    first, and an OIDC fallback account kept the case of the subject id (oidc_Wd...), so
+    it answered 404 everywhere: no edit, no delete, no 2FA reset (#1141). MK"""
+    if not isinstance(name, str) or not name:
+        return None
+    if name in users:
+        return name
+    lowered = name.lower()
+    return lowered if lowered in users else None
+
+
 def check_cluster_access(cluster_id):
     """Check if current user can access a cluster based on tenant or VM ACLs.
     Returns (True, None) if allowed, (False, error_response) if not.
@@ -660,6 +674,28 @@ def require_unconfined(cluster_id):
     return None
 
 
+def node_shell_address(mgr, node):
+    """The address a shell for `node` logs in at, or None: then there is no shell.
+
+    MK Oct 2026 (#1143) - both node shells fell back to the cluster's connection host
+    when the node's own address was not found (the main port one always, its lookup
+    read an undefined port), so the shell of every node opened on that one host under
+    the clicked node's name. Only a member of the cluster resolves, through the
+    manager's own lookup; nothing stands in for it, least of all an address the
+    browser sends along.
+    """
+    if not node or not isinstance(node, str):
+        return None
+    try:
+        # an XCP-ng pool answers membership from XAPI itself, its nodes are a poll cache
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng' and node not in (mgr.nodes or {}):
+            return None
+        return mgr.member_node_ip(node) or None
+    except Exception as e:
+        logging.warning(f"[SHELL] no address for node {node!r}: {e}")
+        return None
+
+
 # NS Oct 2026 - an XCP-ng pool asks for its own xapi.vm.* permission next to the vm.* one,
 # as its power, config and migrate routes already did (#1110)
 XAPI_TWINS = {'vm.config': 'xapi.vm.config', 'vm.snapshot': 'xapi.vm.snapshot',
@@ -782,6 +818,37 @@ def parse_pve_error(response_text, fallback='Proxmox API error'):
     if '<html' in text.lower():
         return fallback
     return html.escape(text) if text else fallback
+
+
+# MK Oct 2026 (#1142) - a 401 or 403 from a system behind PegaProx (Proxmox VE, PBS, an ESXi
+# server) is about the credentials PegaProx keeps for it, never about the caller's session.
+# Handed on as it came, the browser read the 401 as its own session running out and signed
+# the user off at every click on a server whose stored password had stopped working.
+UPSTREAM_AUTH = 'UPSTREAM_AUTH'
+UPSTREAM_AUTH_STATUSES = (401, 403)
+
+
+def upstream_status(status, default=500):
+    """The status to answer for an upstream one: its 401 and 403 are a 502 (#1142)."""
+    if status in UPSTREAM_AUTH_STATUSES:
+        return 502
+    return status or default
+
+
+def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra):
+    """(response, status) for an upstream system that answered `status`.
+
+    401 and 403 go out as 502 with code UPSTREAM_AUTH and say whose credentials were
+    refused; everything else keeps its status, as before. extra: more fields of the body.
+    """
+    from flask import jsonify
+    if status in UPSTREAM_AUTH_STATUSES:
+        said = ('refused the stored credentials' if status == 401
+                else 'does not allow this with the stored credentials')
+        msg = f'{system} {said} (HTTP {status})'
+        return jsonify({**extra, 'error': f'{msg}: {error}' if error else msg,
+                        'code': UPSTREAM_AUTH, 'upstream_status': status}), 502
+    return jsonify({**extra, 'error': error}), status or default
 
 
 # MK Oct 2026 (#763, #954) - the two evacuation options of a rolling update. The run started

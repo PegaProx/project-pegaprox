@@ -83,7 +83,7 @@ def _get_my_vms():
     """Return all VMs the authenticated user can access across all clusters"""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
 
     user = _portal_user(username)
     user['username'] = username
@@ -554,7 +554,7 @@ def _list_allowed_isos():
     """List ISOs that portal customers are allowed to mount"""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     cfg = _load_config()
 
     # hoster can specify individual ISOs or an entire storage
@@ -588,7 +588,7 @@ def _mount_iso():
     """Mount an allowed ISO to a customer's VM"""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     data = request.get_json() or {}
     cluster_id = data.get('cluster_id', '')
     vmid = data.get('vmid')
@@ -651,7 +651,7 @@ def _unmount_iso():
     """Remove ISO from VM CD-ROM drive"""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     data = request.get_json() or {}
     cluster_id = data.get('cluster_id', '')
     vmid = data.get('vmid')
@@ -746,7 +746,7 @@ def _ct_create_options():
     their current tenant-quota usage, so the create form can render + pre-validate."""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
@@ -782,7 +782,7 @@ def _create_ct():
     creator so it shows up in their portal."""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
@@ -903,7 +903,7 @@ def _destroy_options():
     render the Destroy button."""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
@@ -929,7 +929,7 @@ def _destroy_guest():
     inherit this grant), and audit."""
     username = request.session.get('user', '')
     if not username:
-        return {'error': 'Not authenticated'}, 401
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     user = _portal_user(username)
     from pegaprox.models.permissions import ROLE_ADMIN
     if user.get('effective_role', user.get('role')) == ROLE_ADMIN:

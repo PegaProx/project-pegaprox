@@ -21,7 +21,8 @@ DASH = os.path.join(ROOT, 'web', 'src', 'dashboard.js')
 CLOUD = os.path.join(ROOT, 'web', 'src', 'cloud.js')
 VM_MODALS = os.path.join(ROOT, 'web', 'src', 'vm_modals.js')
 
-FLAGS = ['Topology', 'Worldmap', 'XHM', 'MultiSdn', 'AutoInstall']
+# Guests: All Guests, the guest table of every cluster
+FLAGS = ['Topology', 'Worldmap', 'XHM', 'MultiSdn', 'Guests', 'AutoInstall']
 
 
 def _read(path):
@@ -84,11 +85,11 @@ def test_every_sibling_entry_clears_the_others(dash, sidebar, tools):
     # All Clusters has its handler inline; Topology, World Map, XHM and EVPN have a named
     # one, shared by the Modern rows and the corporate Tools section. The new entry goes
     # through openAutoInstall
-    named = dict(re.findall(r'const open(Topology|Worldmap|Xhm|MultiSdn) = \(\) => \{ ([^}]*) \};', dash))
-    assert sorted(named) == ['MultiSdn', 'Topology', 'Worldmap', 'Xhm'], sorted(named)
-    for fn in ('openWorldmap', 'openXhm', 'openMultiSdn'):
+    named = dict(re.findall(r'const open(Topology|Worldmap|Xhm|MultiSdn|Guests) = \(\) => \{ ([^}]*) \};', dash))
+    assert sorted(named) == ['Guests', 'MultiSdn', 'Topology', 'Worldmap', 'Xhm'], sorted(named)
+    for fn in ('openWorldmap', 'openXhm', 'openMultiSdn', 'openGuests'):
         assert f'onClick={{{fn}}}' in sidebar, fn
-    for fn in ('openTopology', 'openWorldmap', 'openXhm', 'openMultiSdn'):
+    for fn in ('openTopology', 'openWorldmap', 'openXhm', 'openMultiSdn', 'openGuests'):
         assert f'onClick: {fn},' in tools, fn
     handlers = _sidebar_handlers(sidebar) + list(named.values())
     assert len(handlers) >= 5, handlers
@@ -150,7 +151,7 @@ def test_the_entry_sits_right_after_world_map(sidebar, tools):
     assert 'onClick={() => openAutoInstall()}' in button
     assert "t('autoInstall')" in button and "t('autoInstallHint')" in button
     # corporate: the same place in its Tools section, the same gate and handler
-    assert re.findall(r"\{ id: '(\w+)', show: ", tools) == ['topology', 'worldmap', 'autoinstall', 'xhm', 'mcevpn']
+    assert re.findall(r"\{ id: '(\w+)', show: ", tools) == ['guests', 'topology', 'worldmap', 'autoinstall', 'xhm', 'mcevpn']
     assert "{ id: 'autoinstall', show: canAutoInstall && !haStandby," in tools
     assert 'onClick: () => openAutoInstall(),' in tools
 

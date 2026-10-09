@@ -11,7 +11,8 @@ from flask import Blueprint, jsonify, request
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
-from pegaprox.models.tasks import PegaProxConfig
+from pegaprox.models.tasks import (PegaProxConfig, balancer_cooldown, BALANCER_COOLDOWN_MIN,
+                                   BALANCER_COOLDOWN_MAX)
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
 from pegaprox.core.cache import StorageDataCache
@@ -31,7 +32,7 @@ from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
 from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
-                                  bounded_limit, node_maintenance_for_caller)
+                                  bounded_limit, node_maintenance_for_caller, upstream_failure)
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -131,6 +132,7 @@ def get_clusters():
                 'ssh_disabled': bool(getattr(mgr.config, 'ssh_disabled', False)),
                 'migration_threshold': mgr.config.migration_threshold,
                 'migration_tolerance': getattr(mgr.config, 'migration_tolerance', 10),
+                'migration_cooldown': balancer_cooldown(getattr(mgr.config, 'migration_cooldown', None)),
                 'check_interval': mgr.config.check_interval,
                 'auto_migrate': mgr.config.auto_migrate,
                 'balance_containers': getattr(mgr.config, 'balance_containers', False),
@@ -192,6 +194,9 @@ def add_cluster():
     _uerr = _ssh_user_error(data)
     if _uerr:
         return _uerr
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -258,6 +263,7 @@ def export_cluster_config(cluster_id):
         'ssl_verification': c.ssl_verification,
         'migration_threshold': c.migration_threshold,
         'migration_tolerance': getattr(c, 'migration_tolerance', 10),
+        'migration_cooldown': balancer_cooldown(getattr(c, 'migration_cooldown', None)),
         'check_interval': c.check_interval,
         'auto_migrate': c.auto_migrate,
         'balance_containers': getattr(c, 'balance_containers', False),
@@ -314,7 +320,7 @@ def rotate_cluster_api_token(cluster_id):
                 elif resp.status_code in (404, 405, 501):
                     preserved = False  # fall through to delete+create
                 else:
-                    return jsonify({'error': parse_pve_error(resp.text)}), resp.status_code
+                    return upstream_failure(resp.status_code, parse_pve_error(resp.text))
             except Exception as probe_err:
                 mgr.logger.warning(f"[token-rotate] in-place regenerate probe failed ({probe_err}); falling back")
                 preserved = False
@@ -326,7 +332,7 @@ def rotate_cluster_api_token(cluster_id):
             mgr._create_session().delete(base, timeout=10)
             create_resp = mgr._api_post(base, data={})
             if create_resp.status_code != 200:
-                return jsonify({'error': parse_pve_error(create_resp.text)}), create_resp.status_code
+                return upstream_failure(create_resp.status_code, parse_pve_error(create_resp.text))
             data = create_resp.json().get('data') or {}
             new_secret = data.get('value') or data.get('secret')
             preserved = False
@@ -413,6 +419,11 @@ def reconfigure_cluster(cluster_id):
     else:
         kept = getattr(old_mgr.config, 'ha_settings', None)
         data['ha_settings'] = dict(kept) if isinstance(kept, dict) else {}
+    # the balancer cooldown is no connection setting either: one the dialog leaves out stays
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
+    data.setdefault('migration_cooldown', balancer_cooldown(getattr(old_mgr.config, 'migration_cooldown', None)))
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -1447,6 +1458,7 @@ def get_cluster_resources(cluster_id):
 # password was that secret, offered to every node. /reconfigure changes both together.
 ALLOWED_CONFIG_FIELDS = {
     'name', 'host', 'ssl_verification', 'migration_threshold', 'migration_tolerance',
+    'migration_cooldown',  # MK Oct 2026 - seconds the balancer leaves a moved guest alone
     'check_interval', 'auto_migrate', 'balance_containers', 'balance_local_disks',
     'dry_run', 'enabled', 'ha_enabled', 'fallback_hosts', 'ssh_user', 'ssh_port',
     'excluded_nodes',
@@ -1465,6 +1477,19 @@ ALLOWED_CONFIG_FIELDS = {
 # truthy string like "false" would round-trip back to True and silently flip an
 # opt-in on. Only a real bool is accepted for them, no bool() coercion.
 BOOLEAN_CONFIG_FIELDS = {'proxlb_pins_auto_migrate', 'proxlb_pins_strict'}
+
+
+def _cooldown_error(data):
+    """A 400 when the body sets migration_cooldown to anything but whole seconds in
+    range. Checked before any field is applied, like the booleans above."""
+    if 'migration_cooldown' not in data:
+        return None
+    value = data['migration_cooldown']
+    if isinstance(value, bool) or not isinstance(value, int) \
+            or not BALANCER_COOLDOWN_MIN <= value <= BALANCER_COOLDOWN_MAX:
+        return jsonify({'error': f"'migration_cooldown' must be whole seconds from "
+                                 f"{BALANCER_COOLDOWN_MIN} to {BALANCER_COOLDOWN_MAX}"}), 400
+    return None
 
 
 def _ssh_user_error(data):
@@ -1601,6 +1626,9 @@ def update_cluster_config(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -1649,6 +1677,9 @@ def update_cluster_config_live(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
+    _cd_err = _cooldown_error(data)
+    if _cd_err:
+        return _cd_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -1662,10 +1693,15 @@ def update_cluster_config_live(cluster_id):
             updated.append(key)
 
     save_config()
+    usr = getattr(request, 'session', {}).get('user', 'system')
     if rebind:
-        log_audit(getattr(request, 'session', {}).get('user', 'system'), 'cluster.endpoint_changed',
+        log_audit(usr, 'cluster.endpoint_changed',
                   f"Cluster {mgr.config.name}: {', '.join(rebind['moved'])} changed with the "
                   f"credential re-entered")
+    # MK Oct 2026 - the settings tab saves through here, and nothing of it reached the audit log
+    if updated:
+        log_audit(usr, 'cluster.config_changed', f"Cluster {mgr.config.name} config updated: "
+                  f"{', '.join(updated)}")
 
     return jsonify({'message': 'Configuration updated successfully', 'updated_fields': updated})
 
@@ -2677,6 +2713,207 @@ def get_guest_inventory():
         entry['count'] = len(rows)
     guests.sort(key=lambda g: (g['cluster_name'].lower(), g['vmid']))
     return jsonify({'guests': guests, 'clusters': out_clusters})
+
+
+# MK Oct 2026 - the guest table of the All Guests page asks for one page at a time: filtered,
+# sorted and cut here, so 10k guests never cross the wire at once. The rows come from the
+# snapshot the guest list of a cluster reads (get_vm_resources, which the live loop keeps
+# fresh), not from a walk of /cluster/resources per page, so the disk figures are that list's
+# as well. Each row says which of the table's actions the caller may take on its guest; the
+# actions go to the per-guest routes and the bulk migration, which ask again.
+_GUEST_PAGE_MAX = 500
+_GUEST_PAGE_AGE = 6
+_GUEST_PAGE_TAGS = 500
+_GUEST_PAGE_TEXT = 200
+_GUEST_STATES = ('running', 'stopped', 'other')
+_GUEST_KINDS = ('qemu', 'lxc', 'template')
+_GUEST_SORTS = {
+    'name': lambda g: g['name'].lower(),
+    'vmid': lambda g: g['vmid'],
+    'cluster': lambda g: g['cluster_name'].lower(),
+    'node': lambda g: g['node'].lower(),
+    'status': lambda g: g['status'],
+    'type': lambda g: (g['template'], g['type']),
+    'cpu': lambda g: g['cpu'],
+    'mem': lambda g: g['mem'],
+    'disk': lambda g: (g['disk_size'], g['disk']),
+    'uptime': lambda g: g['uptime'],
+}
+_PAGE_NUMBER_RE = re.compile(r'[0-9]{1,9}')
+
+
+def _guest_page_query(args):
+    """The filters, order and window of a guest page as the query string gives them, or the
+    400 a malformed one earns."""
+    def number(name, default, low, high):
+        raw = args.get(name)
+        if raw in (None, ''):
+            return default
+        if not _PAGE_NUMBER_RE.fullmatch(raw) or not low <= int(raw) <= high:
+            raise ValueError(f'{name} is a whole number from {low} to {high}')
+        return int(raw)
+
+    def choice(name, allowed, default=''):
+        raw = args.get(name) or default
+        if raw != default and raw not in allowed:
+            raise ValueError(f"{name} is one of {', '.join(allowed)}")
+        return raw
+
+    def text(name, longest):
+        raw = (args.get(name) or '').strip()
+        if len(raw) > longest:
+            raise ValueError(f'{name} is at most {longest} characters')
+        return raw.lower()
+
+    try:
+        return {
+            'limit': number('limit', 100, 1, _GUEST_PAGE_MAX),
+            'offset': number('offset', 0, 0, 10_000_000),
+            'q': text('q', _GUEST_PAGE_TEXT),
+            'tag': text('tag', 64),
+            'status': choice('status', _GUEST_STATES),
+            'type': choice('type', _GUEST_KINDS),
+            'sort': choice('sort', tuple(_GUEST_SORTS), 'name'),
+            'dir': choice('dir', ('asc', 'desc'), 'asc'),
+        }, None
+    except ValueError as e:
+        return None, (jsonify({'error': str(e)}), 400)
+
+
+def _guest_page_row(cid, cluster_name, g, ips, tags):
+    vmid, node = int(g['vmid']), str(g.get('node') or '')
+    running = g.get('status') == 'running'
+    # the agent cache keeps a guest that has stopped since
+    agent_ips = ips.get((node, vmid)) if running else None
+    return {
+        'cluster_id': cid, 'cluster_name': cluster_name, 'vmid': vmid, 'name': str(g.get('name') or ''),
+        'type': g['type'], 'node': node, 'status': str(g.get('status') or 'unknown'),
+        'template': bool(g.get('template')), 'vcpus': int(g.get('maxcpu') or 0),
+        'cpu': float(g.get('cpu') or 0), 'mem': int(g.get('mem') or 0), 'memory': int(g.get('maxmem') or 0),
+        'disk': int(g.get('disk') or 0), 'disk_size': int(g.get('maxdisk') or 0),
+        'uptime': int(g.get('uptime') or 0) if running else 0,
+        'ip_addresses': [str(a) for a in (agent_ips or (g.get('ip_addresses') if running else None) or [])],
+        'pool': str(g.get('pool') or ''), 'tags': sorted(tags.get(vmid, ())),
+    }
+
+
+def _guest_state(g):
+    return g['status'] if g['status'] in ('running', 'stopped') else 'other'
+
+
+def _guest_kind_fits(g, kind):
+    if not kind:
+        return True
+    if kind == 'template':
+        return g['template']
+    return g['type'] == kind and not g['template']
+
+
+def _guest_text(g):
+    return ' '.join([g['name'], str(g['vmid']), g['node'], g['cluster_name'], g['pool']]
+                    + g['ip_addresses'] + g['tags']).lower()
+
+
+def _guest_page_can(user, cid, xen, g, may):
+    """What the per-guest routes would let this caller do to the guest: the checks of
+    vm_action_api, create_snapshot_api and bulk_migrate_api, without acting."""
+    vmid, kind = g['vmid'], g['type']
+
+    def vm(perm):
+        return user_can_access_vm(user, cid, vmid, perm, kind)
+
+    if xen:
+        start = stop = reboot = vm('xapi.vm.power')
+    else:
+        start, stop, reboot = vm('vm.start'), vm('vm.stop'), vm('vm.restart')
+    return {'start': start, 'stop': stop, 'reboot': reboot,
+            'snapshot': may['vm.snapshot'] and (not xen or may['xapi.vm.snapshot']) and vm('vm.snapshot'),
+            'migrate': may['vm.migrate'] and (not xen or may['xapi.vm.migrate']) and vm('vm.migrate')}
+
+
+@bp.route('/api/inventory/guests/page', methods=['GET'])
+@require_auth()
+def get_guest_page():
+    """One page of the guests of every cluster the caller reaches
+
+    The guests the caller may see, of every Proxmox cluster and XCP-ng pool or of one
+    (?cluster=), filtered, sorted and cut to a page. Query:
+    - limit (1-500, default 100), offset (default 0)
+    - q: text in the name, VMID, node, cluster, pool, IP addresses or tags
+    - status: running, stopped or other; type: qemu, lxc or template; tag: one tag
+    - sort: name, vmid, cluster, node, status, type, cpu, mem, disk or uptime; dir: asc or desc
+
+    The answer has the rows of the page (guests, each with `can`: which of start, stop,
+    reboot, snapshot and migrate the caller may do to it), total (the guests the filters
+    leave), count (all the caller sees), status_counts (by status, the status filter aside),
+    tags (every tag among the guests) and clusters (each with its state and guest count).
+    The figures are those of the cluster's guest list, a few seconds old at most.
+    """
+    from pegaprox.background import alert_events
+    from pegaprox.utils.concurrent import run_concurrent
+    want, err = _guest_page_query(request.args)
+    if err:
+        return err
+    only = request.args.get('cluster') or None
+    if only is not None:
+        ok, err = check_cluster_access(only)
+        if not ok:
+            return err
+        if only not in cluster_managers:
+            return jsonify({'error': 'Cluster not found'}), 404
+
+    reach, out_clusters = [], []
+    for cid, mgr, entry in _overview_reach(only):
+        out_clusters.append(entry)
+        if mgr.is_connected:
+            reach.append((cid, mgr, entry))
+        else:
+            entry['state'] = 'offline'
+
+    def _read(mgr):
+        xen = getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng'
+        rows = mgr.get_vm_resources(max_age=60 if xen else _GUEST_PAGE_AGE)
+        if rows is None or getattr(rows, 'unavailable', False):
+            return None
+        return [g for g in rows if isinstance(g, dict) and g.get('type') in ('qemu', 'lxc')
+                and str(g.get('vmid', '')).isdigit()]
+
+    results = run_concurrent([lambda m=mgr: _read(m) for _, mgr, _ in reach], timeout=20)
+    seen, managers = [], {}
+    for (cid, mgr, entry), rows in zip(reach, results):
+        if rows is None:
+            entry['state'] = 'unreadable'
+            continue
+        rows = scope_vm_rows(cid, rows)
+        ips, tags = _agent_cache(mgr, '_ip_cache'), alert_events.guest_tags(cid, rows)
+        seen += [_guest_page_row(cid, entry['cluster_name'], g, ips, tags) for g in rows]
+        entry['count'] = len(rows)
+        managers[cid] = mgr
+
+    all_tags = sorted({t for g in seen for t in g['tags']})[:_GUEST_PAGE_TAGS]
+    q, tag, kind = want['q'], want['tag'], want['type']
+    left = [g for g in seen if _guest_kind_fits(g, kind) and (not tag or tag in g['tags'])
+            and (not q or q in _guest_text(g))]
+    status_counts = {s: 0 for s in _GUEST_STATES}
+    for g in left:
+        status_counts[_guest_state(g)] += 1
+    if want['status']:
+        left = [g for g in left if _guest_state(g) == want['status']]
+    # equal values keep cluster and VMID order either way: reverse keeps a sort stable
+    left.sort(key=lambda g: (g['cluster_name'].lower(), g['vmid']))
+    left.sort(key=_GUEST_SORTS[want['sort']], reverse=want['dir'] == 'desc')
+    page = left[want['offset']:want['offset'] + want['limit']]
+
+    if page:
+        user = build_authz_user(request.session.get('user', ''), request.session)
+        may = {p: has_permission(user, p) for p in
+               ('vm.snapshot', 'vm.migrate', 'xapi.vm.snapshot', 'xapi.vm.migrate')}
+        for g in page:
+            xen = getattr(managers[g['cluster_id']], 'cluster_type', 'proxmox') == 'xcpng'
+            g['can'] = _guest_page_can(user, g['cluster_id'], xen, g, may)
+    return jsonify({'guests': page, 'total': len(left), 'count': len(seen), 'offset': want['offset'],
+                    'limit': want['limit'], 'status_counts': status_counts, 'tags': all_tags,
+                    'clusters': out_clusters})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>', methods=['DELETE'])

@@ -4861,6 +4861,36 @@
         ]
       }
     },
+    "/api/inventory/guests/page": {
+      "get": {
+        "operationId": "clusters.get_guest_page_get",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "One page of the guests of every cluster the caller reaches",
+        "description": "The guests the caller may see, of every Proxmox cluster and XCP-ng pool or of one\n(?cluster=), filtered, sorted and cut to a page. Query:\n- limit (1-500, default 100), offset (default 0)\n- q: text in the name, VMID, node, cluster, pool, IP addresses or tags\n- status: running, stopped or other; type: qemu, lxc or template; tag: one tag\n- sort: name, vmid, cluster, node, status, type, cpu, mem, disk or uptime; dir: asc or desc\n\nThe answer has the rows of the page (guests, each with `can`: which of start, stop,\nreboot, snapshot and migrate the caller may do to it), total (the guests the filters\nleave), count (all the caller sees), status_counts (by status, the status filter aside),\ntags (every tag among the guests) and clusters (each with its state and guest count).\nThe figures are those of the cluster's guest list, a few seconds old at most.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/tasks/{upid}": {
       "delete": {
         "operationId": "clusters.cancel_task_delete",
@@ -14857,6 +14887,75 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/migrate-check": {
+      "get": {
+        "operationId": "vms.migrate_check_api_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The snapshots of a guest and its local volumes, for the warnings of the migrate dialog",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vm_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.migrate"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}": {
       "delete": {
         "operationId": "vms.delete_vm_api_delete",
@@ -16077,6 +16176,51 @@
           },
           {
             "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/qdevice": {
+      "get": {
+        "operationId": "nodes.get_cluster_qdevice_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The QDevice of a Proxmox VE cluster and the state of the QDevice daemon on each node",
+        "parameters": [
+          {
+            "name": "cluster_id",
             "in": "path",
             "required": true,
             "schema": {
@@ -23129,6 +23273,200 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/backup-restore/batch": {
+      "post": {
+        "operationId": "pbs.restore_backup_batch_post",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Restore several backups in one go",
+        "description": "Body: {items: [{volid, target_vmid?}], mode: 'new'|'overwrite', target_node,\ntarget_storage?, first_vmid?, run: 'sequential'|'parallel', parallel? (2-4), confirm?}.\nOne backup per guest, all from one storage, 1 to 100 of them. 'new' restores each on\ntarget_node into a VMID of its own (its target_vmid, else the next free one from\nfirst_vmid on). 'overwrite' restores each over the guest it came from, on the node that\nguest is on (target_node for one that is gone), and only with confirm: true. Every backup\nis checked as POST /backup-restore checks it before anything starts: one refused and\nnone starts (403, refused names each). Answers 202 {run}, to follow with GET\n/api/batch-restores/<run_id>.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.backup"
+        ]
+      }
+    },
+    "/api/batch-restores": {
+      "get": {
+        "operationId": "pbs.list_batch_restores_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Batch restores of the last hour",
+        "description": "The batches on the clusters the caller reaches, newest first, with their counts and\nwithout the backups. A batch counts only the guests the caller may see. They run in\nthe process of the active instance: a restart ends them.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/batch-restores/{run_id}": {
+      "get": {
+        "operationId": "pbs.get_batch_restore_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One batch restore, a line per backup",
+        "description": "Each with its state (wait, restoring, done, failed, skipped, cancelled, unknown), a\nnote, its task and the VMID it restores into; may_cancel says whether the caller may\ncancel the rest.",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/batch-restores/{run_id}/cancel": {
+      "post": {
+        "operationId": "pbs.cancel_batch_restore_post",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Cancel the rest of a batch restore",
+        "description": "No further backup is restored. What is restoring finishes in Proxmox.",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.backup"
+        ]
+      }
+    },
     "/api/pbs/{pbs_id}/backup-diff": {
       "get": {
         "operationId": "pbs.diff_pbs_backups_get",
@@ -24715,6 +25053,168 @@
         ],
         "x-pegaprox-permissions": [
           "backup.delete"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/datacenter/backup/{job_id}/runs": {
+      "get": {
+        "operationId": "storage.get_backup_job_runs_get",
+        "tags": [
+          "storage"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The runs of a backup job",
+        "description": "Read from the vzdump tasks of the nodes it runs on, newest first: when each run started\nand ended, how it went (ok, warning, failed, running), whether the schedule started it,\nand its task on every node. ?days= (1-60, default 14) is how far back, ?limit= (1-100,\ndefault 20) how many runs. partial says some tasks could not be read in this call;\nasking again goes on where it stopped. unread_nodes are offline or did not answer.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/datacenter/backup/{job_id}/runs/guests": {
+      "get": {
+        "operationId": "storage.get_backup_job_run_guests_get",
+        "tags": [
+          "storage"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The guests of one run of a backup job",
+        "description": "?upid= once per task of the run (from .../runs). Per guest: its node, state (ok,\nfailed, running, unknown), when it started and ended, how long it took, the error, the\narchive and its size. missing lists the guests the job names that no task of the run\nbacked up. Read from the task logs, so this costs one log read per task.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/datacenter/backup/{job_id}/runs/log": {
+      "get": {
+        "operationId": "storage.get_backup_job_run_log_get",
+        "tags": [
+          "storage"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The log of one guest in a run of a backup job, or of a whole task of it",
+        "description": "?upid= names the task, ?vmid= the guest: its lines only. Without vmid the task log,\n?start= and ?limit= (at most 5000 lines) to page through it; a caller confined to some\nguests names one.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
         ]
       }
     },
@@ -31720,7 +32220,7 @@
           }
         },
         "summary": "PegaProx auto-update from GitHub",
-        "description": "NS: Rewritten feb 2026 - archive-based (no manual releases needed)\nPRIMARY: downloads GitHub source archive, extracts, copies.\nFALLBACK: expands update_files globs via GitHub API, downloads individually.\n\nProtected paths (NEVER overwritten):\n- config/, ssl/, certs/   (settings, encrypted data)\n- *.db, *.enc             (databases, encrypted files)\n- *.pem, *.key, *.crt    (certificates, private keys)",
+        "description": "NS: Rewritten feb 2026 - archive-based (no manual releases needed)\nPRIMARY: downloads GitHub source archive, extracts, copies.\nFALLBACK: expands update_files globs via GitHub API, downloads individually.\n\nProtected paths (NEVER overwritten):\n- config/, ssl/, certs/   (settings, encrypted data)\n- *.db, *.enc             (databases, encrypted files)\n- *.pem, *.key, *.crt    (certificates, private keys)\n- plugins/<id>/config.json once it exists (a plugin's settings, #1134)",
         "requestBody": {
           "required": false,
           "content": {
@@ -33007,6 +33507,41 @@
             }
           }
         ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
+    "/api/updates-overview": {
+      "get": {
+        "operationId": "settings.get_updates_overview_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Pending package updates of all nodes and PBS servers, from the cached update checks",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -35940,6 +36475,51 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/balance-history": {
+      "get": {
+        "operationId": "history.get_balance_history_get",
+        "tags": [
+          "history"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Balancer moves of one cluster with why. ?trigger=balance,predictive,affinity,pin ?status=success|failed|dry_run ?before=<row id> ?limit=1..200",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
     "/api/affinity-rules": {
       "get": {
         "operationId": "history.get_affinity_rules_get",
@@ -36905,6 +37485,41 @@
             }
           }
         ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/ceph-overview": {
+      "get": {
+        "operationId": "ceph.get_ceph_rollup_get",
+        "tags": [
+          "ceph"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Ceph health, capacity, OSDs and placement groups of all clusters",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -40141,6 +40756,7 @@
           }
         },
         "summary": "Emergency failover - source may be unreachable",
+        "description": "An optional body {\"vmids\": [...]} fails over only those guests of the plan; the\nothers stay at the source and keep replicating.",
         "parameters": [
           {
             "name": "plan_id",
@@ -40304,6 +40920,7 @@
           }
         },
         "summary": "Reverse direction - migrate VMs back to original source",
+        "description": "Only guests that are failed over go back: all of them, or the ones a body\n{\"vmids\": [...]} names.",
         "parameters": [
           {
             "name": "plan_id",
@@ -46923,7 +47540,7 @@
           }
         },
         "summary": "A write a standby would have refused, handed to us to run as the user it names.",
-        "description": "The body is {method, path, query, content_type, body_b64, user, sign_in,\nclient_ip}, the browser's request as the standby took it, and the peer signature\ncovers it like the body of every peer call: neither the request nor the user can\nchange on the way. Only on the active (409 anywhere else, which also stops a write\nthat would travel on; 503 HA_NO_LEASE on a leader without its lease, said to a\nmember before the body is read, and 503 HA_TRANSFER for a write while it hands its\nlead on), only from a member that signs its calls, only a\nwrite under\n/api/ and never under /api/ha/ - or a GET of ha.FORWARDED_READS, the progress of a\njob or a view only our tables hold, or of a plugin route that opens no console -\nand only for an account that exists and is enabled here. sign_in is the\nstandby's digest of the account's password (ha.sign_in_digest): 403\nHA_FORWARD_STALE_SIGN_IN when ours differs, the password changed here since.\nThe request then goes through our routing and every check on the way, CSRF and\nthe IP list included, under a session for that user that holds for this one\nrequest: role, tenant and permissions are ours, whatever the standby thinks of\nthem. Its audit lines name the standby and carry the client address the standby\nsaw. The answer is {status, headers, body_b64}.",
+        "description": "The body is {method, path, query, content_type, body_b64, user, sign_in,\nclient_ip}, the browser's request as the standby took it, and the peer signature\ncovers it like the body of every peer call: neither the request nor the user can\nchange on the way. Only on the active (409 anywhere else, which also stops a write\nthat would travel on; 503 HA_NO_LEASE on a leader without its lease or with less of\nit left than ha_vote.WRITE_LEASE_MARGIN, said to a member before the body is read,\nand 503 HA_TRANSFER for a write while it hands its lead on), only from a member that\nsigns its calls, only a write under\n/api/ and never under /api/ha/ - or a GET of ha.FORWARDED_READS, the progress of a\njob or a view only our tables hold, or of a plugin route that opens no console -\nand only for an account that exists and is enabled here. sign_in is the\nstandby's digest of the account's password (ha.sign_in_digest): 403\nHA_FORWARD_STALE_SIGN_IN when ours differs, the password changed here since.\nThe request then goes through our routing and every check on the way, CSRF and\nthe IP list included, under a session for that user that holds for this one\nrequest: role, tenant and permissions are ours, whatever the standby thinks of\nthem. Its audit lines name the standby and carry the client address the standby\nsaw. The answer is {status, headers, body_b64}.",
         "requestBody": {
           "required": false,
           "content": {

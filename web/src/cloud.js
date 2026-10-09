@@ -1363,6 +1363,7 @@
         function CloudBackups({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/backup` : null);
             const mut = useCloudMutate(reload);
+            const [runsOf, setRunsOf] = React.useState(null);
             const jobs = Array.isArray(data) ? data : [];
             const active = jobs.filter(j => Number(j.enabled) === 1 || j.enabled === true).length;
             const failed = jobs.filter(j => (j['last-run-status'] || '').toLowerCase().indexOf('err') >= 0).length;
@@ -1398,12 +1399,14 @@
                                             <CloudIconBtn icon="Power" title={(Number(j.enabled) === 1 || j.enabled === true) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + j.id, 'PUT', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, { enabled: (Number(j.enabled) === 1 || j.enabled === true) ? 0 : 1 })} />
                                             <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + j.id, 'DELETE', `/api/clusters/${clusterId}/datacenter/backup/${j.id}`, undefined, (t('cloud.confirmDelBackup') || 'Delete this backup job?'))} />
                                             </>)}
+                                            <CloudIconBtn icon="Clock" title={t('bkpRunsHistory') || 'Run history'} onClick={() => setRunsOf(j)} />
                                         </CloudRowActions>
                                     </tr>);
                                 })}</tbody>
                             </table></div>
                         </div>
                     </CloudSectionState>
+                    {runsOf && <BackupJobRunsModal clusterId={clusterId} job={runsOf} onClose={() => setRunsOf(null)} />}
                 </div>
             );
         }

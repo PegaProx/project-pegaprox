@@ -198,6 +198,22 @@ def signature_verdict(headers, method, path, body, sender, public_b64, receiver,
     return 'ok'
 
 
+def clock_refusal(verdict, now, started, ts):
+    """The 401 answer to a call with a good signature that signature_verdict found
+    'window' or 'early': {code, clock, error}. An early call says nothing of clocks a
+    window apart - right after a restart every sender whose clock is behind the
+    receiver's hears it, for as long as it is behind - so it gets a text of its own."""
+    if verdict == 'early':
+        return {'code': 'HA_CLOCK', 'clock': 'early',
+                'error': f'The receiving instance started {max(0, int(now - started))} s ago, and '
+                         f'the call was signed before that by the clock of the sender, which is '
+                         f'{max(0, int(now - ts))} s behind it (or the call is an old one). Calls '
+                         'signed after the start are taken - set both clocks by NTP'}
+    return {'code': 'HA_CLOCK', 'clock': 'window',
+            'error': f'The clocks of the two instances are more than {SIGNATURE_WINDOW} seconds '
+                     'apart - set both by NTP'}
+
+
 def take_nonce(seen, nonce, ts, now, cap=NONCES_PER_SENDER):
     """Spend `nonce` in `seen` ({nonce: kept until}, one per sender and bucket): 'ok' the
     first time within the window, 'seen' for a replay, 'full' while the bucket holds

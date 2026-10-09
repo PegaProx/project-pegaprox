@@ -1344,8 +1344,9 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
     assert "const lockedTab = haReadOnly && !['summary', 'performance', 'tasks'].includes(activeTab);" in body
     assert "{activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}" in body
     assert "{activeTab === 'shell' && !haConsolesElsewhere && (" in body
-    assert '{!haConsolesElsewhere && data.shellFullscreen && (' in body
-    assert body.count('<NodeShellTerminal') == 2
+    # fullscreen is the same panel behind that gate, no second terminal of its own (#1143)
+    assert 'shellFullscreen' not in body
+    assert body.count('<NodeShellPanel ') == 1 and '<NodeShellTerminal' not in body
     assert "const haLock = { disabled: lockedTab, 'data-ha-locked': lockedTab ? '' : undefined };" in body
     # (#625 v2 review) no fieldset around all tab bodies any more, it disabled Refresh and
     # SMART too: each tab that changes the node locks its changing parts itself
@@ -1861,9 +1862,12 @@ def test_esxi_pbs_and_the_add_buttons_stay_on_the_active(dash):
     # PBS edit/delete, encryption key and auto-verify; ESXi re-configure/delete
     for opener in ('<button onClick={() => { setEditingPBS(selectedPBS);', '<button onClick={() => setShowEncryptionKeyModal(true)}',
                    '<button onClick={() => setShowVerifyScheduleModal(true)}',
-                   '<button onClick={() => { setEditingVMware(selectedVMware);'):
+                   '<button onClick={() => openVmwareEdit(selectedVMware)} title='):
         at = dash.index(opener)
         assert '{isAdmin && !haReadOnly && (' in dash[at - 220:at], opener
+    # the way to the settings of an ESXi server that refuses its password, too (#1142)
+    at = dash.index('<button onClick={() => openVmwareEdit(selectedVMware)} data-esxi-error-edit')
+    assert "{vmwareError?.code === 'UPSTREAM_AUTH' && isAdmin && !haReadOnly && (" in dash[at - 160:at]
     for head in ('const vmwarePowerAction = async (vmId, action) => {',
                  'const vmwareSnapshotAction = async (vmId, action, data = {}) => {',
                  'const toggleVMwareDRS = async (vmwId, clusterId, enabled, automation) => {',
@@ -3960,7 +3964,6 @@ CONSOLE_GATES = [
     ('dashboard.js', '}, [consoleKey, haConsolesElsewhere]);', 1),
     ('node_modals.js', "{activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}", 1),
     ('node_modals.js', "{activeTab === 'shell' && !haConsolesElsewhere && (", 1),
-    ('node_modals.js', '{!haConsolesElsewhere && data.shellFullscreen && (', 1),
     ('node_modals.js', "{activeDetailTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}", 1),
     ('node_modals.js', "{activeDetailTab === 'shell' && !haConsolesElsewhere && (", 1),
     ('tables.js', 'const consoles = !haConsolesElsewhere;', 1),

@@ -193,8 +193,9 @@ def _run_shell(monkeypatch, path, server_key, on_connect=None):
     connect meets `server_key` the way SSHClient.connect would."""
     monkeypatch.setenv('PEGAPROX_SSH_KNOWN_HOSTS', path)
     monkeypatch.delenv('PEGAPROX_SSH_STRICT_HOST_KEYS', raising=False)
+    # the main app names the node's own address; the connection host stands in for none (#1143)
     answer = _Resp(200, {'valid': True, 'known_hosts_only': False,
-                         'cluster_context': {'host': NODE, 'node_ips': {}}})
+                         'cluster_context': {'host': NODE, 'node_ips': {'n1': NODE}}})
     ns, _asked = _ssh_server({'/api/ws/token/validate': answer})
 
     class _Client(paramiko.SSHClient):

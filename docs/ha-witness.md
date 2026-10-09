@@ -1,8 +1,9 @@
 # The PegaProx witness
 
-> The witness belongs to automatic failover. A release that does not offer automatic
-> failover yet shows no "Add witness" on its HA page and refuses a witness code; this
-> page is for the release that does.
+> **Beta.** The witness belongs to automatic failover, which is new in this release and
+> ships as a beta. Try it in your setup before you rely on it; you can switch back to
+> manual failover at any time. Every group stays in manual mode until an admin switches
+> it on, on the leader's HA page (the Automatic failover card and its checklist).
 
 Automatic failover needs at least three votes. A group of two PegaProx instances has
 two. The witness is the third: a small process that votes, never leads, and holds no

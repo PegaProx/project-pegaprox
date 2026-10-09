@@ -16,6 +16,7 @@ from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
+from pegaprox.background.scheduler import _first_minute, _minute
 
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.rbac import has_permission
@@ -276,81 +277,101 @@ def check_schedules():
     This is deliberately simple - no cron expressions, just specific times
     """
     global _scheduler_running
-    
+    # what the pass before checked: (minute, wall time, seconds it took); None checks the
+    # current minute only
+    last = None
+
     while _scheduler_running:
         # a standby keeps ticking but fires nothing: VM actions, scheduled rolling
         # updates and the 03:00 cleanup all belong to the active instance (#625)
         if not ha.is_active():
+            # nothing to catch up once it acts: what fell due meanwhile was the other
+            # instance's (5.7 reports it in an automatic group)
+            last = None
             _wait_a_minute()
             continue
         try:
+            started = time.monotonic()
             schedules = load_schedules()
+            actions = schedules.get('actions', [])
             # the group's zone when this instance is in one, so a failover does not
             # shift a schedule; datetime.now() on an instance of its own (#625)
-            now = ha.schedule_now()
-            current_time = now.strftime('%H:%M')
-            current_day = now.strftime('%A').lower()
-            current_date = now.strftime('%Y-%m-%d')
+            now = _minute(ha.schedule_now())
+            wall = time.time()
             # automatic failover (design 5.7): what fell due without a leader is said, and
             # a new leader fires nothing in a minute the former one may have fired. Neither
             # does anything anywhere else
-            _report_missed(schedules.get('actions', []))
+            _report_missed(actions)
             if ha.schedule_held():
+                last = (now, wall, 0.0)
                 _wait_a_minute()
                 continue
 
-            for action in schedules.get('actions', []):
+            # MK Oct 2026 - every minute since the pass before, not just the one it woke
+            # in: a minute the loop slept over never ran its actions. A long gap (clock
+            # step forward, suspended host) is reported instead of run late, as in
+            # background/scheduler.py
+            first, skipped = _first_minute(last, now, wall)
+            if skipped:
+                # in an automatic group the gap is the group's mark first (5.7)
+                if not ha.report_settled('scheduled actions', wall - 60,
+                                         'the report of the minutes the scheduled actions stepped over'):
+                    last = (now, wall, 0.0)
+                    _wait_a_minute()
+                    continue
+                _report_skipped(actions, *skipped)
+            minutes = []
+            at = first
+            while at <= now:
+                minutes.append(at)
+                at += timedelta(minutes=1)
+
+            lost, through = [], True
+            for action in actions:
                 if not action.get('enabled', True):
                     continue
+                slot = next((m for m in reversed(minutes) if _due_minute(action, m)), None)
+                if slot is None:
+                    continue
+                stamp = slot.strftime('%Y-%m-%d %H:%M')
+                # ran in this minute or later already (prevent double execution; a clock
+                # step back must not run a minute twice)
+                if _stamp(action.get('last_run')) >= stamp:
+                    continue
+                # a minute caught up that a new leader still holds (5.7)
+                if slot < now and ha.schedule_held(slot):
+                    continue
+                if action.get('schedule_type') == 'once':
+                    action['enabled'] = False  # Disable after running
 
-                should_run = False
-                schedule_type = action.get('schedule_type', 'daily')
-                schedule_time = action.get('time', '')
-                
-                # Check if it's time to run
-                if schedule_time == current_time:
-                    if schedule_type == 'once':
-                        # One-time schedule - check date
-                        if action.get('date') == current_date:
-                            should_run = True
-                            action['enabled'] = False  # Disable after running
-                    
-                    elif schedule_type == 'daily':
-                        should_run = True
-                    
-                    elif schedule_type == 'weekly':
-                        # Check if today is in the selected days
-                        days = action.get('days', [])
-                        if current_day in days:
-                            should_run = True
-                    
-                    elif schedule_type == 'weekdays':
-                        if current_day not in ['saturday', 'sunday']:
-                            should_run = True
-                    
-                    elif schedule_type == 'weekends':
-                        if current_day in ['saturday', 'sunday']:
-                            should_run = True
-                
-                if should_run:
-                    # Check if we already ran this minute (prevent double execution)
-                    last_run = action.get('last_run', '')
-                    if last_run == f"{current_date} {current_time}":
-                        continue
-
-                    if ha.schedule_fire_first():
-                        # at most once: written and on its way to the members before it acts
-                        _record_action_run(action.get('id'), f"{current_date} {current_time}",
-                                           disable=not action.get('enabled', True))
-                        ha.schedule_fired()
-                    if not ha.confirm_step(f"scheduled {action.get('action')} of {action.get('vmid')}"):
+                first_run = ha.schedule_fire_first()
+                if first_run:
+                    if not ha.is_active():
+                        # the lease went during this pass: the rest is the next leader's
+                        through = False
                         break
-                    # Execute the action
-                    execute_scheduled_action(action)
-                    action['last_run'] = f"{current_date} {current_time}"
-                    _record_action_run(action.get('id'), action['last_run'],
+                    # at most once: written and on its way to the members before it acts
+                    _record_action_run(action.get('id'), stamp,
                                        disable=not action.get('enabled', True))
-            
+                    ha.schedule_fired()
+                if not ha.confirm_step(f"scheduled {action.get('action')} of {action.get('vmid')}"):
+                    if not first_run:
+                        through = False
+                        break
+                    # used up and reported (lab E6b_2), the ones after it try again
+                    lost.append((action, slot))
+                    continue
+                # Execute the action
+                execute_scheduled_action(action)
+                action['last_run'] = stamp
+                _record_action_run(action.get('id'), action['last_run'],
+                                   disable=not action.get('enabled', True))
+            if lost:
+                _report_lost(lost)
+            if through:
+                # the group's mark for the report of the next leader (5.7)
+                ha.schedules_checked('scheduled actions', wall)
+
             # MK: Check for scheduled rolling updates
             try:
                 check_scheduled_updates()
@@ -358,7 +379,7 @@ def check_schedules():
                 logging.error(f"[SCHEDULER] Scheduled updates check error: {e}")
             
             # Daily cleanup tasks at 03:00
-            if current_time == '03:00':
+            if any(m.hour == 3 and m.minute == 0 for m in minutes):
                 try:
                     # Cleanup soft-deleted scripts after 20 days
                     cleanup_deleted_scripts()
@@ -367,6 +388,7 @@ def check_schedules():
                     logging.info("[SCHEDULER] Daily cleanup completed")
                 except Exception as e:
                     logging.error(f"[SCHEDULER] Daily cleanup error: {e}")
+            last = (now, wall, time.monotonic() - started)
         
         except Exception as e:
             logging.error(f"Scheduler error: {e}")
@@ -374,9 +396,13 @@ def check_schedules():
         _wait_a_minute()
 
 
+def _stamp(value):
+    """A last run as 'YYYY-MM-DD HH:MM', the form the tick writes ('' for none)."""
+    return str(value or '').replace('T', ' ')[:16]
+
+
 def _due_minute(action, at):
-    """Whether `action` falls due in the minute `at`, its last run aside. For the report
-    of what a change of leader missed (5.7); check_schedules decides as it always did."""
+    """Whether `action` falls due in the minute `at`, its last run aside."""
     if action.get('time', '') != at.strftime('%H:%M'):
         return False
     kind, day = action.get('schedule_type', 'daily'), at.strftime('%A').lower()
@@ -387,29 +413,91 @@ def _due_minute(action, at):
             or (kind == 'weekends' and day in ('saturday', 'sunday')))
 
 
+# a week of minutes at most is looked through for the report of a gap
+_REPORT_SPAN = 7 * 24 * 60
+
+
+def _report_skipped(actions, first, last):
+    """Say and audit the actions that fell due in the minutes from `first` to `last`,
+    which the loop stepped over, and did not run."""
+    names = set()
+    at, n = first, 0
+    while at <= last and n < _REPORT_SPAN:
+        stamp = at.strftime('%Y-%m-%d %H:%M')
+        names.update(str(a.get('name') or f"{a.get('action')} {a.get('vmid')}") for a in actions
+                     if a.get('enabled', True) and _due_minute(a, at)
+                     and _stamp(a.get('last_run')) < stamp)
+        at += timedelta(minutes=1)
+        n += 1
+    why = ('while the scheduler stood still (a clock step forward, a suspended host '
+           'or a stalled process)')
+    window = (first, last + timedelta(seconds=59))
+    if ha.guard_on():
+        ha.missed_schedules('scheduled actions', sorted(names), window, why)
+        return
+    if not names:
+        return
+    a, b = window
+    text = (f"{len(names)} scheduled actions fell due between {a:%Y-%m-%d %H:%M:%S} and "
+            f"{b:%Y-%m-%d %H:%M:%S} {why} and did not run: {', '.join(sorted(names)[:20])}")
+    logging.warning(f"[SCHEDULER] {text}")
+    log_audit('system', 'scheduled_action.missed', text)
+
+
 def _report_missed(actions):
     """Once a new leader of an automatic group acts: the actions that fell due in the gap."""
     window = ha.missed_schedule_window('scheduled actions')
     if not window:
         return
+    first, last = (ha.schedule_at(w).replace(second=0, microsecond=0) for w in window)
     missed = set()
-    at = window[0] - window[0] % 60
-    while at <= window[1]:
-        when = ha.schedule_at(at)
-        stamp = when.strftime('%Y-%m-%d %H:%M')
+    for a in actions:
+        slot = _latest_due(a, first, last) if a.get('enabled', True) else None
         # a last run in that minute or later: the former leader got to it
-        missed.update(str(a.get('name') or f"{a.get('action')} {a.get('vmid')}") for a in actions
-                      if a.get('enabled', True) and _due_minute(a, when)
-                      and str(a.get('last_run') or '') < stamp)
-        at += 60
+        if slot is not None and _stamp(a.get('last_run')) < slot.strftime('%Y-%m-%d %H:%M'):
+            missed.add(_action_name(a))
+    # the end of the gap is the group's mark before the report goes out: the next leader
+    # starts after it. A no leaves it to the next pass
+    if missed and not ha.missed_settled('scheduled actions', window):
+        return
     ha.missed_schedules('scheduled actions', sorted(missed), window)
 
 
+def _action_name(action):
+    return str(action.get('name') or f"{action.get('action')} {action.get('vmid')}")
+
+
+def _latest_due(action, first, last):
+    """The latest minute from `first` to `last` at which `action` falls due, its last run
+    aside; None for none. A day at a time: the marks of 5.7 let the gap reach back days."""
+    try:
+        hour, minute = map(int, str(action.get('time', '')).split(':'))
+        day = last.replace(hour=hour, minute=minute)
+    except (TypeError, ValueError):
+        return None
+    if day > last:
+        day -= timedelta(days=1)
+    while day >= first:
+        if _due_minute(action, day):
+            return day
+        day -= timedelta(days=1)
+    return None
+
+
+def _report_lost(lost):
+    """Actions whose last run went out and whose lease confirm then failed: no leader runs
+    them now, so they are reported as missed (5.7), not run late."""
+    slots = [slot for _action, slot in lost]
+    ha.missed_schedules('scheduled actions', sorted({_action_name(a) for a, _slot in lost}),
+                        (min(slots), max(slots) + timedelta(seconds=59)),
+                        'while the lease of this instance could not be confirmed')
+
+
 def _wait_a_minute():
-    # Sleep for 60 seconds (check every minute), in 1s steps so a stop is quick
-    for _ in range(60):
-        if not _scheduler_running:
-            break
+    # to just after the start of the next minute, in 1 s steps so a stop is quick. A flat
+    # 60 s after the work let the pass creep through the minute until it stepped over one
+    until = time.time() + 60 - time.time() % 60 + 0.5
+    while _scheduler_running and time.time() < until:
         time.sleep(1)
 
 

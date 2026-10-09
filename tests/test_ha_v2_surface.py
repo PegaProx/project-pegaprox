@@ -267,7 +267,7 @@ def test_the_standalone_vnc_server(ha_env, seed, monkeypatch, auth):
 
 
 def test_the_legacy_node_shell_socket(ha_env, seed, monkeypatch):
-    """/shellws on the main port, the one that still takes ?session= only."""
+    """/shellws on the main port, here with ?session= (it takes ?token= first, #1143)."""
     api = ha_env.api
     admin = _admin(api, seed)
     reg = _registry(monkeypatch)
@@ -280,15 +280,24 @@ def test_the_legacy_node_shell_socket(ha_env, seed, monkeypatch):
         handler(ws, CID, 'n1')
     assert [json.loads(m) for m in ws.sent] == [{'status': 'error', 'message': STANDBY_ANSWER['error']}]
     assert reg.asked == []
+    # the page's ws token alike, and a standby does not spend it
+    from pegaprox.utils.realtime import ws_tokens
+    token_query = _auth_query('token', admin)
+    ws = _SyncWS()
+    with api.app.test_request_context(f'/api/clusters/{CID}/nodes/n1/shellws?{token_query}'):
+        handler(ws, CID, 'n1')
+    assert [json.loads(m) for m in ws.sent] == [{'status': 'error', 'message': STANDBY_ANSWER['error']}]
+    assert token_query[len('token='):] in ws_tokens and reg.asked == []
 
     pytest.importorskip('paramiko')
     for role, be in _roles(ha_env):
         be()
-        ws = _SyncWS()
-        with api.app.test_request_context(url):
-            handler(ws, CID, 'n1')
-        assert [json.loads(m)['message'] for m in ws.sent] == ['Cluster not found'], role
-        assert reg.asked and reg.asked[-1] == CID, role
+        for query in (f'session={admin.session_id}', _auth_query('token', admin)):
+            ws = _SyncWS()
+            with api.app.test_request_context(f'/api/clusters/{CID}/nodes/n1/shellws?{query}'):
+                handler(ws, CID, 'n1')
+            assert [json.loads(m)['message'] for m in ws.sent] == ['Cluster not found'], (role, query)
+            assert reg.asked and reg.asked[-1] == CID, role
 
 
 def test_the_ws_token_validation_the_ssh_server_asks(ha_env, seed, monkeypatch):

@@ -43,14 +43,19 @@ The rules, in the words of the design:
     committed drops that config: the group stays automatic
   * a manual active that takes an automatic config from a vote request is a standby
     from that write on
+  * a member whose wall clock is off the majority of the members it measures starts
+    its campaign on a timer one lease length later, once per timer that a start, a
+    renewal or a vote it granted armed (the back-off after a lost try adds none), and
+    votes as before (Q15): a member with a right clock wins whenever one campaigns, and
+    a group whose clocks all drifted apart still elects one, one lease later at most
 
 This module is the protocol and nothing else. It imports neither Flask, the database
 nor requests: a Node reads the time from the clock it is handed, sends through the
 transport it is handed and writes its state through the store it is handed. ha.py
 drives it (its section "automatic failover"); tests/test_ha_vote_sim.py drives it in a
 simulator with a clock per member, directed cuts, pauses and restarts.
-AUTO_MODE_SHIPPED keeps automatic mode off until the confirm sites, the cluster claim
-and the transfer routes are in.
+AUTO_MODE_SHIPPED says whether this release offers automatic mode at all; it ships as a
+beta, every group still starts in manual mode.
 
 MK Oct 2026 (#625)
 """
@@ -60,9 +65,13 @@ import json
 import math
 import time
 
-# Automatic mode is refused until the confirm sites, the cluster claim and Make leader
-# are in (slices S4, S6 and S7). Every group runs in manual mode until then.
-AUTO_MODE_SHIPPED = False
+# Automatic failover ships as a beta (owner decision 08.10.2026, after the lab re-test).
+# Manual mode stays the default of every group, new or updated: switching to automatic
+# is a step the admin takes on the HA page of the leader, and the way back to manual is
+# always open. Set to False, the server refuses the switch, the vote and the renewal
+# the way the releases before it did.
+AUTO_MODE_SHIPPED = True
+# what a server that refuses it answers (older releases, and tests of that path)
 NOT_SHIPPED_ERROR = 'Automatic failover is not available in this release yet'
 
 MODE_MANUAL = 'manual'
@@ -101,6 +110,10 @@ SITE_MAX = 64
 SKEW_LIMIT = 5
 # a step of the wall clock against the lease clock that forces a confirm round
 CLOCK_JUMP = 2
+# a leader in automatic mode takes a write only while this much of its lease is left
+# (Q16): one let in later may commit after the lease ended, a change the next leader
+# never sees (lab E6b, 25 ms past it). The caller hears 503 HA_NO_LEASE and tries again
+WRITE_LEASE_MARGIN = 2.0
 # Confirm rounds (4.5) start the moment a caller has no round out that started after it,
 # up to this many out at once; past that, callers share the next one, which starts as
 # one of them comes back
@@ -563,6 +576,9 @@ class Node:
                  snapshot(): what a catch-up pull hands out
                  apply_snapshot(frm, answer) -> the cv now held, or None
     rng          random.Random, for the election timer
+    skewed()     whether the wall clock here is off the majority of the members the host
+                 measures it against (Q15). Asked when the election timer fires: a yes
+                 puts the campaign off by L, once per timer
 
     The host calls tick() at next_wake() at the latest (lease time), on_request for every
     signed peer call and on_answer for every answer. The gates read is_active(),
@@ -576,7 +592,8 @@ class Node:
     may carry a lower cv; what it replaces is captured, not wiped (4.11)."""
 
     def __init__(self, me, kind, *, store, clock, wall, send, hooks, rng, sign, verify,
-                 boot_id='', restart_on_win=True, keep_w_take=True, lower_reach=None):
+                 boot_id='', restart_on_win=True, keep_w_take=True, lower_reach=None,
+                 skewed=None):
         self.me = me
         self.kind = kind
         self.store = store
@@ -591,6 +608,7 @@ class Node:
         self.restart_on_win = restart_on_win
         self.keep_w_take = keep_w_take
         self.lower_reach = lower_reach or (lambda: False)
+        self.skewed = skewed or (lambda: False)
         loaded = store.load()
         if not loaded:
             raise ValueError('no lease state')
@@ -671,6 +689,9 @@ class Node:
         # as a candidate
         self._campaign = None
         self.election_at = _INF
+        # when the timer armed last was put off for a clock off the majority (Q15), None
+        # while it was not. A back-off after a lost campaign keeps it
+        self.deferred_at = None
         # how the last election this member ran failed: {at, kind, epoch, why, reached,
         # m, reasons}. reached counts the voters that answered at all, refusals included
         # (7.3: only a majority that does not answer may be gone)
@@ -714,6 +735,11 @@ class Node:
 
     def may_write(self):
         return self.is_active() and self.transfer is None
+
+    @property
+    def acting_said(self):
+        """Whether 'acting' went out for the lead this process acts on (acting_seen)."""
+        return self._acting_said
 
     @property
     def epoch(self):
@@ -1288,6 +1314,12 @@ class Node:
                 wait = min(wait, self.started + self.t.boot_wait + self.t.lost_lease_backoff)
             at = max(at, wait)
         self.election_at = at
+        if backoff is None:
+            # a start, a renewal or a vote granted: the next timer may be put off again
+            # (Q15). Not the back-off after a campaign of its own, which already waited
+            # its lease: one more per try would add L to every failed round of a group
+            # whose clocks all drifted apart
+            self.deferred_at = None
 
     def _maybe_campaign(self, now):
         if not self._timer_candidate():
@@ -1296,11 +1328,22 @@ class Node:
             # never while our own promise to a leader runs
             self.election_at = self.promise_until + self.rng.uniform(0, self.t.L / 4)
             return
+        if self.deferred_at is None and self.skewed():
+            # Q15: a clock off the majority waits one lease more, so a member with a right
+            # clock wins whenever one campaigns. Once per timer, asked as it fires: the
+            # next time this member campaigns whatever its clock says, and its back-off
+            # after a lost try waits no lease on top, or a group whose clocks all drifted
+            # apart would elect nobody, or only ever later. It votes as before
+            self.deferred_at = now
+            self.election_at = now + self.t.L
+            self._event('campaign_deferred', until=self.election_at)
+            return
         self._prevote(now, 'timer')
 
     def campaign_now(self, why='make_leader'):
         """'Make leader' while the leader does not answer: skip the timer, keep the
-        pre-vote and every rule (7.1, second case)."""
+        pre-vote and every rule (7.1, second case). The admin picked this member, so a
+        clock off the majority does not put it off (Q15 is about the timer)."""
         now = self.clock()
         if (self.dead or self.st['role'] != ROLE_STANDBY or self._campaign is not None
                 or not self.view.candidate(self.me, timer=False) or self.view.mode != MODE_AUTO):
@@ -1703,10 +1746,24 @@ class Node:
         self._confirm_round(now)
         if now >= self.next_round_at:
             self._start_round(now)
+        self._say_acting(now)
+        self._cfg_work(now)
+
+    def _say_acting(self, now):
         if self._acting and not self._acting_said and self.acting_from <= now:
             self._acting_said = True
-            self._event('acting', epoch=led['epoch'])
-        self._cfg_work(now)
+            self._event('acting', epoch=self.st['led']['epoch'])
+            return True
+        return False
+
+    def acting_seen(self):
+        """For the gates, once is_active() said yes: a hub that runs the loop late lets a
+        write in after acting_from and before the tick that says 'acting' (E6b, 38 ms).
+        The first gate to find the takeover wait over says it then. True when it did;
+        is_active() itself says nothing."""
+        if self.dead or not self.st.get('led') or not self.lease_mode():
+            return False
+        return self._say_acting(self.clock())
 
     def _cfg_work(self, now):
         if not self._acting or now < self.acting_from or self.transfer is not None:

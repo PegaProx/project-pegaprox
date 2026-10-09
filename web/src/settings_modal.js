@@ -11224,6 +11224,9 @@
             // leader, read on a member. Each card only shows what its server reports: none of them
             // on a server from before stage 2, and on a member nothing it has no data for.
             const groupCards = (leader) => {
+                // a removed instance is in no group any more: the removed note says by whom and
+                // what to do, and nothing of the config it left is shown next to it
+                if (status.removed) return null;
                 // auto is null while this release does not offer automatic failover: no switch
                 // and no witness form that could only be refused
                 const reported = status.auto != null;
@@ -11484,8 +11487,9 @@
         // LW Oct 2026 (#625) - stage 2 of the group, for HaPanel: automatic failover, its witness
         // and the time zone the schedules run in. The leader switches and sets them, a member
         // reads what its leader says. status.auto is null on a release that does not offer
-        // automatic failover yet; the switch and the witness code are refused there with 409
-        // HA_AUTO_NOT_SHIPPED, which is a note and no error.
+        // automatic failover; the switch and the witness code are refused there with 409
+        // HA_AUTO_NOT_SHIPPED, which is a note and no error. Where it is offered it is a beta,
+        // and both cards say so next to their title.
         // ═══════════════════════════════════════════════
 
         // the precondition each finding code of the server belongs to, in the order of the list
@@ -11520,6 +11524,7 @@
         // a witness that was removed and did not hear it lets go on its own host with this
         const HA_WITNESS_LEAVE = 'pegaprox-witness leave --force';
         const HA_GROUP_CARD = 'bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-3';
+        const HA_BETA_BADGE = 'px-1.5 py-0.5 rounded-full border text-[10px] font-semibold leading-none bg-purple-500/20 text-purple-300 border-purple-500/30';
         const HA_GROUP_FIELD = 'px-3 py-2 bg-proxmox-card border border-proxmox-border rounded text-sm text-white disabled:opacity-50';
         const HA_GROUP_BTN = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
         const HA_GROUP_GHOST = 'flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500';
@@ -11911,6 +11916,7 @@
                             <h4 className="font-medium text-white flex flex-wrap items-center gap-2">
                                 <Icons.Shield />
                                 {leader ? <label htmlFor="pgha-auto">{t('haAutoTitle')}</label> : <span>{t('haAutoTitle')}</span>}
+                                {!notShipped && <span className={HA_BETA_BADGE} data-ha-beta="auto">{t('haAutoBeta')}</span>}
                                 {auto && (
                                     <span data-ha-auto-mode={mode} className={`px-2 py-0.5 rounded-full border text-xs font-medium ${HA_AUTO_MODE_STYLE[mode]}`}>
                                         {t(HA_AUTO_MODES[mode])}
@@ -11926,6 +11932,7 @@
                                 className={`toggle-switch flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed ${on ? 'active' : ''}`} />
                         )}
                     </div>
+                    {leader && !notShipped && <p className="text-xs text-purple-300" data-ha-auto-beta-note>{t('haAutoBetaNote')}</p>}
                     {notShipped && !on && (
                         <div className="rounded-lg p-3 text-sm border bg-blue-500/10 border-blue-500/30 text-blue-200 flex items-start gap-2" data-ha-auto-not-shipped>
                             <span className="mt-0.5 flex-shrink-0"><Icons.Info /></span>
@@ -12285,10 +12292,13 @@
 
             return (
                 <div className={HA_GROUP_CARD} data-ha-witness={witness ? 'paired' : code && !expired ? 'waiting' : 'none'}>
-                    <h4 className="font-medium text-white flex items-center gap-2">
-                        <Icons.Scale />
-                        {t(witness || !leader ? 'haWitnessTitle' : 'haWitnessAddTitle')}
-                    </h4>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <h4 className="font-medium text-white flex items-center gap-2">
+                            <Icons.Scale />
+                            {t(witness || !leader ? 'haWitnessTitle' : 'haWitnessAddTitle')}
+                        </h4>
+                        {!notShipped && <span className={HA_BETA_BADGE} data-ha-beta="witness">{t('haAutoBeta')}</span>}
+                    </div>
                     <p className="text-sm text-gray-400">{t('haWitnessIntro')}</p>
                     {witness ? (
                         <>

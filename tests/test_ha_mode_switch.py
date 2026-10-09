@@ -24,9 +24,9 @@ def _findings(r):
 
 # --- refused -----------------------------------------------------------------------------
 
-def test_the_server_refuses_automatic_mode_until_it_ships(auto, seed, monkeypatch):
-    """AUTO_MODE_SHIPPED is off in the product: no switch, no vote, no renewal, and
-    nothing of the lease in a status answer."""
+def test_the_server_refuses_automatic_mode_where_it_does_not_ship(auto, seed, monkeypatch):
+    """AUTO_MODE_SHIPPED off, as on a release before the beta: no switch, no vote, no
+    renewal, and nothing of the lease in a status answer."""
     auto.pair(seed)
     monkeypatch.setattr(hv, 'AUTO_MODE_SHIPPED', False)
     assert hv.AUTO_MODE_SHIPPED is False
@@ -69,14 +69,20 @@ def test_lease_state_on_an_instance_that_does_not_offer_it_keeps_it_passive(auto
     assert not [c for c in auto.g.calls if c[3] in ('/api/ha/peer/renew', '/api/ha/peer/vote')]
 
 
-def test_shipped_stays_off(auto):
-    """The constant itself: this slice does not flip it. (The fixture did, for the test.)"""
+def test_it_ships_as_a_beta_and_a_group_starts_manual(auto, seed):
+    """The constant itself is on (read from the source, the fixture sets it as well), and
+    manual mode stays the default: a group formed on this release fails over by hand until
+    an admin switches it."""
     import ast
     import inspect
     src = ast.parse(inspect.getsource(hv))
     value = next(n.value.value for n in src.body if isinstance(n, ast.Assign)
                  and n.targets[0].id == 'AUTO_MODE_SHIPPED')
-    assert value is False
+    assert value is True
+    auto.pair(seed)
+    assert [auto.mode(n) for n in 'abc'] == ['manual'] * 3
+    with auto.at('a') as ha:
+        assert ha.public_status()['auto']['mode'] == 'manual'
 
 
 def test_fewer_than_three_votes_is_refused(auto, seed):

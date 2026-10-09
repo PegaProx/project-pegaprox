@@ -148,6 +148,7 @@ def save_config():
                     'ssl_verification': getattr(manager.config, 'ssl_verification', False),
                     'migration_threshold': getattr(manager.config, 'migration_threshold', 30),
                     'migration_tolerance': getattr(manager.config, 'migration_tolerance', 10),
+                    'migration_cooldown': getattr(manager.config, 'migration_cooldown', 900),
                     'check_interval': getattr(manager.config, 'check_interval', 300),
                     'auto_migrate': getattr(manager.config, 'auto_migrate', False),
                     'balance_containers': getattr(manager.config, 'balance_containers', False),

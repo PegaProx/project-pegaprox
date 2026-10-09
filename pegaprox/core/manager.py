@@ -48,7 +48,8 @@ from pegaprox.globals import (
     cluster_managers, _ssh_active_connections,
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
-from pegaprox.models.tasks import MaintenanceTask, PegaProxConfig
+from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
+                                   BALANCER_COOLDOWN_DEFAULT)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for
@@ -500,6 +501,146 @@ def drop_own_recovery_locks(instance_id):
     return removed
 
 
+# MK Oct 2026 - every move the balancer makes goes into migration_history with why. The
+# sentence is for whoever reads the table, the numbers beside it let the UI word it in
+# the reader's language. The guest dict carries it into migrate_vm under this key, so
+# no caller of migrate_vm (or stand-in for it) has to take a new argument.
+BALANCE_WHY = '_balance_why'
+MIGRATION_LOG_MAX = 200   # the in-memory list behind "last migrations"
+
+
+def _node_load(node_status, node):
+    d = (node_status or {}).get(node) or {}
+
+    def num(key):
+        try:
+            return round(float(d.get(key) or 0), 1)
+        except (TypeError, ValueError):
+            return 0.0
+    return {'score': num('score'), 'cpu': num('cpu_percent'), 'mem': num('mem_percent')}
+
+
+def balance_reason(kind, source, target, node_status=None, **facts):
+    """{trigger, reason, details} of one balancer move. kind 'balance' (threshold,
+    tolerance), 'predictive' (forecast, confidence 0..1, threshold), 'affinity' (rule) or
+    'pin' (pinned); manual=True when someone started it by hand (Balance Now, Move back now)."""
+    def num(key, digits=1):
+        try:
+            return round(float(facts.get(key) or 0), digits)
+        except (TypeError, ValueError):
+            return 0.0
+    details = {'source': source, 'target': target}
+    tgt = _node_load(node_status, target)
+    if kind == 'balance':
+        src = _node_load(node_status, source)
+        diff = round(src['score'] - tgt['score'], 1)
+        threshold, tolerance = num('threshold'), num('tolerance')
+        details.update(source_load=src, target_load=tgt, diff=diff,
+                       threshold=threshold, tolerance=tolerance)
+        text = (f"{source} score {src['score']} (CPU {src['cpu']}%, RAM {src['mem']}%) and "
+                f"{target} score {tgt['score']} (CPU {tgt['cpu']}%, RAM {tgt['mem']}%) are "
+                f"{diff} apart, above threshold {threshold:g} + tolerance {tolerance:g}")
+    elif kind == 'predictive':
+        forecast, threshold = num('forecast'), num('threshold')
+        confidence = int(round(num('confidence', 4) * 100))
+        details.update(forecast=forecast, confidence=confidence, threshold=threshold,
+                       target_load=tgt)
+        text = (f"{source} is heading for overload (forecast score {forecast} above "
+                f"{threshold:g}, confidence {confidence}%), moved to the least loaded node "
+                f"{target} (score {tgt['score']})")
+    elif kind == 'affinity':
+        rule = str(facts.get('rule') or '')[:200]
+        details.update(rule=rule, target_load=tgt)
+        text = (f"anti-affinity rule '{rule}': another guest of the rule runs on {source}, "
+                f"moved to {target} (score {tgt['score']})")
+    else:
+        pinned = sorted(str(n) for n in (facts.get('pinned') or []))
+        details.update(pinned=pinned)
+        text = f"pinned to {', '.join(pinned)} but running on {source}, returned to {target}"
+    if facts.get('manual'):
+        details['manual'] = True
+        text += ' (started by hand)'
+    return {'trigger': kind, 'reason': text, 'details': details}
+
+
+def record_balance_move(cluster_id, vm, target, why, status, duration=0.0, note=''):
+    """One balancer move into migration_history. Never raises: the move happened (or
+    failed) whether or not its line could be written."""
+    try:
+        reason = why.get('reason') or ''
+        if note:
+            reason = f"{reason}; {note}" if reason else note
+        get_db().add_migration_event(
+            cluster_id, vm.get('vmid'), vm.get('name') or '', vm.get('node') or '', target or '',
+            status, reason=reason[:1000], trigger=why.get('trigger'),
+            details=why.get('details'), duration=duration)
+    except Exception as e:
+        logging.warning(f"[BAL] could not record the move of {vm.get('vmid')} in the history: {e}")
+
+
+def _iso_epoch(value):
+    try:
+        ts = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return ts.timestamp()
+
+
+def balancer_cooldown_secs(mgr):
+    return balancer_cooldown(getattr(getattr(mgr, 'config', None), 'migration_cooldown',
+                                     BALANCER_COOLDOWN_DEFAULT))
+
+
+def recent_balancer_moves(mgr):
+    """{vmid: when the balancer last moved it}, the cooldown table. The first look after a
+    start fills it from the history: a restart used to hand the balancer a guest it had
+    moved a minute before. In a group the cluster's own task list goes in as well."""
+    table = mgr._vm_migration_cooldown
+    cid = getattr(mgr, 'id', None)
+    if isinstance(cid, str) and not getattr(mgr, '_cooldown_seeded', False):
+        mgr._cooldown_seeded = True
+        horizon = time.time() - balancer_cooldown_secs(mgr)
+        try:
+            db = get_db()
+            for row in db.list_balancer_moves(cid, status='success', limit=db.MIGRATION_HISTORY_KEEP):
+                ts = _iso_epoch(row['timestamp'])
+                if ts is None or ts < horizon:
+                    continue
+                vmid = int(row['vmid'])
+                table[vmid] = max(table.get(vmid, 0), ts)
+        except Exception as e:
+            logging.debug(f"[BAL] cooldown not read back from the history: {e}")
+    if isinstance(cid, str) and isinstance(mgr, PegaProxManager):
+        _cooldown_from_tasks(mgr, table)
+    return table
+
+
+# a task list that did not answer is asked again at a later look, not sooner than this
+COOLDOWN_TASKS_RETRY = 60
+
+
+def _cooldown_from_tasks(mgr, table):
+    """#625 - migration_history is per instance: after a change of leader it holds what this
+    instance moved when it led before, not the moves of the leader before it. Those are in
+    the cluster's task list, so a process in a group (a new leader always is a new process)
+    adds the guest migrations from there at its first look - one read for the whole
+    cluster, never one per guest. A list that did not answer is asked again later."""
+    if getattr(mgr, '_cooldown_tasks_read', False) or ha.role() == ha.ROLE_STANDALONE:
+        return
+    if time.monotonic() < getattr(mgr, '_cooldown_tasks_retry', 0):
+        return
+    moved = mgr.recent_guest_migrations(time.time() - balancer_cooldown_secs(mgr))
+    if moved is None:
+        mgr._cooldown_tasks_retry = time.monotonic() + COOLDOWN_TASKS_RETRY
+        return
+    mgr._cooldown_tasks_read = True
+    for vmid, ts in moved.items():
+        table[vmid] = max(table.get(vmid, 0), ts)
+    if moved:
+        logging.info(f"[BAL] {mgr.id}: {len(moved)} guest(s) migrated within the cooldown, "
+                     f"from the cluster's task list: {', '.join(str(v) for v in sorted(moved)[:20])}")
+
+
 class UnreadList(list):
     """The [] get_vm_resources() answers when cluster/resources did not answer.
 
@@ -509,6 +650,31 @@ class UnreadList(list):
     """
     __slots__ = ()
     unavailable = True
+
+
+def _rrd_value(point, key, scale=1):
+    """One value of a PVE rrddata slot, None where PVE has no sample (it leaves the key out)."""
+    v = point.get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):
+        return None
+    return round(v * scale, 2)
+
+
+def _rrd_share(point, used_key, total_key, no_total=None):
+    """used of total in percent, None without a sample; no_total when the total is 0 (no swap)."""
+    used = _rrd_value(point, used_key)
+    if used is None:
+        return None
+    total = _rrd_value(point, total_key)
+    if not total:
+        return no_total
+    return round(used / total * 100, 2)
 
 
 class PegaProxManager:
@@ -579,6 +745,8 @@ class PegaProxManager:
         self._disk_cache_lock = threading.Lock()
         # #237: track VMs where guest agent is disabled to avoid spamming PVE with failed requests
         self._no_agent_vms = set()  # vmids with no agent (cleared on VM start/config change)
+        # (node, vmid) -> whether the guest agent answered the sweep's last call, under _ip_cache_lock
+        self._agent_state = {}
 
         # update tracking
         self.nodes_updating = {}
@@ -1248,6 +1416,7 @@ class PegaProxManager:
             # NS: clear stale IPs/disk so reconnect doesn't serve old data
             with self._ip_cache_lock:
                 self._ip_cache.clear()
+                self._agent_state.clear()
             with self._disk_cache_lock:
                 self._disk_cache.clear()
             # N-1 (regression fix): also drop the short node-status/tasks result
@@ -2130,7 +2299,9 @@ class PegaProxManager:
                 r['disk_percent'] = round((r.get('disk', 0) / maxdisk) * 100, 1) if maxdisk > 0 else 0
 
             # inject cached IP addresses + disk usage (only for running VMs)
-            if self._ip_cache or self._disk_cache:
+            agents = getattr(self, '_agent_state', None)
+            if self._ip_cache or self._disk_cache or agents:
+                no_agent = getattr(self, '_no_agent_vms', ())
                 with self._ip_cache_lock:
                     for r in resources:
                         if r.get('status') != 'running':
@@ -2140,6 +2311,13 @@ class PegaProxManager:
                         if ips:
                             r['ip'] = ips[0]
                             r['ip_addresses'] = ips
+                        if agents is not None and r.get('type') == 'qemu':
+                            # MK Oct 2026 - the agent column of the guest list, from the IP sweep
+                            up = agents.get(key)
+                            if up is None and r.get('vmid') in no_agent:
+                                up = False
+                            if up is not None:
+                                r['agent_running'] = up
                 with self._disk_cache_lock:
                     for r in resources:
                         if r.get('status') != 'running':
@@ -2534,8 +2712,8 @@ class PegaProxManager:
             # stop ping-pong. The reconcile records that cooldown after a move but
             # never read it back, so a guest HA or an operator keeps pulling off
             # its pin got dragged back on every cycle. Defer it until it lapses.
-            last_move = self._vm_migration_cooldown.get(v['vmid'])
-            if last_move and (time.time() - last_move) < 900:
+            last_move = recent_balancer_moves(self).get(v['vmid'])
+            if last_move and (time.time() - last_move) < balancer_cooldown_secs(self):
                 self.logger.info(
                     f"[PROXLB] {v['name']} ({v['vmid']}) is off its pin but was migrated "
                     "recently - waiting out the cooldown")
@@ -2594,6 +2772,8 @@ class PegaProxManager:
             if not ha.confirm_step(f"returning {v['vmid']} to its pinned node"):
                 break
             migrated_now += 1
+            vm[BALANCE_WHY] = balance_reason('pin', v['node'], target, pinned=v['pinned_nodes'],
+                                             manual=force)
             if self.migrate_vm(vm, target, dry_run=False, wait_timeout=1800):
                 result['migrated'].append({**v, 'target': target})
                 self._vm_migration_cooldown[v['vmid']] = time.time()
@@ -2968,9 +3148,12 @@ class PegaProxManager:
 
                     if not ha.confirm_step(f'the anti-affinity move of {vid}'):
                         return migrations
+                    vm_res[BALANCE_WHY] = balance_reason('affinity', nd, target, node_status,
+                                                         rule=rule.get('name'))
                     ok = self.migrate_vm(vm_res, target)
                     if ok:
                         migrations += 1
+                        self._vm_migration_cooldown[vm_res.get('vmid')] = time.time()
                         # update maps so next iteration sees the new position
                         vm_nodes[vid] = target
                         node_groups.setdefault(target, []).append(vid)
@@ -2981,6 +3164,38 @@ class PegaProxManager:
         if migrations:
             self.logger.info(f"[AFFINITY] Completed {migrations} affinity enforcement migration(s)")
         return migrations
+
+    def recent_guest_migrations(self, since):
+        """{vmid: when it moved} of the guest migrations in the cluster's task list (qmigrate,
+        vzmigrate) that ended well at `since` or later, or run now (stamped now). One read of
+        /cluster/tasks for the whole cluster; None when it did not answer."""
+        try:
+            resp = self._api_get(f"https://{self.host}:{self.api_port}/api2/json/cluster/tasks")
+            tasks = resp.json().get('data') if resp.status_code == 200 else None
+        except Exception as e:
+            self.logger.debug(f"[BAL] task list unreadable: {e}")
+            return None
+        if not isinstance(tasks, list):
+            return None
+        now, out = time.time(), {}
+        for task in tasks:
+            if not isinstance(task, dict) or task.get('type') not in ('qmigrate', 'vzmigrate'):
+                continue
+            try:
+                vmid = int(task.get('id'))
+                end = task.get('endtime')
+                status = str(task.get('status') or '')
+                if end is None and not status:
+                    at = now
+                elif status == 'OK' or status.startswith('WARNINGS'):
+                    at = float(end)
+                else:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if at >= since:
+                out[vmid] = max(out.get(vmid, 0), at)
+        return out
 
     def find_migration_candidate(self, source_node: str, target_node: str, exclude_vmids: list = None, include_containers: bool = None, node_status: dict = None, target_mgr=None) -> Optional[Dict]:
         """
@@ -3030,11 +3245,13 @@ class PegaProxManager:
 
         # Filter VMs on source node that are running
         # NS: VM cooldown — skip VMs migrated in last 15 min to prevent ping-pong
-        cooldown_secs = 900
+        # MK Oct 2026 - per cluster now (migration_cooldown), and it survives a restart
+        cooldown_secs = balancer_cooldown_secs(self)
         now = time.time()
-        cooled_vmids = {vmid for vmid, ts in self._vm_migration_cooldown.items() if now - ts < cooldown_secs}
+        recent = recent_balancer_moves(self)
+        cooled_vmids = {vmid for vmid, ts in recent.items() if now - ts < cooldown_secs}
         # clean up old entries
-        self._vm_migration_cooldown = {v: t for v, t in self._vm_migration_cooldown.items() if now - t < cooldown_secs}
+        self._vm_migration_cooldown = {v: t for v, t in recent.items() if now - t < cooldown_secs}
 
         # MK May 2026 — coexistence with PVE 9.2's CRS. Two-layer check:
         #
@@ -3662,9 +3879,18 @@ class PegaProxManager:
             rules = [r for r in rules if not r['off']]
             if not rules and not joined:
                 return [], []
+            # #625 - the rows go in before the confirm round, and to the members with it: a
+            # leader gone after the first PUT leaves the next one the list to switch back on
+            # (_restore_suspended_ha_rules_if_due). A row of a rule that stayed on only makes
+            # that a switch-on of an enabled rule
+            names = joined + [r['rule'] for r in rules]
+            db.save_suspended_ha_rules(self.id, names, owner=owner)
+            ha.send_on('the HA rules switched off')
             if not ha.confirm_step('switching off the negative affinity rules'):
+                for name in names:
+                    if owner not in held.get(name, ()):
+                        db.remove_suspended_ha_rule(self.id, name, owners=owner)
                 return [], [r['rule'] for r in rules]
-            db.save_suspended_ha_rules(self.id, joined + [r['rule'] for r in rules], owner=owner)
             off, failed = [], []
             for r in rules:
                 try:
@@ -4076,13 +4302,17 @@ class PegaProxManager:
         """migrate vm to another node"""
         # NS: this handles the proxmox api call
         # MK: had to add iso unmount, was breaking migrations silently for weeks
+        # MK Oct 2026 - a balancer move brings its reason along (BALANCE_WHY); taken off the
+        # dict first thing, it must not stick to the guest for the next caller
+        why = vm.pop(BALANCE_WHY, None) if isinstance(vm, dict) else None
+        started = time.time()
         if dry_run is None:
             dry_run = self.config.dry_run
         
         # dry run = just log, dont actually do it
         if dry_run:
             self.logger.info(f"[DRY RUN] Would migrate {vm.get('name', 'unnamed')} ({vm.get('vmid')}) to {target_node}")
-            self.last_migration_log.append({
+            self._note_migration({
                 'timestamp': datetime.now().isoformat(),
                 'vm': vm.get('name', 'unnamed'),
                 'vmid': vm.get('vmid'),
@@ -4090,7 +4320,7 @@ class PegaProxManager:
                 'to_node': target_node,
                 'dry_run': True,
                 'success': True
-            })
+            }, why, started)
             return True
         
         try:
@@ -4171,7 +4401,7 @@ class PegaProxManager:
                     success = self._wait_for_task(source_node, task_id, timeout=wait_timeout)
                     if success:
                         self.logger.info(f"[OK] Successfully migrated {vm.get('name', 'unnamed')} to {target_node}")
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4179,7 +4409,7 @@ class PegaProxManager:
                             'to_node': target_node,
                             'dry_run': False,
                             'success': True
-                        })
+                        }, why, started)
                         return True
                     else:
                         # MK Apr 2026 (#340): HA + negative-affinity setups fail the original
@@ -4221,7 +4451,7 @@ class PegaProxManager:
                                 f"ended up on {actual_node} (HA likely re-routed from {target_node}). "
                                 "Treating as success."
                             )
-                            self.last_migration_log.append({
+                            self._note_migration({
                                 'timestamp': datetime.now().isoformat(),
                                 'vm': vm.get('name', 'unnamed'),
                                 'vmid': vmid,
@@ -4231,10 +4461,10 @@ class PegaProxManager:
                                 'dry_run': False,
                                 'success': True,
                                 'note': 'HA re-routed during evacuation',
-                            })
+                            }, why, started)
                             return True
                         self.logger.error(f"[ERROR] Migration task failed for {vm.get('name', 'unnamed')}")
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4243,9 +4473,19 @@ class PegaProxManager:
                             'dry_run': False,
                             'success': False,
                             'error': 'Task failed'
-                        })
+                        }, why, started)
                         return False
-                
+
+                if why:
+                    self._note_migration({
+                        'timestamp': datetime.now().isoformat(),
+                        'vm': vm.get('name', 'unnamed'),
+                        'vmid': vmid,
+                        'from_node': source_node,
+                        'to_node': target_node,
+                        'dry_run': False,
+                        'success': True
+                    }, why, started)
                 return True
             else:
                 resp_text = response.text or ''
@@ -4271,7 +4511,7 @@ class PegaProxManager:
                             f"[OK] {vm.get('name', 'unnamed')} left {source_node} (now on "
                             f"{landed}) via the in-flight migration — evacuation successful."
                         )
-                        self.last_migration_log.append({
+                        self._note_migration({
                             'timestamp': datetime.now().isoformat(),
                             'vm': vm.get('name', 'unnamed'),
                             'vmid': vmid,
@@ -4280,10 +4520,10 @@ class PegaProxManager:
                             'dry_run': False,
                             'success': True,
                             'note': 'already migrating (migrate lock) — confirmed off source',
-                        })
+                        }, why, started)
                         return True
                 self.logger.error(f"[ERROR] Failed to migrate {vm.get('name', 'unnamed')}: {response.status_code} - {resp_text}")
-                self.last_migration_log.append({
+                self._note_migration({
                     'timestamp': datetime.now().isoformat(),
                     'vm': vm.get('name', 'unnamed'),
                     'vmid': vmid,
@@ -4292,13 +4532,49 @@ class PegaProxManager:
                     'dry_run': False,
                     'success': False,
                     'error': resp_text
-                })
+                }, why, started)
                 return False
                 
         except Exception as e:
             self.logger.error(f"[ERROR] Error migrating VM: {e}")
+            if why:
+                self._note_migration({
+                    'timestamp': datetime.now().isoformat(),
+                    'vm': vm.get('name', 'unnamed'),
+                    'vmid': vm.get('vmid'),
+                    'from_node': vm.get('node'),
+                    'to_node': target_node,
+                    'dry_run': False,
+                    'success': False,
+                    'error': str(e)
+                }, why, started)
             return False
-    
+
+    def _note_migration(self, entry, why=None, started=None):
+        """A line of the in-memory "last migrations" list, and for a move of the balancer
+        (why set) its row in migration_history."""
+        log = self.last_migration_log
+        log.append(entry)
+        if len(log) > MIGRATION_LOG_MAX:
+            del log[:-MIGRATION_LOG_MAX]
+        if not why:
+            return
+        entry['trigger'] = why.get('trigger')
+        status = 'dry_run' if entry.get('dry_run') else ('success' if entry.get('success') else 'failed')
+        extra, note = {}, ''
+        if entry.get('requested_target'):
+            extra['requested_target'] = entry['requested_target']
+            note = f"HA placed it on {entry.get('to_node')} instead of {entry['requested_target']}"
+        if entry.get('error'):
+            extra['error'] = str(entry['error'])[:300]
+            note = f"failed: {extra['error']}"
+        if extra:
+            why = dict(why, details=dict(why.get('details') or {}, **extra))
+        record_balance_move(self.id, {'vmid': entry.get('vmid'), 'name': entry.get('vm'),
+                                      'node': entry.get('from_node')},
+                            entry.get('to_node'), why, status,
+                            duration=(time.time() - started) if started else 0.0, note=note)
+
     def _wait_for_task(self, node: str, task_id: str, timeout: int = 600) -> bool:
         """
         Wait for a Proxmox task to complete.
@@ -12639,10 +12915,21 @@ echo "AGENT_INSTALLED_OK"
             # NS Apr 2026 (PR #324): only fall back to the connected host when
             # the requested node is literally that host -- otherwise multi-node
             # clusters would silently SSH into the wrong box.
-            connected = self.host or self.config.host
-            if connected and (node_name in connected or node_name in self.config.host):
-                self.logger.debug(f"[NodeIP] {node_name} matches connected host, using {connected}")
-                return connected
+            # MK Oct 2026 (#1143) - "literally" was a substring test: pve1 matched a host
+            # named pve10.lab, and in a failover the configured host's name handed back the
+            # one connected to. The whole name or a host name's first label, and that host.
+            for h in (self.host, self.config.host):
+                bare = (h or '').strip('[]').lower()
+                if not bare:
+                    continue
+                try:
+                    ipaddress.ip_address(bare)
+                    names = {bare}
+                except ValueError:
+                    names = {bare, bare.split('.')[0]}
+                if node_name.lower() in names:
+                    self.logger.debug(f"[NodeIP] {node_name} is the host {h}, using it")
+                    return h
 
             self.logger.warning(f"[NodeIP] No reachable management IP for {node_name}")
             return None
@@ -15907,44 +16194,40 @@ echo "AGENT_INSTALLED_OK"
                 ]
                 active_pressure_keys = []
 
-                # Check first valid point to determine available metrics
-                if rrd_data:
-                    first_point = next((p for p in rrd_data if p), None)
-                    if first_point:
-                        for k in pressure_keys:
-                            if k in first_point:
-                                active_pressure_keys.append(k)
-                                formatted_data['metrics'][k] = []
+                # a PSI series exists when any slot carries it: the first one may be a gap
+                for k in pressure_keys:
+                    if any(p and p.get(k) is not None for p in rrd_data):
+                        active_pressure_keys.append(k)
+                        formatted_data['metrics'][k] = []
 
+                # MK Oct 2026 - PVE leaves a value out of a slot it has no sample for (the guest
+                # stopped, the node was down); it goes on as None, so the chart draws a gap
+                # there and not a measured 0
                 for point in rrd_data:
                     if not point:
                         continue
-                    
+
                     timestamp = point.get('time', 0)
                     formatted_data['timestamps'].append(timestamp)
-                    
+
                     # CPU usage (0-1 -> 0-100%)
-                    cpu = point.get('cpu', 0)
-                    formatted_data['metrics']['cpu'].append(round((cpu or 0) * 100, 2))
-                    
+                    formatted_data['metrics']['cpu'].append(_rrd_value(point, 'cpu', 100))
+
                     # Memory usage (bytes)
-                    mem = point.get('mem', 0)
-                    maxmem = point.get('maxmem', 1)
-                    mem_percent = ((mem or 0) / (maxmem or 1)) * 100
-                    formatted_data['metrics']['memory'].append(round(mem_percent, 2))
-                    
+                    formatted_data['metrics']['memory'].append(_rrd_share(point, 'mem', 'maxmem'))
+
                     # Disk I/O (bytes/s)
-                    formatted_data['metrics']['disk_read'].append(point.get('diskread', 0) or 0)
-                    formatted_data['metrics']['disk_write'].append(point.get('diskwrite', 0) or 0)
-                    
+                    formatted_data['metrics']['disk_read'].append(_rrd_value(point, 'diskread'))
+                    formatted_data['metrics']['disk_write'].append(_rrd_value(point, 'diskwrite'))
+
                     # Network I/O (bytes/s)
-                    formatted_data['metrics']['net_in'].append(point.get('netin', 0) or 0)
-                    formatted_data['metrics']['net_out'].append(point.get('netout', 0) or 0)
+                    formatted_data['metrics']['net_in'].append(_rrd_value(point, 'netin'))
+                    formatted_data['metrics']['net_out'].append(_rrd_value(point, 'netout'))
 
                     # Pressure Stall (PSI)
                     for k in active_pressure_keys:
-                        formatted_data['metrics'][k].append(point.get(k, 0) or 0)
-                
+                        formatted_data['metrics'][k].append(_rrd_value(point, k))
+
                 return {'success': True, 'data': formatted_data}
             else:
                 return {'success': False, 'error': response.text}
@@ -18093,67 +18376,38 @@ echo "AGENT_INSTALLED_OK"
                 ]
                 active_pressure_keys = []
 
-                # Check first valid point to determine available metrics
-                if rrd_data:
-                    first_point = next((p for p in rrd_data if p), None)
-                    if first_point:
-                        for k in pressure_keys:
-                            if k in first_point:
-                                active_pressure_keys.append(k)
-                                formatted_data['metrics'][k] = []
+                # a PSI series exists when any slot carries it: the first one may be a gap
+                for k in pressure_keys:
+                    if any(p and p.get(k) is not None for p in rrd_data):
+                        active_pressure_keys.append(k)
+                        formatted_data['metrics'][k] = []
 
+                # same as the guest charts: a slot without a sample stays None
                 for point in rrd_data:
                     if not point:
                         continue
                     
                     timestamp = point.get('time', 0)
                     formatted_data['timestamps'].append(timestamp)
+                    metrics = formatted_data['metrics']
                     
-                    # CPU usage (0-1 -> 0-100%)
-                    cpu = point.get('cpu', 0)
-                    formatted_data['metrics']['cpu'].append(round((cpu or 0) * 100, 2))
+                    # CPU usage and IO wait (0-1 -> 0-100%)
+                    metrics['cpu'].append(_rrd_value(point, 'cpu', 100))
+                    metrics['iowait'].append(_rrd_value(point, 'iowait', 100))
                     
-                    # IO Wait
-                    iowait = point.get('iowait', 0)
-                    formatted_data['metrics']['iowait'].append(round((iowait or 0) * 100, 2))
+                    # memory, swap and root fs in percent; a node without swap has 0%
+                    metrics['memory'].append(_rrd_share(point, 'memused', 'memtotal'))
+                    metrics['swap'].append(_rrd_share(point, 'swapused', 'swaptotal', no_total=0))
+                    metrics['loadavg'].append(_rrd_value(point, 'loadavg'))
                     
-                    # Memory usage
-                    memused = point.get('memused', 0)
-                    memtotal = point.get('memtotal', 1)
-                    mem_percent = ((memused or 0) / (memtotal or 1)) * 100
-                    formatted_data['metrics']['memory'].append(round(mem_percent, 2))
-                    
-                    # Swap usage
-                    swapused = point.get('swapused', 0)
-                    swaptotal = point.get('swaptotal', 1)
-                    if swaptotal and swaptotal > 0:
-                        swap_percent = ((swapused or 0) / swaptotal) * 100
-                    else:
-                        swap_percent = 0
-                    formatted_data['metrics']['swap'].append(round(swap_percent, 2))
-                    
-                    # Load average
-                    loadavg = point.get('loadavg', 0)
-                    formatted_data['metrics']['loadavg'].append(round(loadavg or 0, 2))
-                    
-                    # Network I/O (bytes/s)
-                    netin = point.get('netin', 0)
-                    netout = point.get('netout', 0)
-                    formatted_data['metrics']['net_in'].append(round((netin or 0) / 1024, 2))  # KB/s
-                    formatted_data['metrics']['net_out'].append(round((netout or 0) / 1024, 2))  # KB/s
-                    
-                    # Root FS usage
-                    rootused = point.get('rootused', 0)
-                    roottotal = point.get('roottotal', 1)
-                    if roottotal and roottotal > 0:
-                        rootfs_percent = ((rootused or 0) / roottotal) * 100
-                    else:
-                        rootfs_percent = 0
-                    formatted_data['metrics']['rootfs'].append(round(rootfs_percent, 2))
+                    # Network I/O (bytes/s -> KB/s)
+                    metrics['net_in'].append(_rrd_value(point, 'netin', 1 / 1024))
+                    metrics['net_out'].append(_rrd_value(point, 'netout', 1 / 1024))
+                    metrics['rootfs'].append(_rrd_share(point, 'rootused', 'roottotal', no_total=0))
 
                     # Pressure Stall (PSI)
                     for k in active_pressure_keys:
-                        formatted_data['metrics'][k].append(point.get(k, 0) or 0)
+                        metrics[k].append(_rrd_value(point, k))
                 
                 return formatted_data
             return {'error': 'Failed to get RRD data'}
@@ -19478,6 +19732,10 @@ echo "AGENT_INSTALLED_OK"
                     # an automatic leader that lost its lease starts no migration (#625)
                     if not ha.confirm_step(f'balancing {vm_name} ({vmid})'):
                         break
+                    vm[BALANCE_WHY] = balance_reason(
+                        'balance', source_node, target_node, node_status,
+                        threshold=self.config.migration_threshold,
+                        tolerance=getattr(self.config, 'migration_tolerance', 10) or 0, manual=force)
                     success = self.migrate_vm(vm, target_node)
                     
                     if success:
@@ -19519,6 +19777,9 @@ echo "AGENT_INSTALLED_OK"
                                 self.logger.info(f"[PREDICTIVE] Migrating {vm.get('name', '')} (VMID {vm.get('vmid')}): {nname} → {tgt}")
                                 if not ha.confirm_step(f"balancing {vm.get('vmid')} ahead of a trend"):
                                     break
+                                vm[BALANCE_WHY] = balance_reason(
+                                    'predictive', nname, tgt, node_status, forecast=ps['score'],
+                                    confidence=ps['confidence'], threshold=pred_threshold)
                                 if self.migrate_vm(vm, tgt):
                                     migrations_done += 1
                                     self._vm_migration_cooldown[vm.get('vmid')] = time.time()
@@ -21196,17 +21457,34 @@ echo DONE""",
     def _fetch_qemu_ips(self, node: str, vmid: int) -> list:
         """Fetch IP addresses from QEMU guest agent for a running VM.
         Returns IPv4 addresses first, then IPv6."""
+        return self._probe_qemu_agent(node, vmid)[0]
+
+    def _probe_qemu_agent(self, node: str, vmid: int) -> tuple:
+        """(ips, agent) from one network-get-interfaces call: agent is True when the guest
+        agent answered (a command error from inside the guest included), False when PVE says
+        it is not running, not configured or timed out, None when this tells nothing (skipped,
+        or another error)."""
         if vmid in self._no_agent_vms:
-            return []
+            return [], None
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
             resp = self._create_session().get(url, timeout=8)
             if resp.status_code == 500:
                 self._no_agent_vms.add(vmid)
-                return []
+                said = (getattr(resp, 'text', '') or '').lower()
+                if any(s in said for s in ('not running', 'no qemu guest agent configured', 'got timeout')):
+                    return [], False
+                # "Agent error: <desc>" is the agent itself refusing the command
+                return [], (True if 'agent error' in said else None)
             if resp.status_code != 200:
-                return []
-            interfaces = resp.json().get('data', {}).get('result', [])
+                return [], None
+            return self._agent_ips(resp.json().get('data', {}).get('result', [])), True
+        except Exception:
+            return [], None
+
+    @staticmethod
+    def _agent_ips(interfaces) -> list:
+        try:
             ipv4s, ipv6s = [], []
             for iface in interfaces:
                 if iface.get('name') == 'lo':
@@ -21314,11 +21592,11 @@ echo DONE""",
                 vm_type = r.get('type', 'qemu')
                 if vm_type == 'lxc':
                     ips = self._fetch_lxc_ips(node, vmid)
-                    return (node, vmid, ips, None)
+                    return (node, vmid, ips, None, None)
                 else:
-                    ips = self._fetch_qemu_ips(node, vmid)
+                    ips, agent = self._probe_qemu_agent(node, vmid)
                     disk = self._fetch_qemu_disk_usage(node, vmid)
-                    return (node, vmid, ips, disk)
+                    return (node, vmid, ips, disk, agent)
 
             tasks = [lambda r=r: fetch_one(r) for r in running]
             # own pool — this is the one sweep whose size follows the estate, not the nodes
@@ -21328,13 +21606,17 @@ echo DONE""",
                 for result in results:
                     if result is None:
                         continue
-                    node, vmid, ips, disk = result
+                    node, vmid, ips, disk, agent = result
                     self._ip_cache[(node, vmid)] = ips
+                    # MK Oct 2026 - what the same call said about the agent, for the guest list;
+                    # a guest skipped or unreadable this round keeps what it last said
+                    if agent is not None:
+                        self._agent_state[(node, vmid)] = agent
             with self._disk_cache_lock:
                 for result in results:
                     if result is None:
                         continue
-                    node, vmid, ips, disk = result
+                    node, vmid, ips, disk, agent = result
                     if disk:
                         self._disk_cache[(node, vmid)] = disk
         except Exception as e:

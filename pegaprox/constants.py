@@ -94,7 +94,9 @@ SSL_DIR = os.path.join(CONFIG_DIR, 'ssl')  # MK 2026-06-01: was 'ssl/' (image la
 SSL_DIR_LEGACY = 'ssl'
 STATIC_DIR = 'static'
 IMAGES_DIR = 'images'
-PLUGINS_DIR = 'plugins'
+# MK Oct 2026 (#1134): the image sets it to config/plugins, so a plugin's config.json
+# lives in the volume and outlasts a new image. Unset keeps plugins/ in the working dir.
+PLUGINS_DIR = _dir_from_env('PEGAPROX_PLUGINS_DIR', 'plugins')
 
 # MK Aug 2026 (#633): the block below runs at IMPORT time, so any process that
 # just imports pegaprox.* under a different user runs it as that user. A root-run
@@ -115,7 +117,7 @@ CONFIG_OWNED_BY_US = _config_owned_by_us()
 
 # Ensure directories exist
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)   # #826: a moved log path is usually nested
-Path(PLUGINS_DIR).mkdir(exist_ok=True)
+Path(PLUGINS_DIR).mkdir(parents=True, exist_ok=True)
 Path(WEB_DIR).mkdir(exist_ok=True)
 if CONFIG_OWNED_BY_US:
     Path(SSL_DIR).mkdir(parents=True, exist_ok=True)

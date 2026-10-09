@@ -396,6 +396,20 @@ def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> di
         return {'error': str(e)}
 
 
+class _VerifiedClaims(dict):
+    """Claims of an ID token whose signature checked out against the IdP's JWKS.
+
+    MK Oct 2026 (#1141) - a type and not a key: the unverified decode below hands back
+    whatever JSON the token carries, so a key saying "verified" could come from the
+    token itself. Copying into a plain dict drops the mark, which is the safe way round.
+    """
+
+
+def oidc_id_token_verified(claims) -> bool:
+    """True when `claims` came out of the signature-checked path of oidc_decode_id_token."""
+    return isinstance(claims, _VerifiedClaims)
+
+
 def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                          config: dict = None) -> dict:
     """Decode and verify JWT ID token signature using JWKS
@@ -474,7 +488,7 @@ def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
                     logging.warning(f"[OIDC] Nonce mismatch after sig verification")
                     return {'error': 'OIDC nonce mismatch - possible replay attack'}
 
-                return claims
+                return _VerifiedClaims(claims)
 
         except Exception as e:
             # MK: don't break login if JWKS is temporarily unreachable
@@ -554,6 +568,30 @@ def oidc_get_user_info(config: dict, access_token: str) -> dict:
         logging.warning(f"[OIDC] User info fetch error: {e}")
     
     return user_info
+
+
+def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
+    """user_info, with preferred_username and email from the ID token when it has neither.
+
+    MK Oct 2026 (#1141) - Entra falls back to the userinfo endpoint when Graph /me is
+    refused (no User.Read consent), and that answer has a sub but no name, so the account
+    came out as oidc_<sub>. The ID token of the same sign-in does carry preferred_username.
+    Only from a token whose signature was checked in this sign-in, never from the
+    unverified decode, and only for the same subject (OIDC Core 5.3.2).
+    """
+    if user_info.get('preferred_username') or user_info.get('email'):
+        return user_info
+    if not oidc_id_token_verified(id_claims):
+        return user_info
+    sub = user_info.get('sub')
+    if not sub or id_claims.get('sub') != sub:
+        return user_info
+    named = dict(user_info)
+    for claim in ('preferred_username', 'email'):
+        value = id_claims.get(claim)
+        if isinstance(value, str) and value:
+            named[claim] = value
+    return named
 
 
 def oidc_get_user_groups(config: dict, access_token: str) -> list:
@@ -817,6 +855,58 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     return result
 
 
+def _oidc_fallback_username(sub, users: dict):
+    """The key for a sign-in whose claims carry no usable name, or None to refuse it.
+
+    MK Oct 2026 (#1141) - this was oidc_<first 12 chars of the sub>. It kept the case of
+    the sub, and the admin routes lower-case the name they are given, so such an account
+    could be neither edited nor deleted. And 12 characters of a sub are not the sub: two
+    subjects sharing a prefix derived one key, and the second login took the account over.
+
+    An OIDC account already bound to this sub keeps its key, whatever it looks like (the
+    old upper-case ones included) - it is the same identity, as in the adoption rule
+    below. Otherwise a lower-case hash of the sub, which is never adopted from someone
+    else: a row under that key that is not this subject's refuses the login.
+    """
+    if not isinstance(sub, str) or not sub:
+        logging.warning("[OIDC] sign-in without a name and without a sub claim - refused")
+        return None
+    # sorted: a standby has to arrive at the same key as the active, whatever row order
+    mine = [key for key in sorted(users)
+            if isinstance(users[key], dict)
+            and users[key].get('auth_source', 'local') in OIDC_AUTH_SOURCES
+            and users[key].get('oidc_sub') == sub]
+    if mine:
+        # a named account before an old fallback one: once the ID token names the user both
+        # carry the sub, and the named one is what an admin looks after now. A sign-in that
+        # loses the name again must not go back to the old one (disabled or not)
+        named = [key for key in mine if not _oidc_is_fallback_row(key, users[key])]
+        return (named or mine)[0]
+    key = _oidc_fallback_key(sub)
+    if key in users:
+        logging.warning(f"[OIDC] '{key}' belongs to another identity - this sign-in has no "
+                        f"name claim to tell them apart, refused")
+        return None
+    return key
+
+
+def _oidc_fallback_key(sub: str) -> str:
+    return 'oidc_' + hashlib.sha256(sub.encode('utf-8')).hexdigest()[:16]
+
+
+def _oidc_is_fallback_row(username: str, row: dict) -> bool:
+    """Whether `row` is the account a sign-in without a name made for its stored sub.
+
+    Its key is then no name an IdP gave anyone, only the sub spelled differently - the
+    hash, or oidc_<first 12 chars> from before #1141. A name claim that happens to spell
+    it is not that identity.
+    """
+    sub = row.get('oidc_sub')
+    if not isinstance(sub, str) or not sub:
+        return False
+    return username in (_oidc_fallback_key(sub), f"oidc_{sub[:12]}")
+
+
 def oidc_derive_username(user_info: dict, users: dict = None) -> str:
     """Derive the local username key from OIDC claims.
 
@@ -826,6 +916,9 @@ def oidc_derive_username(user_info: dict, users: dict = None) -> str:
 
     `users` is the already-loaded users table. Callers in the login path have
     one in hand; passing it avoids a second full-table read per login.
+
+    None when the claims carry no name and the fallback key cannot be this
+    identity's (see _oidc_fallback_username); the sign-in is refused then.
     """
     from pegaprox.utils.auth import load_users
 
@@ -838,7 +931,8 @@ def oidc_derive_username(user_info: dict, users: dict = None) -> str:
     username = ''.join(c for c in raw_username.lower()
                        if c.isalnum() or c in '._-@+')
     if not username:
-        return f"oidc_{user_info.get('sub', 'unknown')[:12]}"
+        return _oidc_fallback_username(user_info.get('sub'),
+                                       users if users is not None else load_users())
 
     # Back-compat: installs before this change stored the part before '@'.
     # An existing account keeps its old key so it isn't orphaned -- but only if
@@ -876,6 +970,8 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
     # Derive username from OIDC claims
     email = user_info.get('email') or user_info.get('preferred_username', '')
     username = oidc_derive_username(user_info, users)
+    if username is None:
+        return None  # no name, and the fallback key is not this identity's (#1141)
 
     display_name = user_info.get('name') or user_info.get('given_name', '')
     if not display_name:
@@ -894,7 +990,14 @@ def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, u
             logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
                             f"account of that name exists and cannot be taken over by OIDC")
             return None  # Caller should handle None return
-        
+        # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
+        # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
+        if (_oidc_is_fallback_row(username, users[username])
+                and users[username].get('oidc_sub') != user_info.get('sub')):
+            logging.warning(f"[OIDC] Rejected login for '{username}' - that account was made "
+                            f"for another subject's sign-in without a name")
+            return None
+
         # Update existing OIDC user - on a copy, so the table the caller handed in
         # stays what it was
         user = copy.deepcopy(users[username])

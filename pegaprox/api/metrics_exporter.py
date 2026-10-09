@@ -16,6 +16,7 @@ some setups put PegaProx behind a mutual-TLS reverse proxy and want to skip auth
 import time
 import logging
 import threading
+from urllib.parse import quote
 from flask import Blueprint, request, Response
 
 from pegaprox.globals import (
@@ -29,6 +30,7 @@ from pegaprox.core import ha  # PegaProx's own warm standby (#625)
 from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.rbac import has_permission
 from pegaprox.utils import auth as auth_state
+from pegaprox.utils.concurrent import run_per_node
 
 
 bp = Blueprint('metrics_exporter', __name__)
@@ -115,7 +117,8 @@ _reads_lock = threading.Lock()
 # samples of a metric in one group
 _ESTATE_FAMILIES = (
     ('pegaprox_cluster_source_up', 'gauge',
-     '1 if the last read of a source behind these metrics answered in full (storage, replication, backups)'),
+     '1 if the last read of a source behind these metrics answered in full '
+     '(storage, replication, backups, clock, node_pressure)'),
     ('pegaprox_storage_active', 'gauge', '1 if the storage is active (a shared one: on at least one node)'),
     ('pegaprox_storage_inactive_nodes', 'gauge', 'Nodes that list a shared storage without having it active'),
     ('pegaprox_storage_used_bytes', 'gauge', 'Bytes used on an active storage'),
@@ -131,6 +134,50 @@ _ESTATE_FAMILIES = (
      'Unix time of the newest backup of a VM or LXC container on a linked PBS or a backup storage, 0 if none'),
     ('pegaprox_guest_last_backup_age_seconds', 'gauge',
      'Seconds since the newest backup of a VM or LXC container'),
+)
+
+# MK Oct 2026 - node health and guest tags. Temperature and power are what the 5-minute
+# hardware poll left in the manager's caches (background/metrics.py), nothing is asked for
+# them here. The clock is the read the clock_drift alert makes too (alert_events), one
+# /nodes/<n>/time per online node every 5 minutes, and node pressure the newest point of
+# /nodes/<n>/rrddata once a minute: both in the background like replication. Guest pressure
+# only where /cluster/resources lists it with the guests; never a read per guest.
+_CLOCK_SERVE_MAX = 900
+_PRESSURE_EVERY = 60
+_PRESSURE_SERVE_MAX = 300
+_PRESSURE_ABSENT_RETRY = 3600   # a node whose RRD has no pressure (before Proxmox VE 9)
+_PRESSURE_PARALLEL = 8
+_PRESSURE_BUDGET = 30
+_GUEST_TAGS_MAX = 10            # tag series per guest, so a tag-happy estate stays bounded
+_PRESSURE = (('cpu', 'pressurecpusome', 'pressurecpufull'),
+             ('memory', 'pressurememorysome', 'pressurememoryfull'),
+             ('io', 'pressureiosome', 'pressureiofull'))
+_pressure_reads = {}            # cid -> (epoch, {'nodes': {node: {key: value}}, 'failed': set()})
+_pressure_absent = {}           # (cid, node) -> epoch to ask again
+
+_HEALTH_FAMILIES = (
+    ('pegaprox_node_clock_offset_seconds', 'gauge',
+     'Node clock minus the PegaProx clock in seconds; Proxmox answers whole seconds, so about '
+     '0.5 s plus half the round trip either way'),
+    ('pegaprox_node_temperature_celsius', 'gauge',
+     'Hottest temperature sensor of the node from the 5-minute hardware poll'),
+    ('pegaprox_node_power_watts', 'gauge',
+     'Power draw of the node as its BMC reports it, from the 5-minute hardware poll'),
+    ('pegaprox_node_pressure_some_percent', 'gauge',
+     'Share of time in which some tasks of the node waited for cpu, memory or io '
+     '(pressure stall information, 10 s average, Proxmox VE 9)'),
+    ('pegaprox_node_pressure_full_percent', 'gauge',
+     'Share of time in which all non-idle tasks of the node waited for cpu, memory or io'),
+    ('pegaprox_guest_pressure_some_percent', 'gauge',
+     'Share of time in which some tasks of a running VM or LXC container waited for cpu, memory or io'),
+    ('pegaprox_guest_pressure_full_percent', 'gauge',
+     'Share of time in which all tasks of a running VM or LXC container waited for cpu, memory or io'),
+    ('pegaprox_guest_tag_info', 'gauge',
+     'One series per tag of a VM or LXC container (Proxmox and PegaProx tags, lower case); '
+     'join it on cluster_id and vmid'),
+    ('pegaprox_cluster_qdevice_connected', 'gauge',
+     '1 if the QDevice daemon of the node is connected to the QNetd host, 0 if it is not or runs '
+     'none; from the last QDevice read of the UI or the alert rule, a scrape never reads'),
 )
 
 
@@ -247,6 +294,150 @@ def _put_replication(fam, base, data, now):
         _put(fam, 'pegaprox_replication_fail_count', fails, labels)
         failed = fails > 0 or bool(str(st.get('error') or '').strip())
         _put(fam, 'pegaprox_replication_failed', 1 if failed else 0, labels)
+
+
+def _clock_state(cid, mgr, now):
+    """The last clock read of the cluster when it is recent enough, else None. Older than
+    the alert's own pace, a new one starts in the background."""
+    from pegaprox.background import alert_events
+    hit = alert_events.clock_reading(cid)
+    if hit is None or not 0 <= now - hit['at'] < alert_events.CLOCK_EVERY:
+        _read_in_background('clock', cid, lambda: alert_events.read_node_clocks(cid, mgr))
+        hit = alert_events.clock_reading(cid)
+    if hit is None or now - hit['at'] >= _CLOCK_SERVE_MAX:
+        return None
+    return hit
+
+
+def _api_data(mgr, path, timeout=8):
+    """(status, data) of a GET on the cluster API, (0, None) when nothing came back."""
+    try:
+        resp = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json{path}", timeout=timeout)
+    except Exception as e:
+        logging.debug(f"[metrics] GET {path} failed: {e}")
+        return 0, None
+    if resp.status_code != 200:
+        return resp.status_code, None
+    try:
+        return 200, resp.json().get('data')
+    except Exception:
+        return 0, None
+
+
+def _last_pressure(mgr, node):
+    """{rrd key: value} of the newest RRD point of a node that has pressure figures, {} when
+    its RRD has none (before Proxmox VE 9), None when it did not answer. The newest one or two
+    points of the hour are still being averaged and come back empty."""
+    status, rows = _api_data(mgr, f"/nodes/{quote(node, safe='')}/rrddata?timeframe=hour&cf=AVERAGE")
+    if status != 200 or not isinstance(rows, list):
+        return None
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        got = {k: row[k] for _r, some, full in _PRESSURE for k in (some, full)
+               if isinstance(row.get(k), (int, float)) and not isinstance(row.get(k), bool)}
+        if got:
+            return got
+    return {}
+
+
+def _read_node_pressure(cid, mgr):
+    now = time.time()
+    try:
+        nodes = mgr.get_node_status() or {}
+    except Exception:
+        nodes = {}
+    if not nodes:
+        _pressure_reads[cid] = (now, None)
+        return
+    online = sorted(n for n, info in nodes.items() if (info or {}).get('status') == 'online')
+    ask = [n for n in online if _pressure_absent.get((cid, n), 0) <= now]
+    got = run_per_node({n: (lambda node: _last_pressure(mgr, node)) for n in ask},
+                       max_concurrent=_PRESSURE_PARALLEL, timeout=_PRESSURE_BUDGET) or {}
+    out, failed = {}, set()
+    for node in ask:
+        values = got.get(node)
+        if values is None:
+            failed.add(node)
+        elif not values:
+            _pressure_absent[(cid, node)] = now + _PRESSURE_ABSENT_RETRY
+        else:
+            _pressure_absent.pop((cid, node), None)
+            out[node] = values
+    for key in [k for k in _pressure_absent if k[0] == cid and k[1] not in nodes]:
+        _pressure_absent.pop(key, None)
+    _pressure_reads[cid] = (now, {'nodes': out, 'failed': failed})
+
+
+def _node_pressure(cid, mgr, now):
+    """{'nodes': {node: {key: value}}, 'failed': {node}} of the last read when it is recent
+    enough, else None."""
+    hit = _pressure_reads.get(cid)
+    if hit is None or not 0 <= now - hit[0] < _PRESSURE_EVERY:
+        _read_in_background('pressure', cid, lambda: _read_node_pressure(cid, mgr))
+        hit = _pressure_reads.get(cid)
+    if hit is None or hit[1] is None or now - hit[0] >= _PRESSURE_SERVE_MAX:
+        return None
+    return hit[1]
+
+
+def _put_pressure(fam, scope, values, labels):
+    for resource, some, full in _PRESSURE:
+        lbl = {**labels, 'resource': resource}
+        if isinstance(values.get(some), (int, float)) and not isinstance(values.get(some), bool):
+            _put(fam, f'pegaprox_{scope}_pressure_some_percent', _round_num(values[some], places=3), lbl)
+        if isinstance(values.get(full), (int, float)) and not isinstance(values.get(full), bool):
+            _put(fam, f'pegaprox_{scope}_pressure_full_percent', _round_num(values[full], places=3), lbl)
+
+
+def _put_node_health(fam, base, mgr, names, clock, pressure):
+    """Clock offset, temperature, power and pressure of each node the cluster lists."""
+    temp_of = getattr(mgr, 'get_cached_node_temp', None)
+    hw_of = getattr(mgr, 'get_cached_node_hardware', None)
+    for name in names:
+        labels = {**base, 'node': name}
+        reading = (clock or {}).get('nodes', {}).get(name)
+        if reading:
+            _put(fam, 'pegaprox_node_clock_offset_seconds', _round_num(reading[0], places=2), labels)
+        try:
+            temp = temp_of(name) if callable(temp_of) else None
+            hw = hw_of(name) if callable(hw_of) else None
+        except Exception as e:
+            logging.debug(f"[metrics] {base.get('cluster_id')}/{name} hardware cache: {e}")
+            temp = hw = None
+        if isinstance(temp, (int, float)) and not isinstance(temp, bool):
+            _put(fam, 'pegaprox_node_temperature_celsius', _round_num(temp, places=1), labels)
+        watts = hw.get('power_w') if isinstance(hw, dict) and hw.get('available') else None
+        if isinstance(watts, (int, float)) and not isinstance(watts, bool):
+            _put(fam, 'pegaprox_node_power_watts', _round_num(watts, places=1), labels)
+        if pressure and name in pressure['nodes']:
+            _put_pressure(fam, 'node', pressure['nodes'][name], labels)
+
+
+def _put_qdevice(fam, base, cid, now):
+    """Per node that answered the last QDevice read (core/qdevice.py), kept there for the
+    QDevice view and the alert rule. A node that was not asked or did not answer has no
+    series, and neither has a cluster without a QDevice."""
+    from pegaprox.core import qdevice
+    v = qdevice.cached(cid, now)
+    if v is None or not (v['present'] or v.get('seen')):
+        return
+    for r in v['nodes']:
+        if r['answered']:
+            _put(fam, 'pegaprox_cluster_qdevice_connected', 1 if r['connected'] else 0,
+                 {**base, 'node': r['node']})
+
+
+def _guest_tags(cid, vms):
+    """{vmid: [tag, ...]} sorted and cut to _GUEST_TAGS_MAX, from the rows the scrape read and
+    PegaProx's own tags (one query per cluster), merged as the tag views merge them."""
+    from pegaprox.background.alert_events import guest_tags
+    out = {}
+    for vmid, tags in guest_tags(cid, vms).items():
+        kept = sorted(t[:64] for t in tags if t)[:_GUEST_TAGS_MAX]
+        if kept:
+            out[vmid] = kept
+    return out
 
 
 def _node_apt_updates_available(cid, mgr, node):
@@ -465,7 +656,7 @@ def prometheus_metrics():
     emit('# TYPE pegaprox_ceph_osd_in gauge')
 
     now = time.time()
-    fam = {name: [] for name, _t, _h in _ESTATE_FAMILIES}
+    fam = {name: [] for name, _t, _h in _ESTATE_FAMILIES + _HEALTH_FAMILIES}
 
     # a scrape walks every cluster over the API; copy the dict so a cluster
     # registered mid-scrape can't break the whole exposition
@@ -479,8 +670,10 @@ def prometheus_metrics():
         ctype = getattr(mgr, 'cluster_type', 'proxmox')
 
         # Node counts + per-node stats
+        node_names = []
         try:
             node_status = mgr.get_node_status() or {}
+            node_names = sorted(node_status)
             nodes_total = len(node_status)
             nodes_online = 0
             for name, info in node_status.items():
@@ -550,6 +743,27 @@ def prometheus_metrics():
                 logging.debug(f"[metrics] {cid} backup ages failed: {e}")
             _put(fam, 'pegaprox_cluster_source_up', 0 if last_backup is None else 1,
                  {**base, 'source': 'backups'})
+        clock = pressure = None
+        if ctype == 'proxmox':
+            try:
+                clock = _clock_state(cid, mgr, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} clock failed: {e}")
+            _put(fam, 'pegaprox_cluster_source_up',
+                 1 if clock is not None and len(clock['nodes']) == len(clock['online']) else 0,
+                 {**base, 'source': 'clock'})
+            try:
+                pressure = _node_pressure(cid, mgr, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} node pressure failed: {e}")
+            _put(fam, 'pegaprox_cluster_source_up', 1 if pressure is not None and not pressure['failed'] else 0,
+                 {**base, 'source': 'node_pressure'})
+        _put_node_health(fam, base, mgr, node_names, clock, pressure)
+        if ctype == 'proxmox':
+            try:
+                _put_qdevice(fam, base, cid, now)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} qdevice failed: {e}")
 
         # VM counts
         try:
@@ -561,6 +775,11 @@ def prometheus_metrics():
             out.extend(_sample('pegaprox_cluster_vms_total', len(vms), base))
             running = sum(1 for v in vms if v.get('status') == 'running')
             out.extend(_sample('pegaprox_cluster_vms_running', running, base))
+            try:
+                tags = _guest_tags(cid, vms)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} guest tags failed: {e}")
+                tags = {}
 
             for v in vms:
                 vmid = v.get('vmid', '')
@@ -598,6 +817,10 @@ def prometheus_metrics():
                 if 'diskwrite' in v:
                     out.extend(_sample('pegaprox_guest_disk_write_bytes_total', _num(v.get('diskwrite')), labels))
                 out.extend(_sample('pegaprox_guest_uptime_seconds', _num(v.get('uptime', 0)), labels))
+                for tag in tags.get(int(vmid), ()) if str(vmid).isdigit() else ():
+                    _put(fam, 'pegaprox_guest_tag_info', 1, {**base, 'vmid': vmid, 'tag': tag})
+                if v.get('status') == 'running':
+                    _put_pressure(fam, 'guest', v, labels)
                 if last_backup is not None and v.get('type') in ('qemu', 'lxc') and not v.get('template'):
                     try:
                         ts = last_backup.get(int(vmid), 0)
@@ -609,7 +832,7 @@ def prometheus_metrics():
         except Exception as e:
             logging.debug(f"[metrics] {cid} vm list failed: {e}")
 
-    for name, mtype, help_text in _ESTATE_FAMILIES:
+    for name, mtype, help_text in _ESTATE_FAMILIES + _HEALTH_FAMILIES:
         emit(f'# HELP {name} {help_text}')
         emit(f'# TYPE {name} {mtype}')
         out.extend(fam[name])

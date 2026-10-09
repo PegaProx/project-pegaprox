@@ -9,6 +9,7 @@ registering blueprints after the first request — plugins can be loaded at runt
 """
 
 import json
+import os
 import re
 import sys
 import threading
@@ -258,10 +259,34 @@ def unload_plugin(plugin_id):
     logging.info(f"[PLUGINS] Unloaded: {plugin_id}")
 
 
+def seed_bundled_plugins():
+    """Bring the plugins the image ships (PEGAPROX_PLUGINS_SEED) into PLUGINS_DIR: code
+    replaced, a plugin's config.json and a plugin the admin added left alone. MK Oct 2026
+    (#1134) - the Docker image loads its plugins from the config volume, so a new image
+    no longer resets their settings. Unset everywhere else (the .deb postinst, update.sh
+    and deploy.sh run the same sync)."""
+    seed = os.environ.get('PEGAPROX_PLUGINS_SEED', '').strip()
+    if not seed or not os.path.isdir(seed):
+        return
+    if os.path.realpath(seed) == os.path.realpath(PLUGINS_DIR):
+        return
+    # the sync script ships with the code, not with the plugins
+    app_root = Path(__file__).resolve().parents[2]
+    script = app_root / 'packaging' / 'plugins' / 'sync_plugins.py'
+    try:
+        spec = importlib.util.spec_from_file_location('pegaprox_sync_plugins', script)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.sync(seed, PLUGINS_DIR, say=lambda msg: logging.info(f"[PLUGINS] {msg}"))
+    except Exception as e:
+        logging.warning(f"[PLUGINS] could not bring the bundled plugins into {PLUGINS_DIR}: {e}")
+
+
 def load_enabled_plugins(app):
     """Called once at startup — load all enabled plugins"""
     global _app
     _app = app
+    seed_bundled_plugins()
     states = _get_plugin_states()
     discovered = _discover_plugins()
 
@@ -524,6 +549,25 @@ def delete_plugin(plugin_id):
     log_audit(usr, 'plugins.deleted', f"Deleted plugin: {plugin_id}")
 
     return jsonify({'success': True, 'message': f'Plugin {plugin_id} deleted.'})
+
+
+def plugin_file(plugin_id, filename):
+    """A file of a plugin, from the directory the plugins are loaded from, as an absolute
+    path - None for a bad id, a path that resolves out of the plugin's folder (a symlink,
+    '..') and a file that is not there. MK Oct 2026 (#1134) - a plugin's own page was read
+    next to the program files, where a package install has no plugins: the plugin ran
+    and its page said "not installed". Same containment as load_plugin."""
+    if not _valid_plugin_id(plugin_id) or not isinstance(filename, str) or not filename:
+        return None
+    root = Path(PLUGINS_DIR).resolve()
+    plugin_dir = (root / plugin_id).resolve()
+    path = (plugin_dir / filename).resolve()
+    try:
+        plugin_dir.relative_to(root)
+        path.relative_to(plugin_dir)
+    except ValueError:
+        return None
+    return path if path.is_file() else None
 
 
 def _safe_plugin_path(plugin_id, filename='config.json'):

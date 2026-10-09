@@ -265,7 +265,8 @@ def by_api_token():
 
 def no_lease_refusal(known=True):
     """503 HA_NO_LEASE where the leader of an automatic group takes no change right now:
-    its lease ran out, or it is still taking over (Retry-After says for how long).
+    its lease ran out, it is still taking over (Retry-After says for how long), or less
+    than ha_vote.WRITE_LEASE_MARGIN of the lease is left (ha.takes_writes, Q16).
     None everywhere else, a manual group and an instance of its own included. A caller
     nobody has checked (`known` false) hears that changes are paused and nothing else:
     not whether the group has a leader, not how long a takeover still runs."""
@@ -281,8 +282,8 @@ def no_lease_refusal(known=True):
 
 def write_gate_refusal():
     """What the write gate in app.py answers on an instance that is no standby and may
-    not act right now. Never None: the gate asked ha.is_active() and heard no, and
-    whatever the state says a moment later (the lease loop may have stepped the
+    not take a write right now. Never None: the gate asked ha.takes_writes() and heard
+    no, and whatever the state says a moment later (the lease loop may have stepped the
     instance down in between), this write is not taken. The gate runs before any
     route has looked at the caller, so only a signed-in browser session, or a write a
     member handed over, hears who leads and for how long not."""
@@ -1869,9 +1870,7 @@ def witness_code_bundle():
     if request.headers.get(ha.PEER_HEADER):
         kind, rec = request_witness()
         if kind == 'skewed':
-            return jsonify({'code': 'HA_CLOCK',
-                            'error': f'The clocks of the two instances are more than '
-                                     f'{ha.SIGNATURE_WINDOW} seconds apart - set both by NTP'}), 401
+            return jsonify(ha.clock_refusal(request.headers)), 401
         if kind != 'witness':
             if not _peer_failures.allow(ip):
                 resp = jsonify({'error': 'Too many failed peer calls'})
@@ -2117,9 +2116,7 @@ def _peer_or_refuse():
                                'error': 'This instance was removed from the group - unpair it'}), 410)
     if kind == 'skewed':
         # the signature is good, so this is the member itself: no failure to count
-        return None, (jsonify({'code': 'HA_CLOCK',
-                               'error': f'The clocks of the two instances are more than '
-                                        f'{ha.SIGNATURE_WINDOW} seconds apart - set both by NTP'}), 401)
+        return None, (jsonify(ha.clock_refusal(request.headers)), 401)
     ip = get_client_ip()
     if not _peer_failures.allow(ip):
         logging.debug(f"[HA] peer calls from {ip} over the failure budget")
@@ -2661,9 +2658,7 @@ def peer_witness_leave():
         body = None
     kind, rec = (None, None) if body is None or request.query_string else request_witness()
     if kind == 'skewed':
-        return jsonify({'code': 'HA_CLOCK',
-                        'error': f'The clocks of the two instances are more than '
-                                 f'{ha.SIGNATURE_WINDOW} seconds apart - set both by NTP'}), 401
+        return jsonify(ha.clock_refusal(request.headers)), 401
     if kind != 'witness':
         ip = get_client_ip()
         if not _peer_failures.allow(ip):
@@ -2704,10 +2699,10 @@ def peer_forward():
     client_ip}, the browser's request as the standby took it, and the peer signature
     covers it like the body of every peer call: neither the request nor the user can
     change on the way. Only on the active (409 anywhere else, which also stops a write
-    that would travel on; 503 HA_NO_LEASE on a leader without its lease, said to a
-    member before the body is read, and 503 HA_TRANSFER for a write while it hands its
-    lead on), only from a member that signs its calls, only a
-    write under
+    that would travel on; 503 HA_NO_LEASE on a leader without its lease or with less of
+    it left than ha_vote.WRITE_LEASE_MARGIN, said to a member before the body is read,
+    and 503 HA_TRANSFER for a write while it hands its lead on), only from a member that
+    signs its calls, only a write under
     /api/ and never under /api/ha/ - or a GET of ha.FORWARDED_READS, the progress of a
     job or a view only our tables hold, or of a plugin route that opens no console -
     and only for an account that exists and is enabled here. sign_in is the

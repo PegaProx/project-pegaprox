@@ -27,9 +27,10 @@ PBS = [{'id': 'p1', 'name': 'pbs01', 'host': '10.0.0.9', 'port': 8007, 'connecte
 WITH_PBS = {('GET', '/api/pbs'): (200, PBS)}
 GROUPS = [{'id': 'g1', 'name': 'Production', 'color': '#E86F2D', 'sort_order': 0, 'collapsed': 0},
           {'id': 'g2', 'name': 'Staging', 'color': '#49AFD9', 'sort_order': 1, 'collapsed': 0}]
-ORDER = ['topology', 'worldmap', 'autoinstall', 'xhm', 'mcevpn']
+# All Guests first: the table of every guest, a read on a standby as well
+ORDER = ['guests', 'topology', 'worldmap', 'autoinstall', 'xhm', 'mcevpn']
 # what each entry opens: the corporate header of its view
-TITLES = {'topology': 'Topology', 'worldmap': 'World Map', 'autoinstall': 'Automated Installations',
+TITLES = {'guests': 'All Guests', 'topology': 'Topology', 'worldmap': 'World Map', 'autoinstall': 'Automated Installations',
           'xhm': 'Hypervisor Migration', 'mcevpn': 'Multi-Cluster EVPN'}
 KEY = 'pegaprox_corp_tools_collapsed'
 
@@ -181,7 +182,7 @@ def test_runtime_the_section_sits_under_the_clusters(open_app):
     rows, icons, pbs = geo['rows'], geo['icons'], geo['pbs']
     pitch = pbs[1]['top'] - pbs[0]['top']
     assert round(pitch) == 30, pbs
-    assert len(rows) == 5
+    assert len(rows) == 6
     for i, r in enumerate(rows):
         assert round(r['height']) == round(pbs[0]['height']), (i, r, pbs[0])
         assert round(icons[i]['left']) == round(geo['pbsIcon']['left']), (i, icons[i], geo['pbsIcon'])
@@ -211,7 +212,7 @@ def test_runtime_an_expanded_cluster_comes_before_the_section(open_app):
     # the tree is several screens long, the last guest is far below the fold
     assert where['height'] > 2 * where['view'] and where['guest'] > where['view'], where
     # the tools come after the last guest and stay reachable by scrolling the sidebar
-    assert len(where['tools']) == 4, where
+    assert len(where['tools']) == 5, where
     assert all(where['guest'] < b <= where['height'] for b in where['tools']), where
     assert not app.errors, app.errors
 
@@ -411,11 +412,11 @@ def test_runtime_blocked_storage_still_folds_for_the_session(open_app):
 
 @pytest.mark.parametrize('case,kw,expected', [
     ('pve and xcp-ng', dict(clusters=(CLUSTER, XCP)), ORDER),
-    ('one pve cluster', dict(clusters=(CLUSTER,)), ['topology', 'worldmap', 'autoinstall']),
-    ('two pve clusters', dict(clusters=(CLUSTER, PVE2)), ['topology', 'worldmap', 'autoinstall', 'mcevpn']),
+    ('one pve cluster', dict(clusters=(CLUSTER,)), ['guests', 'topology', 'worldmap', 'autoinstall']),
+    ('two pve clusters', dict(clusters=(CLUSTER, PVE2)), ['guests', 'topology', 'worldmap', 'autoinstall', 'mcevpn']),
     ('view-only installs', dict(autoinstall='view'), ORDER),
-    ('no install permission', dict(autoinstall=None), ['topology', 'worldmap', 'xhm', 'mcevpn']),
-    ('standby', dict(role='standby'), ['topology', 'worldmap', 'xhm', 'mcevpn']),
+    ('no install permission', dict(autoinstall=None), ['guests', 'topology', 'worldmap', 'xhm', 'mcevpn']),
+    ('standby', dict(role='standby'), ['guests', 'topology', 'worldmap', 'xhm', 'mcevpn']),
 ])
 def test_runtime_each_entry_shows_under_its_condition(open_app, case, kw, expected):
     app = _corporate(open_app, **kw)
@@ -442,7 +443,7 @@ def test_runtime_modern_keeps_the_entries_under_all_clusters(open_app):
         const sb = document.querySelector('.pp-sidebar');
         const at = t => { const el = Array.from(sb.querySelectorAll('button, h3')).find(e => e.innerText.trim().startsWith(t));
                           return el ? el.getBoundingClientRect().top : null; };
-        return ['All Clusters', 'World Map', 'Automated Installations', 'Hypervisor Migration', 'Multi-Cluster EVPN', 'Testi'].map(at);
+        return ['All Clusters', 'World Map', 'All Guests', 'Automated Installations', 'Hypervisor Migration', 'Multi-Cluster EVPN', 'Testi'].map(at);
     }""")
     assert None not in tops, tops
     assert tops == sorted(tops), tops

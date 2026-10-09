@@ -61,33 +61,20 @@ def get_node_ip_api(cluster_id, node):
     # (never used here), which AttributeError'd BEFORE the cluster-type branch below on XCP-ng
     # (XcpngManager has no api_port) → 500 on the node-IP endpoint for XCP-ng clusters.
     cluster_host = mgr.host
-    node_ip = None
-    source = None
 
-    # NS Mar 2026: XCP-ng uses XAPI host.get_address instead of Proxmox REST
-    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
-        try:
-            node_ip = mgr._get_host_ip(node)
-            source = 'xapi_host_address'
-        except Exception as e:
-            logging.error(f"XCP-ng get_node_ip: {e}")
-            node_ip = cluster_host
-            source = 'xcpng_fallback'
+    # MK Oct 2026 (#1143) - the node shell's own lookup, members only. _get_node_ip took any
+    # name, so a node.view caller had this server resolve it and knock on its SSH port, and
+    # XCP-ng's _get_host_ip named the pool's host as the address of a host it did not find.
+    # (NS Mar 2026: XCP-ng answers from XAPI's host.get_address, not Proxmox REST)
+    from pegaprox.api.helpers import node_shell_address
+    xcpng = getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng'
+    node_ip = node_shell_address(mgr, node)
+    if node_ip:
+        source = 'xapi_host_address' if xcpng else 'manager_get_node_ip'
     else:
-        # NS Apr 2026 (PR #324): let manager._get_node_ip do the heavy lifting
-        # (scores interfaces, filters corosync IPs out of the mgmt net, probes
-        # the SSH port). This endpoint is informational -- fall back to
-        # cluster_host only when we truly couldn't resolve anything.
-        try:
-            node_ip = mgr._get_node_ip(node)
-            if node_ip:
-                source = 'manager_get_node_ip'
-        except Exception as e:
-            logging.error(f"Error getting node IP: {e}")
-
-        if not node_ip:
-            node_ip = cluster_host
-            source = 'cluster_host_fallback'
+        # informational: the cluster host, said to be a stand-in
+        node_ip = cluster_host
+        source = 'xcpng_fallback' if xcpng else 'cluster_host_fallback'
 
     return jsonify({
         'ip': node_ip,
@@ -180,6 +167,36 @@ def get_node_cluster_health_api(cluster_id, node):
     if isinstance(result, dict) and result.get('error'):
         return jsonify(result), 502
     return jsonify(result)
+
+
+# MK Oct 2026 (#1137) - the QDevice as the QDevice daemons of the nodes report it
+# (core/qdevice.py). The QNetd host is no node of the cluster: its connection state and
+# answer times are all there is of it. Cluster infrastructure, so no pool or guest grant
+# reaches it.
+@bp.route('/api/clusters/<cluster_id>/qdevice', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_qdevice_api(cluster_id):
+    """The QDevice of a Proxmox VE cluster and the state of the QDevice daemon on each node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'present': False})   # an XCP-ng pool has no corosync
+    if not getattr(mgr, 'is_connected', False):
+        return jsonify({'error': 'The cluster is not connected'}), 503
+    from pegaprox.core import qdevice
+    view = qdevice.view(cluster_id, mgr)
+    if view is None:
+        return jsonify({'error': 'The cluster did not answer'}), 503
+    if not view['present'] and not any(r['answered'] for r in view['nodes']):
+        return jsonify({'error': 'No node answered',
+                        'nodes': [{'node': r['node'], 'error': r['error']} for r in view['nodes'] if r['asked']]}), 503
+    return jsonify(qdevice.public(view))
 
 
 # MK May 2026 — lm-sensors readings (CPU temp, fan rpm, voltages).

@@ -743,6 +743,8 @@ AUTOMATIONS = {
     ('pegaprox/api/vmware.py', 'start_vmware_migration'): (1, 'job'),
     ('pegaprox/api/xhm.py', 'xhm_start'): (1, 'job'),
     ('pegaprox/app.py', 'main'): (3, 'local'),
+    # the batch restore runs its restores in ha.as_job, like the server-side bulk migration
+    ('pegaprox/core/batch_restore.py', 'launch'): (1, 'job'),
     ('pegaprox/background/alerts.py', 'start_alert_thread'): (1, 'read'),
     ('pegaprox/background/broadcast.py', 'broadcast_resources_loop'): (4, 'read'),
     ('pegaprox/background/broadcast.py', 'start_broadcast_thread'): (1, 'read'),

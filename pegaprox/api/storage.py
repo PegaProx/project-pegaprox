@@ -26,6 +26,7 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
+from pegaprox.api.helpers import upstream_failure
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_for, ssh_blocked_for
 from pegaprox import globals as _g
 from pegaprox.utils.ssh import read_capped as _read_capped
@@ -1044,7 +1045,7 @@ def execute_storage_migration(cluster_id):
             })
         else:
             error_msg = response.json().get('errors', response.text) if response.text else 'Migration failed'
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error executing storage migration: {e}")
@@ -1630,7 +1631,8 @@ def create_storage(cluster_id):
                 error_msg = f'PVE {response.status_code}: {raw[:300] if raw else "no body"}'
 
             logging.error(f"Failed to create storage [{response.status_code}]: {error_msg}; raw_body={response.text[:500]!r}")
-            return jsonify({'error': error_msg, 'pve_status': response.status_code, 'pve_body': response.text[:500]}), response.status_code
+            return upstream_failure(response.status_code, error_msg, pve_status=response.status_code,
+                                    pve_body=response.text[:500])
             
     except Exception as e:
         logging.error(f"Error creating storage: {e}")
@@ -1716,7 +1718,7 @@ def update_storage(cluster_id, storage_id):
                     error_msg = ', '.join([f"{k}: {v}" for k, v in error_msg.items()])
             except:
                 error_msg = response.text
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error updating storage: {e}")
@@ -1756,7 +1758,7 @@ def delete_storage(cluster_id, storage_id):
                 error_msg = error_data.get('errors', error_data.get('message', response.text))
             except:
                 error_msg = response.text
-            return jsonify({'error': error_msg}), response.status_code
+            return upstream_failure(response.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error deleting storage: {e}")
@@ -2239,7 +2241,7 @@ def scan_storage(cluster_id):
                 error_msg = scan_resp.json().get('errors', scan_resp.text)
             except:
                 error_msg = scan_resp.text
-            return jsonify({'error': error_msg}), scan_resp.status_code
+            return upstream_failure(scan_resp.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error scanning storage: {e}")
@@ -2384,7 +2386,7 @@ def download_template(cluster_id):
                 error_msg = resp.json().get('errors', resp.text)
             except:
                 error_msg = resp.text
-            return jsonify({'error': error_msg}), resp.status_code
+            return upstream_failure(resp.status_code, error_msg)
             
     except Exception as e:
         logging.error(f"Error downloading template: {e}")
@@ -2470,7 +2472,7 @@ def get_node_storage_identity(cluster_id, node, storage):
         if resp.status_code == 200:
             data = resp.json().get('data') or {}
             return jsonify({'supported': True, **data})
-        return jsonify({'error': resp.text or f'HTTP {resp.status_code}'}), resp.status_code
+        return upstream_failure(resp.status_code, resp.text or f'HTTP {resp.status_code}')
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
 
@@ -2559,7 +2561,7 @@ def download_from_url(cluster_id, node, storage):
                 error_msg = resp.json().get('errors', resp.text)
             except:
                 error_msg = resp.text
-            return jsonify({'error': error_msg}), resp.status_code
+            return upstream_failure(resp.status_code, error_msg)
             
     except Exception as e:
         # the exception text repeats the URL, pre-signed query and all
@@ -2593,26 +2595,30 @@ def get_backup_jobs(cluster_id):
             # caller, and to viewing rights: explicit-vmid jobs whose targets they can all see.
             # all=1 / pool / exclude jobs span VMs beyond their grant, so those stay hidden from them.
             from pegaprox.utils.auth import build_authz_user
-            from pegaprox.utils.rbac import user_can_access_vm
             from pegaprox.api.helpers import caller_is_scoped
             _bu = build_authz_user(request.session.get('user', ''), request.session)
             if caller_is_scoped(_bu, cluster_id):
-                def _job_visible(j):
-                    if (str(j.get('all', '')).strip() in ('1', 'true', 'True', 'yes')
-                            or (j.get('pool') or '').strip() or (j.get('exclude') or '').strip()):
-                        return False
-                    _vmids = [x.strip() for x in str(j.get('vmid') or '').split(',') if x.strip()]
-                    if not _vmids:
-                        return False
-                    try:
-                        return all(user_can_access_vm(_bu, cluster_id, int(v), 'vm.view') for v in _vmids)
-                    except (TypeError, ValueError):
-                        return False
-                jobs = [j for j in jobs if _job_visible(j)]
+                jobs = [j for j in jobs if _job_visible(_bu, cluster_id, j)]
             return jsonify(jobs)
         return jsonify([])
     except:
         return jsonify([])
+
+
+def _job_visible(user, cluster_id, job):
+    """Whether a scoped caller sees a backup job: one naming its guests, every one of them theirs
+    to see. All/pool/exclude jobs span guests beyond any grant."""
+    from pegaprox.utils.rbac import user_can_access_vm
+    if (str(job.get('all', '')).strip() in ('1', 'true', 'True', 'yes')
+            or (job.get('pool') or '').strip() or (job.get('exclude') or '').strip()):
+        return False
+    _vmids = [x.strip() for x in str(job.get('vmid') or '').split(',') if x.strip()]
+    if not _vmids:
+        return False
+    try:
+        return all(user_can_access_vm(user, cluster_id, int(v), 'vm.view') for v in _vmids)
+    except (TypeError, ValueError):
+        return False
 
 
 def _authz_backup_targets(cluster_id, data):
@@ -2675,7 +2681,7 @@ def create_backup_job(cluster_id):
                 err_msg = ', '.join(f'{k}: {v}' for k, v in err_msg.items())
         except Exception:
             err_msg = r.text or f'PVE {r.status_code}'
-        return jsonify({'error': err_msg, 'pve_status': r.status_code}), r.status_code
+        return upstream_failure(r.status_code, err_msg, pve_status=r.status_code)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to create backup job')}), 500
 
@@ -2766,7 +2772,7 @@ def update_backup_job(cluster_id, job_id):
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'backup.job_updated', f"Updated backup job {job_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Backup job updated'})
-        return jsonify({'error': r.text}), r.status_code
+        return upstream_failure(r.status_code, r.text)
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to update backup job')}), 500
 
@@ -2820,9 +2826,199 @@ def delete_backup_job(cluster_id, job_id):
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'backup.job_deleted', f"Deleted backup job {job_id}", cluster=manager.config.name)
             return jsonify({'success': True, 'message': 'Backup job deleted'})
-        return jsonify({'error': parse_pve_error(response.text)}), response.status_code
+        return upstream_failure(response.status_code, parse_pve_error(response.text))
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to delete backup job')}), 500
+
+
+# MK Oct 2026 - what the runs of a backup job did, from the vzdump tasks of the nodes
+# (core/backup_runs.py). A caller sees the runs of the jobs the job list shows them.
+_JOB_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}')
+RUN_TASKS_MAX = 128
+
+
+def _job_for_caller(cluster_id, job_id):
+    """(manager, job, None), or (None, None, error response) when the cluster is out of reach,
+    the job is unknown or not one this caller sees"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return None, None, err
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return None, None, error
+    if not _JOB_ID_RE.fullmatch(job_id or '') or getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, None, (jsonify({'error': 'Backup job not found'}), 404)
+    try:
+        r = manager._api_get(f"https://{manager.host}:{manager.api_port}/api2/json/cluster/backup/{job_id}",
+                             timeout=10)
+    except Exception as e:
+        logging.warning(f"[BACKUP-RUNS] job {_sl(job_id)} on {cluster_id} unreadable: {e}")
+        return None, None, (jsonify({'error': 'The backup job cannot be read right now'}), 503)
+    if r.status_code != 200:
+        return None, None, (jsonify({'error': 'Backup job not found'}), 404)
+    job = r.json().get('data') or {}
+    if not isinstance(job, dict) or not job:
+        return None, None, (jsonify({'error': 'Backup job not found'}), 404)
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id) and not _job_visible(user, cluster_id, job):
+        return None, None, (jsonify({'error': 'Backup job not found'}), 404)
+    return manager, job, None
+
+
+def _run_tasks(manager, cluster_id, job, upids):
+    """The tasks `upids` name, each checked to be a vzdump task of `job`: (tasks, None) or
+    (None, error response). One that is not answers the same as an unknown one."""
+    from pegaprox.core import backup_runs as runs
+    if not upids or len(upids) > RUN_TASKS_MAX or len(set(upids)) != len(upids):
+        return None, (jsonify({'error': f'Name 1 to {RUN_TASKS_MAX} tasks of the run'}), 400)
+    tasks = []
+    for upid in upids:
+        m = runs.UPID_RE.fullmatch(upid or '')
+        if not m or m.group('type') != 'vzdump':
+            return None, (jsonify({'error': 'Not a task of this backup job'}), 404)
+        tasks.append({'upid': upid, 'node': m.group('node'), 'end': None})
+    # the runs list read these already; a task named here without it costs one read
+    heads = [runs.header(manager, cluster_id, t) for t in tasks]
+    if any(h is None for h in heads):
+        return None, (jsonify({'error': 'The task log cannot be read right now'}), 503)
+    if not all(runs.belongs(job, h.get('opts')) for h in heads):
+        return None, (jsonify({'error': 'Not a task of this backup job'}), 404)
+    return tasks, None
+
+
+def _caller_sees(cluster_id):
+    """A predicate for the guests of a run: everything for an unconfined caller"""
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    from pegaprox.api.helpers import caller_is_scoped
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not caller_is_scoped(user, cluster_id):
+        return None
+    return lambda vmid, kind: _ucav(user, cluster_id, int(vmid), 'vm.view', kind)
+
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/backup/<job_id>/runs', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_backup_job_runs(cluster_id, job_id):
+    """The runs of a backup job
+
+    Read from the vzdump tasks of the nodes it runs on, newest first: when each run started
+    and ended, how it went (ok, warning, failed, running), whether the schedule started it,
+    and its task on every node. ?days= (1-60, default 14) is how far back, ?limit= (1-100,
+    default 20) how many runs. partial says some tasks could not be read in this call;
+    asking again goes on where it stopped. unread_nodes are offline or did not answer.
+    """
+    from pegaprox.core import backup_runs as runs
+    from pegaprox.api.helpers import bounded_limit, get_task_user
+    manager, job, err = _job_for_caller(cluster_id, job_id)
+    if err:
+        return err
+    days = bounded_limit(request.args.get('days'), runs.DAYS_DEFAULT, runs.DAYS_MAX)
+    limit = bounded_limit(request.args.get('limit'), runs.RUNS_DEFAULT, runs.RUNS_MAX)
+    try:
+        out = runs.job_runs(manager, cluster_id, job, days=days, limit=limit)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to read the runs of the backup job')}), 500
+    for run in out['runs']:
+        run['started_by'] = '' if run['scheduled'] else (get_task_user(run['id']) or '')
+    out.update(job_id=job_id, days=days, limit=limit)
+    return jsonify(out)
+
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/backup/<job_id>/runs/guests', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_backup_job_run_guests(cluster_id, job_id):
+    """The guests of one run of a backup job
+
+    ?upid= once per task of the run (from .../runs). Per guest: its node, state (ok,
+    failed, running, unknown), when it started and ended, how long it took, the error, the
+    archive and its size. missing lists the guests the job names that no task of the run
+    backed up. Read from the task logs, so this costs one log read per task.
+    """
+    from pegaprox.core import backup_runs as runs
+    from pegaprox.utils.concurrent import run_per_node
+    manager, job, err = _job_for_caller(cluster_id, job_id)
+    if err:
+        return err
+    tasks, terr = _run_tasks(manager, cluster_id, job, request.args.getlist('upid'))
+    if terr:
+        return terr
+    by_upid = {t['upid']: t for t in tasks}
+    read = run_per_node({u: (lambda uu: runs.guests_of(manager, cluster_id, by_upid[uu])) for u in by_upid},
+                        max_concurrent=8, timeout=90)
+    sees = _caller_sees(cluster_id)
+    guests, out_tasks = [], []
+    for t in tasks:
+        got = read.get(t['upid'])
+        if got is None:
+            out_tasks.append({'node': t['node'], 'upid': t['upid'], 'readable': False, 'status': ''})
+            continue
+        rows, status = got
+        rows = [dict(g) for g in rows if sees is None or sees(g['vmid'], g['type'])]
+        guests.extend(rows)
+        out_tasks.append({'node': t['node'], 'upid': t['upid'], 'readable': True, 'status': status,
+                          'guests': len(rows)})
+    guests.sort(key=lambda g: (g['vmid'], g['node']))
+    kind, what = runs.selection(job)
+    seen = {g['vmid'] for g in guests}
+    missing = sorted(v for v in what if v not in seen) if kind == 'vmid' and all(
+        t['readable'] for t in out_tasks) else []
+    return jsonify({'guests': guests, 'tasks': out_tasks, 'missing': missing})
+
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/backup/<job_id>/runs/log', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_backup_job_run_log(cluster_id, job_id):
+    """The log of one guest in a run of a backup job, or of a whole task of it
+
+    ?upid= names the task, ?vmid= the guest: its lines only. Without vmid the task log,
+    ?start= and ?limit= (at most 5000 lines) to page through it; a caller confined to some
+    guests names one.
+    """
+    from pegaprox.core import backup_runs as runs
+    from pegaprox.api.helpers import bounded_limit
+    manager, job, err = _job_for_caller(cluster_id, job_id)
+    if err:
+        return err
+    upids = request.args.getlist('upid')
+    if len(upids) != 1:
+        return jsonify({'error': 'Name one task'}), 400
+    tasks, terr = _run_tasks(manager, cluster_id, job, upids)
+    if terr:
+        return terr
+    task = tasks[0]
+    sees = _caller_sees(cluster_id)
+    vmid = request.args.get('vmid')
+    try:
+        if vmid is None:
+            if sees is not None:
+                return jsonify({'error': 'Name the guest whose log you want'}), 403
+            try:
+                start = max(0, int(request.args.get('start', 0)))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'start is a line number'}), 400
+            limit = bounded_limit(request.args.get('limit'), runs.LOG_PAGE, runs.LOG_PAGE)
+            lines = runs.guest_lines(manager, task['node'], task['upid'], start + 1, start + limit)
+            if lines is None:
+                return jsonify({'error': 'The task log cannot be read right now'}), 503
+            return jsonify({'lines': lines, 'start': start, 'more': len(lines) >= limit})
+        if not str(vmid).isdigit():
+            return jsonify({'error': 'vmid is a number'}), 400
+        got = runs.guests_of(manager, cluster_id, task)
+        if got is None:
+            return jsonify({'error': 'The task log cannot be read right now'}), 503
+        guest = next((g for g in got[0] if g['vmid'] == int(vmid)), None)
+        if guest is None or (sees is not None and not sees(guest['vmid'], guest['type'])):
+            return jsonify({'error': 'This guest is not in that task'}), 404
+        lines = runs.guest_lines(manager, task['node'], task['upid'], guest['first'], guest['last'])
+        if lines is None:
+            return jsonify({'error': 'The task log cannot be read right now'}), 503
+        return jsonify({'lines': lines, 'start': guest['first'] - 1,
+                        'more': guest['last'] - guest['first'] + 1 > len(lines)})
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to read the task log')}), 500
 
 
 # ============================================

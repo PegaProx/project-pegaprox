@@ -2135,7 +2135,7 @@
                                 </button>
                                 {showSshSettings && (
                                     <div className="mt-4 space-y-4 p-4 bg-proxmox-dark/50 rounded-lg">
-                                        <p className="text-xs text-gray-400">{t('sshKeyExplanation') || 'SSH features use your login credentials automatically. Only add a key here if password authentication is disabled on your nodes.'}</p>
+                                        <p className="text-xs text-gray-400">{t('sshKeyExplanation')}</p>
                                         <textarea value={config.ssh_key} onChange={e => setConfig({...config, ssh_key: e.target.value})}
                                             className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors font-mono text-xs"
                                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={4} />

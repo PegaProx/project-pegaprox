@@ -36,6 +36,7 @@ from flask import request, jsonify
 
 from pegaprox.api.plugins import register_plugin_route
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error
+from pegaprox.api.helpers import upstream_failure, UPSTREAM_AUTH_STATUSES
 from pegaprox.utils.auth import load_users
 from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
@@ -155,6 +156,16 @@ def _parse_proxmox_error(r):
     return detail
 
 
+def _proxmox_failed(r):
+    """The answer for a Proxmox call that failed: a 4xx as it came, anything else a 502.
+    Its 401/403 is about the login PegaProx keeps, not the caller's session (#1142)."""
+    detail = _parse_proxmox_error(r)
+    if r.status_code in UPSTREAM_AUTH_STATUSES:
+        return upstream_failure(r.status_code, detail=detail)
+    status = r.status_code if 400 <= r.status_code < 500 else 502
+    return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+
+
 # ---------------------------------------------------------------------------
 # Route handler
 # ---------------------------------------------------------------------------
@@ -209,16 +220,12 @@ def ha_handler():
                 if r.status_code == 404:
                     return jsonify({'error': f'HA resource {sid} not found'}), 404
                 if r.status_code != 200:
-                    detail = _parse_proxmox_error(r)
-                    status = r.status_code if 400 <= r.status_code < 500 else 502
-                    return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+                    return _proxmox_failed(r)
                 return jsonify({'data': r.json().get('data')})
             else:
                 r = manager._api_get(_px_url(manager, '/cluster/ha/resources'))
                 if r.status_code != 200:
-                    detail = _parse_proxmox_error(r)
-                    status = r.status_code if 400 <= r.status_code < 500 else 502
-                    return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+                    return _proxmox_failed(r)
                 # NS Aug 2026 (audit) — filter the listing to HA resources the caller may see;
                 # otherwise a scoped user enumerates every tenant's guests + HA state on the cluster.
                 from pegaprox.utils.auth import build_authz_user
@@ -283,9 +290,7 @@ def ha_handler():
         try:
             r = manager._api_post(_px_url(manager, '/cluster/ha/resources'), data=payload)
             if r.status_code != 200:
-                detail = _parse_proxmox_error(r)
-                status = r.status_code if 400 <= r.status_code < 500 else 502
-                return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+                return _proxmox_failed(r)
         except Exception as e:
             log.exception(f"[{cluster_id}] HA POST error")
             return jsonify({'error': safe_error(e, 'HA add failed')}), 500
@@ -350,9 +355,7 @@ def ha_handler():
         try:
             r = manager._api_put(_px_url(manager, f'/cluster/ha/resources/{validated_sid}'), data=payload)
             if r.status_code != 200:
-                detail = _parse_proxmox_error(r)
-                status = r.status_code if 400 <= r.status_code < 500 else 502
-                return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+                return _proxmox_failed(r)
         except Exception as e:
             log.exception(f"[{cluster_id}] HA PUT error")
             return jsonify({'error': safe_error(e, 'HA update failed')}), 500
@@ -388,9 +391,7 @@ def ha_handler():
             if r.status_code == 404:
                 return jsonify({'error': f'HA resource {sid} not found'}), 404
             if r.status_code != 200:
-                detail = _parse_proxmox_error(r)
-                status = r.status_code if 400 <= r.status_code < 500 else 502
-                return jsonify({'error': f'Proxmox returned {r.status_code}', 'detail': detail}), status
+                return _proxmox_failed(r)
         except Exception as e:
             log.exception(f"[{cluster_id}] HA DELETE error")
             return jsonify({'error': safe_error(e, 'HA remove failed')}), 500

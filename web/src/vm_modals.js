@@ -1928,7 +1928,7 @@
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
             const memDataGB = React.useMemo(() => {
                 if (!metricsData?.metrics?.memory || !maxMemGB) return [];
-                return metricsData.metrics.memory.map(p => (p / 100) * maxMemGB);
+                return metricsData.metrics.memory.map(p => p === null ? null : (p / 100) * maxMemGB);
             }, [metricsData, maxMemGB]);
 
             // Toggle HA
@@ -2862,6 +2862,9 @@
         // Migrate Modal Component
         // LW: This thing was a nightmare to debug. ISO detection finally works now!
         // See also: CrossClusterMigrateModal below (similar logic)
+        // storages that keep a qcow2 file, which carries its snapshots along
+        const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
+
         function MigrateModal({ vm, nodes, clusterId, onMigrate, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -3002,6 +3005,37 @@
                 ? virtiofs.filter(v => !dirMappings.some(m => m.id === v.dirid && m.nodes.includes(targetNode)))
                 : [];
 
+            // LW Oct 2026 - snapshots on local disks, read once when the dialog opens: Proxmox
+            // moves no such disk while the VM runs (unless replication has it on the target),
+            // and offline only where both storages keep snapshots in the volume
+            const [snapCheck, setSnapCheck] = useState(null);
+            useEffect(() => {
+                if (!vm || !vm.node || !clusterId) return;
+                let gone = false;
+                (async () => {
+                    try {
+                        const r = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/migrate-check`, { credentials: 'include', headers: getAuthHeaders() });
+                        const d = r && r.ok ? await r.json() : null;
+                        if (!gone) setSnapCheck(d && d.supported !== false ? d : null);
+                    } catch (e) {
+                        if (!gone) setSnapCheck(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [vm && vm.vmid, vm && vm.node, vm && vm.type, clusterId]);
+
+            const snapVols = snapCheck && snapCheck.snapshot_count > 0 ? (snapCheck.volumes || []) : [];
+            const snapLive = !isContainer && vm.status === 'running' && online;
+            const snapNotThere = snapLive
+                ? snapVols.filter(v => !(v.family === 'zfs' && targetNode && (snapCheck.replicated_to || []).includes(targetNode)))
+                : [];
+            const tgtStoreType = targetStorage ? ((storages.find(s => s.storage === targetStorage) || {}).type || '') : '';
+            const snapCarried = (v) => !!v.family && (!tgtStoreType || (v.family === 'zfs' ? tgtStoreType === 'zfspool'
+                : v.family === 'btrfs' ? tgtStoreType === 'btrfs' : MIG_SNAP_FILE_STORAGES.includes(tgtStoreType)));
+            const snapStuck = snapLive ? [] : snapVols.filter(v => !snapCarried(v));
+            const snapCopied = snapLive ? [] : snapVols.filter(snapCarried);
+            const snapDisks = (vols) => vols.map(v => `${v.key} (${v.storage}${v.type ? ', ' + v.type : ''})`).join(', ');
+
             // Fetch storages when target node changes
             useEffect(() => {
                 if(targetNode) {
@@ -3079,6 +3113,41 @@
                                             {vfsMissing.length > 0 && (
                                                 <p className="text-xs text-red-400 mt-2" data-mig-vfs-missing>
                                                     {t('migVfsMissing').replace(/\{node\}/g, () => targetNode).replace(/\{ids\}/g, () => vfsMissing.map(v => v.dirid).join(', '))}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {snapVols.length > 0 && (snapNotThere.length > 0 || snapStuck.length > 0 || snapCopied.length > 0) && (
+                                <div className={`p-3 rounded-lg border ${snapNotThere.length || snapStuck.length ? 'bg-red-500/10 border-red-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}
+                                    data-mig-snap={snapNotThere.length || snapStuck.length ? 'blocked' : 'copied'}>
+                                    <div className="flex items-start gap-2">
+                                        <Icons.AlertTriangle />
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-medium text-sm ${snapNotThere.length || snapStuck.length ? 'text-red-400' : 'text-yellow-400'}`}>{t('migSnapTitle')}</p>
+                                            <p className="text-xs text-gray-300 mt-1">{t('migSnapIntro').replace(/\{count\}/g, () => String(snapCheck.snapshot_count))}</p>
+                                            <div className="mt-2 flex flex-wrap gap-2 text-xs" data-mig-snap-names>
+                                                {(snapCheck.snapshots || []).slice(-6).reverse().map(s => (
+                                                    <code key={s.name} className="bg-proxmox-dark px-1 rounded text-gray-300">{s.name}</code>
+                                                ))}
+                                                {snapCheck.snapshot_count > 6 && (
+                                                    <span className="text-gray-500">{t('migSnapMore').replace(/\{n\}/g, () => String(snapCheck.snapshot_count - 6))}</span>
+                                                )}
+                                            </div>
+                                            {snapNotThere.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-live>
+                                                    {t('migSnapLive').replace(/\{disks\}/g, () => snapDisks(snapNotThere))}
+                                                </p>
+                                            )}
+                                            {snapStuck.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-stuck>
+                                                    {t('migSnapStuck').replace(/\{disks\}/g, () => snapDisks(snapStuck))}
+                                                </p>
+                                            )}
+                                            {snapCopied.length > 0 && (
+                                                <p className="text-xs text-gray-300 mt-2" data-mig-snap-copied>
+                                                    {t('migSnapCopied').replace(/\{disks\}/g, () => snapDisks(snapCopied))}
                                                 </p>
                                             )}
                                         </div>
@@ -4686,6 +4755,15 @@
             );
         }
 
+        // LW Oct 2026 - which rule of the balancer moved a guest: label key and colours, for the
+        // list below and the balancer history in the cluster settings
+        const BAL_HIST_TRIGGERS = {
+            balance: ['balHistTriggerBalance', 'bg-blue-500/20 text-blue-400'],
+            predictive: ['balHistTriggerPredictive', 'bg-purple-500/20 text-purple-400'],
+            affinity: ['balHistTriggerAffinity', 'bg-orange-500/20 text-orange-400'],
+            pin: ['balHistTriggerPin', 'bg-cyan-500/20 text-cyan-400'],
+        };
+
         // Migration History Component
         // LW: Limited to 10 items by default (GitHub Issue - list was too long)
         function MigrationHistory({ logs, maxItems = 10 }) {
@@ -4725,11 +4803,18 @@
                                 <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
                                     <div className="flex items-center justify-between mb-2">
                                         <span className="font-medium text-white">{log.vm}</span>
-                                        {log.dry_run && (
-                                            <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
-                                                Dry Run
-                                            </span>
-                                        )}
+                                        <div className="flex items-center gap-2">
+                                            {BAL_HIST_TRIGGERS[log.trigger] && (
+                                                <span className={`text-xs px-2 py-0.5 rounded ${BAL_HIST_TRIGGERS[log.trigger][1]}`} data-mig-trigger={log.trigger}>
+                                                    {t(BAL_HIST_TRIGGERS[log.trigger][0])}
+                                                </span>
+                                            )}
+                                            {log.dry_run && (
+                                                <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
+                                                    Dry Run
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className="flex items-center gap-2 text-sm text-gray-400">
                                         <span className="font-mono">{log.from_node}</span>
@@ -5965,6 +6050,602 @@
             );
         }
 
+        // LW Oct 2026 - the pending updates of every node and backup server in one table. The
+        // server answers from what each cluster's last update check left (GET /api/updates-overview)
+        // and asks no node; a row opens the update manager of its cluster, which runs the checks.
+        // Nothing here acts, so a standby shows it as it is.
+        function PendingUpdatesOverview({ clusters, onOpen }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const ROWS = 50;
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [query, setQuery] = useState('');
+            const [pendingOnly, setPendingOnly] = useState(() => recall('pegaprox-updates-overview-pending', '0') === '1');
+            const [open, setOpen] = useState(() => recall('pegaprox-updates-overview-open', '1') !== '0');
+            const [showAll, setShowAll] = useState(false);
+            const [sort, setSort] = useState({ by: 'count', dir: 'desc' });
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('node.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('node.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/updates-overview`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                    else setData(prev => prev || { failed: true });
+                } catch (e) {
+                    console.error('updates overview:', e);
+                    if (mine === seq.current) setData(prev => prev || { failed: true });
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey || !open) return;
+                load();
+                // a check made in another tab or by the schedule shows up within a few minutes
+                const timer = setInterval(load, 300000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey, open]);
+
+            if (!allowed || !clusterKey || (data && data.denied)) return null;
+
+            const label = (r) => {
+                const c = clusters.find(x => x.id === r.cluster_id);
+                return (c && (c.display_name || c.name)) || r.cluster_name;
+            };
+            const all = (data && data.hosts) || [];
+            const listed = (data && data.clusters) || [];
+            const needsLook = (h) => !h.ok || h.count > 0;
+            const q = query.trim().toLowerCase();
+            const rows = all.filter(h => !pendingOnly || needsLook(h))
+                .filter(h => !q || `${label(h)} ${h.name}`.toLowerCase().includes(q));
+            const keyOf = {
+                cluster: h => label(h).toLowerCase(), host: h => (h.name || '').toLowerCase(),
+                // a check that failed comes before any count: it is the one to look at
+                count: h => h.ok ? h.count : Number.MAX_SAFE_INTEGER, security: h => h.security ?? -1,
+                channel: h => h.channel || '', subscription: h => h.subscription || '', checked: h => h.checked_at || 0,
+            };
+            const pick = keyOf[sort.by] || keyOf.count;
+            const sorted = [...rows].sort((a, b) => {
+                const x = pick(a), y = pick(b);
+                const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+                return (sort.dir === 'asc' ? c : -c) || label(a).localeCompare(label(b)) || (a.name || '').localeCompare(b.name || '');
+            });
+            const shown = showAll ? sorted : sorted.slice(0, ROWS);
+            const pending = all.reduce((sum, h) => sum + (h.ok ? h.count : 0), 0);
+            const hostsWith = all.filter(h => h.ok && h.count > 0).length;
+            const failedHosts = all.filter(h => !h.ok).length;
+            const unchecked = listed.filter(c => c.state === 'unchecked');
+            const confined = listed.filter(c => c.state === 'confined');
+            const rolling = {};
+            listed.forEach(c => { if (c.rolling) rolling[c.cluster_id] = c.rolling; });
+            const toggle = () => { store('pegaprox-updates-overview-open', open ? '0' : '1'); setOpen(!open); };
+            const sortOn = (by) => setSort(s => s.by === by
+                ? { by, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+                : { by, dir: ['cluster', 'host', 'channel', 'subscription'].includes(by) ? 'asc' : 'desc' });
+            const channelText = { enterprise: t('allUpdatesEnterprise'), 'no-subscription': t('allUpdatesNoSubscription'),
+                test: t('allUpdatesTest'), mixed: t('allUpdatesMixed'), none: t('allUpdatesNoRepo') };
+            const subText = { active: t('allUpdatesSubActive'), notfound: t('allUpdatesSubNone'), new: t('allUpdatesSubNew'),
+                invalid: t('allUpdatesSubInvalid'), expired: t('allUpdatesSubExpired'), suspended: t('allUpdatesSubSuspended'),
+                unknown: t('allUpdatesSubUnknown') };
+            // apt cannot download from the enterprise repository without an active subscription
+            const repoNote = (h) => [
+                h.channel === 'enterprise' && h.subscription && h.subscription !== 'active' ? t('allUpdatesEnterpriseNoSub') : '',
+                h.repo_warnings > 0 ? t('allUpdatesRepoWarnings').replace('{n}', h.repo_warnings) : '',
+            ].filter(Boolean).join('\n');
+            const checkedText = (h) => h.checked_at ? new Date(h.checked_at * 1000).toLocaleString() : '-';
+            const rowKey = (h) => `${h.cluster_id}:${h.kind}:${h.kind === 'pbs' ? h.pbs_id : h.name}`;
+            const go = (cid) => { if (onOpen) onOpen(cid); };
+            const columns = [
+                { by: 'cluster', label: t('cluster') }, { by: 'host', label: t('allUpdatesHost') },
+                { by: 'count', label: t('allUpdatesPending') }, { by: 'security', label: t('allUpdatesSecurity') },
+                { by: 'channel', label: t('allUpdatesRepo') }, { by: 'subscription', label: t('allUpdatesSubscription') },
+                { by: 'checked', label: t('allUpdatesChecked') },
+            ];
+            const rollingText = (cid) => rolling[cid] === 'paused' ? t('allUpdatesRollingPaused') : t('allUpdatesRolling');
+
+            const filters = (
+                <div className="flex items-center gap-3 flex-wrap">
+                    <div className="relative">
+                        <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                        <input data-updates-overview-search value={query} onChange={e => setQuery(e.target.value)} placeholder={t('search')}
+                            style={{ paddingLeft: '1.75rem' }} className="pr-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg w-48" />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                        <input data-updates-overview-pending type="checkbox" checked={pendingOnly}
+                            onChange={e => { setPendingOnly(e.target.checked); store('pegaprox-updates-overview-pending', e.target.checked ? '1' : '0'); }} />
+                        {t('allUpdatesPendingOnly')}
+                    </label>
+                </div>
+            );
+            const footer = (
+                <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {unchecked.length > 0 && (
+                            <span data-updates-overview-unchecked className="text-amber-400">
+                                {t('allUpdatesUnchecked')}{' '}
+                                {unchecked.map((c, i) => (
+                                    <React.Fragment key={c.cluster_id}>
+                                        {i > 0 && ', '}
+                                        {onOpen ? (
+                                            <button type="button" data-updates-overview-open={c.cluster_id} onClick={() => go(c.cluster_id)}
+                                                title={t('allUpdatesOpen')} className="underline hover:text-proxmox-orange">{label(c)}</button>
+                                        ) : label(c)}
+                                    </React.Fragment>
+                                ))}
+                            </span>
+                        )}
+                        {confined.length > 0 && (
+                            <span data-updates-overview-unlisted className="text-amber-400">
+                                {t('allStorageNotListed')} {confined.map(c => `${label(c)} (${t('allStorageConfined')})`).join(', ')}
+                            </span>
+                        )}
+                    </div>
+                    {rows.length > ROWS && (
+                        <button type="button" data-updates-overview-more onClick={() => setShowAll(!showAll)} className="text-proxmox-orange hover:underline">
+                            {showAll ? t('showLess') : t('allStorageShowAll').replace('{n}', rows.length)}
+                        </button>
+                    )}
+                </div>
+            );
+            const waiting = !data && (
+                <div className="text-sm text-gray-500">{t('loading') || 'Loading...'}</div>
+            );
+            const empty = data && (data.failed ? (
+                <div data-updates-overview-failed className="text-sm text-amber-400">{t('allUpdatesReadFailed')}</div>
+            ) : rows.length === 0 && (
+                <div data-updates-overview-empty className="text-sm text-gray-400 flex items-center gap-2">
+                    {all.length === 0 ? t('allUpdatesEmpty')
+                        : !q && all.every(h => !needsLook(h)) ? <><span className="inline-flex text-green-400"><Icons.CheckCircle /></span> {t('allUpdatesUpToDate')}</>
+                        : t('allUpdatesNoMatch')}
+                </div>
+            ));
+            const refreshButton = (
+                <button type="button" onClick={() => load()} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('allStorageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+            const summary = data && !data.failed && (pending > 0 || failedHosts > 0) && (
+                <span data-updates-overview-summary className="inline-flex items-center gap-2">
+                    {pending > 0 && <span className={isCorporate ? '' : 'text-yellow-400'} style={isCorporate ? {color: '#efc006'} : undefined}>
+                        {t('allUpdatesSummary').replace('{n}', pending).replace('{h}', hostsWith)}</span>}
+                    {failedHosts > 0 && <span className={isCorporate ? '' : 'text-red-400'} style={isCorporate ? {color: '#f54f47'} : undefined}>
+                        {t('allUpdatesFailedHosts').replace('{n}', failedHosts)}</span>}
+                </span>
+            );
+
+            if (isCorporate) {
+                return (
+                    <div data-updates-overview>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <span className="inline-flex" style={{color: '#efc006'}}><Icons.Download /></span>
+                            <button type="button" data-updates-overview-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('allUpdatesTitle')}</button>
+                            {data && !data.failed && <span data-updates-overview-count className="text-[11px]" style={{color: '#728b9a'}}>{all.length}</span>}
+                            {summary && <span className="text-[11px]">{summary}</span>}
+                            <span className="flex-1" />
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {filters}
+                                {waiting}
+                                {empty}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-updates-overview-sort={col.by} className="cursor-pointer" style={{textAlign: 'left'}} onClick={() => sortOn(col.by)}>
+                                                        {col.label} {sort.by === col.by && <span className="sort-indicator">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {shown.map(h => {
+                                                const note = repoNote(h);
+                                                return (
+                                                    <tr key={rowKey(h)} data-updates-overview-row={rowKey(h)} className={onOpen ? 'table-row-hover cursor-pointer' : ''}
+                                                        title={onOpen ? t('allUpdatesOpen') : undefined} onClick={() => go(h.cluster_id)}>
+                                                        <td style={{fontWeight: 500}}>
+                                                            {label(h)}
+                                                            {rolling[h.cluster_id] && <>{' '}<span data-updates-overview-rolling className="ml-1 text-[11px]" style={{color: '#49afd9'}}>{rollingText(h.cluster_id)}</span></>}
+                                                        </td>
+                                                        <td style={{color: '#adbbc4'}}>
+                                                            {h.name}
+                                                            {h.kind === 'pbs' && <>{' '}<span className="ml-1 text-[10px] uppercase" style={{color: '#a178d9'}}>PBS</span></>}
+                                                        </td>
+                                                        <td>
+                                                            {!h.ok ? <span style={{color: '#f54f47'}}>{t('allUpdatesCheckFailed')}</span> : (
+                                                                <span style={{color: h.count > 0 ? '#efc006' : '#60b515', fontWeight: h.count > 0 ? 600 : 400}}>{h.count}</span>
+                                                            )}
+                                                            {h.kernel && <>{' '}<span data-updates-overview-kernel className="ml-1 text-[11px]" style={{color: '#49afd9'}} title={t('allUpdatesKernelHint')}>{t('allUpdatesKernel')}</span></>}
+                                                        </td>
+                                                        <td title={h.security == null ? t('allUpdatesSecurityUnknown') : undefined}>
+                                                            {h.security == null ? <span style={{color: '#728b9a'}}>-</span>
+                                                                : <span style={{color: h.security > 0 ? '#f54f47' : '#adbbc4'}}>{h.security}</span>}
+                                                        </td>
+                                                        <td>
+                                                            <span className="inline-flex items-center gap-1">
+                                                                {h.channel ? (channelText[h.channel] || h.channel) : '-'}
+                                                                {note && <span data-updates-overview-repo-note title={note} className="text-[11px] font-bold" style={{color: '#efc006'}}>(!)</span>}
+                                                            </span>
+                                                        </td>
+                                                        <td style={{color: h.subscription === 'active' ? '#60b515' : '#adbbc4'}}>{h.subscription ? (subText[h.subscription] || h.subscription) : '-'}</td>
+                                                        <td style={h.stale ? {color: '#efc006'} : {color: '#adbbc4'}} title={h.stale ? t('allUpdatesStale') : undefined}>{checkedText(h)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            return (
+                <div data-updates-overview className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-updates-overview-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center text-yellow-400">
+                                <Icons.Download />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('allUpdatesTitle')} {data && !data.failed && <span data-updates-overview-count className="text-sm font-normal text-gray-500">({all.length})</span>}
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('allUpdatesDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-2">
+                            {summary && <span className="text-xs font-medium">{summary}</span>}
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {filters}
+                            {waiting}
+                            {empty}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-updates-overview-sort={col.by} className="px-4 py-3 font-medium cursor-pointer hover:text-white" onClick={() => sortOn(col.by)}>
+                                                        {col.label}{sort.by === col.by && <span className="ml-1">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {shown.map(h => {
+                                                const note = repoNote(h);
+                                                return (
+                                                    <tr key={rowKey(h)} data-updates-overview-row={rowKey(h)} onClick={() => go(h.cluster_id)}
+                                                        title={onOpen ? t('allUpdatesOpen') : undefined}
+                                                        className={`hover:bg-proxmox-hover/50 transition-colors ${onOpen ? 'cursor-pointer' : ''}`}>
+                                                        <td className="px-4 py-2 text-sm text-gray-300">
+                                                            {label(h)}
+                                                            {rolling[h.cluster_id] && <div data-updates-overview-rolling className="text-[11px] text-blue-400">{rollingText(h.cluster_id)}</div>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm font-medium text-white">
+                                                            {h.name}
+                                                            {h.kind === 'pbs' && <>{' '}<span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-purple-500/20 text-purple-400 uppercase">PBS</span></>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm">
+                                                            {!h.ok ? <span className="text-red-400">{t('allUpdatesCheckFailed')}</span> : (
+                                                                <span className={h.count > 0 ? 'font-semibold text-yellow-400' : 'text-green-400'}>{h.count}</span>
+                                                            )}
+                                                            {h.kernel && <>{' '}<span data-updates-overview-kernel title={t('allUpdatesKernelHint')} className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-blue-500/20 text-blue-400">{t('allUpdatesKernel')}</span></>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm" title={h.security == null ? t('allUpdatesSecurityUnknown') : undefined}>
+                                                            {h.security == null ? <span className="text-gray-500">-</span>
+                                                                : <span className={h.security > 0 ? 'font-semibold text-red-400' : 'text-gray-300'}>{h.security}</span>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-xs text-gray-400">
+                                                            <span className="inline-flex items-center gap-1">
+                                                                {h.channel ? (channelText[h.channel] || h.channel) : '-'}
+                                                                {note && <span data-updates-overview-repo-note title={note} className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-500/20 text-yellow-400 text-[10px] font-bold">!</span>}
+                                                            </span>
+                                                        </td>
+                                                        <td className={`px-4 py-2 text-xs ${h.subscription === 'active' ? 'text-green-400' : 'text-gray-400'}`}>{h.subscription ? (subText[h.subscription] || h.subscription) : '-'}</td>
+                                                        <td className={`px-4 py-2 text-xs ${h.stale ? 'text-amber-400' : 'text-gray-400'}`} title={h.stale ? t('allUpdatesStale') : undefined}>{checkedText(h)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the Ceph of every cluster in one panel: health and its checks, capacity,
+        // OSDs, placement groups, client I/O and monitors. One status read per cluster on the
+        // server (GET /api/ceph-overview), shared with the Ceph health alert. Shows only where a
+        // cluster has Ceph; a row opens the Ceph page of its cluster. Only reads.
+        function CephOverview({ clusters, onOpen }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [open, setOpen] = useState(() => recall('pegaprox-ceph-overview-open', '1') !== '0');
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('cluster.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('cluster.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/ceph-overview`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                    else setData(prev => prev || { failed: true });
+                } catch (e) {
+                    console.error('ceph overview:', e);
+                    if (mine === seq.current) setData(prev => prev || { failed: true });
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey || !open) return;
+                load();
+                // the server keeps a read for 30 s, the health alert reads at its own pace
+                const timer = setInterval(load, 60000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey, open]);
+
+            const rows = (data && data.ceph) || [];
+            const listed = (data && data.clusters) || [];
+            // gone silent after it answered: that one keeps the panel
+            const lost = listed.filter(c => c.state === 'unreadable' && c.had_ceph);
+            // no panel where no cluster has Ceph; a folded one stays where it was folded
+            const any = rows.length > 0 || lost.length > 0 || (data && data.failed);
+            if (!allowed || !clusterKey || (data && data.denied) || (open && !any)) return null;
+
+            const label = (r) => {
+                const c = clusters.find(x => x.id === r.cluster_id);
+                return (c && (c.display_name || c.name)) || r.cluster_name;
+            };
+            const unlisted = [...lost, ...listed.filter(c => c.state === 'confined' || (c.state === 'offline' && rows.length > 0))];
+            const stateText = { offline: t('allStorageOffline'), unreadable: t('allStorageUnreadable'), confined: t('allStorageConfined') };
+            const unhealthy = rows.filter(r => r.health !== 'HEALTH_OK').length;
+            const toggle = () => { store('pegaprox-ceph-overview-open', open ? '0' : '1'); setOpen(!open); };
+            const go = (cid) => { if (onOpen) onOpen(cid); };
+            const size = (b) => formatBytes(b || 0);
+            const level = (h) => h === 'HEALTH_OK' ? 'ok' : h === 'HEALTH_WARN' ? 'warn' : h === 'HEALTH_ERR' ? 'err' : 'none';
+            const fill = (p) => p == null ? 'none' : p >= 85 ? 'err' : p >= 75 ? 'warn' : 'ok';
+            const osdText = (r) => t('allCephOsdsValue').replace('{up}', r.osds.up).replace('{total}', r.osds.total).replace('{in}', r.osds.in);
+            const osdsShort = (r) => r.osds.up < r.osds.total || r.osds.in < r.osds.total;
+            const pgText = (r) => t('allCephPgsClean').replace('{clean}', r.pgs.clean).replace('{total}', r.pgs.total);
+            const otherPgs = (r) => r.pgs.states.filter(s => !s.state.split('+').includes('clean') || !s.state.split('+').includes('active'));
+            const monText = (r) => t('allCephMonsValue').replace('{quorum}', r.mons.quorum).replace('{total}', r.mons.total);
+            const ioLines = (r) => [
+                t('allCephRead').replace('{v}', size(r.io.read_bps)).replace('{n}', r.io.read_iops),
+                t('allCephWrite').replace('{v}', size(r.io.write_bps)).replace('{n}', r.io.write_iops),
+                r.io.recovery_bps > 0 ? t('allCephRecovery').replace('{v}', size(r.io.recovery_bps)) : '',
+            ].filter(Boolean);
+            const healthText = (r) => (r.health || '').replace('HEALTH_', '') || '?';
+            const columns = [t('cluster'), t('allCephHealth'), t('allCephCapacity'), t('allCephOsds'), t('allCephPgs'), t('allCephIo'), t('allCephMons')];
+
+            const footer = unlisted.length > 0 && (
+                <div data-ceph-overview-unlisted className="text-xs text-amber-400">
+                    {t('allStorageNotListed')} {unlisted.map(c => `${label(c)} (${stateText[c.state] || c.state})`).join(', ')}
+                </div>
+            );
+            const failed = data && data.failed && (
+                <div data-ceph-overview-failed className="text-sm text-amber-400">{t('allCephFailed')}</div>
+            );
+            const refreshButton = (
+                <button type="button" onClick={() => load()} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('allStorageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+            const headline = rows.length > 0 && (unhealthy > 0
+                ? <span data-ceph-overview-summary className={isCorporate ? '' : 'text-yellow-400'} style={isCorporate ? {color: '#efc006'} : undefined}>{t('allCephUnhealthy').replace('{n}', unhealthy)}</span>
+                : <span data-ceph-overview-summary className={isCorporate ? '' : 'text-green-400'} style={isCorporate ? {color: '#60b515'} : undefined}>{t('allCephHealthy')}</span>);
+
+            if (isCorporate) {
+                const color = { ok: '#60b515', warn: '#efc006', err: '#f54f47', none: '#728b9a' };
+                return (
+                    <div data-ceph-overview>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <Icons.HardDrive className="w-3.5 h-3.5" style={{color: '#a178d9'}} />
+                            <button type="button" data-ceph-overview-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('allCephTitle')}</button>
+                            {rows.length > 0 && <span data-ceph-overview-count className="text-[11px]" style={{color: '#728b9a'}}>{rows.length}</span>}
+                            {headline && <span className="text-[11px]">{headline}</span>}
+                            <span className="flex-1" />
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {failed}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>{columns.map(c => <th key={c} style={{textAlign: 'left'}}>{c}</th>)}</tr>
+                                        </thead>
+                                        <tbody>
+                                            {rows.map(r => (
+                                                <tr key={r.cluster_id} data-ceph-overview-row={r.cluster_id} data-health={r.health}
+                                                    className={onOpen ? 'table-row-hover cursor-pointer' : ''} title={onOpen ? t('allCephOpen') : undefined} onClick={() => go(r.cluster_id)}>
+                                                    <td style={{fontWeight: 500}}>{label(r)}</td>
+                                                    <td>
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: color[level(r.health)]}} />
+                                                            <span style={{color: color[level(r.health)], fontSize: '12px', fontWeight: 600}}>{healthText(r)}</span>
+                                                        </span>
+                                                        {r.checks.slice(0, 2).map(c => (
+                                                            <div key={c.name} data-ceph-overview-check={c.name} className="text-[11px]" style={{color: color[level(c.severity)]}} title={c.name}>{c.message || c.name}</div>
+                                                        ))}
+                                                        {(r.checks.length > 2 || r.checks_more > 0) && (
+                                                            <div className="text-[11px]" style={{color: '#728b9a'}} title={r.checks.slice(2).map(c => c.message || c.name).join('\n')}>
+                                                                {t('allCephMoreChecks').replace('{n}', r.checks.length - 2 + r.checks_more)}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td>
+                                                        {r.percent == null ? '-' : (
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span style={{color: color[fill(r.percent)], minWidth: '40px'}}>{r.percent.toFixed(1)}%</span>
+                                                                <span className="inline-block" style={{width: '60px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                                    <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(r.percent, 100)}%`, background: color[fill(r.percent)]}} />
+                                                                </span>
+                                                            </div>
+                                                        )}
+                                                        <div className="text-[11px]" style={{color: '#728b9a'}}>{size(r.bytes.used)} / {size(r.bytes.total)}</div>
+                                                    </td>
+                                                    <td style={{color: osdsShort(r) ? '#efc006' : '#adbbc4'}}>{osdText(r)}</td>
+                                                    <td>
+                                                        <div style={{color: r.pgs.clean < r.pgs.total ? '#efc006' : '#adbbc4'}}>{pgText(r)}</div>
+                                                        {otherPgs(r).slice(0, 3).map(s => (
+                                                            <div key={s.state} className="text-[11px]" style={{color: '#728b9a'}}>{s.count} {s.state}</div>
+                                                        ))}
+                                                    </td>
+                                                    <td className="text-[12px]" style={{color: '#adbbc4'}}>
+                                                        {ioLines(r).map(line => <div key={line}>{line}</div>)}
+                                                    </td>
+                                                    <td style={{color: r.mons.quorum < r.mons.total ? '#efc006' : '#adbbc4'}}>{monText(r)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            const badge = { ok: 'bg-green-500/20 text-green-400', warn: 'bg-yellow-500/20 text-yellow-400', err: 'bg-red-500/20 text-red-400', none: 'bg-gray-500/20 text-gray-400' };
+            const text = { ok: 'text-green-400', warn: 'text-yellow-400', err: 'text-red-400', none: 'text-gray-400' };
+            const bar = { ok: 'bg-green-500', warn: 'bg-yellow-500', err: 'bg-red-500', none: 'bg-gray-500' };
+            return (
+                <div data-ceph-overview className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-ceph-overview-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center text-purple-400">
+                                <Icons.HardDrive className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('allCephTitle')} {rows.length > 0 && <span data-ceph-overview-count className="text-sm font-normal text-gray-500">({rows.length})</span>}
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('allCephDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-2">
+                            {headline && <span className="text-xs font-medium">{headline}</span>}
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {failed}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                {columns.map(c => <th key={c} className="px-4 py-3 font-medium">{c}</th>)}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {rows.map(r => (
+                                                <tr key={r.cluster_id} data-ceph-overview-row={r.cluster_id} data-health={r.health} onClick={() => go(r.cluster_id)}
+                                                    title={onOpen ? t('allCephOpen') : undefined}
+                                                    style={{ verticalAlign: 'top' }}
+                                                    className={`hover:bg-proxmox-hover/50 transition-colors ${onOpen ? 'cursor-pointer' : ''}`}>
+                                                    <td className="px-4 py-2 text-sm font-medium text-white">{label(r)}</td>
+                                                    <td className="px-4 py-2">
+                                                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${badge[level(r.health)]}`}>{healthText(r)}</span>
+                                                        {r.checks.slice(0, 2).map(c => (
+                                                            <div key={c.name} data-ceph-overview-check={c.name} className={`text-[11px] mt-0.5 ${text[level(c.severity)]}`} title={c.name}>{c.message || c.name}</div>
+                                                        ))}
+                                                        {(r.checks.length > 2 || r.checks_more > 0) && (
+                                                            <div className="text-[11px] text-gray-500" title={r.checks.slice(2).map(c => c.message || c.name).join('\n')}>
+                                                                {t('allCephMoreChecks').replace('{n}', r.checks.length - 2 + r.checks_more)}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-4 py-2">
+                                                        {r.percent == null ? <span className="text-gray-500">-</span> : (
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                    <div className={`h-full rounded-full ${bar[fill(r.percent)]}`} style={{ width: `${Math.min(r.percent, 100)}%` }} />
+                                                                </div>
+                                                                <span className={`text-xs font-medium ${text[fill(r.percent)]}`}>{r.percent.toFixed(1)}%</span>
+                                                            </div>
+                                                        )}
+                                                        <div className="text-[11px] text-gray-500 mt-0.5">{size(r.bytes.used)} / {size(r.bytes.total)}</div>
+                                                    </td>
+                                                    <td className={`px-4 py-2 text-sm ${osdsShort(r) ? 'text-yellow-400' : 'text-gray-300'}`}>{osdText(r)}</td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                        <div className={r.pgs.clean < r.pgs.total ? 'text-yellow-400' : 'text-gray-300'}>{pgText(r)}</div>
+                                                        {otherPgs(r).slice(0, 3).map(s => (
+                                                            <div key={s.state} className="text-[11px] text-gray-500">{s.count} {s.state}</div>
+                                                        ))}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-xs text-gray-400">
+                                                        {ioLines(r).map(line => <div key={line}>{line}</div>)}
+                                                    </td>
+                                                    <td className={`px-4 py-2 text-sm ${r.mons.quorum < r.mons.total ? 'text-yellow-400' : 'text-gray-300'}`}>{monText(r)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // LW Oct 2026 - every storage of every cluster in one table, fullest first. The server reads
         // each cluster once (GET /api/storage-overview, shared with the health check), and only
         // while the panel is open. Nothing here acts, so a standby shows it as it is.
@@ -6523,7 +7204,7 @@
 
         // LW: All Clusters Overview - GitHub Feature Request #16
         // added a bunch of stuff here - storage, sparklines, sorting etc
-        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, topologyOnly = false, onAutoInstall, addToast }) {
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests }) {
             // #625: an empty list on a standby is no reason to offer adding a cluster there -
             // say why it is empty instead: no sync yet, or its live view is off
             const haInfo = (useAuth() || {}).ha || {};
@@ -6539,7 +7220,12 @@
             const [guestSortDir, setGuestSortDir] = useState('desc');
             const [cpuHistory, setCpuHistory] = useState({});
             const [ramHistory, setRamHistory] = useState({});
-            
+            // LW Oct 2026 - a row of the update and Ceph panels opens that place in its cluster
+            const openIn = (tab, section) => onOpenClusterTab ? (cid) => {
+                const cluster = clusters.find(c => c.id === cid);
+                if (cluster) onOpenClusterTab(cluster, tab, section);
+            } : null;
+
             // sparkline history
             useEffect(() => {
                 clusters.forEach(cluster => {
@@ -6863,6 +7549,11 @@
                                         <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
                                     </span>
                                 )}
+                                {!topologyOnly && clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests} className="corp-vm-btn corp-vm-btn-ghost">
+                                        <span className="flex"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
                                 {!topologyOnly && clusters.length > 0 && (
                                     <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
                                         className="corp-vm-btn corp-vm-btn-ghost disabled:opacity-50" />
@@ -7036,6 +7727,10 @@
                         {!topologyOnly && clusters.length > 0 && <GuestsWithoutBackup clusters={clusters} onSelectVm={onSelectVm} />}
 
                         {!topologyOnly && clusters.length > 0 && <StorageOverview clusters={clusters} />}
+
+                        {!topologyOnly && clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
+
+                        {!topologyOnly && clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
 
                         {/* NS: Mar 2026 - Multi-cluster topology redesign (#142) */}
                         {clusters.filter(c => c.connected).length > 0 && (() => {
@@ -7261,6 +7956,12 @@
                             </div>
 
                             <div className="flex items-center gap-3">
+                                {clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests}
+                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors">
+                                        <span className="flex text-blue-400"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
                                 {clusters.length > 0 && (
                                     <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
                                         className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors disabled:opacity-50" />
@@ -7478,6 +8179,10 @@
                     {clusters.length > 0 && <GuestsWithoutBackup clusters={clusters} onSelectVm={onSelectVm} />}
 
                     {clusters.length > 0 && <StorageOverview clusters={clusters} />}
+
+                    {clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
+
+                    {clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
 
                     {/* Empty State */}
                     {clusters.length === 0 && (

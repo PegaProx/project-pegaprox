@@ -5,6 +5,8 @@ update.sh                     usr/lib/pegaprox
 static                        usr/lib/pegaprox
 web                           usr/lib/pegaprox
 images                        usr/lib/pegaprox
+plugins                       usr/share/pegaprox
+packaging/plugins/sync_plugins.py usr/lib/pegaprox/packaging/plugins
 debian/pegaprox-wrapper       usr/bin/pegaprox
 systemd/pegaprox.service      lib/systemd/system/
 packaging/witness/install.sh  usr/lib/pegaprox/packaging/witness

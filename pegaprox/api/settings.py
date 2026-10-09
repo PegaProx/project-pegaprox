@@ -343,6 +343,23 @@ def _managed_update_command(method):
     }.get(method, '')
 
 
+def _update_target(install_dir, rel_path):
+    """Where the updater writes rel_path of the new tree, None to leave it as it is.
+
+    MK Oct 2026 (#1134) - plugins/ goes to the directory the plugins are loaded from
+    (PLUGINS_DIR), which is not always the one next to the code. And a plugin's
+    config.json there holds what the admin set: the update overwrote it on every run, a
+    missing one still comes from the release.
+    """
+    parts = rel_path.replace('\\', '/').split('/')
+    if len(parts) < 2 or parts[0] != 'plugins':
+        return os.path.join(install_dir, rel_path)
+    dst = os.path.join(os.path.abspath(PLUGINS_DIR), *parts[1:])
+    if len(parts) == 3 and parts[2] == 'config.json' and os.path.lexists(dst):
+        return None
+    return dst
+
+
 # MK Oct 2026 - the update, the rollback and the restart button hand the restart to
 # `systemctl restart pegaprox` only when this process runs in that unit. A second
 # PegaProx on the host (a test instance started by hand, one in a unit of another name)
@@ -551,6 +568,7 @@ def perform_pegaprox_update():
     - config/, ssl/, certs/   (settings, encrypted data)
     - *.db, *.enc             (databases, encrypted files)
     - *.pem, *.key, *.crt    (certificates, private keys)
+    - plugins/<id>/config.json once it exists (a plugin's settings, #1134)
     """
     _uerr = _refuse_confined_updater()
     if _uerr:
@@ -748,7 +766,10 @@ def perform_pegaprox_update():
                             skipped_protected.append(rel_path)
                             continue
 
-                        dst = os.path.join(install_dir, rel_path)
+                        dst = _update_target(install_dir, rel_path)
+                        if dst is None:
+                            skipped_protected.append(rel_path)
+                            continue
                         try:
                             os.makedirs(os.path.dirname(dst), exist_ok=True)
                             shutil.copy2(os.path.join(root, fname), dst)
@@ -812,7 +833,10 @@ def perform_pegaprox_update():
                 if remote_path.endswith('.pyc') or '/__pycache__/' in remote_path:
                     continue
 
-                dst = os.path.join(install_dir, remote_path)
+                dst = _update_target(install_dir, remote_path)
+                if dst is None:
+                    skipped_protected.append(remote_path)
+                    continue
 
                 # try GitHub first, then mirror.
                 # MK 2026-06-02: bare `except: continue` here used to swallow
@@ -859,7 +883,9 @@ def perform_pegaprox_update():
             for _rp, _err in failed_files:
                 if is_protected(_rp) or _rp.endswith('.pyc'):
                     continue
-                _dst = os.path.join(install_dir, _rp)
+                _dst = _update_target(install_dir, _rp)
+                if _dst is None:
+                    continue
                 _ok = False
                 for _bu in [GITHUB_RAW_URL, MIRROR_RAW_URL]:
                     try:
@@ -2368,7 +2394,7 @@ def backup_config():
         logging.info(f"[Backup] User from session: {username}")
         if not username:
             logging.warning("[Backup] No user in session")
-            return jsonify({'error': 'Not authenticated'}), 401
+            return jsonify({'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}), 401
         
         users = load_users()
         
@@ -2650,7 +2676,7 @@ def restore_config():
         username = getattr(request, 'session', {}).get('user')
         logging.debug(f"[Restore] User from session: {username}")
         if not username:
-            return jsonify({'error': 'Not authenticated'}), 401
+            return jsonify({'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}), 401
         
         users = load_users()
         
@@ -3708,9 +3734,10 @@ def status_page():
     """Serve public status page — only if plugin is enabled"""
     if not _plugin_page_here('status_page'):
         return '<h1>Status Page not available</h1><p>The Status Page plugin is not enabled.</p>', 404
-    import os
-    path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'status_page', 'status.html')
-    if os.path.exists(path):
+    # from where the plugin is loaded, not next to the code (#1134)
+    from pegaprox.api.plugins import plugin_file
+    path = plugin_file('status_page', 'status.html')
+    if path:
         return send_file(path)
     return '<h1>Status Page not installed</h1>', 404
 
@@ -3736,9 +3763,9 @@ def client_portal_page(subpath=None):
     """Serve client portal — only if plugin is enabled"""
     if not _plugin_page_here('client_portal'):
         return '<h1>Client Portal not available</h1><p>The Client Portal plugin is not enabled.</p>', 404
-    import os
-    portal_path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'client_portal', 'portal.html')
-    if os.path.exists(portal_path):
+    from pegaprox.api.plugins import plugin_file
+    portal_path = plugin_file('client_portal', 'portal.html')
+    if portal_path:
         return send_file(portal_path)
     return '<h1>Client Portal not installed</h1>', 404
 
@@ -4190,6 +4217,89 @@ Generated by: {username}
 _UPDATE_CHECK_TTL = 24 * 60 * 60  # 24h
 _update_check_cache = {}
 
+# MK Oct 2026 - where a host takes its packages from, read along with each check for the
+# overview of all clusters (/api/updates-overview). Only the product's own standard repos
+# decide the channel; the Ceph ones (ceph-squid-enterprise, ...) do not.
+_PRODUCT_REPOS = ('enterprise', 'no-subscription', 'test')
+_SUBSCRIPTION_STATES = ('active', 'notfound', 'new', 'invalid', 'expired', 'suspended')
+_KERNEL_PACKAGES = ('linux-image', 'pve-kernel', 'proxmox-kernel')
+_NO_SOURCE = {'channel': None, 'repo_warnings': None, 'subscription': None}
+
+
+def apt_channel(data):
+    """{'channel', 'repo_warnings'} from an /apt/repositories answer of PVE or PBS. The channel
+    is the one standard repository that is on, 'mixed' for several, 'none' for none; None
+    for both when the answer has no standard-repos list."""
+    if not isinstance(data, dict) or not isinstance(data.get('standard-repos'), list):
+        return {'channel': None, 'repo_warnings': None}
+    on = [r['handle'] for r in data['standard-repos']
+          if isinstance(r, dict) and r.get('handle') in _PRODUCT_REPOS and r.get('status') == 1]
+    channel = on[0] if len(on) == 1 else ('mixed' if on else 'none')
+    infos = data.get('infos') if isinstance(data.get('infos'), list) else []
+    return {'channel': channel,
+            'repo_warnings': sum(1 for i in infos if isinstance(i, dict) and i.get('kind') == 'warning')}
+
+
+def subscription_state(data):
+    """The status of a /subscription answer, nothing else of it (the key stays where it is)."""
+    if not isinstance(data, dict):
+        return None
+    status = str(data.get('status') or '').strip().lower()
+    if not status:
+        return None
+    return status if status in _SUBSCRIPTION_STATES else 'unknown'
+
+
+def _node_package_source(mgr, node):
+    from urllib.parse import quote
+    base = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{quote(node, safe='')}"
+    out = dict(_NO_SOURCE)
+    try:
+        r = mgr._api_get(f"{base}/apt/repositories", timeout=8)
+        if r.status_code == 200:
+            out.update(apt_channel((r.json() or {}).get('data')))
+    except Exception as e:
+        logging.debug(f"[UpdateCheck] {node}: repositories unreadable: {e}")
+    try:
+        r = mgr._api_get(f"{base}/subscription", timeout=8)
+        if r.status_code == 200:
+            out['subscription'] = subscription_state((r.json() or {}).get('data'))
+    except Exception as e:
+        logging.debug(f"[UpdateCheck] {node}: subscription unreadable: {e}")
+    return out
+
+
+def _pbs_package_source(pmgr):
+    out = dict(_NO_SOURCE)
+    try:
+        repos = pmgr.api_get('/nodes/localhost/apt/repositories', timeout=8)
+        if isinstance(repos, dict) and 'error' not in repos:
+            out.update(apt_channel(repos.get('data')))
+        sub = pmgr.api_get('/nodes/localhost/subscription', timeout=8)
+        if isinstance(sub, dict) and 'error' not in sub:
+            out['subscription'] = subscription_state(sub.get('data'))
+    except Exception as e:
+        logging.debug(f"[UpdateCheck] PBS {getattr(pmgr, 'name', '?')}: package source unreadable: {e}")
+    return out
+
+
+def _overview_host(res, kind):
+    """One row of the update overview from what the check stored for a host. Security is None
+    where the list does not say: PVE and PBS give a package's origin ('Debian') but not its
+    suite, so a security update reads like any other there."""
+    res = res if isinstance(res, dict) else {}
+    count = res.get('count')
+    ok = res.get('success', True) is not False and isinstance(count, int) and count >= 0
+    updates = [u for u in (res.get('updates') or []) if isinstance(u, dict)] if ok else []
+    marked = sum(1 for u in updates if any('security' in str(u.get(k) or '').lower()
+                                           for k in ('Origin', 'Section', 'Label', 'Archive')))
+    security = marked if ok and (marked or kind == 'xcpng') else None
+    names = [str(u.get('Package') or '') for u in updates]
+    kernel = any(k in n for n in names for k in _KERNEL_PACKAGES) or (kind == 'xcpng' and 'kernel' in names)
+    return {'ok': ok, 'count': count if ok else None, 'security': security, 'kernel': kernel,
+            'channel': res.get('channel'), 'repo_warnings': res.get('repo_warnings'),
+            'subscription': res.get('subscription')}
+
 
 @bp.route('/api/clusters/<cluster_id>/updates/check', methods=['POST'])
 @require_auth(perms=['node.update'])
@@ -4365,6 +4475,14 @@ def check_cluster_updates(cluster_id):
         }
         logging.warning(f"[UpdateCheck] rejecting node name outside allow-list: {node_name!r}")
 
+    # two short reads per node after the check, a failed one included: an enterprise repo
+    # without a subscription is the usual reason its refresh failed
+    if getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox' and safe_node_names:
+        sources = run_concurrent_dict(
+            {n: (lambda nn=n: _node_package_source(mgr, nn)) for n in safe_node_names}, timeout=20)
+        for node_name, src in sources.items():
+            results[node_name].update(src or _NO_SOURCE)
+
     # MK: count > 0 for updates, ignore -1 (failed checks)
     total_updates = sum(max(r.get('count', 0), 0) for r in results.values())
     nodes_with_updates = sum(1 for r in results.values() if r.get('count', 0) > 0)
@@ -4390,7 +4508,8 @@ def check_cluster_updates(cluster_id):
                     'success': 'error' not in pbs_upd,
                     'pbs_id': pid,
                     'updates': upd_list,
-                    'count': len(upd_list)
+                    'count': len(upd_list),
+                    **_pbs_package_source(pmgr),
                 }
             except Exception as pe:
                 pbs_results[pmgr.name or pid] = {'success': False, 'pbs_id': pid, 'error': str(pe), 'updates': [], 'count': -1}
@@ -4474,6 +4593,73 @@ def get_cluster_update_status(cluster_id):
         'rolling_update': rolling_update,
         'last_check': getattr(mgr, '_last_update_check', None)
     })
+
+
+# MK Oct 2026 - the pending updates of every node and backup server on the clusters the
+# caller reaches, in one table. Read from what each cluster's last check left in
+# _update_check_cache: no node is asked anything here, and a cluster nobody has checked since
+# the last restart says so (its update manager runs the check). The checks run on the active,
+# so a standby reads this there (ha.FORWARDED_READS).
+@bp.route('/api/updates-overview', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_updates_overview():
+    """Pending package updates of all nodes and PBS servers, from the cached update checks"""
+    from pegaprox.api.helpers import caller_is_scoped, check_pbs_access
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import has_permission
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    now = time.time()
+
+    def _name(cid, mgr):
+        name = getattr(getattr(mgr, 'config', None), 'name', None)
+        return name if isinstance(name, str) and name else cid
+
+    hosts, clusters, backup = [], [], {}
+    for cid, mgr in sorted(list(cluster_managers.items()), key=lambda kv: _name(*kv).lower()):
+        kind = getattr(mgr, 'cluster_type', 'proxmox')
+        if kind not in ('proxmox', 'xcpng'):
+            continue
+        ok, _err = check_cluster_access(cid)
+        if not ok:
+            continue
+        name = _name(cid, mgr)
+        entry = {'cluster_id': cid, 'cluster_name': name, 'state': 'ok', 'count': 0,
+                 'checked_at': None, 'stale': False, 'rolling': None}
+        clusters.append(entry)
+        # the packages of the nodes are the cluster's: a pool or a guest grant does not cover them
+        if caller_is_scoped(user, cid):
+            entry['state'] = 'confined'
+            continue
+        rolling = getattr(mgr, '_rolling_update', None)
+        if isinstance(rolling, dict) and rolling.get('status') in ('running', 'paused'):
+            entry['rolling'] = rolling['status']
+        cached = _update_check_cache.get(cid)
+        payload = cached.get('payload') if isinstance(cached, dict) else None
+        if not isinstance(payload, dict):
+            entry['state'] = 'unchecked'
+            continue
+        at = float(cached.get('at') or 0)
+        entry['checked_at'], entry['stale'] = int(at), now - at >= _UPDATE_CHECK_TTL
+        for node, res in sorted((payload.get('nodes') or {}).items()):
+            row = _overview_host(res, kind)
+            row.update(cluster_id=cid, cluster_name=name, kind='node', name=str(node), pbs_id=None,
+                       checked_at=entry['checked_at'], stale=entry['stale'])
+            entry['count'] += row['count'] or 0
+            hosts.append(row)
+        for pname, res in (payload.get('pbs') or {}).items():
+            pid = res.get('pbs_id') if isinstance(res, dict) else None
+            # a PBS linked to no cluster is in the check of each: the newest one tells
+            if pid and (pid not in backup or at > backup[pid][0]):
+                backup[pid] = (at, entry, str(pname), res)
+    if backup and has_permission(user, 'pbs.view'):
+        for pid, (at, entry, pname, res) in sorted(backup.items(), key=lambda kv: kv[1][2].lower()):
+            if pid not in pbs_managers or not check_pbs_access(pid)[0]:
+                continue
+            row = _overview_host(res, 'pbs')
+            row.update(cluster_id=entry['cluster_id'], cluster_name=entry['cluster_name'], kind='pbs',
+                       name=pname, pbs_id=pid, checked_at=int(at), stale=now - at >= _UPDATE_CHECK_TTL)
+            hosts.append(row)
+    return jsonify({'hosts': hosts, 'clusters': clusters})
 
 
 # NS 2026-07-17 (#403 part 2, proxforge): decide whether a DEPLOYED Ceph is unsafe

@@ -330,7 +330,7 @@ def get_sse_token():
     user = request.session.get('user', 'unknown')
     user_data = _stream_identity(user)
     if user_data is None:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
     allowed_clusters = get_user_clusters(user_data)
 
     # bound to the session or API token it is minted under, so it ends with it (#1038)
@@ -378,11 +378,11 @@ def validate_ws_token_api():
         return refused
     token = request.args.get('token')
     if not token:
-        return jsonify({'error': 'Token required'}), 401
+        return jsonify({'error': 'Token required', 'code': 'INVALID_TOKEN'}), 401
 
     data = validate_ws_token(token)
     if not data:
-        return jsonify({'error': 'Invalid or expired token'}), 401
+        return jsonify({'error': 'Invalid or expired token', 'code': 'INVALID_TOKEN'}), 401
 
     # NS Aug 2026 (audit + CodeAnt) — reject a disabled account for EVERY ws_token consume, not only
     # the ?cluster_id= path below: the DEFAULT VM-console/shell path passes no cluster_id, so the
@@ -395,7 +395,7 @@ def validate_ws_token_api():
         _acct = None
     if _acct is not None and not _acct.get('enabled', True):
         logging.warning(f"[WS-TOKEN] user '{_sl(data.get('user'))}' is disabled")
-        return jsonify({'error': 'Account disabled'}), 401
+        return jsonify({'error': 'Account disabled', 'code': 'ACCOUNT_DISABLED'}), 401
 
     requested_cluster = (request.args.get('cluster_id') or '').strip()
     cluster_context = None
@@ -417,13 +417,13 @@ def validate_ws_token_api():
             # The old local floor also missed the owner ceiling for a custom-role token.
             user = resolve_authz_user(data)
             if not user:
-                return jsonify({'error': 'Invalid or expired token'}), 401
+                return jsonify({'error': 'Invalid or expired token', 'code': 'INVALID_TOKEN'}), 401
             # NS Aug 2026 (audit re-verify) — a ws_token minted while enabled must not keep opening a
             # console/shell after the account is disabled (this validate path is the ws_token
             # chokepoint and never rechecked account state).
             if not user.get('enabled', True):
                 logging.warning(f"[WS-TOKEN] user '{_sl(data['user'])}' is disabled")
-                return jsonify({'error': 'Account disabled'}), 401
+                return jsonify({'error': 'Account disabled', 'code': 'ACCOUNT_DISABLED'}), 401
             allowed = get_user_clusters(user)
             access_ok = allowed is None or requested_cluster in allowed
             if not access_ok:
@@ -474,6 +474,9 @@ def validate_ws_token_api():
             # from the DB. Multi-node clusters where the frontend prefetched a
             # per-node IP that isn't in this set will need to re-resolve through
             # the normal cluster-creds endpoint with a session cookie.
+            # MK Oct 2026 (#1143) - except for a node shell: it has to land on the node it
+            # was opened for, and without that node's address the SSH server put it on the
+            # primary host, which is another node. Its call waits long enough for the probe.
             try:
                 from pegaprox.globals import cluster_managers
                 mgr = cluster_managers.get(requested_cluster)
@@ -488,6 +491,12 @@ def validate_ws_token_api():
                     for i, host in enumerate(fb):
                         if host:
                             node_ips[f'_fallback_{i}'] = host
+                    if (request.args.get('shell') or '') == 'node':
+                        from pegaprox.api.helpers import node_shell_address
+                        shell_node = request.args.get('node') or ''
+                        shell_ip = node_shell_address(mgr, shell_node)
+                        if shell_ip:
+                            node_ips[shell_node] = shell_ip
                     cluster_context = {
                         'host': cluster_host,
                         'node_ips': node_ips,
@@ -556,7 +565,8 @@ def sse_updates():
 
     # NS Mar 2026 - removed session_id fallback, token-only auth for SSE
     if not user:
-        return jsonify({'error': 'Authentication required. Provide a valid SSE token.'}), 401
+        return jsonify({'error': 'Authentication required. Provide a valid SSE token.',
+                        'code': 'INVALID_TOKEN'}), 401
 
     client_id = str(uuid.uuid4())
     message_queue = queue_module.Queue(maxsize=100)
@@ -766,7 +776,7 @@ def update_sse_subscription():
     # RBAC: what clusters is this user allowed to see?
     user_data = _stream_identity(username)
     if user_data is None:
-        return jsonify({'error': 'Unauthorized'}), 401
+        return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
     allowed = get_user_clusters(user_data)  # None = admin
 
     # filter requested against allowed
