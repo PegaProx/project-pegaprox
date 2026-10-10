@@ -1450,6 +1450,228 @@
             );
         }
 
+        // LW Oct 2026 - the transfer network of a PVE cluster: the network remote migrations
+        // into it dial its nodes in (core/transfer_net.py). Each node's address comes from the
+        // server's cache, nodes it still reads come back pending and are asked for again.
+        const XFER_NET_V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
+        function xferNetValid(value) {
+            const v = (value || '').trim();
+            if (!v) return true;
+            const m = v.match(XFER_NET_V4);
+            if (m) return m.slice(1, 5).every(o => Number(o) <= 255) && Number(m[5]) >= 1 && Number(m[5]) <= 32;
+            const six = v.match(/^([0-9a-fA-F:.]+)\/(\d{1,3})$/);
+            return !!six && six[1].includes(':') && Number(six[2]) >= 1 && Number(six[2]) <= 128;
+        }
+
+        function TransferNetworkSection({ cluster, clusters, authFetch, addToast, t, canEdit, haReadOnly, onSaved }) {
+            const saved = cluster.transfer_network || '';
+            const [draft, setDraft] = React.useState(saved);
+            const [view, setView] = React.useState(null);
+            const [failed, setFailed] = React.useState(false);
+            const [saving, setSaving] = React.useState(false);
+            const [srcCluster, setSrcCluster] = React.useState('');
+            const [srcNodes, setSrcNodes] = React.useState([]);
+            const [srcNode, setSrcNode] = React.useState('');
+            const [check, setCheck] = React.useState(null);
+            const [checkError, setCheckError] = React.useState('');
+            const [checking, setChecking] = React.useState(false);
+            const gen = React.useRef(0);
+
+            React.useEffect(() => { setDraft(saved); }, [saved]);
+
+            const value = draft.trim();
+            const valid = xferNetValid(value);
+            const dirty = value !== saved;
+            // what the list shows: the saved network, or the one typed when it differs
+            const query = !valid ? null : (dirty ? `?network=${encodeURIComponent(value)}` : '');
+
+            React.useEffect(() => {
+                if (query === null) return undefined;
+                const mine = ++gen.current;
+                let timer = null, tries = 0;
+                const load = async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${cluster.id}/transfer-network${query}`);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (mine !== gen.current) return;
+                    setFailed(!d);
+                    if (!d) return;
+                    setView(d);
+                    if (d.pending && ++tries < 15) timer = setTimeout(load, 2000);
+                };
+                timer = setTimeout(load, query ? 500 : 0);
+                return () => { gen.current += 1; clearTimeout(timer); };
+            }, [cluster.id, query, authFetch]);
+
+            React.useEffect(() => {
+                setSrcNodes([]); setSrcNode('');
+                if (!srcCluster) return undefined;
+                let live = true;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${srcCluster}/nodes`);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (!live || !Array.isArray(d)) return;
+                    setSrcNodes(d.filter(n => n && n.node && (n.status || 'online') === 'online').map(n => n.node).sort());
+                })();
+                return () => { live = false; };
+            }, [srcCluster, authFetch]);
+
+            const save = async () => {
+                if (!valid || !dirty) return;
+                setSaving(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${cluster.id}/config`, {
+                        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ transfer_network: value }),
+                    });
+                    if (!r || !r.ok) {
+                        addToast(await PegaProxApiErrors.message(r, t('saveError')), 'error');
+                        return;
+                    }
+                    // the server stores the network address (10.20.0.5/24 is 10.20.0.0/24)
+                    const g = await authFetch(`${API_URL}/clusters/${cluster.id}/transfer-network`);
+                    const d = g && g.ok ? await g.json().catch(() => null) : null;
+                    const stored = d && typeof d.saved === 'string' ? d.saved : value;
+                    setCheck(null);
+                    onSaved(stored);
+                    setDraft(stored);
+                    addToast(t('xferNetSaved'));
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            const runCheck = async () => {
+                setChecking(true); setCheck(null); setCheckError('');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${cluster.id}/transfer-network/check`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ source_cluster: srcCluster, source_node: srcNode }),
+                    });
+                    if (!r || !r.ok) {
+                        setCheckError(await PegaProxApiErrors.message(r, t('xferNetCheckFailed')));
+                        return;
+                    }
+                    const d = await r.json().catch(() => null);
+                    if (d) setCheck(d); else setCheckError(t('xferNetCheckFailed'));
+                } finally {
+                    setChecking(false);
+                }
+            };
+
+            const probe = {};
+            (check?.nodes || []).forEach(n => { probe[n.node] = n; });
+            const tested = (check?.nodes || []).filter(n => n.status === 'ok' || n.status === 'fail');
+            const sources = (clusters || []).filter(c => (c.cluster_type || 'proxmox') === 'proxmox')
+                .sort((a, b) => (a.id === cluster.id) - (b.id === cluster.id));
+            const inputCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm';
+            const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300 disabled:opacity-50';
+            const nodeState = (n) => {
+                if (n.state === 'ok') return <span className="font-mono text-green-400">{n.address} <span className="text-gray-500">({n.iface})</span></span>;
+                if (n.state === 'none') return <span className="text-yellow-400">{t('xferNetNoAddress')}</span>;
+                if (n.state === 'unreadable') return <span className="text-red-400" title={n.error || ''}>{t('xferNetUnreadable')}</span>;
+                if (n.state === 'offline') return <span className="text-gray-500">{t('xferNetNodeOffline')}</span>;
+                return <span className="text-gray-500">{t('xferNetResolving')}</span>;
+            };
+
+            return (
+                <div className="space-y-3 min-w-0" data-transfer-network>
+                    <div>
+                        <h4 className="text-sm font-medium text-gray-400 mb-1 flex items-center gap-2">
+                            <Icons.Network className="w-4 h-4" />
+                            {t('xferNetTitle')}
+                        </h4>
+                        <p className="text-xs text-gray-500">{t('xferNetDesc')}</p>
+                    </div>
+                    <fieldset disabled={haReadOnly || !canEdit} className="min-w-0 space-y-3"
+                        data-ha-locked={haReadOnly ? '' : undefined} data-xfer-edit>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <input id="xfer-net-input" type="text" value={draft} maxLength={64}
+                                onChange={e => setDraft(e.target.value)} placeholder={t('xferNetPlaceholder')}
+                                aria-label={t('xferNetTitle')} spellCheck={false}
+                                className={`${inputCls} font-mono flex-1 min-w-0 disabled:opacity-50 ${valid ? '' : 'border-red-500'}`} />
+                            <button type="button" onClick={save} disabled={!valid || !dirty || saving} data-xfer-save
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50 disabled:cursor-not-allowed">
+                                {t('save')}
+                            </button>
+                        </div>
+                        {!valid && <div className="text-xs text-red-400" data-xfer-invalid>{t('xferNetInvalid')}</div>}
+                    </fieldset>
+
+                    {failed && <div className="text-xs text-red-400" data-xfer-failed>{t('xferNetLoadError')}</div>}
+                    {view && (
+                        <div className="text-xs text-gray-500 p-2 bg-proxmox-dark rounded-lg space-y-1" data-xfer-dc>
+                            <div>
+                                {t('xferNetDcNet')}:{' '}
+                                <span className="font-mono text-gray-300" data-xfer-dc-value>
+                                    {view.migration_network === null ? t('xferNetDcNetUnread') : (view.migration_network || t('xferNetDcNetNone'))}
+                                </span>
+                            </div>
+                            <div>{t('xferNetDcNetHint')}</div>
+                        </div>
+                    )}
+                    {view && !view.network && <div className="text-xs text-gray-500" data-xfer-off>{t('xferNetOff')}</div>}
+                    {view && view.network && (
+                        <div className="space-y-1 min-w-0" data-xfer-nodes>
+                            <div className="text-xs text-gray-400" data-xfer-heading>{t('xferNetNodes').replace('{network}', view.network)}</div>
+                            {view.missing > 0 && (
+                                <div className="text-xs text-yellow-400" data-xfer-missing>
+                                    {t('xferNetMissing').replace('{count}', view.missing).replace('{total}', view.nodes.length)}
+                                </div>
+                            )}
+                            <div className="max-h-64 overflow-y-auto space-y-1">
+                                {view.nodes.map(n => {
+                                    const p = probe[n.node];
+                                    return (
+                                        <div key={n.node} data-xfer-node={n.node} data-xfer-state={n.state}
+                                            className="flex flex-wrap items-center justify-between gap-2 bg-proxmox-dark rounded px-2 py-1 text-xs min-w-0">
+                                            <span className="font-mono text-gray-300 truncate">{n.node}</span>
+                                            <span className="flex items-center gap-3">
+                                                {nodeState(n)}
+                                                {p && p.status === 'ok' && <span className="text-green-400" data-xfer-probe="ok">{t('xferNetAnswers')}{p.ms != null ? ` (${p.ms} ms)` : ''}</span>}
+                                                {p && p.status === 'fail' && <span className="text-red-400" data-xfer-probe="fail">{t('xferNetNoAnswer')}</span>}
+                                            </span>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {saved && (
+                        <fieldset disabled={haReadOnly || !canEdit} className="min-w-0 space-y-2 pt-2 border-t border-gray-700/50"
+                            data-ha-locked={haReadOnly ? '' : undefined} data-xfer-check>
+                            <div className="text-xs text-gray-500">{t('xferNetCheckDesc')}</div>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <select value={srcCluster} onChange={e => setSrcCluster(e.target.value)} className={selectCls}
+                                    aria-label={t('xferNetCheckCluster')} data-xfer-src-cluster>
+                                    <option value="">{t('xferNetCheckCluster')}</option>
+                                    {sources.map(c => <option key={c.id} value={c.id}>{c.display_name || c.name}</option>)}
+                                </select>
+                                <select value={srcNode} onChange={e => setSrcNode(e.target.value)} disabled={!srcNodes.length}
+                                    className={selectCls} aria-label={t('xferNetCheckNode')} data-xfer-src-node>
+                                    <option value="">{t('xferNetCheckNode')}</option>
+                                    {srcNodes.map(n => <option key={n} value={n}>{n}</option>)}
+                                </select>
+                                <button type="button" onClick={runCheck} disabled={!srcNode || checking || dirty} data-xfer-run
+                                    className="px-3 py-1 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded text-xs text-gray-300 flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed">
+                                    {checking ? <Icons.RotateCw className="w-3 h-3" /> : <Icons.Activity className="w-3 h-3" />}
+                                    {t('xferNetCheckRun')}
+                                </button>
+                            </div>
+                            {dirty && <div className="text-xs text-gray-500" data-xfer-save-first>{t('xferNetCheckSaveFirst')}</div>}
+                            {checkError && <div className="text-xs text-red-400" data-xfer-check-error>{checkError}</div>}
+                            {check && (
+                                <div className="text-xs text-gray-400" data-xfer-check-done>
+                                    {t('xferNetCheckDone').replace('{ok}', tested.filter(n => n.status === 'ok').length)
+                                        .replace('{total}', tested.length).replace('{node}', check.source_node)}
+                                </div>
+                            )}
+                        </fieldset>
+                    )}
+                </div>
+            );
+        }
+
         // LW Oct 2026 - the connection check of one PVE cluster: read-only probes on the
         // server (core/conncheck.py), started here by the admin and never on a timer. The
         // server answers with codes; the words and the fix for each come from translations.
@@ -16851,6 +17073,11 @@
                     if (response && response.ok) {
                         const result = await response.json();
                         addToast(result.message || t('crossClusterStarted'));
+                        // LW Oct 2026 - a target with a transfer network that this migration could not use
+                        const xn = result.transfer_network;
+                        if (xn && xn.via === 'management') {
+                            addToast(t('xferNetFallback').replace('{network}', xn.network).replace('{node}', xn.node || '?'), 'warning');
+                        }
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 5000);
                     } else if (response) {
                         const err = await response.json();
@@ -22481,6 +22708,17 @@
                                                             )}
                                                         </div>
                                                     </div>
+
+                                                    {/* LW Oct 2026 - where remote migrations into this cluster dial its nodes,
+                                                        next to how PegaProx connects; a standby shows it locked */}
+                                                    {(selectedCluster.cluster_type || 'proxmox') === 'proxmox' && can('cluster.view') && (
+                                                        <div className="pt-4 border-t border-proxmox-border">
+                                                            <TransferNetworkSection key={selectedCluster.id} cluster={selectedCluster} clusters={clusters}
+                                                                authFetch={authFetch} addToast={addToast} t={t}
+                                                                canEdit={can('cluster.config')} haReadOnly={haReadOnly}
+                                                                onSaved={v => setSelectedCluster(prev => prev ? {...prev, transfer_network: v} : prev)} />
+                                                        </div>
+                                                    )}
 
                                                     {/* HA Section */}
                                                     <div className="pt-4 border-t border-proxmox-border">
