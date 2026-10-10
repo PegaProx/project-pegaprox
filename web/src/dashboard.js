@@ -1701,6 +1701,8 @@
             hardware: 'connCheckFeatHardware', agent: 'connCheckFeatAgent', storage: 'connCheckFeatStorage',
             disks: 'connCheckFeatDisks', uploads: 'connCheckFeatUploads', nodePower: 'connCheckFeatNodePower',
             nodeConfig: 'connCheckFeatNodeConfig', syslog: 'connCheckFeatSyslog', sdn: 'connCheckFeatSdn',
+            networks: 'connCheckFeatNetworks', pools: 'connCheckFeatPools', mappings: 'connCheckFeatMappings',
+            replication: 'connCheckFeatReplication', haConfig: 'connCheckFeatHaConfig',
         };
         const CONN_CHECK_SECTIONS = [
             ['credentials', 'connCheckSecCredentials', ['credentials']],
@@ -1723,6 +1725,9 @@
             const [running, setRunning] = React.useState(false);
             const [report, setReport] = React.useState(null);
             const [error, setError] = React.useState('');
+            // LW Oct 2026 - what works with this connection, and the role that needs no more
+            const [showCaps, setShowCaps] = React.useState(true);
+            const [showRole, setShowRole] = React.useState(false);
 
             const run = async () => {
                 setRunning(true); setError('');
@@ -1889,6 +1894,22 @@
                                     <div className="text-xs text-gray-500 mt-4">{t('connCheckCheckedAt').replace('{time}', new Date(report.checked_at).toLocaleString()).replace('{s}', (report.duration_ms / 1000).toFixed(1))}</div>
                                 </div>
                             )}
+                            <div className="mt-4 pt-4 border-t border-proxmox-border">
+                                <button type="button" data-check-toggle="capabilities" onClick={() => setShowCaps(!showCaps)}
+                                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-500 hover:text-white">
+                                    <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${showCaps ? 'rotate-90' : ''}`} />
+                                    {t('capabTitle')}
+                                </button>
+                                {showCaps && <div className="mt-2"><ClusterCapabilities clusterId={cluster.id} refreshKey={report ? report.checked_at : ''} /></div>}
+                            </div>
+                            <div className="mt-4 pt-4 border-t border-proxmox-border">
+                                <button type="button" data-check-toggle="role" onClick={() => setShowRole(!showRole)}
+                                    className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-gray-500 hover:text-white">
+                                    <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${showRole ? 'rotate-90' : ''}`} />
+                                    {t('pveRoleTitle')}
+                                </button>
+                                {showRole && <div className="mt-2"><PveRoleRecipe /></div>}
+                            </div>
                         </div>
                     </div>
                 </div>

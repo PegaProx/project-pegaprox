@@ -2751,6 +2751,14 @@
                 if (item.kind === 'guests_stay') return t('rollRunUndoneGuests').replace('{count}', item.count || 0).replace('{node}', item.node || '-');
                 return t('rollRunUndoneError');
             };
+            // why a run waits for its quorum, from the votes the server counted
+            const rollQuorumText = (d) => {
+                const node = d.node || rollingUpdate?.current_node || '-';
+                if (d.reason === 'status_unreadable') return t('rollQuorumUnread').replace('{node}', node);
+                if (d.reason === 'not_quorate') return t('rollQuorumNotQuorate').replace('{node}', node);
+                return t('rollQuorumHeld').replace('{node}', node).replace('{after}', String(d.after ?? '-'))
+                    .replace('{expected}', String(d.expected ?? '-')).replace('{needed}', String(d.needed ?? '-'));
+            };
 
             const loadRollHistory = async () => {
                 setRollHistory(null);
@@ -2772,12 +2780,15 @@
                 paused: 'bg-yellow-500/20 text-yellow-400' };
 
             // NS: GitHub #40 - Resume a paused rolling update
-            const resumeRollingUpdate = async () => {
+            // LW Oct 2026 - acceptRisk: Continue anyway on a run held for its quorum (true only,
+            // the click event of the plain Continue is no yes)
+            const resumeRollingUpdate = async (acceptRisk) => {
                 try {
                     const response = await fetch(`${API_URL}/clusters/${clusterId}/updates/rolling/resume`, {
                         method: 'POST',
                         credentials: 'include',
-                        headers: getAuthHeaders()
+                        headers: acceptRisk === true ? { ...getAuthHeaders(), 'Content-Type': 'application/json' } : getAuthHeaders(),
+                        ...(acceptRisk === true ? { body: JSON.stringify({ accept_quorum_risk: true }) } : {}),
                     });
                     const data = await response.json();
                     if (data.success) {
@@ -3380,6 +3391,18 @@
                                                         .replace('{phase}', rollingUpdate.paused_details?.phase || rollingUpdate.resume_at?.phase || '-')}</p>
                                                     <p className="text-xs text-gray-400">{t('rollRunInterruptedHint').replace('{node}', rollingUpdate.paused_details?.node || rollingUpdate.current_node || '-')}</p>
                                                 </div>
+                                            ) : rollingUpdate.paused_reason === 'quorum' ? (
+                                                // LW Oct 2026 - the node would cost the cluster its quorum: the votes, and what Continue does
+                                                <div className="text-sm text-yellow-200/80 space-y-1" data-testid="rolling-quorum">
+                                                    <p>{rollQuorumText(rollingUpdate.paused_details || {})}</p>
+                                                    {(rollingUpdate.paused_details?.offline || []).length > 0 && (
+                                                        <p className="text-xs">{t('rollQuorumOffline').replace('{nodes}', rollingUpdate.paused_details.offline.join(', '))}</p>
+                                                    )}
+                                                    {rollingUpdate.paused_details?.qdevice?.present && !rollingUpdate.paused_details.qdevice.connected && (
+                                                        <p className="text-xs">{t('rollQuorumQdevice')}</p>
+                                                    )}
+                                                    <p className="text-xs text-gray-400">{t('rollQuorumHint').replace('{node}', rollingUpdate.paused_details?.node || rollingUpdate.current_node || '-')}</p>
+                                                </div>
                                             ) : rollingUpdate.paused_details && (
                                                 <div className="text-sm text-yellow-200/80">
                                                     {rollingUpdate.paused_details.message}
@@ -3413,6 +3436,19 @@
                                                         <Icons.Play className="w-4 h-4" />
                                                         {t('rollRunContinue')}
                                                     </button>
+                                                    {rollingUpdate.paused_reason === 'quorum' && (
+                                                        <button
+                                                            onClick={() => {
+                                                                const node = rollingUpdate.paused_details?.node || rollingUpdate.current_node || '-';
+                                                                if (window.confirm(t('rollQuorumContinueConfirm').replace('{node}', node))) resumeRollingUpdate(true);
+                                                            }}
+                                                            data-testid="rolling-continue-anyway"
+                                                            className="px-4 py-2 bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-300 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
+                                                        >
+                                                            <Icons.AlertTriangle className="w-4 h-4" />
+                                                            {t('rollQuorumContinueAnyway')}
+                                                        </button>
+                                                    )}
                                                     <button
                                                         onClick={cancelRollingUpdate}
                                                         data-testid="rolling-cancel"
