@@ -1364,9 +1364,22 @@
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/backup` : null);
             const mut = useCloudMutate(reload);
             const [runsOf, setRunsOf] = React.useState(null);
+            // LW Oct 2026 - Proxmox hands no last-run status with a job; the newest run of each
+            // comes from the job history (.../last-runs), after the list itself and again
+            // after every reload of it (Refresh, Run now)
+            const listedAt = React.useMemo(() => (Array.isArray(data) && data.length ? Date.now() : 0), [data]);
+            const last = useCloudData(clusterId && listedAt ? `/api/clusters/${clusterId}/datacenter/backup/last-runs?at=${listedAt}` : null);
+            const lastRuns = (last.data && last.data.jobs) || {};
             const jobs = Array.isArray(data) ? data : [];
             const active = jobs.filter(j => Number(j.enabled) === 1 || j.enabled === true).length;
-            const failed = jobs.filter(j => (j['last-run-status'] || '').toLowerCase().indexOf('err') >= 0).length;
+            const failed = jobs.filter(j => (lastRuns[j.id] || {}).state === 'failed').length;
+            const runChip = (run) => {
+                if (!run) return <span className="cloud-cell-muted">{last.loading ? '…' : '-'}</span>;
+                const label = { ok: t('bkpRunsStateOk'), warning: t('bkpRunsStateWarning'), failed: t('failed'), running: t('bkpRunsStateRunning') }[run.state] || run.state;
+                const cls = run.state === 'ok' ? 'cloud-chip-ok' : run.state === 'failed' ? 'cloud-chip-err' : 'cloud-chip-soft';
+                const when = run.start ? new Date(run.start * 1000).toLocaleString() : '';
+                return <span className={`cloud-chip ${cls}`} title={when} data-last-run={run.state}>{label}</span>;
+            };
             const kpis = [
                 { icon: 'Archive', value: jobs.length, label: t('cloud.bkpJobs') || 'Backup jobs', accent: '#6366f1' },
                 { icon: 'CheckCircle', value: active, label: t('cloud.bkpActive') || 'Enabled', accent: '#22c55e' },
@@ -1384,14 +1397,12 @@
                             <div className="cloud-table-scroll"><table className="cloud-table">
                                 <thead><tr><th>{t('cloud.colSchedule') || 'Schedule'}</th><th>{t('cloud.colGuests') || 'Guests'}</th><th>{t('cloud.colStorage') || 'Storage'}</th><th>{t('cloud.colMode') || 'Mode'}</th><th>{t('cloud.colStatus') || 'Status'}</th><th>{t('cloud.colState') || 'State'}</th><th style={{ textAlign: 'right' }}>{t('cloud.colActions') || ''}</th></tr></thead>
                                 <tbody>{jobs.map((j, i) => {
-                                    const st = (j['last-run-status'] || '').toLowerCase();
-                                    const ok = st === 'ok' || st === 'OK'.toLowerCase();
                                     return (<tr className="cloud-table-row cloud-table-row-static" key={j.id || i}>
                                         <td className="cloud-table-mono">{j.schedule || '—'}</td>
                                         <td>{(Number(j.all) === 1) ? <span className="cloud-chip cloud-chip-soft">{t('cloud.allGuests') || 'All guests'}</span> : <span className="cloud-table-mono">{j.vmid || '—'}</span>}</td>
                                         <td>{j.storage || '—'}</td>
                                         <td className="cloud-cell-muted">{j.mode || 'snapshot'}{j.compress && j.compress !== '0' ? ' · ' + j.compress : ''}</td>
-                                        <td>{st ? (ok ? <span className="cloud-chip cloud-chip-ok">OK</span> : <span className="cloud-chip cloud-chip-err">{j['last-run-status']}</span>) : <span className="cloud-cell-muted">—</span>}</td>
+                                        <td>{runChip(lastRuns[j.id])}</td>
                                         <td>{(Number(j.enabled) === 1 || j.enabled === true) ? <CloudConnChip connected={true} t={t} /> : <CloudConnChip connected={false} t={t} />}</td>
                                         <CloudRowActions>
                                             {mut.acts && (<>

@@ -177,12 +177,15 @@ GUESTS = {'guests': [_guest(100, 'ok'), _guest(101, 'failed', error='No space le
 LOG = {'lines': ['INFO: Starting Backup of VM 101 (qemu)', 'ERROR: Backup of VM 101 failed - No space left on device'],
        'start': 8, 'more': False}
 BASE = '/api/clusters/c1/datacenter/backup/backup-all/runs'
+LAST_RUNS = {'jobs': {'backup-all': {'state': 'failed', 'start': T0, 'end': T0 + 300}},
+             'partial': False, 'unread_nodes': []}
 
 
 def _history_reads(runs=RUNS, guests=GUESTS):
     extra = dict(SSE_TOKEN)
     extra.update({('GET', '/api/clusters/c1/datacenter/backup'): (200, [JOB]), ('GET', BASE): (200, runs),
-                  ('GET', BASE + '/guests'): (200, guests), ('GET', BASE + '/log'): (200, LOG)})
+                  ('GET', BASE + '/guests'): (200, guests), ('GET', BASE + '/log'): (200, LOG),
+                  ('GET', '/api/clusters/c1/datacenter/backup/last-runs'): (200, LAST_RUNS)})
     return extra
 
 
@@ -288,6 +291,25 @@ def test_runtime_a_run_of_many_nodes_is_read_a_few_tasks_at_a_time(open_app):
     assert [u.count('upid=') for u in reads] == [16, 4]
     # each read answers what it saw: missing is what none of them backed up
     assert page.locator('[data-bkp-missing]').inner_text() == 'Not backed up in this run: 101, 102'
+    assert not app.errors, app.errors
+
+
+def test_runtime_cloud_counts_the_jobs_whose_last_run_failed(open_app):
+    """Proxmox hands no last-run status with a job: the column and the count read the job history"""
+    app = open_app(_history_reads(), layout='cloud')
+    page = app.page
+    page.locator('.cloud-shell').get_by_text('Backups', exact=True).first.click()
+    page.locator('[data-last-run="failed"]').wait_for(timeout=8000)
+    assert page.locator('[data-last-run="failed"]').inner_text() == 'Failed'
+    kpi = page.locator('.cloud-kpi', has_text='Failed last run')
+    assert kpi.inner_text().split()[0] == '1'
+    (asked,) = _urls(app, '/backup/last-runs')
+    # Refresh reads the jobs and their last runs again
+    page.locator('.cloud-body button', has_text='Refresh').first.click()
+    deadline = time.time() + 4
+    while time.time() < deadline and len(_urls(app, '/backup/last-runs')) < 2:
+        page.wait_for_timeout(100)
+    assert len(_urls(app, '/backup/last-runs')) == 2
     assert not app.errors, app.errors
 
 

@@ -2826,13 +2826,18 @@
                         const r = await authFetch(`${apiUrl}/clusters/${clusterId}/nodes/${node}/tasks/${encodeURIComponent(upid)}/log?start=${startLine}`);
                         if (r && r.ok) {
                             const data = await r.json();
-                            const arr = Array.isArray(data) ? data : (data.data || []);
+                            // LW Oct 2026 - the route answers {log, lines}; this read an array that never came
+                            let arr = Array.isArray(data) ? data
+                                : Array.isArray(data.lines) ? data.lines
+                                : (data.data || []);
+                            // Proxmox answers an empty log with one 'no content' line
+                            if (arr.length === 1 && arr[0] === 'no content') arr = [];
                             if (arr.length) {
                                 if (cancelled) return;
-                                setLines(prev => [...prev, ...arr.map(l => l.t || l)]);
+                                setLines(prev => [...prev, ...arr.map(l => (l && l.t !== undefined) ? l.t : l)]);
                                 startLine += arr.length;
                                 // throughput sniff: look for "INFO: ... read X.X GiB/s" or "transferred"
-                                const recent = arr.map(l => l.t || l).join('\n');
+                                const recent = arr.map(l => (l && l.t !== undefined) ? l.t : l).join('\n');
                                 const m = recent.match(/(\d+(?:\.\d+)?)\s*(MiB|GiB)\/s/);
                                 if (m) {
                                     const mbps = parseFloat(m[1]) * (m[2] === 'GiB' ? 1024 : 1);
