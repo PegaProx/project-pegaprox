@@ -35,6 +35,7 @@ CLOCK_FAIL_S = 60
 # What PegaProx asks PVE for and which features stop working without it. One entry
 # per privilege set: any of `privs` on `path` (or propagated from above) is enough.
 # VM.Monitor is the PVE 8 name of the guest agent read, VM.GuestAgent.Audit the PVE 9 one.
+# The role recipe of core/pve_access.py is built from this table.
 PRIVILEGE_NEEDS = (
     (('Sys.Audit',), '/', ('monitoring',)),
     (('VM.Audit',), '/vms', ('guests',)),
@@ -42,6 +43,7 @@ PRIVILEGE_NEEDS = (
     (('VM.Migrate',), '/vms', ('migration',)),
     (('VM.Console',), '/vms', ('consoles',)),
     (('VM.Snapshot',), '/vms', ('snapshots',)),
+    (('VM.Snapshot.Rollback',), '/vms', ('snapshots',)),
     (('VM.Backup',), '/vms', ('backups',)),
     (('VM.Allocate',), '/vms', ('create',)),
     (('VM.Clone',), '/vms', ('clone',)),
@@ -50,13 +52,25 @@ PRIVILEGE_NEEDS = (
     (('VM.Config.Disk',), '/vms', ('hardware',)),
     (('VM.Config.Network',), '/vms', ('hardware',)),
     (('VM.Config.Options',), '/vms', ('hardware',)),
+    (('VM.Config.CDROM',), '/vms', ('hardware',)),
+    (('VM.Config.HWType',), '/vms', ('hardware',)),
+    (('VM.Config.Cloudinit',), '/vms', ('hardware',)),
     (('VM.GuestAgent.Audit', 'VM.Monitor'), '/vms', ('agent',)),
     (('Datastore.Audit',), '/storage', ('storage',)),
     (('Datastore.AllocateSpace',), '/storage', ('disks',)),
     (('Datastore.AllocateTemplate',), '/storage', ('uploads',)),
+    # a replication job needs VM.Replicate on the guest (PVE API schema of /cluster/replication)
+    (('VM.Replicate',), '/vms', ('replication',)),
+    # PVE 8: a guest NIC on a bridge or vnet needs it on that bridge
+    (('SDN.Use',), '/sdn', ('networks',)),
+    (('Pool.Audit',), '/pool', ('pools',)),
+    (('Mapping.Audit',), '/mapping', ('mappings',)),
+    (('Mapping.Use',), '/mapping', ('mappings',)),
     (('Sys.PowerMgmt',), '/nodes', ('nodePower',)),
     (('Sys.Modify',), '/', ('nodeConfig',)),
     (('Sys.Syslog',), '/', ('syslog',)),
+    # HA resources and rules, the ones a rolling update lets give way among them
+    (('Sys.Console',), '/', ('haConfig',)),
     (('SDN.Audit',), '/sdn', ('sdn',)),
 )
 

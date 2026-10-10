@@ -681,6 +681,9 @@ def check_cluster_connection(cluster_id):
         return jsonify({'error': safe_error(e, 'The connection check failed')}), 500
     report['cluster_id'] = cluster_id
     report['ssh_checked'] = with_ssh
+    # the capability matrix answers from these privileges until the next check
+    from pegaprox.core import pve_access
+    pve_access.remember_report(cluster_id, mgr, report)
     if with_ssh:
         # what each node said goes to its row under Node credentials (#1136)
         from pegaprox.core import node_creds
@@ -695,6 +698,73 @@ def check_cluster_connection(cluster_id):
               f"{s['fail']} failed" + ('' if with_ssh else ' (without SSH)'),
               cluster=mgr.config.name)
     return jsonify(report)
+
+
+@bp.route('/api/clusters/<cluster_id>/capabilities', methods=['GET'])
+@require_auth(perms=['cluster.config'])
+def get_cluster_capabilities(cluster_id):
+    """Which features of PegaProx work with this cluster's connection, and what each one
+    that does not still needs (core/pve_access.py).
+
+    MK Oct 2026 - from the privileges the last connection check read, whether SSH is off,
+    the kind of login and whether a key or a password is stored. Asking sends nothing to
+    the cluster; ?refresh=1 reads /access/permissions once, the read of the check. Nothing
+    is changed and nothing goes to a node. Like the check itself: the login and SSH setup
+    of the whole cluster are no business of a caller confined to part of it.
+    """
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'The capability list covers Proxmox VE clusters only',
+                        'code': 'PVE_ONLY'}), 400
+    refresh = request.args.get('refresh', '')
+    if refresh not in ('', '0', '1'):
+        return jsonify({'error': 'refresh must be 0 or 1'}), 400
+    from pegaprox.core import pve_access
+    try:
+        item, source = pve_access.privileges(cluster_id, mgr, refresh=refresh == '1')
+        out = pve_access.capabilities(cluster_id, mgr, item, source)
+    except Exception as e:
+        logging.exception(f"capability list failed for {_sl(cluster_id)}")
+        return jsonify({'error': safe_error(e, 'The capability list failed')}), 500
+    out.update(cluster_id=cluster_id, connected=bool(mgr.is_connected))
+    return jsonify(out)
+
+
+@bp.route('/api/pve-role-recipe', methods=['GET'])
+@require_auth()
+def get_pve_role_recipe():
+    """The pveum commands for a least-privilege PegaProx role, a dedicated account and an
+    API token with privilege separation (core/pve_access.recipe).
+
+    MK Oct 2026 - ?features=a,b picks the optional features (all of them without the
+    parameter, none for an empty value), ?pve=8|9 the release (the guest agent read has
+    another name in each), ?user=, ?token= and ?role= the names. Built from the privilege
+    table of the connection check, no cluster is asked. For whoever adds or sets up a
+    cluster: cluster.add or cluster.config.
+    """
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not (has_permission(user, 'cluster.add') or has_permission(user, 'cluster.config')):
+        return jsonify({'error': 'Permission denied: cluster.add or cluster.config'}), 403
+    from pegaprox.core import pve_access
+    args = request.args
+    try:
+        features = pve_access.parse_features(args.get('features'))
+        pve = args.get('pve', '9')
+        if pve not in ('8', '9'):
+            raise ValueError('pve must be 8 or 9')
+        out = pve_access.recipe(features, pve=int(pve), user=args.get('user', 'pegaprox@pve'),
+                                token=args.get('token', 'pegaprox'), role=args.get('role', 'PegaProx'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    return jsonify(out)
 
 
 _XFER_NODE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.\-]{0,62}$')

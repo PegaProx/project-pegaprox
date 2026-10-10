@@ -409,6 +409,9 @@ def _cluster_manager(api, guests=(), cluster_type='proxmox', update_ok=True):
     fake = api.make_fake_manager('cluster_1', cluster_type=cluster_type)
     fake.config.name = 'Testi'
     fake.get_node_status.return_value = {'pve1': {'status': 'online'}, 'pve2': {'status': 'online'}}
+    # the quorum gate before each node reads /cluster/status: three votes, one node may go
+    fake._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}] + [
+        {'type': 'node', 'name': n, 'online': 1} for n in ('pve1', 'pve2', 'pve3')]
     fake.get_ceph_health_summary.return_value = None
     fake.get_vm_resources.return_value = [dict(g) for g in guests]
     fake.nodes_in_maintenance = {}

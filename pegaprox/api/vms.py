@@ -11987,7 +11987,9 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
     pve_pwd = getattr(mgr.config, 'pass_', None) or getattr(mgr.config, 'password', None)
     pve_usr = getattr(mgr.config, 'user', None) or 'root@pam'
     # #955 - a token id with its secret is no password either; PVE would only answer 401
-    if not pve_pwd or '!' in pve_usr:
+    # (the capability list asks the same question, core/pve_access.password_login)
+    from pegaprox.core.pve_access import password_login
+    if password_login(mgr.config):
         return jsonify({'error': 'Cluster has no stored password — termproxy needs user/pass auth (API tokens cannot mint termproxy tickets).'}), 400
 
     import ssl as _ssl

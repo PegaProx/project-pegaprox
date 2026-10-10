@@ -674,6 +674,26 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
             def _status():
                 return (rolling_runs.current(mgr) or {}).get('status')
 
+            def _quorum_stop(idx, node_name, phase):
+                """MK Oct 2026 - the quorum gate of settings.run_rolling_update. This worker waits
+                for nobody: a node that would cost the cluster its quorum pauses the run (reason
+                'quorum') and this worker ends - a Continue hands the run to the worker of a run
+                started by hand, which looks again. 'paused', 'cancelled' or None to go on."""
+                verdict = rolling_runs.quorum_gate(mgr, node_name, sleep=time.sleep,
+                                                   stop=lambda: _status() != 'running')
+                if verdict['ok']:
+                    if not verdict.get('skipped'):
+                        rolling_log(mgr, rolling_runs.quorum_said(verdict))
+                    return None
+                if _status() != 'running':
+                    return 'cancelled'
+                details, line = rolling_runs.quorum_hold(verdict, phase)
+                logging.warning(f"[SCHEDULER] Rolling update of {cluster_id} paused before {node_name}: "
+                                f"quorum {verdict.get('reason')}")
+                _set(status='paused', current_step='paused_quorum', paused_reason=rolling_runs.QUORUM,
+                     paused_details=details, resume_at={'index': idx, 'phase': phase}, log=line)
+                return 'paused'
+
             rolling_log(mgr, f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, "
                              f"evacuation_timeout={evacuation_timeout}s, reboot_timeout={reboot_timeout}s, "
                              f"migrate_templates={migrate_templates}, relax_anti_affinity={relax_anti_affinity}")
@@ -695,6 +715,11 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                         except Exception as e:
                             logging.warning(f"[SCHEDULER] Check failed for {node_name}: {e}")
                     _set(current_step='maintenance', node=(node_name, {'phase': 'maintenance'}))
+                    gate = _quorum_stop(idx, node_name, 'maintenance')
+                    if gate == 'paused':
+                        return
+                    if gate:
+                        break
                     running = []
                     if not skip_evacuation:
                         try:
@@ -740,6 +765,11 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                             continue
                         rolling_moved_guests(mgr, node_name, running, task)
                     _set(current_step='updating', node=(node_name, {'phase': 'updating'}))
+                    gate = _quorum_stop(idx, node_name, 'updating')
+                    if gate == 'paused':
+                        return
+                    if gate:
+                        break
                     if not ha.confirm_step(f'update of {node_name}'):
                         rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break

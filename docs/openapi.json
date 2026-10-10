@@ -3377,6 +3377,82 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/capabilities": {
+      "get": {
+        "operationId": "clusters.get_cluster_capabilities_get",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Which features of PegaProx work with this cluster's connection, and what each one that does not still needs (core/pve_access.py).",
+        "description": "MK Oct 2026 - from the privileges the last connection check read, whether SSH is off,\nthe kind of login and whether a key or a password is stored. Asking sends nothing to\nthe cluster; ?refresh=1 reads /access/permissions once, the read of the check. Nothing\nis changed and nothing goes to a node. Like the check itself: the login and SSH setup\nof the whole cluster are no business of a caller confined to part of it.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.config"
+        ]
+      }
+    },
+    "/api/pve-role-recipe": {
+      "get": {
+        "operationId": "clusters.get_pve_role_recipe_get",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        },
+        "summary": "The pveum commands for a least-privilege PegaProx role, a dedicated account and an API token with privilege separation (core/pve_access.recipe).",
+        "description": "MK Oct 2026 - ?features=a,b picks the optional features (all of them without the\nparameter, none for an empty value), ?pve=8|9 the release (the guest agent read has\nanother name in each), ?user=, ?token= and ?role= the names. Built from the privilege\ntable of the connection check, no cluster is asked. For whoever adds or sets up a\ncluster: cluster.add or cluster.config.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/transfer-network": {
       "get": {
         "operationId": "clusters.get_transfer_network_get",
@@ -34669,7 +34745,7 @@
           }
         },
         "summary": "Continue a paused rolling update",
-        "description": "MK Oct 2026 - one that no worker waits for here (interrupted by a restart or a switch to\nanother instance, or paused before one) gets a worker that looks at its node again and\ngoes on from the phase it was in.",
+        "description": "MK Oct 2026 - one that no worker waits for here (interrupted by a restart or a switch to\nanother instance, or paused before one) gets a worker that looks at its node again and\ngoes on from the phase it was in. A run paused for its quorum looks at it again on a\nContinue; {\"accept_quorum_risk\": true} takes that one node down all the same.",
         "parameters": [
           {
             "name": "cluster_id",

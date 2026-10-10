@@ -81,6 +81,9 @@ def _run(api, seed, monkeypatch, task):
     root = seed.user('root', role='admin')
     fake = api.make_fake_manager()
     fake.get_node_status.return_value = {'blade1': {'status': 'online'}}
+    # the quorum gate before the node goes down reads /cluster/status: three votes, one may go
+    fake._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}] + [
+        {'type': 'node', 'name': n, 'online': 1} for n in ('blade1', 'blade2', 'blade3')]
     fake.get_ceph_health_summary.return_value = None
     fake.start_node_update.return_value = task
     fake.exit_maintenance_mode.return_value = False   # what the real one says for an untracked node

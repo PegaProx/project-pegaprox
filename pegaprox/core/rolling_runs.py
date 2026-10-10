@@ -399,6 +399,163 @@ def follow(mgr, cluster_id):
         return 1
 
 
+# MK Oct 2026 - the quorum gate. Before a node goes into maintenance and before its update the
+# cluster has to keep its quorum with that node down, or the run waits: paused, reason 'quorum'.
+# A node that comes back from its reboot can take a moment to rejoin corosync, so a verdict
+# against it is looked at again for QUORUM_SETTLE seconds before the run holds.
+QUORUM = 'quorum'
+QUORUM_SETTLE = 60
+QUORUM_LOOK_EVERY = 10
+
+
+def _config_votes(mgr):
+    """{node: votes} as corosync.conf has them (/cluster/config/nodes), {} when unread."""
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/config/nodes", timeout=10)
+        if r.status_code != 200:
+            return {}
+        rows = r.json().get('data') or []
+    except Exception:
+        return {}
+    out = {}
+    for row in rows if isinstance(rows, list) else ():
+        if not isinstance(row, dict) or not row.get('node'):
+            continue
+        try:
+            out[str(row['node'])] = max(0, int(row.get('quorum_votes', 1)))
+        except (TypeError, ValueError):
+            out[str(row['node'])] = 1
+    return out
+
+
+def _qdevice_of(mgr, node_count):
+    """{'present', 'connected', 'votes'} of the cluster's QDevice (core/qdevice.py, kept 30 s).
+    pvecm sets one up with the ffsplit algorithm, one vote; lms gives it one less than nodes."""
+    from pegaprox.core import qdevice
+    try:
+        v = qdevice.view(getattr(mgr, 'id', None), mgr)
+    except Exception:
+        v = None
+    if not isinstance(v, dict) or not v.get('present'):
+        return {'present': False, 'connected': False, 'votes': 0}
+    algo = str(v.get('algorithm') or '').lower()
+    votes = max(1, node_count - 1) if 'lms' in algo else 1
+    return {'present': True, 'connected': v.get('state') == 'Connected', 'votes': votes}
+
+
+def quorum_facts(mgr):
+    """What decides the quorum of a Proxmox VE cluster: one read of /cluster/status, the votes
+    of corosync.conf and the QDevice its nodes report. None where there is no quorum to look
+    at (XCP-ng, a manager without /cluster/status); {'error': ...} when the status was not
+    read."""
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None
+    read = getattr(mgr, '_ha_cluster_status', None)
+    if not callable(read):
+        return None
+    try:
+        entries = read()
+    except Exception:
+        entries = None
+    if not isinstance(entries, list):
+        return {'error': 'status_unreadable'}
+    cluster = next((e for e in entries if isinstance(e, dict) and e.get('type') == 'cluster'), None)
+    nodes = {str(e['name']): {'online': bool(e.get('online')), 'votes': 1}
+             for e in entries if isinstance(e, dict) and e.get('type') == 'node' and e.get('name')}
+    if cluster is None:
+        return {'standalone': True, 'quorate': True, 'nodes': nodes, 'qdevice': {'present': False},
+                'two_node': False}
+    for name, votes in _config_votes(mgr).items():
+        if name in nodes:
+            nodes[name]['votes'] = votes
+    seen = getattr(mgr, 'ha_config', None)
+    seen = seen.get('fence_strategy') if isinstance(seen, dict) else None
+    return {'standalone': False, 'quorate': bool(cluster.get('quorate')), 'nodes': nodes,
+            'qdevice': _qdevice_of(mgr, len(nodes)),
+            # corosync's two_node, as the last look at pvecm status found it (#625)
+            'two_node': isinstance(seen, dict) and seen.get('two_node_flag') is True}
+
+
+def quorum_without(facts, node):
+    """Whether the cluster stays quorate with `node` down. ok, reason ('not_quorate',
+    'would_lose', 'status_unreadable' or None) and the votes behind it."""
+    if facts is None:
+        return {'ok': True, 'reason': None, 'skipped': True}
+    if facts.get('error'):
+        return {'ok': False, 'reason': facts['error'], 'node': node}
+    nodes = facts.get('nodes') or {}
+    offline = sorted(n for n, v in nodes.items() if not v['online'] and n != node)
+    if facts.get('standalone'):
+        return {'ok': True, 'reason': None, 'node': node, 'standalone': True, 'offline': offline}
+    q = facts.get('qdevice') or {}
+    q_votes = int(q.get('votes') or 0) if q.get('present') else 0
+    expected = sum(v['votes'] for v in nodes.values()) + q_votes
+    needed = 1 if facts.get('two_node') and len(nodes) == 2 and not q_votes else expected // 2 + 1
+    have = sum(v['votes'] for v in nodes.values() if v['online']) + (q_votes if q.get('connected') else 0)
+    mine = nodes.get(node) or {}
+    after = have - (mine.get('votes', 0) if mine.get('online') else 0)
+    reason = None
+    if not facts.get('quorate'):
+        reason = 'not_quorate'
+    elif after < needed:
+        reason = 'would_lose'
+    return {'ok': reason is None, 'reason': reason, 'node': node, 'expected': expected, 'needed': needed,
+            'have': have, 'after': after, 'offline': offline,
+            'qdevice': {'present': bool(q.get('present')), 'connected': bool(q.get('connected'))}}
+
+
+def quorum_gate(mgr, node, sleep=time.sleep, stop=None, settle=QUORUM_SETTLE):
+    """quorum_without for node now; a verdict against it is looked at again every
+    QUORUM_LOOK_EVERY seconds for `settle` seconds, or until stop() says the run ended."""
+    verdict = quorum_without(quorum_facts(mgr), node)
+    waited = 0
+    while not verdict['ok'] and waited < settle and not (stop and stop()):
+        sleep(QUORUM_LOOK_EVERY)
+        waited += QUORUM_LOOK_EVERY
+        verdict = quorum_without(quorum_facts(mgr), node)
+    return verdict
+
+
+def quorum_said(verdict):
+    """The log line of a verdict."""
+    if verdict.get('skipped'):
+        return 'Quorum: not looked at (no corosync cluster to ask)'
+    if verdict.get('standalone'):
+        return 'Quorum: a single node in no cluster, nothing to lose'
+    if verdict.get('reason') == 'status_unreadable':
+        return 'Quorum: /cluster/status did not answer'
+    head = (f"Quorum with {verdict['node']} down: {verdict['after']} of {verdict['expected']} votes, "
+            f"{verdict['needed']} needed")
+    if verdict['offline']:
+        head += f" ({', '.join(verdict['offline'])} offline)"
+    q = verdict.get('qdevice') or {}
+    if q.get('present'):
+        head += ', QDevice ' + ('connected' if q.get('connected') else 'NOT connected')
+    return head
+
+
+def quorum_hold(verdict, phase):
+    """(paused_details, log line) of a run that waits for its quorum."""
+    node = verdict.get('node') or ''
+    step = 'goes into maintenance' if phase == 'maintenance' else 'is updated'
+    if verdict.get('reason') == 'status_unreadable':
+        why = "the quorum of the cluster could not be read (/cluster/status did not answer)"
+    elif verdict.get('reason') == 'not_quorate':
+        why = 'the cluster is not quorate right now'
+    else:
+        why = (f"taking {node} down would leave {verdict['after']} of {verdict['expected']} votes, "
+               f"and the cluster needs {verdict['needed']}")
+        if verdict.get('offline'):
+            why += f" ({', '.join(verdict['offline'])} offline)"
+    details = {k: verdict.get(k) for k in ('node', 'reason', 'expected', 'needed', 'have', 'after',
+                                           'offline', 'qdevice')}
+    details.update(phase=phase, message=(
+        f"Not going on before {node} {step}: {why}. Bring the missing nodes (or the QDevice) "
+        f"back, then Continue - it looks at the quorum again. Continue anyway takes the node down "
+        f"all the same, Cancel ends the run."))
+    return details, f"⏸ QUORUM - {node} is not taken down: {why}. Waiting for Continue or Cancel."
+
+
 def history(cluster_id, limit=HISTORY_KEEP):
     """The runs of a cluster for the history list, newest first."""
     out = []

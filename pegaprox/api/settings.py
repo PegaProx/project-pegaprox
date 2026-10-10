@@ -5109,6 +5109,31 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  current_node=nodes_to_update[at] if at < total else '', current_step=resume_at['phase'])
         return status
 
+    def _quorum_holds(idx, node_name, phase):
+        """MK Oct 2026 - before node_name goes into maintenance and before its update: the
+        cluster keeps its quorum with it down, or the run waits (paused, reason 'quorum'), and
+        each Continue looks again. A node an admin let go anyway (Continue anyway) goes on with a
+        warning. False when the run was cancelled meanwhile."""
+        while True:
+            verdict = rolling_runs.quorum_gate(mgr, node_name, sleep=time.sleep,
+                                               stop=lambda: _status() != 'running')
+            if verdict['ok']:
+                if not verdict.get('skipped'):
+                    _log(rolling_runs.quorum_said(verdict))
+                return True
+            if _status() != 'running':
+                return False
+            accepted = (rolling_runs.current(mgr) or {}).get('quorum_risk_accepted') or []
+            if node_name in accepted:
+                _log(f"⚠ {rolling_runs.quorum_said(verdict)} - going on, the risk was accepted for {node_name}")
+                return True
+            details, line = rolling_runs.quorum_hold(verdict, phase)
+            logging.warning(f"[RollingUpdate] Paused before {node_name} ({phase}): quorum {verdict.get('reason')}")
+            status = _hold(rolling_runs.QUORUM, 'paused_quorum', details, {'index': idx, 'phase': phase}, line)
+            if status != 'running':
+                return False
+            _log(f"▶ Continued - looking at the quorum again before {node_name} goes on")
+
     def _pending(node_name):
         """How many updates the node has, None when that could not be read."""
         # First refresh apt/yum cache
@@ -5202,6 +5227,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 logging.info(f"[RollingUpdate] Node {node_name} has {update_count} updates available")
 
         if todo('maintenance'):
+            if not _quorum_holds(idx, node_name, 'maintenance'):
+                return 'stop'
             # NS: force-refresh maintenance state from PVE before each node (#141)
             refresh = getattr(mgr, 'refresh_maintenance_status', None)
             if callable(refresh):
@@ -5327,6 +5354,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 rolling_moved_guests(mgr, node_name, running, maintenance_task)
 
         if todo('updating'):
+            if not _quorum_holds(idx, node_name, 'updating'):
+                return 'stop'
             # Step 2: Run apt update/upgrade
             _phase(node_name, 'updating', f"Installing updates on {node_name}")
             logging.info(f"[RollingUpdate] Installing updates on {node_name}")
@@ -5776,7 +5805,8 @@ def resume_rolling_update(cluster_id):
 
     MK Oct 2026 - one that no worker waits for here (interrupted by a restart or a switch to
     another instance, or paused before one) gets a worker that looks at its node again and
-    goes on from the phase it was in."""
+    goes on from the phase it was in. A run paused for its quorum looks at it again on a
+    Continue; {"accept_quorum_risk": true} takes that one node down all the same."""
     # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) - cluster-scoped route was missing the tenant gate
     ok, err = check_cluster_access(cluster_id)
     if not ok:
@@ -5786,6 +5816,14 @@ def resume_rolling_update(cluster_id):
         return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The body must be a JSON object'}), 400
+    accept_risk = data.get('accept_quorum_risk', False)
+    if not isinstance(accept_risk, bool):
+        return jsonify({'error': 'accept_quorum_risk must be true or false'}), 400
     manager = cluster_managers[cluster_id]
     opened = rolling_runs.open_run(manager, cluster_id)
     if opened is None:
@@ -5809,10 +5847,17 @@ def resume_rolling_update(cluster_id):
             return jsonify({'error': 'This rolling update is being cancelled'}), 409
         paused_reason = state.get('paused_reason') or 'unknown'
         name = getattr(manager.config, 'name', cluster_id)
+        risk, said = {}, paused_reason
+        if accept_risk:
+            if paused_reason != rolling_runs.QUORUM:
+                return jsonify({'error': 'Only a run paused for its quorum can go on anyway'}), 400
+            risk_node = (state.get('paused_details') or {}).get('node') or state.get('current_node') or ''
+            risk = {'add': {'quorum_risk_accepted': risk_node}}
+            said = f"{paused_reason}, the quorum risk accepted for {risk_node}"
         if rolling_runs.worker_here(cluster_id, manager):
-            log_audit(usr, 'node.rolling_update_resumed', f"Rolling update continued (was paused: {paused_reason})",
+            log_audit(usr, 'node.rolling_update_resumed', f"Rolling update continued (was paused: {said})",
                       cluster=name)
-            rolling_runs.change(manager, status='running', log=f"▶ Resumed (was: {paused_reason})")
+            rolling_runs.change(manager, status='running', log=f"▶ Resumed (was: {said})", **risk)
             return jsonify({'success': True, 'message': 'Resumed', 'was_paused_for': paused_reason})
         nodes = list(state.get('nodes') or [])
         resume = dict(state.get('resume_at') or {})
@@ -5822,11 +5867,12 @@ def resume_rolling_update(cluster_id):
         at = int(resume['index'])
         node = nodes[at] if 0 <= at < len(nodes) else ''
         log_audit(usr, 'node.rolling_update_resumed',
-                  f"Rolling update continued at {node or 'its end'} (was paused: {paused_reason})", cluster=name)
+                  f"Rolling update continued at {node or 'its end'} (was paused: {said})", cluster=name)
         rolling_runs.change(manager, status='running', paused_reason=None, paused_details=None, resume_at=None,
                             current_index=at, current_node=node, current_step=resume['phase'],
-                            log=f"▶ Continued by {usr} (was: {paused_reason})"
-                                + (f" - {node} is looked at again before the run goes on" if node else ''))
+                            log=f"▶ Continued by {usr} (was: {said})"
+                                + (f" - {node} is looked at again before the run goes on" if node else ''),
+                            **risk)
         _launch_rolling_update(manager, cluster_id, usr, resume)
     return jsonify({'success': True, 'message': 'Resumed', 'was_paused_for': paused_reason})
 
