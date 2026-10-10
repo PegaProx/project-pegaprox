@@ -262,6 +262,37 @@ def test_an_unknown_job_and_a_job_id_out_of_shape(api, seed):
     assert c.get(f'/api/clusters/{CID}/datacenter/backup/..%2F..%2Fnodes/runs').status_code == 404
 
 
+def test_a_run_that_failed_before_its_command_line_is_the_jobs_failed_run(api, seed):
+    """The storage could not be activated: the task logs only that, and the run was nobody's."""
+    pve = _Pve(api)
+    early = ["ERROR: could not activate storage 'local', local: error fetching datastores - "
+             "500 Can't connect to 192.0.2.20:8007 (No route to host)"]
+    pve.task('pve1', T0, None, extra=early, status="could not activate storage 'local'", vmid='100')
+    body = _runs(_admin(api, seed), job='backup-vms').get_json()
+    assert [(x['start'], x['state']) for x in body['runs']] == [(T0, 'failed')]
+    assert _last(_admin(api, seed)).get_json()['jobs']['backup-vms']['state'] == 'failed'
+    # read once: a second look takes it from what was kept
+    reads = len(pve.log_reads())
+    runs._lists.clear()
+    _runs(_admin(api, seed), job='backup-vms')
+    assert len(pve.log_reads()) == reads
+
+
+def test_an_early_failure_on_another_storage_or_guest_is_not_the_jobs(api, seed):
+    pve = _Pve(api)
+    pve.task('pve1', T0, None, extra=["ERROR: could not activate storage 'nas2', nas2: timeout"],
+             status="could not activate storage 'nas2'", vmid='100')
+    pve.task('pve1', T0 + 300, None, extra=["ERROR: could not activate storage 'local', local: gone"],
+             status="could not activate storage 'local'", vmid='300')
+    assert _runs(_admin(api, seed), job='backup-vms').get_json()['runs'] == []
+    # an all-guests job on that storage takes the one that names no guest outside it
+    pve.task('pve2', T0 + 600, None, extra=["ERROR: could not activate storage 'pbs', pbs: gone"],
+             status="could not activate storage 'pbs'")
+    runs._lists.clear()
+    got = _runs(_admin(api, seed)).get_json()['runs']
+    assert [(x['start'], x['state']) for x in got] == [(T0 + 600, 'failed')]
+
+
 # --- who sees them ---------------------------------------------------------------------------
 
 def _scoped(api, seed, vmids):

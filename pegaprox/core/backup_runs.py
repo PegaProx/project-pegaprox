@@ -48,6 +48,9 @@ _FINISHED = re.compile(r'Finished Backup of VM (\d+) \(([^)]*)\)')
 _FAILED = re.compile(r'Backup of VM (\d+) failed - (.*)$')
 _SIZE = re.compile(r'archive file size: (\S+)')
 _ARCHIVE = re.compile(r"creating (?:vzdump|Proxmox Backup Server) archive '([^']+)'")
+# a task that fails before vzdump logs its command line says why, mostly a backup storage
+# it cannot activate: "could not activate storage 'pbs1', ..."
+_EARLY_STORAGE = re.compile(r"storage '([^'\s]{1,128})'")
 
 _lock = threading.Lock()
 _headers = OrderedDict()   # (cluster, upid) -> {'opts': {...}} or {} for a task that is no backup job
@@ -211,9 +214,10 @@ def _log_page(mgr, node, upid, start, limit):
 
 
 def header(mgr, cluster_id, task):
-    """What the task logged first: {'opts': ...}, {} when it ended without a command line,
-    {'waiting': True} while it runs and has not logged one yet (the global lock), None when
-    the log cannot be read. The first two are kept."""
+    """What the task logged first: {'opts': ...}, {'early_storage': name} or {} when it ended
+    without a command line (with or without naming the storage it failed on), {'waiting':
+    True} while it runs and has not logged one yet (the global lock), None when the log
+    cannot be read. All but the last two are kept."""
     key = (cluster_id, task['upid'])
     hit = _recall(_headers, key)
     if hit is not None:
@@ -233,8 +237,26 @@ def header(mgr, cluster_id, task):
             return got
     if task.get('end') is None:
         return {'waiting': True}
-    _remember(_headers, key, {}, _HEADERS_KEPT)
-    return {}
+    early = {}
+    for _n, text in lines:
+        m = _EARLY_STORAGE.search(text)
+        if m:
+            early = {'early_storage': m.group(1)}
+            break
+    _remember(_headers, key, early, _HEADERS_KEPT)
+    return early
+
+
+def failed_early(job, head, task):
+    """Whether a task that ended before it logged a command line is a run of `job`: its error
+    names the storage the job writes to, and a guest it names is one the job selects.
+
+    MK Oct 2026 - a scheduled run whose storage could not be activated (the commonest real
+    failure) logs only the error, so it was nobody's run and the job looked fine."""
+    storage = (head or {}).get('early_storage')
+    if not storage or storage != str(job.get('storage') or '').strip():
+        return False
+    return may_be(job, task)
 
 
 # --- runs --------------------------------------------------------------------------------------
@@ -322,8 +344,8 @@ def job_runs(mgr, cluster_id, job, days=DAYS_DEFAULT, limit=RUNS_DEFAULT):
             if h is None:
                 partial = True
                 continue
-            if belongs(job, h.get('opts')):
-                matched.append(dict(t, scheduled=str(h['opts'].get('quiet', '')) == '1'))
+            if belongs(job, h.get('opts')) or failed_early(job, h, t):
+                matched.append(dict(t, scheduled=str((h.get('opts') or {}).get('quiet', '')) == '1'))
         runs = group(matched)
         # what is left is older than the oldest run asked for: it cannot change those
         if len(runs) > limit and runs[limit - 1]['start'] - GROUP_SECONDS > chunk[-1]['start']:
