@@ -1503,6 +1503,20 @@
 
             const authHeaders = getAuthHeaders();  // NS: Get auth headers
 
+            // LW Oct 2026 - the performance charts zoom together, finer data for a narrow range
+            const perfFetch = u => fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null);
+            const perfZoom = useChartZoom({
+                preset: perfTimeframe, loaded: data.performance, resetKey: `${clusterId}/${node}`,
+                loadPreset: tf => perfFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf}`),
+                loadRange: (from, to) => perfFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`),
+            });
+            const perfNet = perfZoom.source('net_in', 'net_out');
+            const perfPsi = {
+                cpu: perfZoom.source('pressurecpusome', 'pressurecpufull'),
+                memory: perfZoom.source('pressurememorysome', 'pressurememoryfull'),
+                io: perfZoom.source('pressureiosome', 'pressureiofull'),
+            };
+
             // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
             const allTabs = isXcpng ? [
                 { id: 'summary', label: 'Summary', icon: Icons.Activity },
@@ -2199,7 +2213,8 @@
                                                 <h3 className="text-lg font-semibold text-white flex items-center gap-2">
                                                     <Icons.BarChart /> Performance Metrics
                                                 </h3>
-                                                <div className="flex gap-2">
+                                                <div className="flex items-center gap-2">
+                                                    <ChartZoomBar zoom={perfZoom} />
                                                     {['hour', 'day', 'week', 'month', 'year'].map(tf => (
                                                         <button
                                                             key={tf}
@@ -2215,11 +2230,11 @@
                                             </div>
                                             
                                             {data.performance?.metrics ? (
+                                                <ChartZoomContext.Provider value={perfZoom}>
                                                 <div className="space-y-4">
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <LineChart
-                                                            data={data.performance.metrics.cpu}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('cpu')}
                                                             label="CPU Usage"
                                                             color="#f97316"
                                                             unit="%"
@@ -2227,8 +2242,7 @@
                                                             yMax={100}
                                                         />
                                                         <LineChart
-                                                            data={data.performance.metrics.memory}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('memory')}
                                                             label="Memory Usage"
                                                             color="#3b82f6"
                                                             unit="%"
@@ -2236,15 +2250,13 @@
                                                             yMax={100}
                                                         />
                                                         <LineChart
-                                                            data={data.performance.metrics.iowait}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('iowait')}
                                                             label="IO Wait"
                                                             color="#eab308"
                                                             unit="%"
                                                         />
                                                         <LineChart
-                                                            data={data.performance.metrics.loadavg}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('loadavg')}
                                                             label="Load Average"
                                                             color="#22c55e"
                                                             unit=""
@@ -2252,17 +2264,16 @@
                                                     </div>
                                                     <LineChart
                                                         datasets={[
-                                                            { label: 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4' },
-                                                            { label: 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6' }
+                                                            { label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4' },
+                                                            { label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6' }
                                                         ]}
-                                                        timestamps={data.performance.timestamps}
+                                                        timestamps={perfNet.timestamps}
                                                         label="Network I/O"
                                                         unit=" KB/s"
                                                     />
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <LineChart
-                                                            data={data.performance.metrics.swap}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('swap')}
                                                             label="Swap Usage"
                                                             color="#ec4899"
                                                             unit="%"
@@ -2270,8 +2281,7 @@
                                                             yMax={100}
                                                         />
                                                         <LineChart
-                                                            data={data.performance.metrics.rootfs}
-                                                            timestamps={data.performance.timestamps}
+                                                            {...perfZoom.series('rootfs')}
                                                             label="Root FS Usage"
                                                             color="#a855f7"
                                                             unit="%"
@@ -2283,10 +2293,10 @@
                                                     {data.performance.metrics.pressurecpusome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressurecpusome, color: '#3b82f6' },
-                                                                { label: 'Full', data: data.performance.metrics.pressurecpufull, color: '#ef4444' }
+                                                                { label: 'Some', data: perfPsi.cpu.metrics.pressurecpusome, color: '#3b82f6' },
+                                                                { label: 'Full', data: perfPsi.cpu.metrics.pressurecpufull, color: '#ef4444' }
                                                             ]}
-                                                            timestamps={data.performance.timestamps}
+                                                            timestamps={perfPsi.cpu.timestamps}
                                                             label="CPU Pressure Stall"
                                                             unit="%"
                                                             yMin={0}
@@ -2296,10 +2306,10 @@
                                                     {data.performance.metrics.pressurememorysome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressurememorysome, color: '#22c55e' },
-                                                                { label: 'Full', data: data.performance.metrics.pressurememoryfull, color: '#ef4444' }
+                                                                { label: 'Some', data: perfPsi.memory.metrics.pressurememorysome, color: '#22c55e' },
+                                                                { label: 'Full', data: perfPsi.memory.metrics.pressurememoryfull, color: '#ef4444' }
                                                             ]}
-                                                            timestamps={data.performance.timestamps}
+                                                            timestamps={perfPsi.memory.timestamps}
                                                             label="Memory Pressure Stall"
                                                             unit="%"
                                                             yMin={0}
@@ -2309,10 +2319,10 @@
                                                     {data.performance.metrics.pressureiosome && (
                                                         <LineChart
                                                             datasets={[
-                                                                { label: 'Some', data: data.performance.metrics.pressureiosome, color: '#eab308' },
-                                                                { label: 'Full', data: data.performance.metrics.pressureiofull, color: '#ef4444' }
+                                                                { label: 'Some', data: perfPsi.io.metrics.pressureiosome, color: '#eab308' },
+                                                                { label: 'Full', data: perfPsi.io.metrics.pressureiofull, color: '#ef4444' }
                                                             ]}
-                                                            timestamps={data.performance.timestamps}
+                                                            timestamps={perfPsi.io.timestamps}
                                                             label="IO Pressure Stall"
                                                             unit="%"
                                                             yMin={0}
@@ -2322,10 +2332,11 @@
 
                                                     {data.performance.timestamps?.length > 0 && (
                                                         <div className="text-xs text-gray-500 text-center mt-2">
-                                                            {formatTime(data.performance.timestamps[0])} - {formatTime(data.performance.timestamps[data.performance.timestamps.length - 1])}
+                                                            {formatTime(perfZoom.range ? perfZoom.range.from : data.performance.timestamps[0])} - {formatTime(perfZoom.range ? perfZoom.range.to : data.performance.timestamps[data.performance.timestamps.length - 1])}
                                                         </div>
                                                     )}
                                                 </div>
+                                                </ChartZoomContext.Provider>
                                             ) : (
                                                 <div className="text-center text-gray-500 py-12">
                                                     <Icons.BarChart className="mx-auto mb-3 w-12 h-12 opacity-50" />
@@ -5301,6 +5312,16 @@
                 catch(e) { console.error(e); return null; }
             };
 
+            // LW Oct 2026 - the performance charts zoom together, finer data for a narrow range
+            const perfZoom = useChartZoom({
+                preset: perfTimeframe, loaded: data.performance, resetKey: navKey,
+                loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf}`)
+                    .then(r => r?.ok ? r.json() : null),
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r?.ok ? r.json() : null),
+            });
+            const perfNet = perfZoom.source('net_in', 'net_out');
+
             // LW: Feb 2026 - save handler for configure tab edits
             const handleSave = async (endpoint, payload, successMsg, method) => {
                 setSaving(true);
@@ -5701,7 +5722,8 @@
                                         <div className="space-y-4">
                                             <div className="flex items-center justify-between">
                                                 <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('performance')}</span>
-                                                <div className="flex gap-1">
+                                                <div className="flex items-center gap-1">
+                                                    <span className="mr-2"><ChartZoomBar zoom={perfZoom} /></span>
                                                     {['hour', 'day', 'week', 'month', 'year'].map(tf => (
                                                         <button key={tf} onClick={() => handlePerfTimeframeChange(tf)}
                                                             className="px-2 py-1 text-[11px]"
@@ -5713,19 +5735,21 @@
                                             {loading && !data.performance ? (
                                                 <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
                                             ) : data.performance?.metrics ? (
+                                                <ChartZoomContext.Provider value={perfZoom}>
                                                 <div className="space-y-3">
                                                     <div className="grid grid-cols-2 gap-3">
-                                                        <LineChart data={data.performance.metrics.cpu} timestamps={data.performance.timestamps} label="CPU" color="#49afd9" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.memory} timestamps={data.performance.timestamps} label="Memory" color="#9b59b6" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.iowait} timestamps={data.performance.timestamps} label="IO Wait" color="#eab308" unit="%" />
-                                                        <LineChart data={data.performance.metrics.loadavg} timestamps={data.performance.timestamps} label="Load Average" color="#22c55e" unit="" />
+                                                        <LineChart {...perfZoom.series('cpu')} label="CPU" color="#49afd9" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('memory')} label="Memory" color="#9b59b6" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('iowait')} label="IO Wait" color="#eab308" unit="%" />
+                                                        <LineChart {...perfZoom.series('loadavg')} label="Load Average" color="#22c55e" unit="" />
                                                     </div>
-                                                    <LineChart datasets={[{label: 'Net In', data: data.performance.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: data.performance.metrics.net_out, color: '#8b5cf6'}]} timestamps={data.performance.timestamps} label="Network I/O" unit=" KB/s" />
+                                                    <LineChart datasets={[{label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
                                                     <div className="grid grid-cols-2 gap-3">
-                                                        <LineChart data={data.performance.metrics.swap} timestamps={data.performance.timestamps} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
-                                                        <LineChart data={data.performance.metrics.rootfs} timestamps={data.performance.timestamps} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('swap')} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('rootfs')} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
                                                     </div>
                                                 </div>
+                                                </ChartZoomContext.Provider>
                                             ) : (
                                                 <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.BarChart className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">No performance data available</p></div>
                                             )}

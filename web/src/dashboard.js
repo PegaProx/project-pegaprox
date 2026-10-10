@@ -13435,6 +13435,20 @@
                 setReportLoading(false);
             };
             
+            // LW Oct 2026 - the CPU and memory charts of the report zoom together. The report is
+            // PegaProx's own history already, so a range with few points in it (the week keeps
+            // every third snapshot) is read again at full resolution with from/to
+            const reportToSeries = d => (d && Array.isArray(d.timestamps)) ? {
+                timestamps: d.timestamps.map(x => { const ms = new Date(x).getTime(); return isNaN(ms) ? 0 : Math.floor(ms / 1000); }),
+                metrics: { cpu: d.cpu?.samples || [], memory: d.memory?.samples || [] },
+            } : null;
+            const reportSeries = React.useMemo(() => reportToSeries(reportData), [reportData]);
+            const reportZoom = useChartZoom({
+                preset: reportPeriod, loaded: reportSeries, resetKey: selectedCluster?.id,
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${selectedCluster?.id}/reports/summary?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r && r.ok ? r.json() : null).then(reportToSeries),
+            });
+
             const loadTopVms = async (metric = 'cpu', limit = 10, clusterId = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
@@ -21146,6 +21160,7 @@
                                                     <div className="space-y-6">
                                                         <div className="flex justify-end">
                                                             <div className="flex items-center gap-2">
+                                                                {reportData?.timestamps?.length > 2 && <ChartZoomBar zoom={reportZoom} />}
                                                                 {['hour', 'day', 'week'].map(p => (
                                                                     <button
                                                                         key={p}
@@ -21286,21 +21301,15 @@
                                                                 </div>
 
                                                                 {/* Timeline Charts — CPU & Memory over time */}
-                                                                {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (() => {
-                                                                    // convert ISO strings to unix seconds for LineChart
-                                                                    const ts = reportData.timestamps.map(t => {
-                                                                        const d = new Date(t);
-                                                                        return isNaN(d.getTime()) ? 0 : Math.floor(d.getTime() / 1000);
-                                                                    });
-                                                                    return (
+                                                                {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (
+                                                                    <ChartZoomContext.Provider value={reportZoom}>
                                                                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                             <h3 className="text-sm font-semibold text-gray-400 mb-2 flex items-center gap-2">
                                                                                 <Icons.Cpu className="w-4 h-4 text-blue-400" /> CPU {t('overTime') || 'over Time'}
                                                                             </h3>
                                                                             <LineChart
-                                                                                data={reportData.cpu?.samples || []}
-                                                                                timestamps={ts}
+                                                                                {...reportZoom.series('cpu')}
                                                                                 label="CPU" color="#3b82f6" unit="%"
                                                                                 yMin={0} yMax={100}
                                                                                 formatValue={v => v.toFixed(1)}
@@ -21311,15 +21320,15 @@
                                                                                 <Icons.HardDrive className="w-4 h-4 text-green-400" /> Memory {t('overTime') || 'over Time'}
                                                                             </h3>
                                                                             <LineChart
-                                                                                data={reportData.memory?.samples || []}
-                                                                                timestamps={ts}
+                                                                                {...reportZoom.series('memory')}
                                                                                 label="Memory" color="#22c55e" unit="%"
                                                                                 yMin={0} yMax={100}
                                                                                 formatValue={v => v.toFixed(1)}
                                                                             />
                                                                         </div>
-                                                                    </div>);
-                                                                })()}
+                                                                    </div>
+                                                                    </ChartZoomContext.Provider>
+                                                                )}
                                                                 {/* data points info */}
                                                                 {reportData?.data_points > 0 && (
                                                                     <div className="text-xs text-gray-600 text-center">

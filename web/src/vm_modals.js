@@ -1925,11 +1925,20 @@
                 return () => { metricsSeqRef.current++; };
             }, [fetchMetrics, metricsRefreshTick]);
 
+            // LW Oct 2026 - a range dragged on one chart zooms all six, with finer data where needed
+            const metricsZoom = useChartZoom({
+                preset: metricsTimeframe, loaded: metricsData, resetKey: `${clusterId}/${vm.vmid}`,
+                loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${tf}`)
+                    .then(r => r?.ok ? r.json() : null),
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.vmid}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r?.ok ? r.json() : null),
+            });
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
+            const metricsMem = metricsZoom.series('memory');
             const memDataGB = React.useMemo(() => {
-                if (!metricsData?.metrics?.memory || !maxMemGB) return [];
-                return metricsData.metrics.memory.map(p => p === null ? null : (p / 100) * maxMemGB);
-            }, [metricsData, maxMemGB]);
+                if (!metricsMem.data || !maxMemGB) return [];
+                return metricsMem.data.map(p => p === null ? null : (p / 100) * maxMemGB);
+            }, [metricsMem.data, maxMemGB]);
 
             // Toggle HA
             const toggleProxmoxHa = async () => {
@@ -2504,6 +2513,7 @@
                                             {t('performanceMetrics') || 'Performance Metrics'}
                                         </span>
                                         <div className="flex items-center gap-2">
+                                            <ChartZoomBar zoom={metricsZoom} />
                                             <select
                                                 value={metricsTimeframe}
                                                 onChange={e => setMetricsTimeframe(e.target.value)}
@@ -2532,27 +2542,29 @@
                                                 <Icons.RotateCw className="w-4 h-4 animate-spin" style={{color: '#728b9a'}} />
                                             </div>
                                         ) : metricsData?.metrics ? (
+                                            <ChartZoomContext.Provider value={metricsZoom}>
                                             <div className="space-y-3">
                                                 <div className="grid grid-cols-2 gap-3">
-                                                    <LineChart data={metricsData.metrics.cpu} timestamps={metricsData.timestamps}
+                                                    <LineChart {...metricsZoom.series('cpu')}
                                                         label="CPU" color="#49afd9" unit="%" />
-                                                    <LineChart data={memDataGB} timestamps={metricsData.timestamps}
+                                                    <LineChart data={memDataGB} timestamps={metricsMem.timestamps}
                                                         label="Memory" color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
                                                         formatValue={v => v.toFixed(2)} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
-                                                    <LineChart data={metricsData.metrics.disk_read} timestamps={metricsData.timestamps}
+                                                    <LineChart {...metricsZoom.series('disk_read')}
                                                         label="Disk Read" color="#efc006" unit="/s" formatValue={formatBytes} />
-                                                    <LineChart data={metricsData.metrics.disk_write} timestamps={metricsData.timestamps}
+                                                    <LineChart {...metricsZoom.series('disk_write')}
                                                         label="Disk Write" color="#f97316" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                                 <div className="grid grid-cols-2 gap-3">
-                                                    <LineChart data={metricsData.metrics.net_in} timestamps={metricsData.timestamps}
+                                                    <LineChart {...metricsZoom.series('net_in')}
                                                         label="Network In" color="#49afd9" unit="/s" formatValue={formatBytes} />
-                                                    <LineChart data={metricsData.metrics.net_out} timestamps={metricsData.timestamps}
+                                                    <LineChart {...metricsZoom.series('net_out')}
                                                         label="Network Out" color="#8b5cf6" unit="/s" formatValue={formatBytes} />
                                                 </div>
                                             </div>
+                                            </ChartZoomContext.Provider>
                                         ) : (
                                             <div className="text-center py-4 text-[12px]" style={{color: '#728b9a'}}>
                                                 {t('noDataAvailable') || 'No data available'}

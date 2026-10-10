@@ -420,12 +420,158 @@
             return new Date(ts * 1000).toLocaleString();
         };
 
+        // LW Oct 2026 - a time range is picked by dragging along a chart. The charts of one
+        // view share a zoom (useChartZoom, handed down through ChartZoomContext): a range
+        // picked on one of them zooms all of them, and where the loaded preset has only a
+        // few points in it the view loads finer data. No zoom plugin, LineChart draws the band
+        const ChartZoomContext = React.createContext(null);
+        const CHART_PRESET_SECONDS = { hour: 3600, day: 86400, week: 7 * 86400, month: 30 * 86400, year: 365 * 86400 };
+        // with fewer points than this in a picked range the view looks for finer data
+        const ZOOM_ENOUGH_POINTS = 40;
+        // what PegaProx stores itself: a snapshot every 5 minutes, 200 a range at most (metrics.py)
+        const HISTORY_STEP = 300;
+        const HISTORY_ROWS = 200;
+
+        // the samples of `key` in from..to, -1 where src has no such series
+        function zoomPoints(src, key, from, to) {
+            const ts = src && src.timestamps;
+            const vals = src && src.metrics && src.metrics[key];
+            if (!Array.isArray(ts) || !Array.isArray(vals) || vals.length !== ts.length) return -1;
+            let n = 0;
+            for (let i = 0; i < ts.length; i++) {
+                if (ts[i] >= from && ts[i] <= to && typeof vals[i] === 'number') n++;
+            }
+            return n;
+        }
+
+        // The zoom of one view's charts. loaded is what the preset brought ({timestamps,
+        // metrics}). A picked range with few of its points in it brings the finest preset
+        // that still reaches back to it (loadPreset), and where that is sparse too the
+        // snapshots PegaProx keeps (loadRange, CPU and memory). Each chart then takes the
+        // source with the most samples in the range: series(key), or source(...keys) for
+        // a chart of several series that have to share their timestamps.
+        function useChartZoom({ preset, loaded, loadPreset, loadRange, resetKey }) {
+            const [range, setRange] = useState(null);
+            const [finer, setFiner] = useState([]);
+            const [busy, setBusy] = useState(false);
+            const seqRef = useRef(0);
+            const cacheRef = useRef({});
+            const live = useRef({});
+            live.current = { preset, loaded, loadPreset, loadRange };
+
+            const reset = useCallback(() => {
+                seqRef.current++;
+                cacheRef.current = {};
+                setRange(null);
+                setFiner(f => f.length ? [] : f);
+                setBusy(false);
+            }, []);
+            // another preset, guest or node starts with the whole of it
+            useEffect(reset, [preset, resetKey]);
+
+            const select = useCallback(async (from, to) => {
+                const seq = ++seqRef.current;
+                const cur = live.current;
+                setRange({ from, to });
+                setFiner([]);
+                let best = zoomPoints(cur.loaded, 'cpu', from, to);
+                if (best >= ZOOM_ENOUGH_POINTS) { setBusy(false); return; }
+                const names = Object.keys(CHART_PRESET_SECONDS);
+                const now = Date.now() / 1000;
+                const tf = cur.loadPreset && names.slice(0, names.indexOf(cur.preset))
+                    .find(n => from >= now - CHART_PRESET_SECONDS[n]);
+                const got = [];
+                setBusy(true);
+                try {
+                    if (tf) {
+                        if (!cacheRef.current[tf]) cacheRef.current[tf] = Promise.resolve(cur.loadPreset(tf)).catch(() => null);
+                        const d = await cacheRef.current[tf];
+                        if (seq !== seqRef.current) return;
+                        const n = zoomPoints(d, 'cpu', from, to);
+                        if (n > best) { got.push(d); best = n; }
+                    }
+                    if (cur.loadRange && best < ZOOM_ENOUGH_POINTS && to - from >= 2 * HISTORY_STEP
+                            && Math.min((to - from) / HISTORY_STEP, HISTORY_ROWS) > best * 1.5) {
+                        const d = await Promise.resolve(cur.loadRange(from, to)).catch(() => null);
+                        if (seq !== seqRef.current) return;
+                        if (zoomPoints(d, 'cpu', from, to) > best) got.push(d);
+                    }
+                } finally {
+                    if (seq === seqRef.current) { setFiner(got); setBusy(false); }
+                }
+            }, []);
+
+            const source = useCallback((...keys) => {
+                const base = loaded && loaded.metrics ? loaded : { metrics: {} };
+                if (!range || !finer.length) return base;
+                let pick = base, n = zoomPoints(loaded, keys[0], range.from, range.to);
+                for (const d of finer) {
+                    if (!keys.every(k => d && d.metrics && Array.isArray(d.metrics[k]))) continue;
+                    const m = zoomPoints(d, keys[0], range.from, range.to);
+                    if (m > n) { pick = d; n = m; }
+                }
+                return pick;
+            }, [loaded, finer, range]);
+            const series = useCallback(key => {
+                const s = source(key);
+                return { data: s.metrics ? s.metrics[key] : undefined, timestamps: s.timestamps };
+            }, [source]);
+
+            return useMemo(() => ({
+                range, busy, select, reset, source, series,
+                fromHistory: finer.some(d => d && d.source === 'history'),
+            }), [range, busy, select, reset, source, series, finer]);
+        }
+
+        // what a zoom shows beside the preset picker: the range and the way back to the preset
+        function ChartZoomBar({ zoom }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            if (!zoom) return null;
+            const muted = isCorporate ? { color: 'var(--corp-text-muted)' } : undefined;
+            if (!zoom.range) {
+                return <span className="hidden md:inline-flex text-xs text-gray-500 whitespace-nowrap" style={muted}>{t('chartDragToZoom')}</span>;
+            }
+            const { from, to } = zoom.range;
+            const dated = to - from > 86400 || new Date(from * 1000).toDateString() !== new Date().toDateString();
+            const fmt = s => fmtClock(s, dated ? { month: 'short', day: 'numeric' } : null);
+            return (
+                <span className="flex items-center gap-2 text-xs whitespace-nowrap" data-chart-zoom="">
+                    <span className="flex items-center gap-1 text-gray-300" style={isCorporate ? { color: 'var(--corp-text-secondary)' } : undefined}>
+                        <Icons.ZoomIn className="w-3.5 h-3.5" />
+                        <span className="font-mono" data-chart-zoom-range="">{fmt(from)} - {fmt(to)}</span>
+                    </span>
+                    {zoom.busy && <span title={t('chartLoadingFiner')} className="text-gray-400" style={muted}><Icons.RotateCw /></span>}
+                    {zoom.fromHistory && !zoom.busy && (
+                        <span className="hidden md:inline-flex text-gray-500" style={muted} data-chart-zoom-history="">{t('chartZoomFromHistory')}</span>
+                    )}
+                    <button type="button" onClick={zoom.reset} data-chart-zoom-reset=""
+                        className={isCorporate ? 'flex items-center gap-1 px-2 py-0.5 text-[11px]'
+                            : 'flex items-center gap-1 px-2 py-1 rounded-lg bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white'}
+                        style={isCorporate ? { color: 'var(--corp-text-secondary)', border: '1px solid var(--corp-border-medium)' } : undefined}>
+                        <Icons.ZoomOut className="w-3.5 h-3.5" />{t('resetZoom')}
+                    </button>
+                </span>
+            );
+        }
+
         // Chart.js line chart component - uses canvas for interactive charts
         const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax }) {
+            const { t } = useTranslation();
             const canvasRef = React.useRef(null);
             const chartRef = React.useRef(null);
             const formatRef = React.useRef(formatValue);
             formatRef.current = formatValue;
+            // the view's zoom, or this chart's own where it stands alone
+            const zoom = React.useContext(ChartZoomContext);
+            const [ownRange, setOwnRange] = React.useState(null);
+            const range = zoom ? zoom.range : ownRange;
+            const selectRef = React.useRef(null);
+            selectRef.current = zoom ? zoom.select : (from, to) => setOwnRange({ from, to });
+            React.useEffect(() => { setOwnRange(null); }, [timestamps]);
+            // the time of each drawn point, and the drag in progress ({x0, x1} in canvas pixels)
+            const shownTsRef = React.useRef(null);
+            const bandRef = React.useRef(null);
 
             // Normalize input to array of datasets
             const chartDatasets = React.useMemo(() => {
@@ -435,15 +581,19 @@
             }, [data, datasets, label, color]);
 
             // Stable fingerprint of data to avoid re-creating chart on parent re-renders
+            // (with the span of the timestamps: a finer source can start with the same values)
             const dataFingerprint = React.useMemo(() => {
                 if (chartDatasets.length === 0) return '';
+                const span = timestamps && timestamps.length
+                    ? timestamps.length + '@' + timestamps[0] + '-' + timestamps[timestamps.length - 1] : '';
                 // Simple fingerprint: length + first + middle + last values of all datasets
-                return chartDatasets.map(ds => {
+                return span + '|' + chartDatasets.map(ds => {
                     const d = ds.data;
                     if (!d || d.length === 0) return '0';
                     return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1];
                 }).join('|');
-            }, [chartDatasets]);
+            }, [chartDatasets, timestamps]);
+            const rangeKey = range ? range.from + '-' + range.to : '';
 
             // Cleanup on unmount
             React.useEffect(() => {
@@ -464,6 +614,7 @@
                     chartRef.current.destroy();
                     chartRef.current = null;
                 }
+                shownTsRef.current = null;
 
                 if (chartDatasets.length === 0) return;
 
@@ -472,20 +623,36 @@
                 let finalLabels = [];
 
                 // Determine timestamps/labels from first valid dataset or timestamps prop
-                const rawLength = (chartDatasets[0] && chartDatasets[0].data) ? chartDatasets[0].data.length : 0;
-                if (rawLength === 0) return;
+                const fullLength = (chartDatasets[0] && chartDatasets[0].data) ? chartDatasets[0].data.length : 0;
+                if (fullLength === 0) return;
+
+                // zoomed: only the samples in the range go on from here. A range that falls
+                // between two samples keeps the neighbours, so there is still a line to see
+                const hasTs = timestamps && timestamps.length === fullLength;
+                let lo = 0, hi = fullLength - 1;
+                if (range && hasTs) {
+                    while (lo < fullLength && timestamps[lo] < range.from) lo++;
+                    while (hi >= 0 && timestamps[hi] > range.to) hi--;
+                    if (hi - lo < 1) {
+                        const a = Math.min(lo, hi), b = Math.max(lo, hi), pad = a === b ? 1 : 0;
+                        lo = Math.max(0, a - pad);
+                        hi = Math.min(fullLength - 1, b + pad);
+                    }
+                }
+                const rawLength = hi - lo + 1;
+                const ts = hasTs ? timestamps.slice(lo, hi + 1) : null;
 
                 // Build raw labels first
                 const rawLabels = [];
-                if (timestamps && timestamps.length === rawLength) {
+                if (ts) {
                     // #231: auto-detect span to choose label format
-                    const span = timestamps[timestamps.length - 1] - timestamps[0];
+                    const span = ts[ts.length - 1] - ts[0];
                     const useDateOnly = span > 86400 * 14;  // > 2 weeks
                     const useDate = span > 86400 * 2;        // > 2 days
                     // LW Oct 2026 - the time through fmtClock: browser time, and the 12h/24h
                     // setting the rest of the UI keeps (the locale's default ignored it)
-                    for (let i = 0; i < timestamps.length; i++) {
-                        const d = new Date(timestamps[i] * 1000);
+                    for (let i = 0; i < ts.length; i++) {
+                        const d = new Date(ts[i] * 1000);
                         if (useDateOnly) {
                             rawLabels.push(d.toLocaleDateString([], { month: 'short', day: 'numeric' }));
                         } else if (useDate) {
@@ -511,6 +678,11 @@
                 } else {
                     finalLabels = rawLabels;
                 }
+                if (ts) {
+                    const shown = [];
+                    for (let i = 0; i < rawLength; i += step) shown.push(ts[i]);
+                    shownTsRef.current = shown;
+                }
 
                 // Process each dataset
                 // LW Oct 2026 - a slot without a sample (null, undefined, NaN) stays null and
@@ -519,7 +691,7 @@
                 chartDatasets.forEach(ds => {
                     if (!ds.data || ds.data.length === 0) return;
                     const cleanData = [];
-                    for (let i = 0; i < ds.data.length; i++) {
+                    for (let i = lo; i <= hi && i < ds.data.length; i++) {
                         const v = ds.data[i];
                         cleanData.push((typeof v === 'number' && isFinite(v)) ? v : null);
                     }
@@ -558,6 +730,34 @@
                     canvas.width = parent.clientWidth || 600;
                     canvas.height = 180;
                 }
+                // a horizontal drag on a touch screen picks a range, a vertical one scrolls on
+                canvas.style.touchAction = shownTsRef.current ? 'pan-y pinch-zoom' : '';
+
+                // the band of a drag, in the accent of the layout and theme (Corporate has its
+                // own, darker on the light theme; Modern the primary of its theme)
+                const bandPlugin = {
+                    id: 'ppZoomBand',
+                    afterDatasetsDraw(ch) {
+                        const d = bandRef.current, a = ch.chartArea;
+                        if (!d || !a || Math.abs(d.x1 - d.x0) < 1) return;
+                        const css = getComputedStyle(ch.canvas);
+                        const accent = (css.getPropertyValue('--corp-accent') || css.getPropertyValue('--color-primary')).trim() || '#E57000';
+                        const x = Math.min(d.x0, d.x1), w = Math.abs(d.x1 - d.x0);
+                        const c = ch.ctx;
+                        c.save();
+                        c.fillStyle = accent;
+                        c.strokeStyle = accent;
+                        c.globalAlpha = 0.18;
+                        c.fillRect(x, a.top, w, a.bottom - a.top);
+                        c.globalAlpha = 0.9;
+                        c.lineWidth = 1;
+                        c.beginPath();
+                        c.moveTo(x + 0.5, a.top); c.lineTo(x + 0.5, a.bottom);
+                        c.moveTo(x + w - 0.5, a.top); c.lineTo(x + w - 0.5, a.bottom);
+                        c.stroke();
+                        c.restore();
+                    }
+                };
 
                 const unitStr = unit || '%';
                 const ctx = canvas.getContext('2d');
@@ -569,6 +769,7 @@
                             labels: finalLabels,
                             datasets: processedDatasets
                         },
+                        plugins: [bandPlugin],
                         options: {
                             responsive: false,
                             animation: false,
@@ -637,7 +838,91 @@
                 } catch(e) {
                     console.error('Chart.js error for ' + label + ':', e);
                 }
-            }, [dataFingerprint, unit, yMin, yMax]); // re-run if data changes
+            }, [dataFingerprint, unit, yMin, yMax, rangeKey]); // re-run if data or the zoom changes
+
+            // the drag: pointer events on the canvas, so mouse, pen and touch work alike
+            const hasCanvas = chartDatasets.length > 0;
+            React.useEffect(() => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                let drag = null;
+                const at = e => {
+                    const r = canvas.getBoundingClientRect();
+                    return { x: e.clientX - r.left, y: e.clientY - r.top };
+                };
+                const area = () => (chartRef.current && shownTsRef.current && shownTsRef.current.length > 1)
+                    ? chartRef.current.chartArea : null;
+                const inside = (p, a) => !!a && p.x >= a.left && p.x <= a.right && p.y >= a.top && p.y <= a.bottom;
+                const redraw = () => { if (chartRef.current) chartRef.current.draw(); };
+                // pixel -> unix time, between the two drawn points around it
+                const timeAt = px => {
+                    const ch = chartRef.current, shown = shownTsRef.current;
+                    if (!ch || !shown || shown.length < 2) return null;
+                    const sc = ch.scales.x;
+                    const p0 = sc.getPixelForValue(0), p1 = sc.getPixelForValue(shown.length - 1);
+                    const f = Math.min(1, Math.max(0, (px - p0) / ((p1 - p0) || 1))) * (shown.length - 1);
+                    const i = Math.floor(f), j = Math.min(shown.length - 1, i + 1);
+                    return shown[i] + (shown[j] - shown[i]) * (f - i);
+                };
+                const stop = () => {
+                    window.removeEventListener('keydown', onKey, true);
+                    const d = drag;
+                    drag = null;
+                    bandRef.current = null;
+                    if (d) { try { canvas.releasePointerCapture(d.id); } catch (_) {} }
+                    redraw();
+                };
+                // Escape drops the drag, and only the drag: the dialog around stays open
+                const onKey = e => {
+                    if (e.key !== 'Escape' || !drag) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    stop();
+                };
+                const onDown = e => {
+                    if (drag || (e.pointerType === 'mouse' && e.button !== 0)) return;
+                    const p = at(e);
+                    if (!inside(p, area())) return;
+                    drag = { id: e.pointerId, x0: p.x, x1: p.x };
+                    bandRef.current = drag;
+                    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+                    window.addEventListener('keydown', onKey, true);
+                };
+                const onMove = e => {
+                    const p = at(e), a = area();
+                    if (!drag) {
+                        canvas.style.cursor = inside(p, a) ? 'crosshair' : '';
+                        return;
+                    }
+                    if (e.pointerId !== drag.id || !a) return;
+                    drag.x1 = Math.min(a.right, Math.max(a.left, p.x));
+                    redraw();
+                };
+                const onUp = e => {
+                    if (!drag || e.pointerId !== drag.id) return;
+                    const { x0, x1 } = drag;
+                    stop();
+                    // a click, or a hand that twitched, picks nothing
+                    if (Math.abs(x1 - x0) < 6) return;
+                    const from = timeAt(Math.min(x0, x1)), to = timeAt(Math.max(x0, x1));
+                    if (from !== null && to !== null && to > from) selectRef.current(from, to);
+                };
+                const onCancel = e => { if (drag && e.pointerId === drag.id) stop(); };
+                canvas.addEventListener('pointerdown', onDown);
+                canvas.addEventListener('pointermove', onMove);
+                canvas.addEventListener('pointerup', onUp);
+                canvas.addEventListener('pointercancel', onCancel);
+                canvas.addEventListener('lostpointercapture', onCancel);
+                return () => {
+                    canvas.removeEventListener('pointerdown', onDown);
+                    canvas.removeEventListener('pointermove', onMove);
+                    canvas.removeEventListener('pointerup', onUp);
+                    canvas.removeEventListener('pointercancel', onCancel);
+                    canvas.removeEventListener('lostpointercapture', onCancel);
+                    window.removeEventListener('keydown', onKey, true);
+                    bandRef.current = null;
+                };
+            }, [hasCanvas]);
 
             if (chartDatasets.length === 0) return null;
 
@@ -645,6 +930,10 @@
                 React.createElement('div', { className: 'bg-proxmox-dark rounded-lg p-4' },
                     React.createElement('div', { className: 'flex justify-between items-center mb-2' },
                         React.createElement('span', { className: 'text-sm font-medium text-gray-300' }, label),
+                        !zoom && ownRange && React.createElement('button', {
+                            type: 'button', onClick: () => setOwnRange(null), 'data-chart-zoom-reset': '',
+                            className: 'text-xs text-gray-400 hover:text-white',
+                        }, t('resetZoom')),
                     ),
                     React.createElement('div', { style: { width: '100%', height: '180px' } },
                         React.createElement('canvas', { ref: canvasRef })
@@ -684,12 +973,24 @@
                 };
                 fetchMetrics();
             }, [timeframe, vm.vmid]);
+            // LW Oct 2026 - drag along a chart to zoom all of them; finer data for a narrow range
+            const zoom = useChartZoom({
+                preset: timeframe, loaded: data, resetKey: `${clusterId}/${vm.vmid}`,
+                loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${tf}`)
+                    .then(r => r.ok ? r.json() : null),
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.vmid}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r.ok ? r.json() : null),
+            });
             // Prepare memory data in GB
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
+            const mem = zoom.series('memory');
             const memDataGB = React.useMemo(() => {
-                if (!data || !data.metrics || !data.metrics.memory || !maxMemGB) return [];
-                return data.metrics.memory.map(p => p === null ? null : (p / 100) * maxMemGB);
-            }, [data, maxMemGB]);
+                if (!mem.data || !maxMemGB) return [];
+                return mem.data.map(p => p === null ? null : (p / 100) * maxMemGB);
+            }, [mem.data, maxMemGB]);
+            const psiCpu = zoom.source('pressurecpusome', 'pressurecpufull');
+            const psiMem = zoom.source('pressurememorysome', 'pressurememoryfull');
+            const psiIo = zoom.source('pressureiosome', 'pressureiofull');
 
             return(
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
@@ -702,6 +1003,7 @@
                                 <p className="text-sm text-gray-500">Node: {vm.node}</p>
                             </div>
                             <div className="flex items-center gap-4">
+                                <ChartZoomBar zoom={zoom} />
                                 <select
                                     value={timeframe}
                                     onChange={e => setTimeframe(e.target.value)}
@@ -728,17 +1030,17 @@
                             ) : err ? (
                                 <div className="text-center py-12 text-red-400">{err}</div>
                             ) : data && data.metrics ? (
+                                <ChartZoomContext.Provider value={zoom}>
                                 <div className="space-y-4">
                                     <LineChart 
-                                        data={data.metrics.cpu}
-                                        timestamps={data.timestamps}
+                                        {...zoom.series('cpu')}
                                         label="CPU" 
                                         color="#3b82f6" 
                                         unit="%" 
                                     />
                                     <LineChart 
                                         data={memDataGB}
-                                        timestamps={data.timestamps}
+                                        timestamps={mem.timestamps}
                                         label="Memory" 
                                         color="#22c55e" 
                                         unit=" GB"
@@ -748,16 +1050,14 @@
                                     />
                                     <div className="grid grid-cols-2 gap-4">
                                         <LineChart 
-                                            data={data.metrics.disk_read}
-                                            timestamps={data.timestamps}
+                                            {...zoom.series('disk_read')}
                                             label="Disk Read" 
                                             color="#eab308" 
                                             unit="/s"
                                             formatValue={formatBytes}
                                         />
                                         <LineChart 
-                                            data={data.metrics.disk_write}
-                                            timestamps={data.timestamps}
+                                            {...zoom.series('disk_write')}
                                             label="Disk Write" 
                                             color="#f97316" 
                                             unit="/s"
@@ -766,16 +1066,14 @@
                                     </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <LineChart 
-                                            data={data.metrics.net_in}
-                                            timestamps={data.timestamps}
+                                            {...zoom.series('net_in')}
                                             label="Network In" 
                                             color="#06b6d4" 
                                             unit="/s"
                                             formatValue={formatBytes}
                                         />
                                         <LineChart 
-                                            data={data.metrics.net_out}
-                                            timestamps={data.timestamps}
+                                            {...zoom.series('net_out')}
                                             label="Network Out" 
                                             color="#8b5cf6" 
                                             unit="/s"
@@ -786,10 +1084,10 @@
                                     {data.metrics.pressurecpusome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressurecpusome, color: '#3b82f6' },
-                                                { label: 'Full', data: data.metrics.pressurecpufull, color: '#ef4444' }
+                                                { label: 'Some', data: psiCpu.metrics.pressurecpusome, color: '#3b82f6' },
+                                                { label: 'Full', data: psiCpu.metrics.pressurecpufull, color: '#ef4444' }
                                             ]}
-                                            timestamps={data.timestamps}
+                                            timestamps={psiCpu.timestamps}
                                             label="CPU Pressure Stall"
                                             unit="%"
                                             yMin={0}
@@ -799,10 +1097,10 @@
                                     {data.metrics.pressurememorysome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressurememorysome, color: '#22c55e' },
-                                                { label: 'Full', data: data.metrics.pressurememoryfull, color: '#ef4444' }
+                                                { label: 'Some', data: psiMem.metrics.pressurememorysome, color: '#22c55e' },
+                                                { label: 'Full', data: psiMem.metrics.pressurememoryfull, color: '#ef4444' }
                                             ]}
-                                            timestamps={data.timestamps}
+                                            timestamps={psiMem.timestamps}
                                             label="Memory Pressure Stall"
                                             unit="%"
                                             yMin={0}
@@ -812,10 +1110,10 @@
                                     {data.metrics.pressureiosome && (
                                         <LineChart
                                             datasets={[
-                                                { label: 'Some', data: data.metrics.pressureiosome, color: '#eab308' },
-                                                { label: 'Full', data: data.metrics.pressureiofull, color: '#ef4444' }
+                                                { label: 'Some', data: psiIo.metrics.pressureiosome, color: '#eab308' },
+                                                { label: 'Full', data: psiIo.metrics.pressureiofull, color: '#ef4444' }
                                             ]}
-                                            timestamps={data.timestamps}
+                                            timestamps={psiIo.timestamps}
                                             label="IO Pressure Stall"
                                             unit="%"
                                             yMin={0}
@@ -825,10 +1123,11 @@
                                     
                                     {data.timestamps && data.timestamps.length > 0 && (
                                         <div className="text-xs text-gray-500 text-center mt-4">
-                                            {formatTime(data.timestamps[0])} - {formatTime(data.timestamps[data.timestamps.length - 1])}
+                                            {formatTime(zoom.range ? zoom.range.from : data.timestamps[0])} - {formatTime(zoom.range ? zoom.range.to : data.timestamps[data.timestamps.length - 1])}
                                         </div>
                                     )}
                                 </div>
+                                </ChartZoomContext.Provider>
                             ) : (
                                 <div className="text-center py-12 text-gray-400">No data available</div>
                             )}
