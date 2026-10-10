@@ -17855,6 +17855,69 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/nodes/{node}/tasks/{upid}/status": {
+      "get": {
+        "operationId": "nodes.get_node_task_status_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Status of one task as Proxmox has it: {status, exitstatus, ...}",
+        "description": "MK Oct 2026 - the live backup pane asked this route every 2 s before it existed. A scoped\ncaller reads the status of their own guests' tasks only, like the log next to it.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "upid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "path"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/subscription": {
       "get": {
         "operationId": "nodes.get_node_subscription_api_get",
@@ -25019,6 +25082,52 @@
         ],
         "x-pegaprox-permissions": [
           "backup.delete"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/datacenter/backup/last-runs": {
+      "get": {
+        "operationId": "storage.get_backup_jobs_last_runs_get",
+        "tags": [
+          "storage"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "How the newest run of every backup job the caller sees went",
+        "description": "{'jobs': {job_id: {state, start, end} or None}, 'partial', 'unread_nodes'}. state is ok,\nwarning, failed or running; None is no run in the last 14 days. Proxmox has no last\nrun status of a job (the job list carries none), this reads it from the vzdump tasks\nlike .../runs does, and the reads are shared between the jobs.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
         ]
       }
     },

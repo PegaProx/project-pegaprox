@@ -277,7 +277,8 @@ def test_a_member_reads_an_xcpng_pools_tasks_on_the_leader(fwd, seed, pools):
     g.calls.clear()
     with g.at('b'):
         lists = [admin.get(path).get_json() for path in XCP_READS]
-    assert lists == [[XTASK], [XTASK], {'log': 'Action: start\nStatus: running'}]
+    assert lists == [[XTASK], [XTASK], {'log': 'Action: start\nStatus: running',
+                                         'lines': ['Action: start', 'Status: running']}]
     assert _forward_calls(g) == [('b', 'a', 'POST', FORWARD)] * 3
     assert set(pools.xcp.asked) == {'active'}
     assert g.pulls == []

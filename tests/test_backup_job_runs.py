@@ -96,6 +96,8 @@ class _Pve:
         path = url.split('/api2/json', 1)[1]
         params = dict(params or {})
         self.reads.append((path, params))
+        if path == '/cluster/backup':
+            return _Resp(200, [dict(j) for j in self.jobs.values()])
         m = re.fullmatch(r'/cluster/backup/([^/]+)', path)
         if m:
             job = self.jobs.get(m.group(1))
@@ -479,3 +481,39 @@ def test_tasks_of_one_run_and_of_the_next():
         (5000, 'running', ['c']), (1181, 'ok', ['c']), (1060, 'failed', ['a', 'b']),
         (1000, 'warning', ['a', 'b'])]
     assert got[2]['failed_tasks'] == 1 and got[3]['end'] == 1040 and got[3]['duration'] == 40
+
+
+# --- the newest run of every job, for the job list -------------------------------------------
+
+def _last(client):
+    return client.get(f'/api/clusters/{CID}/datacenter/backup/last-runs')
+
+
+def test_the_last_run_of_every_job(api, seed):
+    pve = _cluster(api)
+    r = _last(_admin(api, seed))
+    assert r.status_code == 200, r.data
+    body = r.get_json()
+    assert body['jobs'] == {'backup-all': {'state': 'failed', 'start': T0, 'end': T0 + 4 + 90},
+                            'backup-vms': {'state': 'ok', 'start': T0 - 2 * 3600, 'end': T0 - 2 * 3600 + 90},
+                            'backup-pool': None}
+    assert body['partial'] is False and body['unread_nodes'] == ['pve3']
+    # the jobs share the reads: every first line once
+    assert len(pve.log_reads()) == len(set(pve.log_reads()))
+
+
+def test_the_last_runs_show_a_scoped_caller_their_jobs_only(api, seed):
+    _cluster(api)
+    assert _last(_scoped(api, seed, [100, 101])).get_json()['jobs'] == {
+        'backup-vms': {'state': 'ok', 'start': T0 - 2 * 3600, 'end': T0 - 2 * 3600 + 90}}
+
+
+def test_the_last_runs_are_no_ones_without_backup_view_or_the_cluster(api, seed):
+    seed.tenant('globex', clusters=['cluster_2'])
+    pve = _cluster(api)
+    for c in (api.as_user(seed.user('ops', role='user', denied=['backup.view'])),
+              api.as_user(seed.user('gx', role='admin', tenant_id='globex',
+                                    tenant_permissions={'globex': {'role': 'user'}})),
+              api.as_user(seed.user('milton', role='user', tenant_id='globex'))):
+        assert _last(c).status_code == 403
+    assert pve.reads == []

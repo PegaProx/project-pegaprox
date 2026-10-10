@@ -2899,6 +2899,59 @@ def _caller_sees(cluster_id):
     return lambda vmid, kind: _ucav(user, cluster_id, int(vmid), 'vm.view', kind)
 
 
+LAST_RUNS_JOBS_MAX = 200
+
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/backup/last-runs', methods=['GET'])
+@require_auth(perms=['backup.view'])
+def get_backup_jobs_last_runs(cluster_id):
+    """How the newest run of every backup job the caller sees went
+
+    {'jobs': {job_id: {state, start, end} or None}, 'partial', 'unread_nodes'}. state is ok,
+    warning, failed or running; None is no run in the last 14 days. Proxmox has no last
+    run status of a job (the job list carries none), this reads it from the vzdump tasks
+    like .../runs does, and the reads are shared between the jobs.
+    """
+    from pegaprox.core import backup_runs as runs
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'jobs': {}, 'partial': False, 'unread_nodes': []})
+    try:
+        r = manager._api_get(f"https://{manager.host}:{manager.api_port}/api2/json/cluster/backup",
+                             timeout=10)
+    except Exception as e:
+        logging.warning(f"[BACKUP-RUNS] job list of {cluster_id} unreadable: {e}")
+        return jsonify({'error': 'The backup jobs cannot be read right now'}), 503
+    if r.status_code != 200:
+        return upstream_failure(r.status_code, parse_pve_error(r.text))
+    jobs = [j for j in (r.json().get('data') or [])
+            if isinstance(j, dict) and _JOB_ID_RE.fullmatch(str(j.get('id') or ''))]
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        jobs = [j for j in jobs if _job_visible(user, cluster_id, j)]
+    partial = len(jobs) > LAST_RUNS_JOBS_MAX
+    out, unread = {}, set()
+    for job in jobs[:LAST_RUNS_JOBS_MAX]:
+        try:
+            got = runs.job_runs(manager, cluster_id, job, days=runs.DAYS_DEFAULT, limit=1)
+        except Exception as e:
+            logging.debug(f"[BACKUP-RUNS] last run of {_sl(job['id'])} unreadable: {e}")
+            partial = True
+            continue
+        partial = partial or got['partial']
+        unread.update(got['unread_nodes'])
+        last = got['runs'][0] if got['runs'] else None
+        out[job['id']] = {k: last[k] for k in ('state', 'start', 'end')} if last else None
+    return jsonify({'jobs': out, 'partial': partial, 'unread_nodes': sorted(unread)})
+
+
 @bp.route('/api/clusters/<cluster_id>/datacenter/backup/<job_id>/runs', methods=['GET'])
 @require_auth(perms=['backup.view'])
 def get_backup_job_runs(cluster_id, job_id):

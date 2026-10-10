@@ -1771,9 +1771,14 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
         
         restore_params = {
             'vmid': target_vmid,
-            'archive': volid,
-            'force': 1 if target_vmid == vmid else 0  # force overwrite if same vmid
+            'force': 1 if str(target_vmid) == str(vmid) else 0  # force overwrite if same vmid
         }
+        # MK Oct 2026 - pct has no archive parameter, a container restore is a create from
+        # the backup as ostemplate with restore set (same as core/batch_restore.start_restore)
+        if vm_type == 'qemu':
+            restore_params['archive'] = volid
+        else:
+            restore_params.update(ostemplate=volid, restore=1)
         
         if target_storage:
             restore_params['storage'] = target_storage

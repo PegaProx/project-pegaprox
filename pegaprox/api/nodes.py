@@ -1152,8 +1152,42 @@ def get_node_task_log_api(cluster_id, node, upid):
     log_lines = manager.get_node_task_log(node, upid, start, limit)
     # Join lines into a single string for display
     log_text = '\n'.join(log_lines) if log_lines else ''
-    
-    return jsonify({'log': log_text})
+
+    # MK Oct 2026 - lines as well, for a reader that tails the log with ?start= and has to
+    # count what it got (an empty line joins away in the text)
+    return jsonify({'log': log_text, 'lines': log_lines or []})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>/status', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_task_status_api(cluster_id, node, upid):
+    """Status of one task as Proxmox has it: {status, exitstatus, ...}
+
+    MK Oct 2026 - the live backup pane asked this route every 2 s before it existed. A scoped
+    caller reads the status of their own guests' tasks only, like the log next to it.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    manager = cluster_managers[cluster_id]
+
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        _p = str(upid).split(':')
+        _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+        if _tvmid is None or not _ucav(_au, cluster_id, int(_tvmid), 'vm.view'):
+            return jsonify({'error': 'Access denied to this task'}), 403
+
+    read = getattr(manager, 'get_task_status', None)
+    status = read(node, upid) if callable(read) else None
+    if not isinstance(status, dict):
+        return jsonify({'error': 'Task status could not be read'}), 502
+    return jsonify({k: status.get(k) for k in ('status', 'exitstatus', 'type', 'id', 'node',
+                                                'starttime', 'pid', 'upid') if k in status})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['GET'])

@@ -73,3 +73,39 @@ def test_an_unconfined_operator_keeps_node_level_task_logs(operator, mgr):
 
 def test_an_unconfined_operator_keeps_any_guests_task_log(operator, mgr):
     assert _log(operator, _upid(THEIRS)).status_code == 200
+
+
+# --- the status next to the log -----------------------------------------------------------------
+
+def _status(client, upid):
+    return client.get(f'/api/clusters/{CL}/nodes/pve1/tasks/{upid}/status')
+
+
+def test_the_log_comes_as_lines_too(acled, mgr):
+    r = _log(acled, _upid(MINE))
+
+    assert r.get_json() == {'log': 'line one\nline two', 'lines': ['line one', 'line two']}
+
+
+def test_the_status_route_answers_what_proxmox_says(operator, mgr):
+    mgr.get_task_status.return_value = {'status': 'stopped', 'exitstatus': 'OK', 'type': 'vzdump',
+                                        'user': 'root@pam'}
+    r = _status(operator, _upid(THEIRS, 'vzdump'))
+
+    assert r.status_code == 200
+    assert r.get_json() == {'status': 'stopped', 'exitstatus': 'OK', 'type': 'vzdump'}
+    assert mgr.get_task_status.call_args[0] == ('pve1', _upid(THEIRS, 'vzdump'))
+
+
+def test_the_status_of_a_task_is_confined_like_its_log(acled, mgr):
+    mgr.get_task_status.return_value = {'status': 'running'}
+
+    assert _status(acled, _upid(MINE, 'vzdump')).status_code == 200
+    assert _status(acled, _upid(THEIRS, 'vzdump')).status_code == 403
+    assert _status(acled, _upid('', 'vzdump')).status_code == 403
+
+
+def test_an_unreadable_status_is_no_server_error(operator, mgr):
+    mgr.get_task_status.return_value = None
+
+    assert _status(operator, _upid(MINE)).status_code == 502
