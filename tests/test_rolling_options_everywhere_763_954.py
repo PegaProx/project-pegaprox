@@ -637,9 +637,10 @@ def test_both_runs_use_the_one_helper():
     import pegaprox.api.schedules as sch
     import pegaprox.api.settings as st
     run = inspect.getsource(sch.execute_scheduled_rolling_update)
-    start = inspect.getsource(st.start_rolling_update)
+    # the route starts the run, its worker (also the one of a Continue after a restart) runs it
+    start = inspect.getsource(st.start_rolling_update) + inspect.getsource(st.run_rolling_update)
     for name in ('evacuation_options(', 'rolling_rules_give_way(', 'rolling_rules_back_on(',
                  'rolling_moved_templates(', 'rolling_options_intro(', 'rolling_node_templates(',
-                 'evacuation_options_said('):
+                 'evacuation_options_said(', 'rolling_wind_down('):
         assert name in run and name in start, name
     assert 'suspend_negative_ha_rules' not in run + start

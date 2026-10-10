@@ -15,7 +15,7 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.core.db import get_db
-from pegaprox.core import ha
+from pegaprox.core import ha, rolling_runs
 from pegaprox.background.scheduler import _first_minute, _minute
 
 from pegaprox.utils.auth import require_auth, load_users, build_authz_user
@@ -24,7 +24,8 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import (check_cluster_access, safe_error, require_unconfined, evacuation_options,
                                   evacuation_options_said, rolling_log, rolling_options_intro,
                                   rolling_node_templates, rolling_moved_templates, rolling_rules_give_way,
-                                  rolling_rules_back_on)
+                                  rolling_rules_back_on, rolling_moved_guests, rolling_wind_down,
+                                  rolling_guests_left_moved)
 from pegaprox.api.nodes import cleanup_deleted_scripts, cleanup_orphaned_excluded_vms
 
 bp = Blueprint('schedules', __name__)
@@ -599,6 +600,10 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
     """Execute a scheduled rolling update on a cluster
     
     MK: This runs the same rolling update logic but triggered by scheduler
+
+    MK Oct 2026 - kept in rolling_update_runs like a run started by hand: not started while
+    one of the cluster is running or paused, and a run a restart interrupted is paused there
+    and goes on (or is cancelled) through the routes of settings.py.
     """
     try:
         # Get update config from action
@@ -614,6 +619,12 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
         except (TypeError, ValueError):
             reboot_timeout = 600
         wait_for_reboot = config.get('wait_for_reboot', True)
+        # NS #630 - scheduled updates run unattended, so default local-disk
+        # evacuation ON: a run that pauses at 3am waiting for a human because one
+        # local-disk VM couldn't live-migrate is the worst possible outcome for an
+        # automatic update. On shared-storage clusters it's a no-op anyway. Honour a
+        # per-schedule override if one is ever stored, else evacuate everything.
+        allow_local_disks = action.get('allow_local_disks', True) is not False
         # MK Oct 2026 (#763, #954) - the two evacuation options of the schedule, off on one
         # saved before they existed and on XCP-ng, as for a run started by hand
         migrate_templates, relax_anti_affinity = evacuation_options(mgr, config)
@@ -621,9 +632,10 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
         logging.info(f"[SCHEDULER] Starting scheduled rolling update for cluster {cluster_id}")
         logging.info(f"[SCHEDULER] Config: reboot={include_reboot}, skip_evacuation={skip_evacuation}")
         
-        # Check if already running
-        if hasattr(mgr, '_rolling_update') and mgr._rolling_update and mgr._rolling_update.get('status') == 'running':
-            logging.warning(f"[SCHEDULER] Rolling update already in progress, skipping")
+        # Check if already running - or paused, which waits for an admin
+        why = rolling_runs.busy(mgr, cluster_id)
+        if why:
+            logging.warning(f"[SCHEDULER] Rolling update not started on {cluster_id}: {why}")
             return
         
         # Get nodes
@@ -634,69 +646,77 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
             logging.warning(f"[SCHEDULER] No nodes available for update")
             return
         
-        # Initialize rolling update state
-        mgr._rolling_update = {
+        # Initialize rolling update state, in the table before the first step
+        state = rolling_runs.begin(mgr, cluster_id, {
             'status': 'running', 'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
             'include_reboot': include_reboot, 'skip_up_to_date': skip_up_to_date,
             'skip_evacuation': skip_evacuation, 'wait_for_reboot': wait_for_reboot,
-            'pause_on_evacuation_error': False, 'force_all': False,
+            'pause_on_evacuation_error': False, 'force_all': False, 'allow_local_disks': allow_local_disks,
             'migrate_templates': migrate_templates, 'relax_anti_affinity': relax_anti_affinity,
             'evacuation_timeout': evacuation_timeout, 'update_timeout': 900, 'reboot_timeout': reboot_timeout,
             'nodes': nodes_to_update, 'current_index': 0, 'current_node': nodes_to_update[0],
             'current_step': 'starting', 'completed_nodes': [], 'skipped_nodes': [],
             'failed_nodes': [], 'rebooting_nodes': [], 'paused_reason': None, 'paused_details': None,
             'logs': [f"[{time.strftime('%H:%M:%S')}] Scheduled rolling update started"], 'scheduled': True
-        }
+        }, 'scheduler')
+        if state is None:
+            logging.warning(f"[SCHEDULER] Rolling update not started on {cluster_id}: another run came first")
+            return
         log_audit('scheduler', 'node.rolling_update_started',
                   f"Scheduled rolling update of {len(nodes_to_update)} node(s) started"
                   + evacuation_options_said(migrate_templates, relax_anti_affinity),
                   cluster=getattr(mgr.config, 'name', cluster_id))
 
         def run_scheduled_update():
+            def _set(**kw):
+                return rolling_runs.change(mgr, **kw)
+
+            def _status():
+                return (rolling_runs.current(mgr) or {}).get('status')
+
             rolling_log(mgr, f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, "
                              f"evacuation_timeout={evacuation_timeout}s, reboot_timeout={reboot_timeout}s, "
                              f"migrate_templates={migrate_templates}, relax_anti_affinity={relax_anti_affinity}")
             rolling_options_intro(mgr)
             try:
                 for idx, node_name in enumerate(nodes_to_update):
-                    if not hasattr(mgr, '_rolling_update') or mgr._rolling_update.get('status') != 'running':
+                    if _status() != 'running':
                         break
-                    mgr._rolling_update['current_index'] = idx
-                    mgr._rolling_update['current_node'] = node_name
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Processing {node_name}")
+                    _set(current_index=idx, current_node=node_name, current_step='checking',
+                         node=(node_name, {'phase': 'checking'}), log=f"Processing {node_name}")
                     if skip_up_to_date:
                         try:
                             mgr.refresh_node_apt(node_name); time.sleep(3)
                             if not mgr.get_node_apt_updates(node_name):
-                                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] {node_name} up-to-date, skipping")
-                                mgr._rolling_update['skipped_nodes'].append(node_name); continue
+                                _set(add={'skipped_nodes': node_name},
+                                     node=(node_name, {'phase': 'done', 'result': 'skipped'}),
+                                     log=f"{node_name} up-to-date, skipping")
+                                continue
                         except Exception as e:
                             logging.warning(f"[SCHEDULER] Check failed for {node_name}: {e}")
-                    mgr._rolling_update['current_step'] = 'maintenance'
-                    # NS #630 — scheduled updates run unattended, so default local-disk
-                    # evacuation ON: a run that pauses at 3am waiting for a human because one
-                    # local-disk VM couldn't live-migrate is the worst possible outcome for an
-                    # automatic update. On shared-storage clusters it's a no-op anyway. Honour a
-                    # per-schedule override if one is ever stored, else evacuate everything.
+                    _set(current_step='maintenance', node=(node_name, {'phase': 'maintenance'}))
+                    running = []
                     if not skip_evacuation:
                         try:
-                            rolling_node_templates(mgr, [r for r in (mgr.get_vm_resources() or [])
-                                                         if r.get('node') == node_name
-                                                         and r.get('type') in ('qemu', 'lxc')])
+                            here = [r for r in (mgr.get_vm_resources() or [])
+                                    if r.get('node') == node_name and r.get('type') in ('qemu', 'lxc')]
+                            running = [v for v in here if (v.get('status') or '').lower() == 'running']
+                            rolling_node_templates(mgr, here)
                         except Exception:
                             pass
                         rolling_rules_give_way(mgr, 'scheduler')   # #954, once, before the first evacuation
                     # before each node's evacuation and its update (design 5.2)
                     if not ha.confirm_step(f'rolling update of {node_name}'):
-                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] stopped: this instance does not hold the lease")
+                        rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break
                     mgr.enter_maintenance_mode(node_name, skip_evacuation=skip_evacuation,
-                                               allow_local_disks=action.get('allow_local_disks', True),
+                                               allow_local_disks=allow_local_disks,
                                                **({'migrate_templates': True} if migrate_templates else {}))  # #763
+                    _set(node=(node_name, {'in_maintenance': True}))
                     if not skip_evacuation:
-                        mgr._rolling_update['current_step'] = 'evacuating'
-                        waited = 0; evacuation_ok = False
-                        while waited < evacuation_timeout:
+                        _set(current_step='evacuating', node=(node_name, {'phase': 'evacuating'}))
+                        waited = 0; evacuation_ok = False; task = None
+                        while waited < evacuation_timeout and _status() != 'cancelled':
                             if node_name in mgr.nodes_in_maintenance:
                                 task = mgr.nodes_in_maintenance[node_name]
                                 if task.status == 'completed':
@@ -705,17 +725,23 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                                 elif task.status == 'completed_with_errors':
                                     rolling_moved_templates(mgr, task)
                                     fv = getattr(task, 'failed_vms', [])
-                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠️ Evacuation: {getattr(task,'migrated_vms',0)}/{getattr(task,'total_vms',0)} migrated, {len(fv)} failed - continuing")
+                                    rolling_log(mgr, f"⚠️ Evacuation: {getattr(task,'migrated_vms',0)}/{getattr(task,'total_vms',0)} migrated, {len(fv)} failed - continuing")
                                     evacuation_ok = True; break
                                 elif task.status == 'failed': break
                             time.sleep(5); waited += 5
+                        if _status() == 'cancelled':
+                            break
                         if not evacuation_ok:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ Evacuation failed on {node_name}, skipping")
-                            mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': 'Evacuation failed'})
-                            mgr.exit_maintenance_mode(node_name); continue
-                    mgr._rolling_update['current_step'] = 'updating'
+                            _set(add={'failed_nodes': {'node': node_name, 'error': 'Evacuation failed'}},
+                                 node=(node_name, {'result': 'failed'}),
+                                 log=f"✗ Evacuation failed on {node_name}, skipping")
+                            if mgr.exit_maintenance_mode(node_name):
+                                _set(node=(node_name, {'in_maintenance': False}))
+                            continue
+                        rolling_moved_guests(mgr, node_name, running, task)
+                    _set(current_step='updating', node=(node_name, {'phase': 'updating'}))
                     if not ha.confirm_step(f'update of {node_name}'):
-                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] stopped: this instance does not hold the lease")
+                        rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break
                     update_task = mgr.start_node_update(node_name, reboot=include_reboot, force=True)
                     if update_task:
@@ -724,13 +750,13 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                             if update_task.status in ['completed', 'failed']: break
                             time.sleep(10); waited += 10
                         if update_task.status == 'completed':
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ {node_name} updated")
-                            mgr._rolling_update['completed_nodes'].append(node_name)
+                            _set(add={'completed_nodes': node_name}, node=(node_name, {'updated': True}),
+                                 log=f"✓ {node_name} updated")
                             if include_reboot:
-                                mgr._rolling_update['current_step'] = 'rebooting'
-                                mgr._rolling_update['rebooting_nodes'].append(node_name)
+                                _set(current_step='rebooting', add={'rebooting_nodes': node_name},
+                                     node=(node_name, {'phase': 'rebooting', 'rebooted': True}))
                                 if wait_for_reboot:
-                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Waiting for {node_name} to reboot...")
+                                    rolling_log(mgr, f"Waiting for {node_name} to reboot...")
                                     ow = 0
                                     while ow < 120:
                                         try:
@@ -740,13 +766,13 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                                         time.sleep(5); ow += 5
                                     rw = 0
                                     came_back = False
-                                    while rw < 600:
+                                    # #630 - the schedule's own reboot timeout, it was a fixed 600 s here
+                                    while rw < reboot_timeout and _status() != 'cancelled':
                                         try:
                                             ns = mgr.get_node_status()
                                             if node_name in ns and ns[node_name].get('status') == 'online':
-                                                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ {node_name} back online")
-                                                if node_name in mgr._rolling_update['rebooting_nodes']:
-                                                    mgr._rolling_update['rebooting_nodes'].remove(node_name)
+                                                _set(drop={'rebooting_nodes': node_name},
+                                                     log=f"✓ {node_name} back online")
                                                 came_back = True
                                                 # NS May 2026 — give HA services time to start
                                                 # before trying to disable maintenance. 10s was
@@ -757,60 +783,64 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                                         except: pass
                                         time.sleep(10); rw += 10
                                     if not came_back:
-                                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ {node_name} did not come back online within 600s")
+                                        rolling_log(mgr, f"⚠ {node_name} did not come back online within {reboot_timeout}s")
                                 else:
-                                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] {node_name} rebooting (wait_for_reboot=False)")
+                                    rolling_log(mgr, f"{node_name} rebooting (wait_for_reboot=False)")
                         else:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ {node_name} update failed")
-                            mgr._rolling_update['failed_nodes'].append({'node': node_name, 'error': 'Update failed'})
+                            _set(add={'failed_nodes': {'node': node_name, 'error': 'Update failed'}},
+                                 node=(node_name, {'result': 'failed'}), log=f"✗ {node_name} update failed")
                     # NS May 2026 — exit_maintenance_mode now retries internally;
                     # if it still returns False the node is stuck and we log it
-                    # for the post-loop sweep below.
-                    if not mgr.exit_maintenance_mode(node_name):
-                        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ⚠ {node_name} maintenance exit failed — will retry at end")
+                    # for the post-loop sweep below. One the update took out itself is no failed exit.
+                    _set(current_step='finishing', node=(node_name, {'phase': 'finishing'}))
+                    if node_name not in mgr.nodes_in_maintenance or mgr.exit_maintenance_mode(node_name):
+                        _set(node=(node_name, {'in_maintenance': False}))
+                    else:
+                        rolling_log(mgr, f"⚠ {node_name} maintenance exit failed - will retry at end")
+                    if node_name in ((rolling_runs.current(mgr) or {}).get('completed_nodes') or []):
+                        _set(node=(node_name, {'phase': 'done', 'result': 'done', 'moved': []}))
                 
-                # NS May 2026 — final sweep: any node still flagged as in
-                # maintenance gets one more shot, after a longer settle time.
-                # Catches the case where the node took >600s to reboot or HA
-                # services were still starting when we tried to exit.
-                stuck_nodes = []
-                try:
-                    with mgr.maintenance_lock:
-                        stuck_nodes = list(mgr.nodes_in_maintenance.keys())
-                except Exception:
-                    pass
-                if stuck_nodes:
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Cleanup: {len(stuck_nodes)} node(s) still in maintenance, retrying...")
-                    time.sleep(15)
-                    for nn in stuck_nodes:
-                        if mgr.exit_maintenance_mode(nn):
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✓ {nn} maintenance cleared on retry")
-                        else:
-                            mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ✗ {nn} STILL in maintenance — manual intervention needed")
-                            mgr._rolling_update['failed_nodes'].append({'node': nn, 'error': 'Stuck in maintenance after rolling update'})
-
-                rolling_rules_back_on(mgr, 'scheduler')   # #954, every node is out of maintenance by now
+                # NS May 2026 - final sweep: every node this run put into maintenance that is
+                # still in it gets one more shot, after a longer settle time. Catches the case
+                # where the node took long to reboot or HA services were still starting when we
+                # tried to exit. And the negative affinity rules come back on (#954).
+                cancelled = _status() == 'cancelled'
+                if not cancelled:
+                    _set(current_step=rolling_runs.CLEANUP)
+                undone = rolling_wind_down(mgr, 'scheduler', settle=15, sleep=time.sleep)
 
                 # Finished
-                mgr._rolling_update['status'] = 'completed'
-                mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] Scheduled rolling update completed")
+                done = rolling_runs.current(mgr) or {}
+                counts = (f"{len(done.get('completed_nodes') or [])} updated, "
+                          f"{len(done.get('skipped_nodes') or [])} skipped, "
+                          f"{len(done.get('failed_nodes') or [])} failed")
+                if cancelled:
+                    _set(cancel_report=undone + rolling_guests_left_moved(mgr), rebooting_nodes=[],
+                         log="Scheduled rolling update cancelled")
+                else:
+                    _set(status='completed', log="Scheduled rolling update completed")
                 
                 # Log audit
                 log_audit('scheduler', 'scheduled.rolling_update', 
-                         f"Scheduled rolling update completed: {len(mgr._rolling_update['completed_nodes'])} updated, "
-                         f"{len(mgr._rolling_update['skipped_nodes'])} skipped, "
-                         f"{len(mgr._rolling_update['failed_nodes'])} failed")
+                          f"Scheduled rolling update {'cancelled' if cancelled else 'completed'}: {counts}")
                 
             except Exception as e:
                 logging.error(f"[SCHEDULER] Rolling update error: {e}")
                 rolling_rules_back_on(mgr, 'scheduler')   # #954, before the status says the run is over
-                if hasattr(mgr, '_rolling_update'):
-                    mgr._rolling_update['status'] = 'failed'
-                    mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] ERROR: {e}")
+                _set(status='failed', error=str(e), log=f"ERROR: {e}")
+
+        run_id = state.get('run_id')
+
+        def work():
+            try:
+                run_scheduled_update()
+            finally:
+                rolling_runs.detach(cluster_id, run_id)
         
         # the steps between the confirms (apt refresh, maintenance exit) ask at their exit (#625)
-        update_thread = threading.Thread(target=ha.as_job(run_scheduled_update, f'rolling update of {cluster_id}'),
+        update_thread = threading.Thread(target=ha.as_job(work, f'rolling update of {cluster_id}'),
                                          daemon=True)
+        rolling_runs.attach(mgr, cluster_id, update_thread)
         update_thread.start()
 
         logging.info(f"[SCHEDULER] Rolling update thread started for {cluster_id}")
@@ -1505,10 +1535,12 @@ def check_scheduled_updates():
                         except:
                             pass
                 
-                # Check if rolling update already running
-                if hasattr(mgr, '_rolling_update') and mgr._rolling_update:
-                    if mgr._rolling_update.get('status') == 'running':
-                        continue
+                # Check if rolling update already running, or paused (one a restart interrupted
+                # waits for an admin, across restarts)
+                why = rolling_runs.busy(mgr, cluster_id)
+                if why:
+                    logging.info(f"[SCHEDULER] Scheduled update of {cluster_id} not started: {why}")
+                    continue
 
                 if not _creator_may_update(cluster_id, schedule):
                     logging.warning(f"[SCHEDULER] Not starting the scheduled update of {cluster_id}: "

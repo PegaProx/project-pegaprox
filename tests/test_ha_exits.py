@@ -716,7 +716,8 @@ AUTOMATIONS = {
     ('pegaprox/api/settings.py', 'perform_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'rollback_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'restart_server'): (1, 'local'),
-    ('pegaprox/api/settings.py', 'start_rolling_update'): (1, 'job'),
+    # the worker of a rolling update, for a start and for a Continue after a restart
+    ('pegaprox/api/settings.py', '_launch_rolling_update'): (1, 'job'),
     ('pegaprox/api/siem.py', 'start_worker'): (1, 'read'),
     ('pegaprox/api/site_recovery.py', '_safe_spawn_failover'): (1, 'job'),
     ('pegaprox/api/snapshots.py', 'start_scheduler'): (1, 'confirm'),
@@ -964,7 +965,7 @@ CONFIRM_SITES = [
     ('pegaprox/api/schedules.py', 'check_schedules', ['execute_scheduled_action']),
     ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update.run_scheduled_update',
      ['enter_maintenance_mode', 'start_node_update']),
-    ('pegaprox/api/settings.py', 'start_rolling_update.run_rolling_update',
+    ('pegaprox/api/settings.py', 'run_rolling_update.run_node',
      ['enter_maintenance_mode', 'start_node_update']),
     ('pegaprox/api/snapshots.py', '_execute_policy', ['create_snapshot']),
     ('pegaprox/api/snapshots.py', '_prune', ['delete_snapshot', '_api_delete']),

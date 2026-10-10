@@ -729,6 +729,26 @@ class PegaProxDB:
                            "SELECT cluster_id, rule, rule_type, suspended_at, 'rolling' FROM suspended_ha_rules_keyed")
             cursor.execute('DROP TABLE suspended_ha_rules_keyed')
 
+        # MK Oct 2026 - rolling updates, so a restart or another instance taking over finds a
+        # run again (core/rolling_runs.py). state: everything but the log, as JSON. Shared
+        # (core/ha.py SYNC_TABLES); logs and updated_at change with every log line and step no
+        # config version.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rolling_update_runs (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT '{}',
+                logs TEXT NOT NULL DEFAULT '[]',
+                started_by TEXT,
+                started_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rolling_runs_cluster '
+                       'ON rolling_update_runs(cluster_id, started_at)')
+
         # Server settings table
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS server_settings (
@@ -5304,6 +5324,58 @@ class PegaProxDB:
         cursor.execute('SELECT rule, rule_type, suspended_at, owner FROM suspended_ha_rules WHERE cluster_id=? '
                        'ORDER BY rule, owner', (cluster_id,))
         return [(r['rule'], r['rule_type'], r['suspended_at'], r['owner']) for r in cursor.fetchall()]
+
+    def insert_rolling_run(self, run_id, cluster_id, status, state, logs, started_by, started_at):
+        """A new rolling update run; state and logs are JSON text."""
+        self.conn.cursor().execute(
+            'INSERT INTO rolling_update_runs (id, cluster_id, status, state, logs, started_by, started_at, '
+            'updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (run_id, cluster_id, status, state, logs, started_by, started_at, started_at))
+        self.conn.commit()
+
+    def update_rolling_run(self, run_id, status, state, logs, updated_at, completed_at=None):
+        """Only a run that has its row: a worker of a run whose row is gone writes nothing."""
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE rolling_update_runs SET status = ?, state = ?, logs = ?, updated_at = ?, '
+                       'completed_at = ? WHERE id = ?',
+                       (status, state, logs, updated_at, completed_at, run_id))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def update_rolling_run_logs(self, run_id, logs, updated_at):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE rolling_update_runs SET logs = ?, updated_at = ? WHERE id = ?',
+                       (logs, updated_at, run_id))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_rolling_runs(self, cluster_id, statuses=None, limit=None):
+        """Runs of a cluster, newest first: [{id, cluster_id, status, state, logs, started_by,
+        started_at, updated_at, completed_at}] with state and logs as text."""
+        sql = 'SELECT * FROM rolling_update_runs WHERE cluster_id = ?'
+        params = [cluster_id]
+        if statuses:
+            sql += ' AND status IN (%s)' % ','.join('?' * len(statuses))
+            params += list(statuses)
+        sql += ' ORDER BY started_at DESC, rowid DESC'
+        if limit:
+            sql += ' LIMIT ?'
+            params.append(int(limit))
+        cursor = self.conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def prune_rolling_runs(self, cluster_id, keep, finished):
+        """The newest `keep` finished runs of a cluster stay; a run still open always does."""
+        marks = ','.join('?' * len(finished))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f'DELETE FROM rolling_update_runs WHERE cluster_id = ? AND status IN ({marks}) AND id NOT IN '
+            f'(SELECT id FROM rolling_update_runs WHERE cluster_id = ? AND status IN ({marks}) '
+            f'ORDER BY started_at DESC, rowid DESC LIMIT ?)',
+            (cluster_id, *finished, cluster_id, *finished, int(keep)))
+        self.conn.commit()
+        return cursor.rowcount
 
     def get_affinity_rules(self, cluster_id: str = None) -> dict:
         """Get affinity rules"""

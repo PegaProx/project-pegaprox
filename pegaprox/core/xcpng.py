@@ -297,6 +297,9 @@ class XcpngManager:
     def start(self):
         if self.running:
             return
+        # MK Oct 2026 - a rolling update of this pool still open (core/rolling_runs.py)
+        from pegaprox.core import rolling_runs
+        rolling_runs.restore(self)
         self.running = True
         self.stop_event.clear()
         self.thread = threading.Thread(target=self._run_loop, daemon=True,
@@ -3673,7 +3676,7 @@ class XcpngManager:
                 # MK Oct 2026 - the rolling update waits for a node only when its task says it
                 # rebooted (#715); without these an XCP-ng host still booting was passed by
                 task.reboot_issued = True
-                if getattr(self, '_rolling_update', {}).get('status') == 'running':
+                if (getattr(self, '_rolling_update', None) or {}).get('status') == 'running':
                     try:
                         from pegaprox.background.alerts import emit_rolling_update_reboot_event
                         emit_rolling_update_reboot_event(self.id, node_name)

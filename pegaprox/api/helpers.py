@@ -854,7 +854,7 @@ def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra
 # MK Oct 2026 (#763, #954) - the two evacuation options of a rolling update. The run started
 # by hand (settings.py) and the scheduled one (schedules.py) are two copies of the loop; what
 # the options do in either of them is written down once, here. Each reads its flags from the
-# state of the run, mgr._rolling_update.
+# state of the run, mgr._rolling_update, and changes it through rolling_runs.change.
 
 def evacuation_options(mgr, data):
     """(migrate_templates, relax_anti_affinity) from a request body or a stored schedule: off
@@ -875,15 +875,17 @@ def evacuation_options_said(migrate_templates, relax_anti_affinity):
 
 def rolling_log(mgr, msg):
     """One line with its time in the log of the rolling update that runs."""
+    from pegaprox.core import rolling_runs
     try:
-        mgr._rolling_update['logs'].append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        rolling_runs.change(mgr, log=msg)
     except Exception:
         pass
 
 
 def rolling_options_intro(mgr):
     """What the options mean for this run, said once when it starts."""
-    state = mgr._rolling_update or {}
+    from pegaprox.core import rolling_runs
+    state = rolling_runs.current(mgr) or {}
     if state.get('skip_evacuation'):
         return
     if state.get('migrate_templates'):
@@ -897,11 +899,12 @@ def rolling_options_intro(mgr):
 
 def rolling_node_templates(mgr, vms_here):
     """#763 - said either way: without the option a template goes down with its node."""
+    from pegaprox.core import rolling_runs
     tpls = [v for v in vms_here if v.get('template')]
     if tpls:
         names = ', '.join(f"{v.get('name') or v.get('vmid')} ({v.get('vmid')})" for v in tpls[:8])
         more = f" and {len(tpls) - 8} more" if len(tpls) > 8 else ''
-        moving = (mgr._rolling_update or {}).get('migrate_templates')
+        moving = (rolling_runs.current(mgr) or {}).get('migrate_templates')
         rolling_log(mgr, f"  → template(s) {'to move' if moving else 'staying here'}: {names}{more}")
 
 
@@ -920,10 +923,13 @@ def rolling_moved_templates(mgr, task):
 def rolling_rules_give_way(mgr, who):
     """#954 - the negative affinity rules off, once, before the first evacuation of a run that
     lets them give way. From here the daemon loop keeps its hands off them."""
-    state = mgr._rolling_update
+    from pegaprox.core import rolling_runs
+    state = rolling_runs.current(mgr) or {}
     if not state.get('relax_anti_affinity') or state.get('ha_rules_held') is not None:
         return
-    state['ha_rules_held'] = True
+    # in the run's row before the first rule is touched: whoever acts next keeps them off
+    # for the run, or switches them on when it has ended
+    rolling_runs.change(mgr, ha_rules_held=True)
     try:
         off, failed = mgr.suspend_negative_ha_rules(who=who)
     except Exception as e:
@@ -936,16 +942,16 @@ def rolling_rules_give_way(mgr, who):
         rolling_log(mgr, "Negative affinity: no enabled negative Proxmox HA rule to switch off")
     if failed:
         rolling_log(mgr, f"⚠ Proxmox kept these rules on, their guests may still not move: {', '.join(failed)}")
-    state['ha_rules_off'] = list(off)
-    state['ha_rules_held'] = bool(off)
+    rolling_runs.change(mgr, ha_rules_off=list(off), ha_rules_held=bool(off))
 
 
 def rolling_rules_back_on(mgr, who):
     """#954 - on again when the run ends, however it ends. A rule a node's maintenance still
-    holds stays off until that node leaves it."""
-    state = mgr._rolling_update or {}
+    holds stays off until that node leaves it. Returns the rules still off for the run."""
+    from pegaprox.core import rolling_runs
+    state = rolling_runs.current(mgr) or {}
     if not state.get('ha_rules_held'):
-        return
+        return []
     try:
         on, left = mgr.restore_suspended_ha_rules(who=who)
         if on:
@@ -958,20 +964,116 @@ def rolling_rules_back_on(mgr, who):
         left = None
         rolling_log(mgr, f"✗ Switching the negative affinity rules back on failed: {e} - PegaProx keeps retrying")
     finally:
-        state['ha_rules_held'] = False
+        rolling_runs.change(mgr, ha_rules_held=False)
     if left is None:
-        return
+        return list(state.get('ha_rules_off') or [])
     try:
         held = mgr.held_ha_rules()
     except Exception:
         held = None
     if not isinstance(held, dict):
-        return
+        return list(left)
     for rule in sorted(r for r in (state.get('ha_rules_off') or []) if r not in left and r in held):
         nodes = sorted(str(o).split(':', 1)[1] for o in held[rule] if str(o).startswith('maintenance:'))
         if nodes:
             rolling_log(mgr, f"Negative affinity: {rule} stays off while {', '.join(nodes)} "
                              f"{'is' if len(nodes) == 1 else 'are'} in maintenance")
+    return list(left)
+
+
+def rolling_in_maintenance(mgr, node, node_status=None):
+    """Whether a node is in maintenance as far as the manager knows: its own list, or the node
+    status (an XCP-ng host stays disabled through a restart of PegaProx, its list does not)."""
+    if node in (getattr(mgr, 'nodes_in_maintenance', None) or {}):
+        return True
+    if node_status is None:
+        try:
+            node_status = mgr.get_node_status() or {}
+        except Exception:
+            node_status = {}
+    row = node_status.get(node) if isinstance(node_status, dict) else None
+    return isinstance(row, dict) and row.get('maintenance_mode') is True
+
+
+def rolling_moved_guests(mgr, node_name, before, task=None):
+    """MK Oct 2026 - the guests the evacuation of a node took away, for the run's row: the ones
+    that ran there before it, less those that failed to move. Where they went is the guest
+    list as cached right now, one read for the node, never one per guest."""
+    from pegaprox.core import rolling_runs
+    failed = {str(v.get('vmid')) for v in (getattr(task, 'failed_vms', None) or [])}
+    try:
+        where = {str(r.get('vmid')): r.get('node') for r in (mgr.get_vm_resources() or [])}
+    except Exception:
+        where = {}
+    moved = []
+    for v in before:
+        vmid = str(v.get('vmid'))
+        if vmid in failed:
+            continue
+        to = where.get(vmid)
+        moved.append({'vmid': v.get('vmid'), 'name': v.get('name') or '',
+                      'to': to if to and to != node_name else None})
+    rolling_runs.change(mgr, node=(node_name, {'moved': moved[:rolling_runs.MOVED_KEEP],
+                                               'moved_count': len(moved)}))
+    return moved
+
+
+def rolling_guests_left_moved(mgr):
+    """For the report of a cancel: the guests the evacuation of a node the run did not finish
+    moved away. Nothing moves them back (a pinned one goes back with the pin reconciliation)."""
+    from pegaprox.core import rolling_runs
+    state = rolling_runs.current(mgr) or {}
+    return [{'kind': 'guests_stay', 'node': n, 'count': int(s.get('moved_count') or 0)}
+            for n, s in sorted((state.get('node_state') or {}).items())
+            if s.get('result') not in ('done', 'skipped') and int(s.get('moved_count') or 0) > 0]
+
+
+def rolling_wind_down(mgr, who, settle=15, sleep=time.sleep):
+    """MK Oct 2026 - the end of a run, however it ends: each node this run put into maintenance
+    and that is still in it gets one more try, and the negative affinity rules come back on.
+    A node someone else put into maintenance is left alone. Returns what stays undone, for
+    the log and the answer of a cancel: [{'kind': 'maintenance', 'node'}, {'kind': 'ha_rules',
+    'rules'}]."""
+    from pegaprox.core import rolling_runs
+    state = rolling_runs.current(mgr) or {}
+    try:
+        node_status = mgr.get_node_status() or {}
+    except Exception:
+        node_status = {}
+    # flagged when the run put it in; a node whose flag never got written (the process ended
+    # while it went in) counts by the phase it was in
+    between = ('maintenance', 'evacuating', 'updating', 'rebooting', 'finishing')
+    ours = [n for n, s in sorted((state.get('node_state') or {}).items())
+            if s.get('in_maintenance') or (s.get('in_maintenance') is None and not s.get('result')
+                                           and s.get('phase') in between)]
+    stuck = [n for n in ours if rolling_in_maintenance(mgr, n, node_status)]
+    for n in ours:
+        if n not in stuck:
+            rolling_runs.change(mgr, node=(n, {'in_maintenance': False}))
+    undone = []
+    if stuck:
+        rolling_log(mgr, f"Cleanup: {len(stuck)} node(s) still in maintenance, retrying"
+                         + (f" after {settle}s settle..." if settle else "..."))
+        if settle:
+            sleep(settle)
+        for nn in stuck:
+            try:
+                ok = bool(mgr.exit_maintenance_mode(nn))
+            except Exception as e:
+                logging.error(f"[RollingUpdate] exit of the maintenance of {nn} failed: {e}")
+                ok = False
+            if ok:
+                rolling_runs.change(mgr, node=(nn, {'in_maintenance': False}),
+                                    log=f"✓ {nn} maintenance cleared on retry")
+            else:
+                rolling_runs.change(mgr, add={'failed_nodes': {'node': nn, 'error': 'Stuck in maintenance after rolling update'}},
+                                    log=f"✗ {nn} STILL stuck - run `ha-manager crm-command node-maintenance "
+                                        f"disable {nn}` manually")
+                undone.append({'kind': 'maintenance', 'node': nn})
+    left = rolling_rules_back_on(mgr, who)
+    if left:
+        undone.append({'kind': 'ha_rules', 'rules': sorted(left)})
+    return undone
 
 
 # NS 2026-06-04 — shared metrics_history loader for insights/cost/power.

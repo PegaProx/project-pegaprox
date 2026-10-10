@@ -317,6 +317,9 @@ SYNC_TABLES = (
     'pegaprox_kv',
     # Proxmox HA rules a rolling update switched off: whoever acts next switches them on (#954)
     'suspended_ha_rules',
+    # a rolling update and the phase each node is in: the next active pauses a run it finds
+    # running and holds it for an admin (core/rolling_runs.py)
+    'rolling_update_runs',
     # node recoveries an automatic leader left half done (5.6); made on its first write
     'ha_recovery_journal',
     # where the group's schedules were last checked and reported (5.7); made on its first write
@@ -359,6 +362,8 @@ VOLATILE_COLUMNS = {
                      'sent_count', 'error_count'),
     # every scheduler pass of the active writes it; it goes along with the next pull
     'ha_schedule_marks': ('checked',),
+    # a log line of a rolling update; its phases step the config version and take the log along
+    'rolling_update_runs': ('logs', 'updated_at'),
 }
 
 # Encrypted columns, the same inventory db.rotate_encryption_key walks. A value
@@ -1586,6 +1591,9 @@ def _refresh_managers():
             follow = getattr(mgr, '_follow_persisted_maintenance', None)
             if follow is not None:
                 changed += int(follow() or 0)
+            # and the rolling update the active runs, shown from here when it does not answer
+            from pegaprox.core import rolling_runs
+            rolling_runs.follow(mgr, cid)
         except Exception as e:
             logging.warning(f"[HA] could not refresh the HA or maintenance view of cluster {cid}: {e}")
     cur = db.conn.cursor()

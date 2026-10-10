@@ -58,6 +58,7 @@ from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
 from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
 from pegaprox.core import ha_transport, ha_vote
+from pegaprox.core import rolling_runs
 from pegaprox.core.ha_transport import node_cmd
 from pegaprox.utils.ssh import read_capped as _read_capped
 
@@ -13420,7 +13421,7 @@ echo "AGENT_INSTALLED_OK"
                             # A rolling update may elect not to reboot a fully patched node.
                             # Notify only after this node's reboot command was actually issued,
                             # rather than when the run merely has include_reboot enabled.
-                            if (getattr(self, '_rolling_update', {}).get('status') == 'running'
+                            if ((getattr(self, '_rolling_update', None) or {}).get('status') == 'running'
                                     and not getattr(task, 'rolling_reboot_alert_emitted', False)):
                                 try:
                                     from pegaprox.background.alerts import emit_rolling_update_reboot_event
@@ -13441,7 +13442,7 @@ echo "AGENT_INSTALLED_OK"
                         self.logger.info(f"Reboot command sent (connection closed as expected): {e}")
                         task.add_output("Reboot command sent / Reboot-Befehl gesendet")
                         task.reboot_issued = True   # #715 — assume reboot on a dropped connection (safe: wait)
-                        if (getattr(self, '_rolling_update', {}).get('status') == 'running'
+                        if ((getattr(self, '_rolling_update', None) or {}).get('status') == 'running'
                                 and not getattr(task, 'rolling_reboot_alert_emitted', False)):
                             try:
                                 from pegaprox.background.alerts import emit_rolling_update_reboot_event
@@ -21732,6 +21733,9 @@ echo DONE""",
             return
 
         self._restore_persisted_maintenance()   # #720 — before the first poll assumes everything Online
+        # MK Oct 2026 - and a rolling update still open, before the daemon loop asks whose HA
+        # rules stay off; one that was running is paused where this instance acts
+        rolling_runs.restore(self)
         self.stop_event.clear()
         self.thread = threading.Thread(target=self.daemon_loop)
         self.thread.daemon = True

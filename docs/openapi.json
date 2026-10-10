@@ -33760,7 +33760,7 @@
           }
         },
         "summary": "Start a rolling update across all cluster nodes",
-        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False)\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)",
+        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False)\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)\n\nMK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused\nwhile another one of the cluster is running or paused, across restarts too.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -33813,7 +33813,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Cancel a running rolling update",
+        "summary": "Cancel a running or paused rolling update",
+        "description": "MK Oct 2026 - with its worker in this process the worker stops at its next look and winds\nthe run down itself. A run no worker follows here (interrupted by a restart, or paused\nbefore one) is wound down right here: the nodes it put into maintenance come out, the\nnegative affinity rules go back on, and the answer says what could not be undone.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -33858,6 +33859,8 @@
             "description": "Insufficient permissions"
           }
         },
+        "summary": "Continue a paused rolling update",
+        "description": "MK Oct 2026 - one that no worker waits for here (interrupted by a restart or a switch to\nanother instance, or paused before one) gets a worker that looks at its node again and\ngoes on from the phase it was in.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -33913,6 +33916,7 @@
           }
         },
         "summary": "Clear completed/cancelled rolling update status (dismiss notification)",
+        "description": "The run stays in the history.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -33944,6 +33948,52 @@
         ],
         "x-pegaprox-permissions": [
           "node.update"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/updates/rolling/history": {
+      "get": {
+        "operationId": "settings.get_rolling_update_history_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The last rolling updates of a cluster, newest first, with how each ended",
+        "description": "MK Oct 2026 - their logs name guests and the run is the whole cluster's: a caller confined\nto part of it gets nothing, as for the run itself.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
         ]
       }
     },
