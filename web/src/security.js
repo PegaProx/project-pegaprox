@@ -2274,6 +2274,9 @@
             const [checking, setChecking] = useState(false);
             const [updateStatus, setUpdateStatus] = useState(null);
             const [rollingUpdate, setRollingUpdate] = useState(null);
+            // LW Oct 2026 - the last runs of the cluster, read when the list is opened
+            const [rollHistory, setRollHistory] = useState(null);
+            const [showRollHistory, setShowRollHistory] = useState(false);
             const [includeReboot, setIncludeReboot] = useState(true);
             const [skipUpToDate, setSkipUpToDate] = useState(true);  // NS: Skip nodes without updates
             // MK Sep 2026 (#716) - which alert channels hear about this run,
@@ -2654,12 +2657,45 @@
                     const data = await response.json();
                     if (data.success) {
                         addToast(t('cancelRollingUpdate') + ' ✓', 'info');
-                        setRollingUpdate(null);
+                        // LW Oct 2026 - the cancelled run stays on screen with what it could not undo
+                        if (Array.isArray(data.not_undone) && data.not_undone.length > 0) {
+                            addToast(t('rollRunNotUndoneToast'), 'warning');
+                        }
+                        getRollingStatus();
+                    } else {
+                        addToast(data.error || t('connectionError'), 'error');
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
                 }
             };
+
+            // LW Oct 2026 - one line per item a cancel could not undo
+            const rollReportText = (item) => {
+                if (item.kind === 'maintenance') return t('rollRunUndoneMaint').replace('{node}', item.node || '-');
+                if (item.kind === 'ha_rules') return t('rollRunUndoneRules').replace('{rules}', (item.rules || []).join(', '));
+                if (item.kind === 'guests_stay') return t('rollRunUndoneGuests').replace('{count}', item.count || 0).replace('{node}', item.node || '-');
+                return t('rollRunUndoneError');
+            };
+
+            const loadRollHistory = async () => {
+                setRollHistory(null);
+                try {
+                    const r = await fetch(`${API_URL}/clusters/${clusterId}/updates/rolling/history`, {
+                        credentials: 'include',
+                        headers: getAuthHeaders()
+                    });
+                    const d = r.ok ? await r.json() : null;
+                    setRollHistory(d && Array.isArray(d.runs) ? d.runs : 'error');
+                } catch (e) {
+                    setRollHistory('error');
+                }
+            };
+            const rollStatusLabel = { completed: 'rollRunStatusCompleted', failed: 'rollRunStatusFailed',
+                cancelled: 'rollRunStatusCancelled', running: 'rollRunStatusRunning', paused: 'rollRunStatusPaused' };
+            const rollStatusColor = { completed: 'bg-green-500/20 text-green-400', failed: 'bg-red-500/20 text-red-400',
+                cancelled: 'bg-gray-500/20 text-gray-400', running: 'bg-blue-500/20 text-blue-400',
+                paused: 'bg-yellow-500/20 text-yellow-400' };
 
             // NS: GitHub #40 - Resume a paused rolling update
             const resumeRollingUpdate = async () => {
@@ -2671,7 +2707,7 @@
                     });
                     const data = await response.json();
                     if (data.success) {
-                        addToast('Rolling Update resumed', 'success');
+                        addToast(t('rollRunResumed'), 'success');
                         setTimeout(() => getRollingStatus(), 500);
                     } else {
                         addToast(data.error || 'Failed to resume', 'error');
@@ -2686,6 +2722,8 @@
                 // Reset state when cluster changes
                 setUpdateStatus(null);
                 setRollingUpdate(null);
+                setRollHistory(null);
+                setShowRollHistory(false);
                 setSelectedNode(null);
                 setUpdatingNode(null);
                 setExpanded(false);
@@ -2733,6 +2771,13 @@
                     checkUpdates();
                 }
             }, [rollingUpdate?.status]);
+
+            // LW Oct 2026 - a run that waits for Continue or Cancel (one a restart interrupted
+            // included) opens the section by itself
+            const rollPausedRun = rollingUpdate?.status === 'paused' ? (rollingUpdate.run_id || 'paused') : null;
+            useEffect(() => {
+                if (rollPausedRun) setExpanded(true);
+            }, [rollPausedRun]);
 
             const totalUpdates = updateStatus?.summary?.total_updates || 0;
             const nodesWithUpdates = updateStatus?.summary?.nodes_with_updates || 0;
@@ -2785,6 +2830,11 @@
                             </div>
                         </div>
                         <div className="flex items-center gap-2">
+                            {rollingUpdate && rollingUpdate.status === 'paused' && (
+                                <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded-full text-xs font-medium" data-testid="rolling-paused-pill">
+                                    {t('rollRunStatusPaused')}
+                                </span>
+                            )}
                             {totalUpdates > 0 && (
                                 <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 rounded-full text-xs font-medium">
                                     {totalUpdates}
@@ -3223,6 +3273,18 @@
                                             {rollingUpdate.skipped_nodes?.length > 0 && `, ${rollingUpdate.skipped_nodes.length} skipped`}
                                         </p>
                                     )}
+                                    {/* LW Oct 2026 - what a cancel could not undo */}
+                                    {rollingUpdate.status === 'cancelled' && Array.isArray(rollingUpdate.cancel_report) && rollingUpdate.cancel_report.length > 0 && (
+                                        <div className="mt-2 space-y-1" data-testid="rolling-cancel-report">
+                                            <p className="text-xs text-yellow-400 font-medium">{t('rollRunNotUndone')}</p>
+                                            {rollingUpdate.cancel_report.map((item, i) => (
+                                                <div key={i} className="flex items-start gap-2 text-xs text-yellow-200/80" data-kind={item.kind}>
+                                                    <Icons.AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+                                                    <span>{rollReportText(item)}</span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
                             )}
 
@@ -3231,12 +3293,20 @@
                                 <div className={`p-4 ${rollingUpdate.status === 'paused' ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-blue-500/10 border border-blue-500/30'} rounded-lg space-y-4`}>
                                     {/* NS: GitHub #40 - Paused Banner */}
                                     {rollingUpdate.status === 'paused' && (
-                                        <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4 space-y-3">
+                                        <div className="bg-yellow-900/30 border border-yellow-600/50 rounded-lg p-4 space-y-3" data-testid="rolling-paused" data-reason={rollingUpdate.paused_reason || ''}>
                                             <div className="flex items-center gap-2">
                                                 <Icons.AlertTriangle className="w-5 h-5 text-yellow-400" />
-                                                <span className="text-yellow-400 font-semibold text-lg">Rolling Update Paused</span>
+                                                <span className="text-yellow-400 font-semibold text-lg">{t('rollRunPausedTitle')}</span>
                                             </div>
-                                            {rollingUpdate.paused_details && (
+                                            {/* LW Oct 2026 - PegaProx stopped mid-run: where it was, and that nothing goes on by itself */}
+                                            {rollingUpdate.paused_reason === 'interrupted' ? (
+                                                <div className="text-sm text-yellow-200/80 space-y-1" data-testid="rolling-interrupted">
+                                                    <p>{t('rollRunInterrupted')
+                                                        .replace('{node}', rollingUpdate.paused_details?.node || rollingUpdate.current_node || '-')
+                                                        .replace('{phase}', rollingUpdate.paused_details?.phase || rollingUpdate.resume_at?.phase || '-')}</p>
+                                                    <p className="text-xs text-gray-400">{t('rollRunInterruptedHint').replace('{node}', rollingUpdate.paused_details?.node || rollingUpdate.current_node || '-')}</p>
+                                                </div>
+                                            ) : rollingUpdate.paused_details && (
                                                 <div className="text-sm text-yellow-200/80">
                                                     {rollingUpdate.paused_details.message}
                                                 </div>
@@ -3254,22 +3324,31 @@
                                                     ))}
                                                 </div>
                                             )}
-                                            <div className="flex gap-3 mt-3">
-                                                <button
-                                                    onClick={resumeRollingUpdate}
-                                                    className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
-                                                >
-                                                    <Icons.Play className="w-4 h-4" />
-                                                    Continue Update
-                                                </button>
-                                                <button
-                                                    onClick={cancelRollingUpdate}
-                                                    className="px-4 py-2 bg-red-600/30 hover:bg-red-600/50 text-red-400 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
-                                                >
-                                                    <Icons.X className="w-4 h-4" />
-                                                    Cancel Update
-                                                </button>
-                                            </div>
+                                            {rollingUpdate.current_step === 'cancelling' ? (
+                                                <div className="flex items-center gap-2 text-sm text-yellow-300" data-testid="rolling-cancelling">
+                                                    <div className="animate-spin w-4 h-4 border-2 border-proxmox-orange border-t-transparent rounded-full"></div>
+                                                    {t('rollRunCancelling')}
+                                                </div>
+                                            ) : hasPerm('node.update') && (
+                                                <div className="flex gap-3 mt-3">
+                                                    <button
+                                                        onClick={resumeRollingUpdate}
+                                                        data-testid="rolling-continue"
+                                                        className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
+                                                    >
+                                                        <Icons.Play className="w-4 h-4" />
+                                                        {t('rollRunContinue')}
+                                                    </button>
+                                                    <button
+                                                        onClick={cancelRollingUpdate}
+                                                        data-testid="rolling-cancel"
+                                                        className="px-4 py-2 bg-red-600/30 hover:bg-red-600/50 text-red-400 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors"
+                                                    >
+                                                        <Icons.X className="w-4 h-4" />
+                                                        {t('rollRunCancel')}
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     
@@ -3285,7 +3364,7 @@
                                                 {rollingUpdate.status === 'paused' ? 'Update Paused' : t('rollingUpdateInProgress')}
                                             </span>
                                         </div>
-                                        {rollingUpdate.status === 'running' && (
+                                        {rollingUpdate.status === 'running' && hasPerm('node.update') && (
                                             <button
                                                 onClick={cancelRollingUpdate}
                                                 className="px-3 py-1.5 text-sm bg-red-500/20 text-red-400 rounded-lg hover:bg-red-500/30 transition-colors flex items-center gap-1"
@@ -3502,6 +3581,58 @@
                                                 ))}
                                             </div>
                                         </details>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* LW Oct 2026 - the last rolling updates, how each ended; read when opened */}
+                            {hasPerm('node.view') && (
+                                <div className="border-t border-proxmox-border pt-3" data-testid="rolling-history">
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); const open = !showRollHistory; setShowRollHistory(open); if (open) loadRollHistory(); }}
+                                        className="text-sm text-gray-400 hover:text-white flex items-center gap-2 transition-colors"
+                                    >
+                                        <Icons.ChevronDown className={`w-4 h-4 transition-transform ${showRollHistory ? 'rotate-180' : ''}`} />
+                                        {t('rollRunHistory')}
+                                    </button>
+                                    {showRollHistory && (
+                                        rollHistory === null ? (
+                                            <div className="mt-2 animate-spin w-4 h-4 border-2 border-proxmox-orange border-t-transparent rounded-full"></div>
+                                        ) : rollHistory === 'error' ? (
+                                            <p className="mt-2 text-xs text-red-400">{t('rollRunHistoryLoadFailed')}</p>
+                                        ) : rollHistory.length === 0 ? (
+                                            <p className="mt-2 text-xs text-gray-500">{t('rollRunHistoryEmpty')}</p>
+                                        ) : (
+                                            <div className="mt-2 space-y-1 max-h-64 overflow-y-auto">
+                                                {rollHistory.map(run => (
+                                                    <details key={run.run_id} className="bg-proxmox-dark rounded-lg" data-run={run.run_id} data-status={run.status}>
+                                                        <summary className="px-3 py-2 cursor-pointer text-xs flex flex-wrap items-center gap-2">
+                                                            <span className={`px-2 py-0.5 rounded-full font-medium ${rollStatusColor[run.status] || 'bg-gray-500/20 text-gray-400'}`}>
+                                                                {rollStatusLabel[run.status] ? t(rollStatusLabel[run.status]) : run.status}
+                                                            </span>
+                                                            <span className="text-gray-300 font-mono">{run.started_at || '-'}</span>
+                                                            <span className="text-gray-400">
+                                                                {t('rollRunHistoryCounts').replace('{updated}', run.completed || 0)
+                                                                    .replace('{skipped}', run.skipped || 0).replace('{failed}', run.failed || 0)}
+                                                            </span>
+                                                            <span className="text-gray-500">
+                                                                {run.scheduled ? t('rollRunHistoryScheduled') : t('rollRunHistoryBy').replace('{user}', run.started_by || '-')}
+                                                            </span>
+                                                        </summary>
+                                                        {Array.isArray(run.cancel_report) && run.cancel_report.length > 0 && (
+                                                            <div className="px-3 pb-1 space-y-0.5">
+                                                                {run.cancel_report.map((item, i) => (
+                                                                    <div key={i} className="text-xs text-yellow-200/80">{rollReportText(item)}</div>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                        <div className="max-h-40 overflow-y-auto px-3 pb-2 font-mono text-xs text-gray-400 space-y-0.5">
+                                                            {(run.logs || []).map((line, i) => <div key={i}>{line}</div>)}
+                                                        </div>
+                                                    </details>
+                                                ))}
+                                            </div>
+                                        )
                                     )}
                                 </div>
                             )}
