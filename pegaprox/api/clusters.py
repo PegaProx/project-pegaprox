@@ -160,6 +160,7 @@ def get_clusters():
                 'longitude': getattr(mgr.config, 'longitude', None),
                 'location_label': getattr(mgr.config, 'location_label', '') or '',
                 'node_ui_suffix': getattr(mgr.config, 'node_ui_suffix', '') or '',
+                'transfer_network': getattr(mgr.config, 'transfer_network', '') or '',
             })
 
     # MK: Sort clusters by sort_order first, then by name for consistent ordering
@@ -197,6 +198,9 @@ def add_cluster():
     _cd_err = _cooldown_error(data)
     if _cd_err:
         return _cd_err
+    _xn_err = _transfer_network_error(data)
+    if _xn_err:
+        return _xn_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -275,6 +279,7 @@ def export_cluster_config(cluster_id):
         'cluster_type': getattr(mgr, 'cluster_type', 'proxmox'),
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
         'ssh_disabled': bool(getattr(c, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
+        'transfer_network': getattr(c, 'transfer_network', '') or '',
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -424,6 +429,11 @@ def reconfigure_cluster(cluster_id):
     if _cd_err:
         return _cd_err
     data.setdefault('migration_cooldown', balancer_cooldown(getattr(old_mgr.config, 'migration_cooldown', None)))
+    # nor is the transfer network
+    _xn_err = _transfer_network_error(data)
+    if _xn_err:
+        return _xn_err
+    data.setdefault('transfer_network', getattr(old_mgr.config, 'transfer_network', '') or '')
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -634,6 +644,107 @@ def check_cluster_connection(cluster_id):
               f"Connection check of {mgr.config.name}: {s['ok']} ok, {s['warn']} warnings, "
               f"{s['fail']} failed" + ('' if with_ssh else ' (without SSH)'),
               cluster=mgr.config.name)
+    return jsonify(report)
+
+
+_XFER_NODE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9.\-]{0,62}$')
+_XFER_CHECK_STATUS = {'NO_NETWORK': 409, 'NOT_MEMBER': 400, 'SSH_DISABLED': 409,
+                      'SSH_NO_CREDENTIALS': 409, 'NODE_BACKOFF': 409, 'SSH_FAILED': 502}
+
+
+def _pve_cluster_or_error(cluster_id):
+    """(manager, None) for a Proxmox VE cluster the caller may act on as a whole, else
+    (None, response)."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return None, err
+    if cluster_id not in cluster_managers:
+        return None, (jsonify({'error': 'Cluster not found'}), 404)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return None, _cerr
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, (jsonify({'error': 'The transfer network applies to Proxmox VE clusters only',
+                               'code': 'PVE_ONLY'}), 400)
+    return mgr, None
+
+
+@bp.route('/api/clusters/<cluster_id>/transfer-network', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_transfer_network(cluster_id):
+    """The transfer network of a Proxmox VE cluster and each node's address in it.
+
+    MK Oct 2026 - remote migrations PegaProx starts into this cluster dial the target node
+    at that address instead of the management host (core/transfer_net.py). Answers from
+    the cache of the nodes' network configs; nodes it lacks are read in the background and
+    come back with state 'pending' until then. ?network=<cidr> shows another network
+    before it is saved. migration_network is the datacenter option PVE uses for
+    migrations inside the cluster, for reference: it is edited there, not here.
+    """
+    mgr, err = _pve_cluster_or_error(cluster_id)
+    if err:
+        return err
+    from pegaprox.core import transfer_net
+    override = request.args.get('network')
+    if override is not None:
+        cidr, nerr = transfer_net.normalize(override)
+        if nerr:
+            return jsonify({'error': nerr.replace('transfer_network', 'network')}), 400
+        override = cidr
+    view = transfer_net.cluster_view(mgr, override)
+    view['cluster_id'] = cluster_id
+    view['saved'] = getattr(mgr.config, 'transfer_network', '') or ''
+    return jsonify(view)
+
+
+@bp.route('/api/clusters/<cluster_id>/transfer-network/check', methods=['POST'])
+@require_auth(perms=['cluster.config'])
+def check_transfer_network(cluster_id):
+    """From one node of a source cluster, whether the transfer addresses of this cluster's
+    nodes answer on port 8006 - the path the disk data of a remote migration takes.
+
+    MK Oct 2026 - body {"source_cluster": id, "source_node": name}. Logs in to that node
+    over SSH once, through the same path as the other node checks, and opens one TCP
+    connection per address from there; nothing is changed. Both clusters must be ones the
+    caller may act on as a whole. A standby forwards it to the active or refuses it like
+    any other write (app.py).
+    """
+    mgr, err = _pve_cluster_or_error(cluster_id)
+    if err:
+        return err
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The request body must be a JSON object'}), 400
+    src_id, node = data.get('source_cluster'), data.get('source_node')
+    if not isinstance(src_id, str) or not src_id or len(src_id) > 64:
+        return jsonify({'error': 'source_cluster must be the id of a cluster'}), 400
+    if not isinstance(node, str) or not _XFER_NODE_RE.match(node):
+        return jsonify({'error': 'source_node must be a node name'}), 400
+    src, err = _pve_cluster_or_error(src_id)
+    if err:
+        return err
+    from pegaprox.core import transfer_net
+    try:
+        report, fail = transfer_net.check_from(src, node, mgr)
+    except Exception as e:
+        logging.exception(f"transfer network check failed for {_sl(cluster_id)}")
+        return jsonify({'error': safe_error(e, 'The check failed')}), 500
+    user = request.session['user']
+    if fail:
+        code, detail = fail
+        log_audit(user, 'cluster.transfer_network_check',
+                  f"Transfer network check of {mgr.config.name} from {_sl(node)} could not run: {code}",
+                  cluster=mgr.config.name)
+        return jsonify({'error': detail, 'code': code}), _XFER_CHECK_STATUS.get(code, 400)
+    rows = report['nodes']
+    log_audit(user, 'cluster.transfer_network_check',
+              f"Transfer network check of {mgr.config.name} ({report['network']}) from "
+              f"{src.config.name}/{_sl(node)}: {sum(1 for r in rows if r['status'] == 'ok')} answer, "
+              f"{sum(1 for r in rows if r['status'] == 'fail')} do not, "
+              f"{sum(1 for r in rows if r['status'] in ('none', 'unreadable'))} without an address",
+              cluster=mgr.config.name)
+    report.update(cluster_id=cluster_id, source_cluster=src_id)
     return jsonify(report)
 
 
@@ -1471,6 +1582,7 @@ ALLOWED_CONFIG_FIELDS = {
     'proxlb_pins_auto_migrate',  # opt-in: migrate guests back onto their plb_pin_ node
     'proxlb_pins_strict',  # opt-in: a pin also vetoes a maintenance evacuation
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
+    'transfer_network',  # MK Oct 2026 - CIDR for remote migrations into this cluster
 }
 
 # These persist as INTEGER (db.py save_cluster) and reload through bool(), so a
@@ -1489,6 +1601,23 @@ def _cooldown_error(data):
             or not BALANCER_COOLDOWN_MIN <= value <= BALANCER_COOLDOWN_MAX:
         return jsonify({'error': f"'migration_cooldown' must be whole seconds from "
                                  f"{BALANCER_COOLDOWN_MIN} to {BALANCER_COOLDOWN_MAX}"}), 400
+    return None
+
+
+def _transfer_network_error(data, mgr=None):
+    """A 400 when the body sets transfer_network to anything but a network in CIDR
+    notation or empty, or sets one on a cluster that is no Proxmox VE cluster. Normalises
+    it in place (10.20.0.5/24 is 10.20.0.0/24)."""
+    if 'transfer_network' not in data:
+        return None
+    from pegaprox.core.transfer_net import normalize
+    cidr, err = normalize(data['transfer_network'])
+    if err:
+        return jsonify({'error': err}), 400
+    kind = getattr(mgr, 'cluster_type', None) if mgr is not None else data.get('cluster_type', 'proxmox')
+    if cidr and (kind or 'proxmox') != 'proxmox':
+        return jsonify({'error': 'transfer_network applies to Proxmox VE clusters only'}), 400
+    data['transfer_network'] = cidr
     return None
 
 
@@ -1629,6 +1758,9 @@ def update_cluster_config(cluster_id):
     _cd_err = _cooldown_error(data)
     if _cd_err:
         return _cd_err
+    _xn_err = _transfer_network_error(data, mgr)
+    if _xn_err:
+        return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -1680,6 +1812,9 @@ def update_cluster_config_live(cluster_id):
     _cd_err = _cooldown_error(data)
     if _cd_err:
         return _cd_err
+    _xn_err = _transfer_network_error(data, mgr)
+    if _xn_err:
+        return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err

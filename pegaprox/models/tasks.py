@@ -189,6 +189,9 @@ class PegaProxConfig:
         # (pve01) get "<suffix>" appended → pve01.example.local:8006. Empty string = links use the
         # node IP/host as before.
         self.node_ui_suffix = (cluster_data.get('node_ui_suffix', '') or '').strip().lstrip('.')
+        # MK Oct 2026 - CIDR the remote migrations into this cluster dial its nodes in
+        # (core/transfer_net.py). Empty = the management host, as before.
+        self.transfer_network = str(cluster_data.get('transfer_network', '') or '').strip()
         # NS May 2026 (#364) — load-balancer settings finally hydrated from db.
         # Were API-settable but never persisted before, so users saw "saved"
         # toasts that reverted within seconds.

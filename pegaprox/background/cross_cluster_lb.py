@@ -17,7 +17,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
-from pegaprox.core import ha
+from pegaprox.core import ha, transfer_net
 from pegaprox.utils.audit import log_audit
 
 logger = logging.getLogger('pegaprox.xclb')
@@ -200,17 +200,20 @@ def run_cross_cluster_balance_check(group):
 
     try:
         # 8. get fingerprint + build endpoint
-        fp = lo_mgr.get_cluster_fingerprint()
+        # MK Oct 2026 - at the target node's transfer address when lo has a transfer network
+        xfer = transfer_net.migration_route(lo_mgr, target_node)
+        if xfer and xfer['host']:
+            fp = {'success': True, 'host': xfer['host'], 'fingerprint': xfer['fingerprint']}
+        else:
+            fp = lo_mgr.get_cluster_fingerprint()
         if not fp.get('success'):
             logger.error(f"[XCLB] Fingerprint failed for {lo_cid}: {fp.get('error')}")
             lo_mgr.delete_api_token(token_name)
             return
+        transfer_net.report_fallback(xfer, getattr(hi_mgr, 'logger', None))
 
         # LW: same endpoint format as manual cross-cluster migration
-        endpoint = (
-            f"apitoken=PVEAPIToken={token['token_id']}={token['token_value']},"
-            f"host={fp['host']},fingerprint={fp['fingerprint']}"
-        )
+        endpoint = transfer_net.endpoint(token, fp['host'], fp['fingerprint'])
 
         logger.info(f"[XCLB] Migrating {vm_type}/{vmid} ({vm_name}): "
                      f"{hi_cid}/{source_node} -> {lo_cid}/{target_node}")

@@ -707,6 +707,8 @@ AUTOMATIONS = {
     ('pegaprox/api/drift.py', 'start_scanner'): (1, 'read'),
     # the replication and backup reads behind the Prometheus series, API GETs only
     ('pegaprox/api/metrics_exporter.py', '_spawn'): (1, 'read'),
+    # the node network configs behind the transfer network view, API GETs only
+    ('pegaprox/core/transfer_net.py', '_spawn'): (1, 'read'),
     ('pegaprox/api/groups.py', 'trigger_xclb_balance_now'): (1, 'confirm'),
     ('pegaprox/api/multi_sdn.py', 'start_scanner'): (1, 'confirm'),
     ('pegaprox/api/realtime.py', 'update_sse_subscription'): (1, 'read'),

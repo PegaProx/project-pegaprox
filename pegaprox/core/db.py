@@ -1437,6 +1437,9 @@ class PegaProxDB:
                 ('node_ui_suffix', "TEXT DEFAULT ''"),
                 # seconds the balancer leaves a guest alone after moving it (was a fixed 900)
                 ('migration_cooldown', "INTEGER DEFAULT 900"),
+                # MK Oct 2026 - CIDR the remote migrations into this cluster dial its nodes in.
+                # Empty = off, the management host as before (core/transfer_net.py)
+                ('transfer_network', "TEXT DEFAULT ''"),
             ]:
                 if col_name not in cluster_columns:
                     try:
@@ -3464,6 +3467,7 @@ class PegaProxDB:
                 'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
                 'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
                 'node_ui_suffix': row['node_ui_suffix'] if 'node_ui_suffix' in row.keys() and row['node_ui_suffix'] else '',
+                'transfer_network': row['transfer_network'] if 'transfer_network' in row.keys() and row['transfer_network'] else '',
             }
 
         return clusters
@@ -3555,6 +3559,7 @@ class PegaProxDB:
             'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
             'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
             'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
+            'transfer_network': row['transfer_network'] if 'transfer_network' in row.keys() and row['transfer_network'] else '',
         }
 
     def save_cluster(self, cluster_id: str, data: dict):
@@ -3565,7 +3570,7 @@ class PegaProxDB:
         # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
         cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
                        'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict, '
-                       'migration_cooldown FROM clusters WHERE id = ?', (cluster_id,))
+                       'migration_cooldown, transfer_network FROM clusters WHERE id = ?', (cluster_id,))
         existing = cursor.fetchone()
 
         # MK May 2026 — preserve previously-set worldmap location across save_cluster
@@ -3605,9 +3610,11 @@ class PegaProxDB:
              latitude, longitude, location_label,
              node_ui_suffix,
              proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
+             transfer_network,
              created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?)
         ''', (
             cluster_id,
             data.get('name', ''),
@@ -3661,6 +3668,7 @@ class PegaProxDB:
             1 if data.get('proxlb_tags_enabled', existing['proxlb_tags_enabled'] if existing else False) else 0,
             1 if data.get('proxlb_pins_auto_migrate', existing['proxlb_pins_auto_migrate'] if existing else False) else 0,
             1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
+            str(data.get('transfer_network', existing['transfer_network'] if existing else '') or '').strip(),
             existing['created_at'] if existing else now,
             now
         ))

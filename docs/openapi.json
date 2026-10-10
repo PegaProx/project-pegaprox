@@ -3377,6 +3377,108 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/transfer-network": {
+      "get": {
+        "operationId": "clusters.get_transfer_network_get",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The transfer network of a Proxmox VE cluster and each node's address in it.",
+        "description": "MK Oct 2026 - remote migrations PegaProx starts into this cluster dial the target node\nat that address instead of the management host (core/transfer_net.py). Answers from\nthe cache of the nodes' network configs; nodes it lacks are read in the background and\ncome back with state 'pending' until then. ?network=<cidr> shows another network\nbefore it is saved. migration_network is the datacenter option PVE uses for\nmigrations inside the cluster, for reference: it is edited there, not here.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/transfer-network/check": {
+      "post": {
+        "operationId": "clusters.check_transfer_network_post",
+        "tags": [
+          "clusters"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "From one node of a source cluster, whether the transfer addresses of this cluster's nodes answer on port 8006 - the path the disk data of a remote migration takes.",
+        "description": "MK Oct 2026 - body {\"source_cluster\": id, \"source_node\": name}. Logs in to that node\nover SSH once, through the same path as the other node checks, and opens one TCP\nconnection per address from there; nothing is changed. Both clusters must be ones the\ncaller may act on as a whole. A standby forwards it to the active or refuses it like\nany other write (app.py).",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.config"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}": {
       "delete": {
         "operationId": "clusters.delete_cluster_delete",

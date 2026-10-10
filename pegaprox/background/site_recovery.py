@@ -9,7 +9,7 @@ import requests
 from datetime import datetime
 
 from pegaprox.core.db import get_db
-from pegaprox.core import ha
+from pegaprox.core import ha, transfer_net
 from pegaprox.background import sr_boot_shots
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.audit import log_audit
@@ -281,16 +281,25 @@ def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_
         token_value = token_result['token_value']
 
         # get target fingerprint
-        fp_result = tgt_mgr.get_cluster_fingerprint()
+        # MK Oct 2026 - a target with a transfer network: a node's address there
+        xfer = transfer_net.migration_route(tgt_mgr)
+        if xfer and xfer['host']:
+            fp_result = {'success': True, 'fingerprint': xfer['fingerprint']}
+        else:
+            fp_result = tgt_mgr.get_cluster_fingerprint()
         if not fp_result.get('success'):
             tgt_mgr.delete_api_token(_sr_token_name)
             return False, f"Failed to get target fingerprint: {fp_result.get('error', '')}"
+        transfer_net.report_fallback(xfer, logger)
 
         fingerprint = fp_result['fingerprint']
-        target_host = tgt_mgr.host
+        target_host = xfer['host'] if xfer and xfer['host'] else tgt_mgr.host
+        if xfer and xfer['host']:
+            logger.info(f"[SR] VM {vmid} goes to {xfer['node']} at {target_host} (transfer network {xfer['network']})")
 
         # build target endpoint string (Proxmox format)
-        target_endpoint = f"apitoken=PVEAPIToken={token_id}={token_value},host={target_host},fingerprint={fingerprint}"
+        target_endpoint = transfer_net.endpoint({'token_id': token_id, 'token_value': token_value},
+                                                target_host, fingerprint)
 
         # execute migration
         result = src_mgr.remote_migrate_vm(
@@ -605,6 +614,16 @@ def execute_failover(plan_id, failover_type='planned', authorized_vmids=None, on
         db.execute("UPDATE site_recovery_plans SET status = 'failed', updated_at = ? WHERE id = ?",
                    (datetime.utcnow().isoformat(), plan_id))
         return
+
+    # MK Oct 2026 - a target with a transfer network the migrations cannot use: said up
+    # front here, each guest's log line and the audit say it again
+    if failover_type != 'emergency' and tgt_mgr is not None and vms:
+        try:
+            _xfer = transfer_net.migration_route(tgt_mgr)
+            if _xfer and not _xfer['host']:
+                _broadcast_progress(plan_id, _xfer['note'], 0)
+        except Exception as e:
+            logger.debug(f"[SR] transfer network of {tgt_id} not read: {e}")
 
     total_vms = len(vms)
     completed = 0

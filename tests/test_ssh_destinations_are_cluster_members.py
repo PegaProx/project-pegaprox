@@ -38,6 +38,9 @@ MEMBER_RESOLVERS = {
     '_get_host_ip',
     '_xcincr_node_ip',     # api/vms.py — cluster/status, None when not a member
     'node_shell_address',  # api/helpers.py - member_node_ip for cluster members only (#1143)
+    # core/transfer_net.py - a member's address in its cluster's transfer network, from the
+    # node's own network config; the connect there is pinned to the management address's key
+    'transfer_ssh_address',
 }
 OWN_HOST_ATTRS = {'host', 'raw_host', 'config'}
 
@@ -130,7 +133,7 @@ def test_no_resolver_falls_back_to_its_own_argument(resolver):
     A resolver that hands back the name it was given turns an unresolvable node into
     the SSH destination, which is the whole point of this file.
     """
-    for path in list(_py_files()) + ['pegaprox/core/manager.py']:
+    for path in list(_py_files()) + ['pegaprox/core/manager.py', 'pegaprox/core/transfer_net.py']:
         src = io.open(path, encoding='utf-8').read()
         if f'def {resolver}' not in src:
             continue

@@ -12990,7 +12990,7 @@ echo "AGENT_INSTALLED_OK"
         return bool(password) and password == stored and not ssh_password_for(self.config)
 
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0,
-                     connect_timeout: int = 30, failure: dict = None):
+                     connect_timeout: int = 30, failure: dict = None, pinned_as: str = None):
         """SSH connect with retry logic and connection rate limiting
 
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
@@ -13003,6 +13003,10 @@ echo "AGENT_INSTALLED_OK"
         MK Oct 2026 - `failure`, when given, gets {'kind', 'detail'} on a None return
         (auth, host_key, unreachable, key, blocked, error); the connection check names
         the reason per node instead of a bare "SSH failed".
+
+        `pinned_as`: another address of the same node (its management address). `host`
+        is then accepted only with the host key pinned for that one, nothing is learned
+        or saved, and without such a pin there is no connection (transfer network).
         """
         # #941 — decide before we open a socket. Every SSH path to a PVE node comes
         # through here, so refusing here is what stops the traffic AND stops the token
@@ -13052,9 +13056,13 @@ echo "AGENT_INSTALLED_OK"
                 else:
                     self.logger.info(f"Connecting to {host}:{ssh_port} as {username}...")
                 
-                from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys
+                from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, pin_as
                 ssh = paramiko.SSHClient()
                 apply_host_key_policy(ssh, paramiko)
+                if pinned_as and not pin_as(ssh, paramiko, host, pinned_as, ssh_port):
+                    if failure is not None:
+                        failure.update(kind='host_key', detail=f'no host key pinned for {pinned_as}')
+                    return None
 
                 connect_kwargs = {
                     'hostname': host,
@@ -13096,7 +13104,8 @@ echo "AGENT_INSTALLED_OK"
                     connect_kwargs['password'] = self.ssh_password_to_offer()
                 
                 ssh.connect(**connect_kwargs)
-                persist_host_keys(ssh)
+                if not pinned_as:
+                    persist_host_keys(ssh)
                 self.logger.info(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
 
                 # SUCCESS - release semaphore immediately, connection is established

@@ -58,6 +58,8 @@ from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_gu
                                   node_maintenance_for_caller)
 from pegaprox.api.ha import standby_console_refusal, STANDBY_CONSOLE_ERROR
 from pegaprox.core import ha, ha_transport
+from pegaprox.core import transfer_net
+from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
 from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_blocked_for
 from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name
@@ -8927,6 +8929,30 @@ def _xcincr_node_ip(mgr, node):
     return None
 
 
+def _xcincr_ssh(mgr, node, job_id):
+    """SSH to a node for the byte relay, or None.
+
+    MK Oct 2026 - at its address in the cluster's transfer network when PegaProx reaches
+    it there and the host key it presents is the one pinned for its management address;
+    else, and for the next ten minutes, at the management address as before."""
+    mgmt_ip = _xcincr_node_ip(mgr, node)
+    if not mgmt_ip:
+        return None
+    via = transfer_ssh_address(mgr, node, mgmt_ip)
+    if via:
+        failure = {}
+        client = mgr._ssh_connect(via, retries=1, connect_timeout=10, failure=failure,
+                                  pinned_as=mgmt_ip)
+        if client:
+            logging.info(f"[XCINCR] Job {job_id}: {node} relays over its transfer address {via}")
+            return client
+        transfer_net.ssh_unusable(mgr, node, via)
+        logging.warning(f"[XCINCR] Job {job_id}: transfer address {via} of {node} not used "
+                        f"({failure.get('kind') or 'error'}: {failure.get('detail') or 'no connection'}) - "
+                        f"relaying over its management address {mgmt_ip}")
+    return mgr._ssh_connect(mgmt_ip)
+
+
 def _xcincr_rbd_pool(ssh, storage):
     """Ceph pool backing an rbd storage (from `pvesm config`); falls back to the
     storage name."""
@@ -9187,8 +9213,8 @@ def _execute_replication_incremental(job):
                                 f'Node {_missing!r} is not listed as a member of its cluster - '
                                 f'refusing to SSH to it')
             return True
-        src_ssh = source_mgr._ssh_connect(_src_ip)
-        tgt_ssh = target_mgr._ssh_connect(_tgt_ip)
+        src_ssh = _xcincr_ssh(source_mgr, source_node, job_id)
+        tgt_ssh = _xcincr_ssh(target_mgr, target_node, job_id)
         if not src_ssh or not tgt_ssh:
             _update_repl_status(db, job_id, 'error', 'SSH to source/target node failed (incremental needs SSH creds on both clusters)')
             return True
@@ -9527,17 +9553,22 @@ def _execute_replication(job):
             return
 
         try:
-            fp = target_mgr.get_cluster_fingerprint()
+            # the target node's transfer address when the target cluster has one (MK Oct 2026)
+            xfer = transfer_net.migration_route(target_mgr, target_node or None)
+            if xfer and xfer['host']:
+                fp = {'success': True, 'host': xfer['host'], 'fingerprint': xfer['fingerprint']}
+            else:
+                fp = target_mgr.get_cluster_fingerprint()
             if not fp.get('success'):
                 target_mgr.delete_api_token(token_name)
                 _cleanup_clone_and_snap(source_mgr, source_node, clone_vmid, vmid, vm_type, snap_name)
                 _update_repl_status(db, job_id, 'error', f'Fingerprint failed: {fp.get("error")}')
                 return
+            transfer_net.report_fallback(xfer, getattr(source_mgr, 'logger', None))
+            logging.info(f"[XCREPL] Job {job_id}: target endpoint host {fp['host']}"
+                         + (f" (transfer network {xfer['network']})" if xfer and xfer['host'] else ''))
 
-            endpoint = (
-                f"apitoken=PVEAPIToken={token['token_id']}={token['token_value']},"
-                f"host={fp['host']},fingerprint={fp['fingerprint']}"
-            )
+            endpoint = transfer_net.endpoint(token, fp['host'], fp['fingerprint'])
 
             # NS Apr 2026: #321 - second+ replication run fails because VM exists on target.
             # A replication job's whole point is to REPLACE the old copy, so remove it here
@@ -13691,18 +13722,22 @@ def cross_cluster_migrate_api():
         logging.info(f"Created token on target cluster: {target_token['token_id']}")
         
         # Step 2: Get target cluster fingerprint
-        fp_result = target_manager.get_cluster_fingerprint()
+        # MK Oct 2026 - a target with a transfer network is dialled at the target node's
+        # address there, pinned to the certificate that node reports for itself
+        xfer = transfer_net.migration_route(target_manager, target_node)
+        if xfer and xfer['host']:
+            fp_result = {'success': True, 'host': xfer['host'], 'fingerprint': xfer['fingerprint']}
+        else:
+            fp_result = target_manager.get_cluster_fingerprint()
         if not fp_result.get('success'):
             raise Exception(f'Could not get target fingerprint: {fp_result.get("error")}')
-        
+        transfer_net.report_fallback(xfer, getattr(source_manager, 'logger', None),
+                                     request.session.get('user', 'system'))
+
         # Step 3: Build target endpoint string
         # MK: Format must be exact - Proxmox is picky about this
         # Format: apitoken=PVEAPIToken=<user>!<tokenname>=<secret>,host=<host>,fingerprint=<fp>
-        target_endpoint = (
-            f"apitoken=PVEAPIToken={target_token['token_id']}={target_token['token_value']},"
-            f"host={fp_result['host']},"
-            f"fingerprint={fp_result['fingerprint']}"
-        )
+        target_endpoint = transfer_net.endpoint(target_token, fp_result['host'], fp_result['fingerprint'])
         
         # MK Aug 2026 (#733) — log the host + fingerprint we hand to PVE. remote_migrate on a
         # target added without SSL trust rejects with a bare {"data":null}/500 and swallows the
@@ -13832,6 +13867,10 @@ def cross_cluster_migrate_api():
                 'online': online,
                 'info': 'Temporary API token will be automatically cleaned up after migration completes.'
             }
+            if xfer:
+                response['transfer_network'] = transfer_net.describe(xfer)
+                if not xfer['host']:
+                    warnings.append(xfer['note'])
             if warnings:
                 response['warnings'] = warnings
             

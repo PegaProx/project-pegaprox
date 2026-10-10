@@ -142,6 +142,7 @@
     "pegaprox/core/pbs.py",
     "pegaprox/core/qdevice.py",
     "pegaprox/core/redfish.py",
+    "pegaprox/core/transfer_net.py",
     "pegaprox/core/v2p.py",
     "pegaprox/core/vmware.py",
     "pegaprox/core/xcpng.py",

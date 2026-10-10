@@ -122,6 +122,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 📊 **Live Metrics** - Real-time CPU, RAM, and storage monitoring via SSE
 - 🔄 **Live Migration** - Migrate VMs between nodes with one click
 - ⚖️ **Cross-Cluster Load Balancing** - Distribute workloads across clusters
+- 🛣️ **Transfer Network** - A dedicated network per cluster for the disk data of cross-cluster migrations, replications and Site Recovery runs, off the management network ([docs](docs/transfer-network.md))
 - 🔄 **Cross-Hypervisor Migration** - Migrate VMs between ESXi, Proxmox VE, and XCP-ng 
 
 ### VM & Container Management

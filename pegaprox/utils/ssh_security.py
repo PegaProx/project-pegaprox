@@ -169,6 +169,50 @@ def apply_host_key_policy(client, paramiko):
     return client
 
 
+def pin_as(client, paramiko, hostname, pinned_as, port=22):
+    """Let ``client`` accept at ``hostname`` only the host keys pinned for ``pinned_as``.
+
+    For a second address of a host we already know, such as a node's transfer address
+    next to its management address: no trust on first use there and no key of its own.
+    The client drops every other pin, holds the keys of ``pinned_as`` under ``hostname``
+    and refuses anything else, so a different key or key type there ends the connect
+    before any credential is sent. False when ``pinned_as`` has no pin to lend or the
+    file cannot be read: then do not connect there. The caller persists nothing."""
+    try:
+        _port = int(port or 22)
+    except (TypeError, ValueError):
+        _port = 22
+
+    def name(h):
+        return h if _port == 22 else '[%s]:%d' % (h, _port)
+
+    pins = paramiko.hostkeys.HostKeys()
+    try:
+        if os.path.exists(_KNOWN_HOSTS):
+            pins.load(_KNOWN_HOSTS)
+    except Exception as e:
+        _log.warning("known_hosts unreadable (%s) - not lending the pin of %s to %s", e, pinned_as, hostname)
+        return False
+    entry = pins.lookup(name(pinned_as))
+    if not entry:
+        return False
+    keys = client.get_host_keys()
+    keys.clear()
+    system = getattr(client, '_system_host_keys', None)
+    if system is not None:
+        system.clear()
+    for keytype in list(entry.keys()):
+        keys.add(name(hostname), keytype, entry[keytype])
+
+    class _OnlyThePin(paramiko.MissingHostKeyPolicy):
+        def missing_host_key(self, _client, host, key):
+            raise paramiko.SSHException(
+                f"the host key at {host} ({key.get_name()}) is not one pinned for {pinned_as}")
+
+    client.set_missing_host_key_policy(_OnlyThePin())
+    return True
+
+
 def secure_ssh_client(paramiko):
     """Return a fresh ``paramiko.SSHClient`` with known_hosts loaded + policy set.
 
