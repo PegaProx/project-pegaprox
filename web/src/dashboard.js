@@ -7938,6 +7938,11 @@
             // #717 — the server answers with a machine code; the sentence the operator reads
             // is chosen here, so it lands in their language. The English error/hint the API
             // also returns stay the fallback for a code we do not know yet.
+            // LW Oct 2026 - a control whose output did not come back is null (verbose: status
+            // null): not checked. It is neither passed nor failed and no score divides by it.
+            const verdictOf = (v) => (v === true || v === false) ? v
+                : (v && typeof v === 'object' && typeof v.status === 'boolean') ? v.status : null;
+
             const sshReason = (info) => ({
                 SSH_NO_CREDENTIALS: [t('sshNoCredentials'), t('sshNoCredentialsHint')],
                 NODE_BACKOFF:       [t('sshNodeBackoff'),   t('sshNodeBackoffHint')],
@@ -7977,9 +7982,11 @@
                             }
                             const d = await r.json();
                             const ctrls = d.controls || {};
-                            const total = Object.keys(ctrls).length;
-                            const passed = Object.values(ctrls).filter(v => v === true || v?.status === true).length;
-                            perNode[n] = { controls: ctrls, total, passed, score: total ? Math.round(passed * 100 / total) : 0 };
+                            const verdicts = Object.values(ctrls).map(verdictOf);
+                            const total = verdicts.filter(v => v !== null).length;
+                            const passed = verdicts.filter(v => v === true).length;
+                            perNode[n] = { controls: ctrls, total, passed, notChecked: verdicts.length - total,
+                                           score: total ? Math.round(passed * 100 / total) : null };
                         } catch (e) {
                             perNode[n] = { error: String(e) };
                         }
@@ -8061,19 +8068,20 @@
                 { id: 'fips', name: 'FIPS 140-3', region: 'US', controls: ['vsnfd_kernel_lockdown'], informational: true, note: 'Requires FIPS-validated crypto module (RHEL/Ubuntu Pro). Not satisfiable on stock Proxmox.' },
             ];
             const frameworkScore = (fw) => {
-                let total = 0, passed = 0;
+                let total = 0, passed = 0, notChecked = 0;
                 Object.values(scopedResults).forEach(perNode => {
                     Object.values(perNode).forEach(n => {
                         if (!n.controls) return;
                         fw.controls.forEach(cid => {
-                            if (cid in n.controls) {
-                                total++;
-                                if (n.controls[cid] === true || n.controls[cid]?.status === true) passed++;
-                            }
+                            if (!(cid in n.controls)) return;
+                            const v = verdictOf(n.controls[cid]);
+                            if (v === null) { notChecked++; return; }
+                            total++;
+                            if (v) passed++;
                         });
                     });
                 });
-                return { total, passed, score: total ? Math.round(passed * 100 / total) : null };
+                return { total, passed, notChecked, score: total ? Math.round(passed * 100 / total) : null };
             };
 
             // MK Apr 2026 — per-framework PDF download. Restructured to use real framework
@@ -8197,11 +8205,8 @@
                 // ── Per-node coverage stats ──
                 const nodeStats = nodes.map(node => {
                     const info = perNode[node] || {};
-                    const checked = fw.controls.filter(cid => info?.controls?.[cid] !== undefined);
-                    const passed = checked.filter(cid => {
-                        const v = info.controls[cid];
-                        return v === true || v?.status === true;
-                    });
+                    const checked = fw.controls.filter(cid => verdictOf(info?.controls?.[cid]) !== null);
+                    const passed = checked.filter(cid => verdictOf(info.controls[cid]) === true);
                     return {
                         node,
                         checked: checked.length,
@@ -8224,10 +8229,10 @@
                 fw.controls.forEach(cid => {
                     const sev = severityMap[cid] || 'medium';
                     nodes.forEach(node => {
-                        const v = perNode[node]?.controls?.[cid];
-                        if (v === undefined) return;
+                        const v = verdictOf(perNode[node]?.controls?.[cid]);
+                        if (v === null) return;
                         sevBuckets[sev].checked += 1;
-                        if (v === true || v?.status === true) sevBuckets[sev].passed += 1;
+                        if (v) sevBuckets[sev].passed += 1;
                     });
                 });
                 const highPct = sevBuckets.high.checked
@@ -8251,11 +8256,11 @@
                     if (!byFamily[familyKey]) byFamily[familyKey] = [];
                     const ctrlResults = {};
                     nodes.forEach(node => {
-                        const v = perNode[node]?.controls?.[cid];
-                        if (v === undefined) {
+                        const v = verdictOf(perNode[node]?.controls?.[cid]);
+                        if (v === null) {
                             ctrlResults[node] = '—';
                         } else {
-                            ctrlResults[node] = (v === true || v?.status === true) ? 'PASS' : 'FAIL';
+                            ctrlResults[node] = v ? 'PASS' : 'FAIL';
                         }
                     });
                     const evaluated = Object.values(ctrlResults).filter(s => s !== '—');
@@ -8728,6 +8733,11 @@
                                             </div>
                                             <p className={`text-3xl font-bold ${scoreColor(s.score)}`}>{s.score == null ? '—' : `${s.score}%`}</p>
                                             <p className="text-xs text-gray-500">{s.passed}/{s.total} {t('controls') || 'controls'}</p>
+                                            {s.notChecked > 0 && (
+                                                <p className="text-[11px] text-gray-400" title={t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>
+                                                    {s.notChecked} {t('hardenNotChecked') || 'not checked'}
+                                                </p>
+                                            )}
                                             {fw.note && (
                                                 <p className="text-[10px] text-yellow-400/80 leading-tight" title={fw.note}>⚠ {fw.note.slice(0, 80)}{fw.note.length > 80 ? '…' : ''}</p>
                                             )}
@@ -8800,13 +8810,20 @@
                                                     {info.error ? (
                                                         <span className="text-xs text-amber-400">{t('unavailable') || 'unavailable'}</span>
                                                     ) : (
-                                                        <span className={`text-sm font-medium ${scoreColor(info.score)}`}>{info.score}%</span>
+                                                        <span className={`text-sm font-medium ${scoreColor(info.score)}`}>{info.score == null ? '-' : `${info.score}%`}</span>
                                                     )}
                                                 </div>
                                                 {info.error ? (
                                                     <p className="text-xs text-gray-500 mt-1">{sshReason(info)[0] || `HTTP ${info.error}`}</p>
                                                 ) : (
-                                                    <p className="text-xs text-gray-500 mt-1">{info.passed}/{info.total} {t('passed') || 'passed'}</p>
+                                                    <p className="text-xs text-gray-500 mt-1">
+                                                        {info.passed}/{info.total} {t('passed') || 'passed'}
+                                                        {info.notChecked > 0 && (
+                                                            <span className="text-gray-400" title={t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>
+                                                                {' · '}{info.notChecked} {t('hardenNotChecked') || 'not checked'}
+                                                            </span>
+                                                        )}
+                                                    </p>
                                                 )}
                                             </div>
                                         ))}
@@ -13773,9 +13790,11 @@
                         // pre-select all controls that are NOT yet applied
                         const sel = {};
                         Object.entries(data.controls || {}).forEach(([id, v]) => {
-                            // verbose: v is {status, evidence}, non-verbose: v is bool
-                            const applied = typeof v === 'object' ? v.status : v;
-                            if (!applied) sel[id] = true;
+                            // verbose: v is {status, evidence}, non-verbose: v is bool. LW Oct 2026 -
+                            // null is a control that was not checked: its state is unknown, so it
+                            // is not ticked for an apply on its own
+                            const applied = (v && typeof v === 'object') ? v.status : v;
+                            if (applied === false) sel[id] = true;
                         });
                         setHardenSelected(sel);
                     } else {
@@ -20963,8 +20982,11 @@
                                                             const controls = hardenStatus.controls || {};
                                                             // NS Apr 2026: verbose result is {status, evidence, command}, non-verbose is bool
                                                             const _isApplied = v => typeof v === 'object' ? v?.status === true : v === true;
+                                                            // null: the check's output did not come back, so it counts nowhere
+                                                            const _notChecked = v => ((v && typeof v === 'object') ? v.status : v) == null;
                                                             const appliedCount = Object.values(controls).filter(_isApplied).length;
-                                                            const totalCount = Object.keys(controls).length;
+                                                            const notCheckedCount = Object.values(controls).filter(_notChecked).length;
+                                                            const totalCount = Object.keys(controls).length - notCheckedCount;
                                                             const selectedCount = Object.values(hardenSelected).filter(Boolean).length;
 
                                                             // reusable render fn for a single control row
@@ -20973,6 +20995,7 @@
                                                                 // verbose: ctrlData is {status, evidence, command}, non-verbose: bool
                                                                 const isVerboseData = ctrlData && typeof ctrlData === 'object';
                                                                 const applied = isVerboseData ? ctrlData.status === true : ctrlData === true;
+                                                                const notChecked = (id in controls) && _notChecked(ctrlData);
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
                                                                 const failed = hardenResults?.[id]?.success === false;
@@ -21023,6 +21046,7 @@
                                                                                 <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${source === 'cis' ? 'text-blue-400 bg-blue-500/10' : source === 'lynis' ? 'text-purple-400 bg-purple-500/10' : source === 'pega' ? 'text-orange-400 bg-orange-500/10' : 'text-amber-400 bg-amber-500/10'}`}>{source === 'cis' ? 'CIS' : source === 'lynis' ? 'Lynis' : source === 'pega' ? 'PegaProx' : 'STIG'} {info.ref}</span>
                                                                                 <span className="text-sm font-medium text-white">{info.title}</span>
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
+                                                                                {notChecked && <span className="text-xs bg-gray-500/20 text-gray-300 px-2 py-0.5 rounded" title={(isVerboseData && ctrlData.not_checked) || t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>{t('hardenNotCheckedBadge') || 'Not checked'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
                                                                                 {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{t('failed') || 'Failed'}</span>}
                                                                             </div>
@@ -21134,11 +21158,12 @@
                                                                     { name: 'PegaProx ' + (t('recommendations') || 'Recommendations'), ctrls: pegaControls, src: 'pega' },
                                                                     { name: 'VS-NfD / BSI Grundschutz (' + (t('informational') || 'informational') + ')', ctrls: vsnfdControls, src: 'vsnfd' },
                                                                 ];
-                                                                const statusLbl = (applied, failed) => failed ? (t('failed') || 'Failed') : applied ? (t('applied') || 'Applied') : (t('notApplied') || 'Not applied');
+                                                                const statusLbl = (applied, failed, unread) => failed ? (t('failed') || 'Failed') : applied ? (t('applied') || 'Applied') : unread ? (t('hardenNotCheckedBadge') || 'Not checked') : (t('notApplied') || 'Not applied');
                                                                 const blocks = [
                                                                     { type: 'stats', data: [
                                                                         { label: t('controlsActive') || 'Controls active', value: `${appliedCount}/${totalCount}`, color: appliedCount === totalCount ? '#2a9f2a' : '#c89600' },
                                                                         { label: t('notApplied') || 'Not applied', value: String(totalCount - appliedCount), color: '#dc3232' },
+                                                                        ...(notCheckedCount > 0 ? [{ label: t('hardenNotCheckedBadge') || 'Not checked', value: String(notCheckedCount), color: '#808080' }] : []),
                                                                         { label: t('selected') || 'Selected', value: String(selectedCount), color: '#3c82c8' },
                                                                     ]},
                                                                     { type: 'spacer', height: 4 },
@@ -21150,7 +21175,7 @@
                                                                         const isObj = v && typeof v === 'object';
                                                                         const applied = isObj ? v.status === true : v === true;
                                                                         const failed = hardenResults?.[id]?.success === false;
-                                                                        return [info.ref || '-', info.title || id, statusLbl(applied, failed), (info.impact || '').slice(0, 90)];
+                                                                        return [info.ref || '-', info.title || id, statusLbl(applied, failed, (id in controls) && _notChecked(v)), (info.impact || '').slice(0, 90)];
                                                                     });
                                                                     blocks.push({
                                                                         type: 'table',
@@ -21195,6 +21220,11 @@
                                                                             <span className={`text-sm font-semibold ${appliedCount === totalCount ? 'text-green-400' : appliedCount > totalCount / 2 ? 'text-yellow-400' : 'text-red-400'}`}>
                                                                                 {appliedCount}/{totalCount} {t('controlsActive') || 'controls active'}
                                                                             </span>
+                                                                            {notCheckedCount > 0 && (
+                                                                                <span className="text-xs text-gray-400" title={t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>
+                                                                                    · {notCheckedCount} {t('hardenNotChecked') || 'not checked'}
+                                                                                </span>
+                                                                            )}
                                                                         </div>
                                                                         <div className="w-full bg-gray-700 rounded-full h-2">
                                                                             <div className={`h-2 rounded-full transition-all ${appliedCount === totalCount ? 'bg-green-500' : appliedCount > totalCount / 2 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{width: `${totalCount > 0 ? (appliedCount / totalCount * 100) : 0}%`}} />
@@ -21347,7 +21377,7 @@
                                                                     <div className="flex gap-3 text-xs">
                                                                         <button onClick={() => {
                                                                             const sel = {};
-                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = typeof v === 'object' ? v.status : v; if (!applied) sel[id] = true; });
+                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false) sel[id] = true; });
                                                                             setHardenSelected(sel);
                                                                         }} className="text-blue-400 hover:text-blue-300">{t('selectAll') || 'Select all'}</button>
                                                                         <button onClick={() => setHardenSelected({})} className="text-gray-500 hover:text-gray-400">{t('deselectAll') || 'Deselect all'}</button>

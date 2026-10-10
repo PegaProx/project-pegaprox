@@ -2267,7 +2267,10 @@ def test_runtime_the_node_modal_reads_but_changes_nothing_on_a_standby(open_app,
     page.get_by_text('Reallocated_Sector_Ct').first.wait_for(timeout=5000)
     assert ('GET', NODE_PATH + '/disks/sda/smart') in app.server.calls
 
-    page.mouse.click(5, 5)                     # the backdrop closes the SMART view
+    # the backdrop closes the SMART view. Clicked below the top edge: this harness has no live
+    # updates, so 'Live updates disconnected' sticks to the top about 3 s after the page loads
+    # and, on a slow run, catches a click at (5, 5) before the backdrop does
+    page.mouse.click(5, 300)
     page.get_by_text('Reallocated_Sector_Ct').first.wait_for(state='hidden', timeout=3000)
     page.locator('button', has_text='System').last.click()
     page.get_by_text('hello syslog').first.wait_for(timeout=5000)

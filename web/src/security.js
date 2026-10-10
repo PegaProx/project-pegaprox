@@ -791,6 +791,60 @@
         }
 
         // Compliance & Key Management Section (HIPAA/ISO 27001)
+        // LW Oct 2026 - what the hash chain found, in sentences. Edited, missing and out of
+        // order entries are the findings; pruning and the entries since the last checkpoint
+        // are context; the entries from before the chain are reported on their own.
+        function AuditChainFindings({ result }) {
+            const { t } = useTranslation();
+            const ch = result.chain || {};
+            const lg = result.legacy;
+            const fmt = (key, fb, vals) => Object.entries(vals).reduce(
+                (str, [k, v]) => str.split(`{${k}}`).join(String(v)), t(key) || fb);
+            const when = (iso) => { try { return iso ? new Date(iso).toLocaleString() : ''; } catch (_) { return iso || ''; } };
+            const named = (list) => (list || []).reduce((n, x) => n + (Array.isArray(x) ? x[1] - x[0] + 1 : 1), 0);
+            const seqs = (list, total) => (list || []).map(x => Array.isArray(x) ? (x[0] === x[1] ? `${x[0]}` : `${x[0]}-${x[1]}`) : `${x}`).join(', ')
+                + (total > named(list) ? ', ...' : '');
+            const bad = [];
+            if (ch.edited > 0) bad.push(fmt('auditChainEdited', '{n} entries were changed after they were written (entries {list}).', { n: ch.edited, list: seqs(ch.edited_seqs, ch.edited) }));
+            if (ch.missing > 0) bad.push(fmt('auditChainMissing', '{n} entries are missing, deleted from the log (entries {list}).', { n: ch.missing, list: seqs(ch.missing_ranges, ch.missing) }));
+            if (ch.broken_links > 0) bad.push(fmt('auditChainBroken', '{n} entries do not follow the entry before them (entries {list}).', { n: ch.broken_links, list: seqs(ch.broken_link_seqs, ch.broken_links) }));
+            if (ch.truncated) bad.push(t('auditChainTruncated') || 'The log ends before its last signed checkpoint: the newest entries were removed.');
+            if (ch.bad_checkpoints > 0) bad.push(fmt('auditChainBadCheckpoints', '{n} checkpoints fail their signature and were not trusted.', { n: ch.bad_checkpoints }));
+            // LW Oct 2026 - the checkpoints are a chain of their own, and the newest one is kept
+            // beside the key as well; a hole there or a chain started over are findings too
+            if (ch.checkpoints_missing > 0) bad.push(fmt('auditChainCheckpointsMissing', '{n} signed checkpoints are missing from the database.', { n: ch.checkpoints_missing }));
+            if (ch.checkpoints_broken > 0) bad.push(fmt('auditChainCheckpointsBroken', '{n} signed checkpoints do not follow the one before them.', { n: ch.checkpoints_broken }));
+            if (ch.no_start) bad.push(t('auditChainNoStart') || 'The signed start of the chain is missing: the oldest entries and those from before the chain cannot be vouched for.');
+            if (ch.restarted) bad.push(fmt('auditChainRestarted', 'The chain was started over. The one this server kept a copy of reached entry {n} and is no longer in the database.', { n: ch.restarted_after || 0 }));
+            if (ch.anchor === 'bad') bad.push(t('auditChainAnchorBad') || 'The copy of the last checkpoint kept beside the encryption key fails its signature.');
+            if (lg && lg.changed_since_chain_start) bad.push(t('auditLegacyChanged') || 'Entries from before the chain were removed or changed since it started.');
+            const info = [];
+            if (ch.anchor === 'missing') info.push(t('auditChainAnchorMissing') || 'No copy of the last checkpoint is kept beside the encryption key yet, so an end removed together with its checkpoints would not show.');
+            if (ch.pruned_through > 0) info.push(fmt('auditChainPruned', 'Retention removed entries up to number {n} ({time}). That is recorded and signed, not counted as missing.', { n: ch.pruned_through, time: when(ch.pruned_at) }));
+            if (ch.after_checkpoint > 0) info.push(fmt('auditChainAfterCheckpoint', '{n} entries were written since the last signed checkpoint ({time}). Checkpoints are signed hourly.', { n: ch.after_checkpoint, time: when(ch.last_checkpoint && ch.last_checkpoint.created_at) }));
+            return (
+                <div className="mt-4 space-y-3" data-testid="audit-chain-findings">
+                    <div className={`p-3 rounded-lg border ${bad.length ? 'bg-red-500/10 border-red-500/30' : 'bg-green-500/10 border-green-500/30'}`}>
+                        <div className="text-sm font-medium text-white mb-1">{t('auditChainTitle') || 'Hash chain'}</div>
+                        {bad.length ? (
+                            <ul className="text-sm text-red-300 space-y-1">{bad.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                        ) : (
+                            <p className="text-sm text-green-300">{t('auditChainIntact') || 'Nothing was changed, removed or reordered since the chain started.'}</p>
+                        )}
+                        {info.length > 0 && (
+                            <ul className="text-xs text-gray-400 space-y-1 mt-2">{info.map((b, i) => <li key={i}>{b}</li>)}</ul>
+                        )}
+                    </div>
+                    {lg && lg.rows > 0 && (
+                        <div className="p-3 rounded-lg border bg-proxmox-card border-proxmox-border text-xs text-gray-400" data-testid="audit-legacy">
+                            {fmt('auditLegacyRows', '{n} entries are from before the chain: {verified} signed, {unsigned} unsigned, {tampered} changed.', { n: lg.rows, verified: lg.verified, unsigned: lg.unsigned, tampered: lg.tampered })}
+                            {lg.changed_since_chain_start === false && <> {t('auditLegacyUnchanged') || 'None of them was removed or changed since the chain started.'}</>}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         function ComplianceSection({ addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, haStandby } = useAuth();
@@ -873,8 +927,11 @@
                     if (res.ok) {
                         const data = await res.json();
                         setAuditIntegrity(data);
-                        if (data.potentially_tampered > 0) {
-                            addToast(`⚠️ WARNING: ${data.potentially_tampered} audit entries may have been tampered!`, 'error');
+                        // LW Oct 2026 - a deleted entry leaves every other one verifying, so the
+                        // chain findings decide the toast too, not only the edited count
+                        const chain = data.chain || {};
+                        if (data.potentially_tampered > 0 || chain.missing > 0 || chain.broken_links > 0 || data.intact === false) {
+                            addToast(`⚠️ WARNING: ${data.potentially_tampered} changed, ${chain.missing || 0} missing, ${chain.broken_links || 0} out of order`, 'error');
                         } else {
                             addToast(`✓ Audit log integrity verified: ${data.verified}/${data.total_entries} entries`, 'success');
                         }
@@ -1001,8 +1058,16 @@
                                 <Icons.Check /> {t('securitySelfCheck') || 'Security Self-Check'}
                             </h3>
                             {compliance && (
-                                <div className={`text-3xl font-bold ${getScoreColor(compliance.compliance_score)}`}>
-                                    {compliance.compliance_score}%
+                                <div className="text-right">
+                                    <div className={`text-3xl font-bold ${compliance.compliance_score == null ? 'text-gray-500' : getScoreColor(compliance.compliance_score)}`}>
+                                        {compliance.compliance_score == null ? '-' : `${compliance.compliance_score}%`}
+                                    </div>
+                                    {compliance.total != null && (
+                                        <div className="text-xs text-gray-400" data-testid="compliance-checked-of">
+                                            {(t('complianceCheckedOf') || '{checked} of {total} controls checked')
+                                                .replace('{checked}', compliance.checked).replace('{total}', compliance.total)}
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1013,12 +1078,20 @@
 
                         {compliance && (
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-                                {Object.entries(compliance.checks || {}).map(([key, value]) => (
-                                    <div key={key} className={`p-3 rounded-lg ${value ? 'bg-green-500/10 border border-green-500/30' : 'bg-red-500/10 border border-red-500/30'}`}>
+                                {/* LW Oct 2026 - a control that could not be judged here says so and why,
+                                    and stays out of the score; older servers only send `checks` */}
+                                {(compliance.controls || Object.entries(compliance.checks || {}).map(([id, v]) => ({ id, status: v ? 'passed' : 'failed' }))).map(c => (
+                                    <div key={c.id} title={c.reason || c.detail || ''} data-testid={`compliance-control-${c.id}`}
+                                        className={`p-3 rounded-lg border ${c.status === 'passed' ? 'bg-green-500/10 border-green-500/30' : c.status === 'failed' ? 'bg-red-500/10 border-red-500/30' : 'bg-proxmox-card border-proxmox-border'}`}>
                                         <div className="flex items-center gap-2">
-                                            {value ? <span className="text-green-400">✓</span> : <span className="text-red-400">✗</span>}
-                                            <span className="text-sm text-gray-300">{key.replace(/_/g, ' ')}</span>
+                                            {c.status === 'passed' ? <span className="text-green-400">✓</span> : c.status === 'failed' ? <span className="text-red-400">✗</span> : <span className="text-gray-500">-</span>}
+                                            <span className="text-sm text-gray-300">{c.id.replace(/_/g, ' ')}</span>
                                         </div>
+                                        {c.status === 'not_checked' ? (
+                                            <p className="text-xs text-gray-500 mt-1">{t('complianceNotChecked') || 'Not checked'}{c.reason ? `: ${c.reason}` : ''}</p>
+                                        ) : c.detail ? (
+                                            <p className="text-xs text-gray-500 mt-1">{c.detail}</p>
+                                        ) : null}
                                     </div>
                                 ))}
                             </div>
@@ -1071,6 +1144,7 @@
                                 </div>
                             </div>
                         )}
+                        {auditIntegrity && auditIntegrity.chain && <AuditChainFindings result={auditIntegrity} />}
                     </div>
 
                     {/* Encryption Key Management */}
