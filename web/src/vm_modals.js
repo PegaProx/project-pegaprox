@@ -3353,26 +3353,195 @@
             );
         }
 
+        // LW Oct 2026 - the Check step of the migrate dialogs: the server's preflight
+        // (core/preflight.py) per guest ready, with warnings or blocked, the planned steps and
+        // what an abort leaves behind. A block that may be overridden gets a tick box, and
+        // ticking one wants the confirmation below it before Start sends it.
+        const MIG_PF_GROUPS = [
+            ['blocked', 'migPfBlocked', 'text-red-400'],
+            ['warning', 'migPfWarning', 'text-yellow-400'],
+            ['ready', 'migPfReady', 'text-green-400'],
+        ];
+        const MIG_PF_REASON = { blocked: 'text-red-400', warning: 'text-yellow-400', info: 'text-gray-400' };
+
+        // what Start sends after a check that still holds: the guests that move, the blocks overridden
+        function migPfPlan(result, override, confirmed) {
+            const rows = (result && result.guests) || [];
+            const overridden = rows.filter(g => g.verdict === 'blocked' && g.overridable && override.has(g.vmid)).map(g => g.vmid);
+            const moving = new Set(rows.filter(g => g.verdict !== 'blocked' || (confirmed && overridden.includes(g.vmid))).map(g => g.vmid));
+            return { moving, overridden: confirmed ? overridden : [], needsConfirm: overridden.length > 0 && !confirmed };
+        }
+
+        async function migPfFetch(url, body, getAuthHeaders, fallback) {
+            try {
+                const res = await fetch(url, {
+                    method: 'POST', credentials: 'include', body: JSON.stringify(body),
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                if (res.ok) return { result: await res.json() };
+                return { error: await PegaProxApiErrors.message(res, fallback) };
+            } catch (e) {
+                return { error: fallback };
+            }
+        }
+
+        function MigPreflightView({ result, stale, override, onOverride, confirmed, onConfirm }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [stepsOpen, setStepsOpen] = useState(false);
+            if (!result) return null;
+            const rows = result.guests || [];
+            const totals = result.totals || {};
+            const boxCls = isCorporate ? 'p-2 space-y-2 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-2 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '260px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '260px' };
+            const aborts = [...new Set([...(result.abort || []),
+                ...rows.filter(g => g.verdict !== 'blocked' || override.has(g.vmid)).map(g => g.abort).filter(Boolean)])];
+            return (
+                <div className="space-y-2" data-testid="mig-pf" data-stale={stale ? '1' : '0'}>
+                    <div className="text-sm text-white" data-testid="mig-pf-totals">
+                        {guestBulkFill(t('migPfTotals'), { ready: totals.ready || 0, warning: totals.warning || 0, blocked: totals.blocked || 0 })}
+                    </div>
+                    {stale && (
+                        <div className="text-xs text-yellow-400 flex items-start gap-2" data-testid="mig-pf-stale">
+                            <Icons.AlertTriangle /><span>{t('migPfStale')}</span>
+                        </div>
+                    )}
+                    <div className={boxCls} style={boxStyle}>
+                        {MIG_PF_GROUPS.map(([level, key, color]) => {
+                            const group = rows.filter(g => g.verdict === level);
+                            if (!group.length) return null;
+                            return (
+                                <div key={level} data-pf-group={level} className="space-y-1">
+                                    <div className={`text-xs font-semibold ${color}`}>{t(key)} ({group.length})</div>
+                                    {group.map(g => (
+                                        <div key={g.vmid} data-pf-guest={g.vmid} className="text-sm">
+                                            <div className="flex items-center gap-2">
+                                                <span className="font-mono text-xs text-gray-400">{g.vmid}</span>
+                                                <span className="truncate flex-1 text-white">{g.name || '-'}</span>
+                                                <span className="text-xs text-gray-500">{g.node} → {g.to || '?'}</span>
+                                            </div>
+                                            {(g.reasons || []).map((r, i) => (
+                                                <div key={i} data-pf-reason={r.code} className={`text-xs pl-4 ${MIG_PF_REASON[r.level] || 'text-gray-400'}`}>{r.text}</div>
+                                            ))}
+                                            {level === 'blocked' && g.overridable && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-300 pl-4">
+                                                    <input type="checkbox" checked={override.has(g.vmid)} data-pf-override={g.vmid}
+                                                        onChange={e => onOverride(g.vmid, e.target.checked)} />
+                                                    {t('migPfOverride')}
+                                                </label>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {(result.capacity || []).length > 0 && (
+                        <div className="text-xs text-gray-400" data-testid="mig-pf-capacity">
+                            <span>{t('migPfCapacity')}: </span>
+                            {result.capacity.map(c => (
+                                <span key={c.node} className="mr-3">
+                                    {c.node} {guestBulkFill(t('migPfMem'), { now: c.mem_pct_now, after: c.mem_pct_after })}
+                                    {c.cpu_pct_after != null ? `, ${guestBulkFill(t('migPfCpu'), { after: c.cpu_pct_after })}` : ''}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    {(result.unread || []).length > 0 && (
+                        <div className="text-xs text-gray-500" data-testid="mig-pf-unread">{guestBulkFill(t('migPfUnread'), { what: result.unread.join(', ') })}</div>
+                    )}
+                    {override.size > 0 && (
+                        <label className="flex items-start gap-2 text-xs text-yellow-400" data-testid="mig-pf-confirm">
+                            <input type="checkbox" checked={confirmed} onChange={e => onConfirm(e.target.checked)} />
+                            <span>{guestBulkFill(t('migPfOverrideConfirm'), { count: override.size })}</span>
+                        </label>
+                    )}
+                    <button type="button" onClick={() => setStepsOpen(o => !o)} data-testid="mig-pf-steps-toggle"
+                        className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+                        {stepsOpen ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('migPfSteps')}
+                    </button>
+                    {stepsOpen && (
+                        <div className="text-xs space-y-1" data-testid="mig-pf-steps">
+                            <ol className="space-y-1 pl-4 list-decimal text-gray-300">
+                                {(result.steps || []).map((s, i) => (
+                                    <li key={i} data-step={s.kind} className={s.kind === 'skip' ? 'text-gray-500' : ''}>{s.text}</li>
+                                ))}
+                            </ol>
+                            {aborts.length > 0 && (<>
+                                <div className="text-gray-400 font-semibold pt-1">{t('migPfAbort')}</div>
+                                {aborts.map((a, i) => <div key={i} className="text-gray-500" data-pf-abort>{a}</div>)}
+                            </>)}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // the state of the Check step in a dialog: the result of the options it was made with,
+        // and the blocks ticked to override
+        function useMigPreflight(key) {
+            const [pf, setPf] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const [override, setOverride] = useState(() => new Set());
+            const [confirmed, setConfirmed] = useState(false);
+            const current = pf && pf.key === key ? pf.result : null;
+            const run = async (fetcher) => {
+                setBusy(true);
+                setError('');
+                const got = await fetcher();
+                setBusy(false);
+                if (got.result) {
+                    setPf({ key, result: got.result });
+                    setOverride(new Set());
+                    setConfirmed(false);
+                } else {
+                    setError(got.error);
+                }
+            };
+            const tick = (vmid, on) => {
+                setOverride(prev => { const next = new Set(prev); if (on) next.add(vmid); else next.delete(vmid); return next; });
+                setConfirmed(false);
+            };
+            return { result: pf && pf.result, current, stale: !!pf && !current, busy, error, run,
+                     override, tick, confirmed, setConfirmed, plan: current ? migPfPlan(current, override, confirmed) : null };
+        }
+
         function BulkMigrateModal({ vms, nodes, clusterId, onMigrate, onClose }) {
             const { t } = useTranslation();  // MK: Fix missing translation hook
             const { isCorporate } = useLayout();
+            const { getAuthHeaders, haReadOnly } = useAuth();
             const [targetNode, setTargetNode] = useState('');
             const [online, setOnline] = useState(true);
             const [localDisks, setLocalDisks] = useState(false);
             const [plan, setPlan] = useState(() => migRunDefaultPlan(vms.length));
             const [busy, setBusy] = useState(false);
             const [error, setError] = useState('');
+            const check = useMigPreflight(JSON.stringify([targetNode, online, localDisks, plan.mode, plan.parallel]));
 
             // Get all unique current nodes
             const currentNodes = [...new Set(vms.map(v => v.node))];
             const availableNodes = (nodes || []).filter(n => n !== 'error' && n !== 'offline')
                 .filter(n => !currentNodes.includes(n) || currentNodes.length > 1);
 
+            const runCheck = () => {
+                if (!targetNode || check.busy) return;
+                const body = { vms: vms.map(v => v.vmid), target: targetNode, online, with_local_disks: localDisks, mode: plan.mode };
+                if (plan.mode === 'parallel') body.parallel = plan.parallel;
+                check.run(() => migPfFetch(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/migration-preflight`, body,
+                    getAuthHeaders, t('migPfFailed')));
+            };
+
+            // after a check that still holds, Start sends the guests that move and the blocks overridden
+            const sending = check.plan ? vms.filter(v => check.plan.moving.has(v.vmid)) : vms;
+            const startBlocked = !!check.plan && (!sending.length || check.plan.needsConfirm);
+
             const handleMigrate = async () => {
-                if (!targetNode || busy) return;
+                if (!targetNode || busy || startBlocked) return;
                 setBusy(true);
                 setError('');
-                const res = await onMigrate({ clusterId, vms, target: targetNode, online, withLocalDisks: localDisks, ...plan });
+                const extra = check.plan && check.plan.overridden.length ? { override: check.plan.overridden } : {};
+                const res = await onMigrate({ clusterId, vms: sending, target: targetNode, online, withLocalDisks: localDisks, ...plan, ...extra });
                 setBusy(false);
                 if (res && res.ok) onClose();
                 else setError((res && res.error) || t('bulkMigrationFailed'));
@@ -3385,11 +3554,18 @@
 
             const footer = (<>
                 <button onClick={onClose} disabled={busy} className={guestBulkButton(isCorporate, 'ghost')}>{t('cancel')}</button>
-                <button onClick={handleMigrate} disabled={!targetNode || busy} data-testid="bulk-migrate-run"
-                    className={guestBulkButton(isCorporate, 'primary')}>
-                    {busy && <span className="flex animate-spin"><Icons.RotateCw /></span>}
-                    {guestBulkFill(t('migRunGo'), { count: vms.length })}
+                <button onClick={runCheck} disabled={!targetNode || busy || check.busy} data-testid="bulk-migrate-check"
+                    className={guestBulkButton(isCorporate, 'ghost')}>
+                    {check.busy ? <span className="flex animate-spin"><Icons.RotateCw /></span> : <Icons.Shield />}
+                    {check.busy ? t('migPfChecking') : t('migPfCheck')}
                 </button>
+                {!haReadOnly && (
+                    <button onClick={handleMigrate} disabled={!targetNode || busy || startBlocked} data-testid="bulk-migrate-run"
+                        className={guestBulkButton(isCorporate, 'primary')}>
+                        {busy && <span className="flex animate-spin"><Icons.RotateCw /></span>}
+                        {guestBulkFill(t('migRunGo'), { count: sending.length })}
+                    </button>
+                )}
             </>);
 
             return (
@@ -3428,6 +3604,24 @@
                             <Icons.Info />
                             <span>{t('migRunServerNote')}</span>
                         </div>
+                        {check.result ? (
+                            <MigPreflightView result={check.result} stale={check.stale} override={check.override}
+                                onOverride={check.tick} confirmed={check.confirmed} onConfirm={check.setConfirmed} />
+                        ) : (
+                            <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-pf-hint">
+                                <Icons.Shield />
+                                <span>{t('migPfHint')}</span>
+                            </div>
+                        )}
+                        {check.plan && !sending.length && (
+                            <div className="text-sm text-red-400" data-testid="mig-pf-none">{t('migPfNoneMoves')}</div>
+                        )}
+                        {check.error && (
+                            <div className="text-sm text-red-400 flex items-start gap-2" data-testid="mig-pf-error">
+                                <Icons.AlertTriangle />
+                                <span className="break-all">{check.error}</span>
+                            </div>
+                        )}
                         {error && (
                             <div className="text-sm text-red-400 flex items-start gap-2" data-testid="bulk-migrate-error">
                                 <Icons.AlertTriangle />
@@ -4106,7 +4300,7 @@
         // NS: The big one - SSH tunnel based migration between clusters
         // Uses same ISO detection logic as MigrateModal (copy-paste, I know...)
         function CrossClusterMigrateModal({ vm, sourceCluster, clusters, onMigrate, onClose }) {
-            const { getAuthHeaders } = useAuth();
+            const { getAuthHeaders, haReadOnly } = useAuth();
             const { t } = useTranslation();
             const [targetCluster, setTargetCluster] = useState('');
             const [targetNode, setTargetNode] = useState('');
@@ -4392,11 +4586,7 @@
                 setLoadingResources(false);
             };
 
-            const handleMigrate = async () => {
-                if (!targetCluster || !targetNode) return;
-                // need at least one storage selected (via map or single dropdown)
-                if (!Object.keys(targetStorageMap).length && !targetStorage) return;
-                setLoading(true);
+            const buildPayload = () => {
                 const payload = {
                     source_cluster: sourceCluster?.id,
                     target_cluster: targetCluster,
@@ -4419,6 +4609,27 @@
                     payload.target_bridge_map = targetBridgeMap;
                 } else {
                     payload.target_bridge = 'vmbr0';
+                }
+                return payload;
+            };
+            // LW Oct 2026 - the Check step, with the options Start would send
+            const check = useMigPreflight(JSON.stringify(buildPayload()));
+            const runCheck = () => {
+                if (!targetCluster || !targetNode || check.busy) return;
+                check.run(() => migPfFetch(`${API_URL}/cross-cluster-migrate/preflight`, buildPayload(),
+                    getAuthHeaders, t('migPfFailed')));
+            };
+            const startBlocked = !!check.plan && (!check.plan.moving.size || check.plan.needsConfirm);
+
+            const handleMigrate = async () => {
+                if (!targetCluster || !targetNode || startBlocked) return;
+                // need at least one storage selected (via map or single dropdown)
+                if (!Object.keys(targetStorageMap).length && !targetStorage) return;
+                setLoading(true);
+                const payload = buildPayload();
+                if (check.plan && check.plan.overridden.length) {
+                    payload.override = check.plan.overridden;
+                    payload.confirm_override = true;
                 }
                 await onMigrate(payload);
                 setLoading(false);
@@ -4739,6 +4950,22 @@
                                 </>
                             )}
 
+                            {targetCluster && targetNode && (check.result ? (
+                                <MigPreflightView result={check.result} stale={check.stale} override={check.override}
+                                    onOverride={check.tick} confirmed={check.confirmed} onConfirm={check.setConfirmed} />
+                            ) : (
+                                <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-pf-hint">
+                                    <Icons.Shield />
+                                    <span>{t('migPfHint')}</span>
+                                </div>
+                            ))}
+                            {check.error && (
+                                <div className="text-sm text-red-400 flex items-start gap-2" data-testid="mig-pf-error">
+                                    <Icons.AlertTriangle />
+                                    <span className="break-all">{check.error}</span>
+                                </div>
+                            )}
+
                             <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-sm text-green-400">
                                 ✓ <strong>{t('autoTokenInfo').split('.')[0]}.</strong> {t('autoTokenInfo').split('.').slice(1).join('.')}
                             </div>
@@ -4752,15 +4979,24 @@
                             <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
                                 {t('cancel')}
                             </button>
-                            <button
-                                onClick={handleMigrate}
-                                disabled={!targetCluster || !targetNode || !targetStorage || loading}
-                                className="flex items-center gap-2 px-4 py-2 bg-cyan-600 rounded-lg text-white hover:bg-cyan-700 disabled:opacity-50"
-                            >
-                                {loading && <Icons.RotateCw />}
-                                <Icons.Globe />
-                                {t('crossClusterMigrate')}
+                            <button onClick={runCheck} disabled={!targetCluster || !targetNode || loading || check.busy}
+                                data-testid="xc-migrate-check"
+                                className="flex items-center gap-2 px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50">
+                                {check.busy ? <span className="flex animate-spin"><Icons.RotateCw /></span> : <Icons.Shield />}
+                                {check.busy ? t('migPfChecking') : t('migPfCheck')}
                             </button>
+                            {!haReadOnly && (
+                                <button
+                                    onClick={handleMigrate}
+                                    disabled={!targetCluster || !targetNode || !targetStorage || loading || startBlocked}
+                                    data-testid="xc-migrate-run"
+                                    className="flex items-center gap-2 px-4 py-2 bg-cyan-600 rounded-lg text-white hover:bg-cyan-700 disabled:opacity-50"
+                                >
+                                    {loading && <Icons.RotateCw />}
+                                    <Icons.Globe />
+                                    {t('crossClusterMigrate')}
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>

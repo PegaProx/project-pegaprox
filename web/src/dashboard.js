@@ -16940,13 +16940,18 @@
             // LW Oct 2026 (#952) - a bulk migration is a run on the server: this starts it and
             // opens its progress. The dialog it comes from is the confirmation (#147), and
             // its answer is {ok} or {error} for that dialog to show
-            const handleBulkMigrate = async ({ clusterId, vms, target, online, withLocalDisks, mode, parallel }) => {
+            const handleBulkMigrate = async ({ clusterId, vms, target, online, withLocalDisks, mode, parallel, override }) => {
                 const cid = clusterId || selectedCluster?.id;
                 if (!cid) return { error: t('bulkMigrationFailed') };
                 try {
                     const body = { vms: vms.map(v => ({ vmid: v.vmid, node: v.node, type: v.type })), target,
                         online: online !== false, with_local_disks: !!withLocalDisks, mode };
                     if (mode === 'parallel') body.parallel = parallel;
+                    // LW Oct 2026 - blocks of the preflight the dialog's Check let the user override
+                    if (override && override.length) {
+                        body.override = override;
+                        body.confirm_override = true;
+                    }
                     const response = await authFetch(`${API_URL}/clusters/${encodeURIComponent(cid)}/vms/bulk-migrate`, {
                         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
                     });
