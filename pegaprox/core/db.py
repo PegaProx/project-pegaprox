@@ -1644,6 +1644,27 @@ class PegaProxDB:
             if 'last_snapshot' not in cols:
                 cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_snapshot TEXT DEFAULT ''")
                 logging.info("Added last_snapshot column to cross_cluster_replications")
+            # MK Oct 2026 - last_run is written by every run, a failed one too; the RPO alert
+            # needs the last one that went through. What is known of it so far: last_run of
+            # a job whose last run was fine, else the newest 'succeeded' in the audit log
+            if 'last_ok_at' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_ok_at TEXT")
+                cursor.execute("UPDATE cross_cluster_replications SET last_ok_at = last_run "
+                               "WHERE last_status = 'ok' AND last_run IS NOT NULL")
+                pending = [r[0] for r in cursor.execute(
+                    "SELECT id FROM cross_cluster_replications WHERE last_ok_at IS NULL").fetchall()]
+                if pending:
+                    found = {}
+                    head, tail = 'xcrepl job ', ' succeeded'
+                    for details, at in cursor.execute(
+                            "SELECT details, MAX(timestamp) FROM audit_log "
+                            "WHERE action = 'replication.completed' GROUP BY details").fetchall():
+                        details = str(details or '')
+                        if details.startswith(head) and details.endswith(tail):
+                            found[details[len(head):-len(tail)]] = at
+                    cursor.executemany("UPDATE cross_cluster_replications SET last_ok_at = ? WHERE id = ?",
+                                       [(found[j], j) for j in pending if j in found])
+                logging.info("Added last_ok_at column to cross_cluster_replications")
         except Exception:
             pass
 

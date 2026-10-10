@@ -78,6 +78,25 @@ min by (cluster) (pegaprox_cluster_qdevice_connected) == 0
 
 Node clock drift, guest restart loops and a QDevice that is not connected are alert rules in PegaProx as well (Automation > Alerts), with one message when it starts and one when it clears, through e-mail, push and the webhook channels like every alert.
 
+### Ceph OSD latency and PegaProx replication series
+| Series | Labels | Where it comes from |
+|---|---|---|
+| `pegaprox_ceph_osd_apply_latency_seconds`, `pegaprox_ceph_osd_commit_latency_seconds` | `cluster_id`, `cluster`, `osd` (`osd.3`), `host` | The apply and commit latency of each OSD from the OSD list of Proxmox VE (`/nodes/<node>/ceph/osd`), read through one node with Ceph at most once a minute in the background and shared with the Ceph OSD latency alert. Only clusters where PegaProx has found Ceph are asked. An OSD that reports no latency (one that is down) has no series. |
+| `pegaprox_cross_cluster_replication_active` | `cluster_id`, `cluster` (the source), `job`, `vmid`, `target_cluster_id`, `target_cluster` | 1 when a replication job of PegaProx (Cross-Cluster Replication, also the jobs behind the Site Recovery plans) runs on its schedule, 0 when it is disabled or waits for the failback of its guest. |
+| `pegaprox_cross_cluster_replication_interval_seconds` | as above | The interval of the job's schedule. |
+| `pegaprox_cross_cluster_replication_last_success_age_seconds` | as above | Seconds since the last run that went through. A job without one on record has no series. |
+| `pegaprox_cross_cluster_replication_failed` | as above | 1 when the last run of the job failed. |
+| `pegaprox_cluster_source_up` | `source` = `ceph_osd` | 1 when the last OSD list answered, for clusters with Ceph. |
+
+The replication series come from the PegaProx database in one query per scrape; no cluster is asked for them, so the jobs of a source cluster that is out of reach are still there.
+
+```
+max by (cluster, host, osd) (pegaprox_ceph_osd_commit_latency_seconds) > 0.1
+pegaprox_cross_cluster_replication_active == 1 and pegaprox_cross_cluster_replication_last_success_age_seconds > 2 * pegaprox_cross_cluster_replication_interval_seconds
+```
+
+Ceph OSD latency and replication RPO are alert rules in PegaProx too. The OSD rule reports an OSD whose apply or commit latency was above the limit (100 ms by default) in three reads in a row, about three minutes, so one slow minute does not page; it is critical from ten times the limit and clears with the first read at or below it, per OSD, muted per OSD or per node. The replication RPO rule reports a replication job of PegaProx whose last successful run is older than the RPO, set in minutes or, at 0, twice the job's interval; a job without a success on record counts from its creation, and one that was disabled or held for a failover counts from when it came back. It names the guest, the source and target cluster, the age, the RPO and the last error, is critical past twice the RPO, and is muted per job or per guest. Disabled jobs and jobs held while their guest is failed over are not reported.
+
 The QNetd host of a QDevice is no Proxmox node. PegaProx sees it only through the QDevice daemons of the cluster nodes, so there is no CPU, memory or update series for it: watch it with an exporter on that host itself.
 
 ## Grafana Dashboard

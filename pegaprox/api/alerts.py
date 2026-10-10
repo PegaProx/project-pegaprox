@@ -427,7 +427,7 @@ def delete_cluster_alert(cluster_id, alert_id):
 
 
 # incidents about a node itself, not about anything on it a confined caller may see
-_NODE_ONLY_METRICS = ('zfs_health', 'clock_drift', 'qdevice')
+_NODE_ONLY_METRICS = ('zfs_health', 'clock_drift', 'qdevice', 'ceph_osd_latency')
 
 
 @bp.route('/api/clusters/<cluster_id>/active-alerts', methods=['GET'])
@@ -452,8 +452,9 @@ def get_active_alerts(cluster_id):
         incidents = [dict(zip(_q, r)) for r in rows]
         _ok = _alert_scoper(cluster_id)
         if _ok is not None:
-            # MK Oct 2026 - a ZFS pool is storage of a node, and a node's clock and QDevice
-            # daemon are the node's: a pool or guest grant reaches none of them
+            # MK Oct 2026 - a ZFS pool is storage of a node, a Ceph OSD a disk of one, and a
+            # node's clock and QDevice daemon are the node's: a pool or guest grant reaches
+            # none of them
             incidents = [i for i in incidents if i.get('metric') not in _NODE_ONLY_METRICS
                          and (i.get('target_type') != 'vm' or _ok(i.get('target_id')))]
         mutes = alert_events.active_mutes(cluster_id)
@@ -530,9 +531,10 @@ def list_alert_mutes(cluster_id):
 
         def _visible(m):
             key = str(m.get('object_key') or '')
+            # a replication job of PegaProx's own (xcrepl:<vmid>:<job>) is its guest's
             vmid = alert_events.object_vmid(key)
-            # an object that is no guest (a node, a node task, a pool, the clock or the
-            # QDevice of a node) names the cluster's nodes: not for a confined caller
+            # an object that is no guest (a node, a node task, a pool, an OSD, the clock or
+            # the QDevice of a node) names the cluster's nodes: not for a confined caller
             if key and vmid is None:
                 return False
             if vmid is not None and not _ok(vmid):

@@ -118,7 +118,7 @@ _reads_lock = threading.Lock()
 _ESTATE_FAMILIES = (
     ('pegaprox_cluster_source_up', 'gauge',
      '1 if the last read of a source behind these metrics answered in full '
-     '(storage, replication, backups, clock, node_pressure)'),
+     '(storage, replication, backups, clock, node_pressure, ceph_osd)'),
     ('pegaprox_storage_active', 'gauge', '1 if the storage is active (a shared one: on at least one node)'),
     ('pegaprox_storage_inactive_nodes', 'gauge', 'Nodes that list a shared storage without having it active'),
     ('pegaprox_storage_used_bytes', 'gauge', 'Bytes used on an active storage'),
@@ -178,6 +178,26 @@ _HEALTH_FAMILIES = (
     ('pegaprox_cluster_qdevice_connected', 'gauge',
      '1 if the QDevice daemon of the node is connected to the QNetd host, 0 if it is not or runs '
      'none; from the last QDevice read of the UI or the alert rule, a scrape never reads'),
+)
+
+# MK Oct 2026 - Ceph OSD latency from the OSD list the ceph_osd_latency alert reads
+# (alert_events.ceph_osds): one /nodes/<n>/ceph/osd per cluster at most once a minute, in
+# the background, only for a cluster that has shown Ceph. PegaProx's own replication jobs
+# come from its database, one query per scrape, the clusters are not asked.
+_DR_FAMILIES = (
+    ('pegaprox_ceph_osd_apply_latency_seconds', 'gauge',
+     'Apply latency of a Ceph OSD as the OSD list of Proxmox VE reports it'),
+    ('pegaprox_ceph_osd_commit_latency_seconds', 'gauge',
+     'Commit latency of a Ceph OSD as the OSD list of Proxmox VE reports it'),
+    ('pegaprox_cross_cluster_replication_active', 'gauge',
+     '1 if a replication job of PegaProx runs on its schedule, 0 if it is disabled or waits for '
+     'the failback of its guest'),
+    ('pegaprox_cross_cluster_replication_interval_seconds', 'gauge',
+     'Interval of a replication job of PegaProx from its schedule'),
+    ('pegaprox_cross_cluster_replication_last_success_age_seconds', 'gauge',
+     'Seconds since the last successful run of a replication job of PegaProx; none while there is none'),
+    ('pegaprox_cross_cluster_replication_failed', 'gauge',
+     '1 if the last run of a replication job of PegaProx failed'),
 )
 
 
@@ -428,6 +448,51 @@ def _put_qdevice(fam, base, cid, now):
                  {**base, 'node': r['node']})
 
 
+def _osd_state(cid, mgr, now, ceph):
+    """The last OSD read of the cluster when it is recent enough, else None, and False for a
+    cluster that has not shown Ceph: neither the health probe nor a status or OSD read found
+    it, so nobody probes its nodes for an OSD list here. Older than a minute, a new read
+    starts in the background."""
+    from pegaprox.background import alert_events
+    if not (ceph or alert_events.ceph_seen(cid) or alert_events.osd_seen(cid)):
+        return False
+    hit = alert_events.osd_reading(cid)
+    if hit is None or not 0 <= now - hit['at'] < alert_events.OSD_EVERY:
+        _read_in_background('ceph_osd', cid, lambda: alert_events.ceph_osds(cid, mgr))
+        hit = alert_events.osd_reading(cid)
+    if hit is None or now - hit['at'] >= alert_events.OSD_SERVE_MAX:
+        return None
+    return hit
+
+
+def _put_osds(fam, base, entry):
+    for oid, o in sorted(entry['osds'].items()):
+        labels = {**base, 'osd': f'osd.{oid}', 'host': o['host']}
+        if o['apply'] is not None:
+            _put(fam, 'pegaprox_ceph_osd_apply_latency_seconds', _round_num(o['apply'] / 1000, places=4), labels)
+        if o['commit'] is not None:
+            _put(fam, 'pegaprox_ceph_osd_commit_latency_seconds', _round_num(o['commit'] / 1000, places=4), labels)
+
+
+def _put_own_replication(fam, clusters, now):
+    """Per replication job of PegaProx whose source cluster is registered, connected or not:
+    the database knows its runs either way."""
+    from pegaprox.background.alert_events import own_replications
+    names = {cid: getattr(getattr(mgr, 'config', None), 'name', cid) or cid for cid, mgr in clusters}
+    for j in own_replications(now) or ():
+        if j['source'] not in names:
+            continue
+        labels = {'cluster_id': j['source'], 'cluster': names[j['source']], 'job': j['id'],
+                  'vmid': j['vmid'], 'target_cluster_id': j['target'],
+                  'target_cluster': names.get(j['target'], j['target'])}
+        _put(fam, 'pegaprox_cross_cluster_replication_active', 1 if j['enabled'] and not j['held'] else 0, labels)
+        _put(fam, 'pegaprox_cross_cluster_replication_interval_seconds', j['interval'], labels)
+        if j['success']:
+            _put(fam, 'pegaprox_cross_cluster_replication_last_success_age_seconds',
+                 max(0, round(now - j['success'])), labels)
+        _put(fam, 'pegaprox_cross_cluster_replication_failed', 1 if j['last_status'] == 'error' else 0, labels)
+
+
 def _guest_tags(cid, vms):
     """{vmid: [tag, ...]} sorted and cut to _GUEST_TAGS_MAX, from the rows the scrape read and
     PegaProx's own tags (one query per cluster), merged as the tag views merge them."""
@@ -656,11 +721,12 @@ def prometheus_metrics():
     emit('# TYPE pegaprox_ceph_osd_in gauge')
 
     now = time.time()
-    fam = {name: [] for name, _t, _h in _ESTATE_FAMILIES + _HEALTH_FAMILIES}
+    fam = {name: [] for name, _t, _h in _ESTATE_FAMILIES + _HEALTH_FAMILIES + _DR_FAMILIES}
 
     # a scrape walks every cluster over the API; copy the dict so a cluster
     # registered mid-scrape can't break the whole exposition
-    for cid, mgr in list(cluster_managers.items()):
+    clusters = list(cluster_managers.items())
+    for cid, mgr in clusters:
         cname = getattr(getattr(mgr, 'config', None), 'name', cid) or cid
         base = {'cluster_id': cid, 'cluster': cname}
         connected = 1 if getattr(mgr, 'is_connected', False) else 0
@@ -707,6 +773,7 @@ def prometheus_metrics():
         # ceph -s goes over SSH, the active reads the same nodes already, and a host key
         # pinned here lands in the known_hosts file the next sync replaces. A standby
         # scrape then has no ceph series, as for a cluster without Ceph.
+        ceph = None
         try:
             ceph = (mgr.get_ceph_health_summary()
                     if ha.is_active() and hasattr(mgr, 'get_ceph_health_summary') else None)
@@ -717,6 +784,16 @@ def prometheus_metrics():
                 out.extend(_sample('pegaprox_ceph_osd_in', _num(ceph.get('osd_in', 0)), base))
         except Exception as e:
             logging.debug(f"[metrics] {cid} ceph health failed: {e}")
+        if ctype == 'proxmox':
+            try:
+                osd = _osd_state(cid, mgr, now, ceph)
+            except Exception as e:
+                logging.debug(f"[metrics] {cid} ceph osd latency failed: {e}")
+                osd = None
+            if osd is not False:
+                _put(fam, 'pegaprox_cluster_source_up', 0 if osd is None else 1, {**base, 'source': 'ceph_osd'})
+                if osd:
+                    _put_osds(fam, base, osd)
 
         if ctype in ('proxmox', 'xcpng'):
             try:
@@ -832,7 +909,12 @@ def prometheus_metrics():
         except Exception as e:
             logging.debug(f"[metrics] {cid} vm list failed: {e}")
 
-    for name, mtype, help_text in _ESTATE_FAMILIES + _HEALTH_FAMILIES:
+    try:
+        _put_own_replication(fam, clusters, now)
+    except Exception as e:
+        logging.debug(f"[metrics] own replication jobs failed: {e}")
+
+    for name, mtype, help_text in _ESTATE_FAMILIES + _HEALTH_FAMILIES + _DR_FAMILIES:
         emit(f'# HELP {name} {help_text}')
         emit(f'# TYPE {name} {mtype}')
         out.extend(fam[name])

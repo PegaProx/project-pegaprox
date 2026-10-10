@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 PegaProx Event Alerts - Layer 7
-Failed Proxmox tasks, Ceph health, replication, stale snapshots, guests without a
-backup job, ZFS pools in trouble, node clocks that drift, guests in a restart loop and
-a QDevice that is not connected.
+Failed Proxmox tasks, Ceph health, slow Ceph OSDs, replication, PegaProx's own
+replication jobs past their RPO, stale snapshots, guests without a backup job, ZFS pools
+in trouble, node clocks that drift, guests in a restart loop and a QDevice that is not
+connected.
 
 The metric rules in alerts.py compare a number on every tick and send again after each
 cooldown for as long as it stays over the line. The rules here watch a condition: one
@@ -30,6 +31,11 @@ What it reads, per cluster that has such a rule:
     above, kept per guest for RESTART_WINDOW_MAX minutes
   - /cluster/status and /cluster/config/qdevice of each node that can be asked, at most
     every qdevice.FRESH seconds, shared with the QDevice view of the UI (core/qdevice.py)
+  - /nodes/<n>/ceph/osd, the CRUSH tree with the latencies of every OSD, through one node
+    that has Ceph, at most every OSD_EVERY, shared with the Prometheus exporter
+  - PegaProx's own replication jobs (cross_cluster_replications, the ones behind the
+    recovery plans included) need nothing from a cluster: one query per tick for all of
+    them, and a source cluster out of reach is still watched
 Nothing here asks a cluster per guest on every tick. Only the active instance runs any
 of it (alerts.alert_check_loop, #625); active_alerts is a table of its own, so after a
 takeover a condition that still holds is said once more by the new active.
@@ -58,9 +64,12 @@ except ImportError:  # python < 3.11
 
 
 EVENT_METRICS = ('task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage',
-                 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice')
+                 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice', 'ceph_osd_latency',
+                 'replication_rpo')
 # the rules that have no number to set; a threshold sent along is ignored
 _NO_THRESHOLD = ('task_failed', 'qdevice')
+# the rules that read PegaProx's database only: they go on while their cluster is out of reach
+DB_ONLY = ('replication_rpo',)
 
 # the fields a matching decision rests on; a rule whose one of these changed starts over
 MATCH_FIELDS = ('metric', 'target_type', 'target_id', 'threshold', 'task_type', 'task_status',
@@ -104,6 +113,11 @@ RESTART_TASKS = frozenset(('qmstart', 'vzstart', 'qmreboot', 'vzreboot'))
 RESTART_WINDOW_DEFAULT = 15   # minutes
 RESTART_WINDOW_MAX = 1440     # minutes; the starts of a guest are kept this long
 RESTART_KEEP = 200            # starts kept per guest
+OSD_EVERY = 60                # the OSD list of a cluster at most this often, whoever asks
+OSD_STREAK = 3                # reads in a row above the limit before a slow OSD is reported
+OSD_SERVE_MAX = 300           # an OSD read older than this says nothing about now
+OSD_BUDGET = 30               # seconds to find a node that lists the OSDs
+OSD_CRITICAL = 10             # times the limit from which a slow OSD is critical
 
 _THRESHOLDS = {
     # metric: (default, lowest, highest)
@@ -116,6 +130,8 @@ _THRESHOLDS = {
     'clock_drift': (2, 1, 3600),        # seconds a node's clock may be off ours
     'restart_loop': (3, 2, 100),        # starts within restart_window_minutes
     'qdevice': (0, 0, 0),               # nothing to set: connected or not
+    'ceph_osd_latency': (100, 5, 10000),  # ms of apply or commit latency
+    'replication_rpo': (0, 0, 10080),   # minutes since the last successful run; 0: twice the interval
 }
 _SNAPSHOT_TASKS = frozenset(('qmsnapshot', 'qmdelsnapshot', 'qmrollback',
                              'vzsnapshot', 'vzdelsnapshot', 'vzrollback'))
@@ -142,6 +158,9 @@ _coverage_guard = threading.Lock()
 _status = {}      # cid -> {source: {'at': epoch, 'ok': bool, 'note': str}} for the diagnostics
 _clock = {}       # cid -> the last read_node_clocks() of a cluster, any caller
 _starts = {}      # cid -> {vmid: [epoch of each start or reboot task]}
+_osd = {}         # cid -> {'at': last try, 'node', 'seen', 'absent_until', 'last': the last read (ceph_osds)}
+_osd_locks = {}
+_own_repl = {}    # job id -> (paused at the last look, epoch it was last resumed or 0)
 _wall = time.time  # our clock against the nodes'; the tests set it
 
 
@@ -317,6 +336,10 @@ def normalize_rule(rule, data, prev_metric=None):
         return 'a clock rule watches the nodes of the cluster or one node'
     if ttype == 'vm' and metric == 'qdevice':
         return 'a QDevice rule watches the nodes of the cluster or one node'
+    if ttype == 'vm' and metric == 'ceph_osd_latency':
+        return 'an OSD latency rule watches the OSDs of the cluster or of one node'
+    if ttype == 'node' and metric == 'replication_rpo':
+        return 'a replication RPO rule watches the jobs of the cluster or of one guest'
     if ttype == 'vm' and not str(tid or '').isdigit():
         return 'a VM target needs its numeric ID'
     if ttype == 'node' and not (isinstance(tid, str) and tid.strip()):
@@ -404,12 +427,15 @@ def prune_mutes(now=None):
 
 
 def object_vmid(object_key):
-    """The guest an object key is about, or None: vm:101, replication:101-0, task:pve1:vzdump:101."""
+    """The guest an object key is about, or None: vm:101, replication:101-0, task:pve1:vzdump:101,
+    xcrepl:101:<job> (a replication job of PegaProx's own)."""
     key = str(object_key or '')
     if key.startswith('vm:'):
         tail = key[3:]
     elif key.startswith('replication:'):
         tail = key.split(':', 1)[1].split('-', 1)[0]
+    elif key.startswith('xcrepl:'):
+        tail = key.split(':', 2)[1]
     elif key.startswith('task:'):
         tail = key.rsplit(':', 1)[-1]
     else:
@@ -552,6 +578,125 @@ def _ceph_read(cid, mgr, st, now):
     return 'none', None
 
 
+def _latency(value):
+    """An OSD latency in ms as the OSD list gives it, or None where it is missing or no number."""
+    if isinstance(value, bool):
+        return None
+    try:
+        ms = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return ms if 0 <= ms < float('inf') else None
+
+
+def _osd_id(row):
+    oid = row.get('id')
+    if isinstance(oid, int) and not isinstance(oid, bool):
+        return oid if oid >= 0 else None      # the buckets of the tree count below zero
+    m = re.match(r'^osd\.(\d{1,9})$', str(row.get('name') or ''))
+    return int(m.group(1)) if m else None
+
+
+def ceph_osds(cid, mgr, now=None):
+    """The last OSD read of a cluster, read again once it is OSD_EVERY old: {'at', 'node',
+    'osds': {id: {'host', 'status', 'apply', 'commit'}}, 'hist': {id: [the higher of the two
+    latencies, or None, per read]}}, the last OSD_STREAK reads per OSD. None while there is
+    no read younger than OSD_SERVE_MAX (no Ceph, not answering).
+
+    One GET /nodes/<n>/ceph/osd per cluster - the CRUSH tree with the apply and commit
+    latency of every OSD - through the node that answered it last, else the one the Ceph
+    status probe found, else the online nodes in turn. The alert tick and the Prometheus
+    exporter share it, so a cluster is read at most every OSD_EVERY whoever asks, and the
+    reads in a row are the same for both. MK Oct 2026
+    """
+    clock = now is None
+    with _ceph_guard:
+        lock = _osd_locks.setdefault(cid, threading.Lock())
+    with lock:
+        now = time.time() if clock else now
+        st = _osd.setdefault(cid, {'at': 0, 'node': None, 'seen': False, 'absent_until': 0, 'last': None})
+        if not 0 <= now - st['at'] < OSD_EVERY:
+            st['at'] = now
+            _read_osds(cid, mgr, st, now)
+        last = st['last']
+        if last is None or not 0 <= now - last['at'] < OSD_SERVE_MAX:
+            return None
+        return last
+
+
+def osd_reading(cid):
+    """The last OSD read of a cluster (ceph_osds), however old, or None."""
+    return (_osd.get(cid) or {}).get('last')
+
+
+def osd_seen(cid):
+    """Whether a node of the cluster has listed its OSDs since this process started."""
+    return bool((_osd.get(cid) or {}).get('seen'))
+
+
+def _read_osds(cid, mgr, st, now):
+    ceph = _ceph.get(cid) or {}
+    if not st['seen'] and (now < st['absent_until'] or (now < ceph.get('absent_until', 0)
+                                                        and not ceph.get('seen'))):
+        return                            # no Ceph here, as far as anyone found out lately
+    deadline = time.monotonic() + OSD_BUDGET
+    asked, got = [], None
+
+    def ask(node):
+        asked.append(node)
+        s, d = _get(mgr, f"/nodes/{quote(node, safe='')}/ceph/osd", timeout=10)
+        return d if s == 200 and isinstance(d, (dict, list)) else None
+
+    for node in dict.fromkeys(n for n in (st['node'], ceph.get('node')) if n):
+        data = ask(node)
+        if data is not None:
+            got = (node, data)
+            break
+    if got is None:
+        try:
+            online = sorted(n for n, info in (mgr.get_node_status() or {}).items()
+                            if (info or {}).get('status') == 'online')
+        except Exception:
+            online = []
+        for node in [n for n in online if n not in asked][:CEPH_PROBE_NODES]:
+            if time.monotonic() > deadline:
+                break
+            data = ask(node)
+            if data is not None:
+                got = (node, data)
+                break
+    if got is None:
+        if st['seen']:
+            _note(cid, 'ceph_osd', False, f"OSD list unreadable (asked {', '.join(asked[:5]) or 'no node'})")
+        else:
+            st['absent_until'] = now + CEPH_RETRY
+            _note(cid, 'ceph_osd', False, f"no node listed Ceph OSDs ({len(asked)} asked); asking again "
+                                          f"in {CEPH_RETRY // 60} minutes")
+        return
+    node, data = got
+    from pegaprox.api.ceph import _flatten_osd_tree
+    prev = st['last']
+    # a gap longer than this is no run of reads in a row
+    past = prev['hist'] if prev and 0 <= now - prev['at'] < OSD_SERVE_MAX else {}
+    osds, hist = {}, {}
+    for row in _flatten_osd_tree(data):
+        oid = _osd_id(row) if isinstance(row, dict) else None
+        if oid is None:
+            continue
+        apply_ms, commit_ms = _latency(row.get('apply_latency_ms')), _latency(row.get('commit_latency_ms'))
+        known = [v for v in (apply_ms, commit_ms) if v is not None]
+        osds[oid] = {'host': str(row.get('host') or '')[:SUBJECT_MAX], 'status': str(row.get('status') or ''),
+                     'apply': apply_ms, 'commit': commit_ms}
+        hist[oid] = (list(past.get(oid, ())) + [max(known) if known else None])[-OSD_STREAK:]
+    st['node'], st['seen'] = node, True
+    st['last'] = {'at': now, 'node': node, 'osds': osds, 'hist': hist}
+    timed = {o: h[-1] for o, h in hist.items() if h[-1] is not None}
+    slow = max(timed, key=timed.get, default=None)
+    _note(cid, 'ceph_osd', True,
+          f"{len(osds)} OSD(s) listed by {node}, {len(osds) - len(timed)} without latency figures"
+          + (f", slowest osd.{slow} at {timed[slow]:.0f} ms" if slow is not None else ''))
+
+
 def _read_replication(cid, mgr, now):
     """{'jobs': [...], 'status': {job_id: entry}, 'failed': {node}} or None when not due/unread."""
     st = _repl.setdefault(cid, {'next_at': 0})
@@ -608,6 +753,65 @@ def read_replication(mgr):
             if prev is None or _num(e.get('last_sync')) >= _num(prev.get('last_sync')):
                 by_id[jid] = e
     return status, {'jobs': jobs, 'status': by_id, 'failed': failed, 'sources': sources}
+
+
+def _epoch(text):
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(str(text)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def own_replications(now=None):
+    """PegaProx's own replication jobs - across clusters and within one, the ones the
+    recovery plans link included - in one query: [{'id', 'vmid', 'source', 'target',
+    'target_node', 'enabled', 'held', 'interval', 'success', 'created', 'resumed',
+    'last_status', 'last_error'}], the times as epochs or None. None when the table could
+    not be read. Nothing is asked of a cluster.
+
+    `held` is a job whose guest a recovery plan has failed over: it waits for the failback
+    (background/site_recovery.py). `resumed` is when a job that was disabled or held came
+    back, as far as this process saw it: the age of its last run says nothing until it had
+    the chance of a run. The alert tick and the Prometheus exporter both read it. MK Oct 2026
+    """
+    from pegaprox.background.cross_cluster_replication import _parse_interval_seconds
+    from pegaprox.background.site_recovery import HELD_JOB_SQL
+    now = now or time.time()
+    try:
+        rows = get_db().conn.execute(
+            f"SELECT r.*, {HELD_JOB_SQL} AS held FROM cross_cluster_replications r").fetchall()
+    except Exception as e:
+        logging.debug(f"[AlertEvents] replication jobs unreadable: {e}")
+        return None
+    out = []
+    for r in rows:
+        j = _row(r)
+        jid = str(j.get('id') or '')
+        vmid = j.get('vmid')
+        if not jid or isinstance(vmid, bool) or not str(vmid).isdigit():
+            continue
+        enabled, held = bool(j.get('enabled')), bool(j.get('held'))
+        was = _own_repl.get(jid)
+        resumed = was[1] if was else 0
+        if was and was[0] and enabled and not held:
+            resumed = now
+        _own_repl[jid] = (not enabled or held, resumed)
+        status = str(j.get('last_status') or '')
+        # a run writes last_run either way; last_ok_at only when it went through
+        success = _epoch(j.get('last_ok_at')) or (_epoch(j.get('last_run')) if status == 'ok' else None)
+        out.append({
+            'id': jid, 'vmid': int(vmid), 'source': str(j.get('source_cluster') or ''),
+            'target': str(j.get('target_cluster') or ''), 'target_node': str(j.get('target_node') or ''),
+            'enabled': enabled, 'held': held,
+            'interval': _parse_interval_seconds(str(j.get('schedule') or '0 */6 * * *')),
+            'success': success, 'created': _epoch(j.get('created_at')), 'resumed': resumed or None,
+            'last_status': status, 'last_error': str(j.get('last_error') or '').strip(),
+        })
+    for gone in set(_own_repl) - {j['id'] for j in out}:
+        _own_repl.pop(gone, None)
+    return out
 
 
 def not_backed_up(cid, mgr, max_age=0, now=None):
@@ -955,7 +1159,8 @@ def _read_cluster(cid, mgr, kinds, now):
             _note(cid, 'tasks', True, f"{len(tasks)} listed, {len(seen['tasks'])} in the window")
         else:
             _note(cid, 'tasks', False, f'task list unreadable (HTTP {status})')
-    if kinds & {'task_failed', 'snapshot_age', 'replication', 'backup_coverage', 'restart_loop'}:
+    if kinds & {'task_failed', 'snapshot_age', 'replication', 'backup_coverage', 'restart_loop',
+                 'replication_rpo'}:
         try:
             seen['resources'] = mgr.get_vm_resources(max_age=60) or []
         except Exception:
@@ -970,6 +1175,8 @@ def _read_cluster(cid, mgr, kinds, now):
         seen['ceph'] = _read_ceph(cid, mgr, now)
         if seen['ceph'] is not None:
             _note(cid, 'ceph', True, str((seen['ceph'].get('health') or {}).get('status', '')))
+    if 'ceph_osd_latency' in kinds:
+        seen['osd'] = ceph_osds(cid, mgr, now=now)
     if 'replication' in kinds:
         seen['replication'] = _read_replication(cid, mgr, now)
     if 'backup_coverage' in kinds:
@@ -1436,6 +1643,129 @@ def _eval_restarts(rule, seen, cname, cid, now):
     return p
 
 
+def _ms_text(ms):
+    return '-' if ms is None else f"{ms:.0f} ms"
+
+
+def _eval_osds(rule, seen):
+    """One incident per OSD whose apply or commit latency was above the limit in each of the
+    last OSD_STREAK reads, so one slow minute does not page; closed once a read has it at or
+    below the limit. An OSD without latency figures in the last read (down, or a Ceph that
+    does not report them) stays as it is, and one that left the tree closes without a word."""
+    entry = seen.get('osd')
+    if not entry:
+        return None
+    limit = int(rule.get('threshold') or _THRESHOLDS['ceph_osd_latency'][0])
+    p = _Pass()
+    p.known = {f"osd:{o['host']}:{oid}" for oid, o in entry['osds'].items()}
+    for oid, o in sorted(entry['osds'].items()):
+        host = o['host']
+        if not _target_ok(rule, host, None):
+            continue
+        obj = f"osd:{host}:{oid}"
+        hist = entry['hist'].get(oid) or []
+        if not hist or hist[-1] is None:
+            continue
+        if hist[-1] <= limit:
+            p.fine[obj] = (f"Resolved: latency of osd.{oid} on {host}",
+                           f"osd.{oid} on node {host} is at or below {limit} ms again "
+                           f"(apply {_ms_text(o['apply'])}, commit {_ms_text(o['commit'])}).")
+            continue
+        streak = hist[-OSD_STREAK:]
+        if len(streak) < OSD_STREAK or any(v is None or v <= limit for v in streak):
+            continue                      # not long enough yet to say
+        worst = hist[-1]
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'node', 'target_id': host, 'target_name': host,
+            'target_key': f"node:{host}", 'name': f"osd.{oid} on {host} is slow",
+            'message': (f"osd.{oid} on node {host}: apply latency {_ms_text(o['apply'])}, commit latency "
+                        f"{_ms_text(o['commit'])}, above {limit} ms in each of the last {OSD_STREAK} reads"),
+            'value': round(worst, 1), 'display': f"{worst:.0f} ms",
+            'severity': 'critical' if worst >= OSD_CRITICAL * limit else 'warning',
+            'details': [('OSD', f"osd.{oid}"), ('Node', host), ('Apply latency', _ms_text(o['apply'])),
+                        ('Commit latency', _ms_text(o['commit'])), ('Limit', f"{limit} ms")],
+        }
+    return p
+
+
+def _span(seconds):
+    """A duration as people say it: 45 min, 7 h 20 min, 3 d 4 h."""
+    minutes = max(0, int(seconds // 60))
+    if minutes < 60:
+        return f"{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours} h {minutes} min" if minutes else f"{hours} h"
+    days, hours = divmod(hours, 24)
+    return f"{days} d {hours} h" if hours else f"{days} d"
+
+
+def _eval_own_replication(rule, seen, cname, now):
+    """One incident per replication job of PegaProx's own (cross-cluster, and the ones
+    behind the recovery plans) whose last successful run is older than the RPO: the rule's
+    minutes, or twice the job's interval when it says 0. A job with no success on record
+    counts from its creation, one that was just switched on again or failed back from when
+    it came back. A disabled job, or one held while its guest is failed over, closes."""
+    jobs = seen.get('xcrepl')
+    if jobs is None:
+        return None
+    from pegaprox.background.cross_cluster_replication import is_job_inflight
+    guests = seen.get('guests')
+    minutes = _int_in(rule.get('threshold'), 0, _THRESHOLDS['replication_rpo'][2]) or 0
+    p = _Pass()
+    p.known = {f"xcrepl:{j['vmid']}:{j['id']}" for j in jobs}
+    for j in jobs:
+        vmid, jid = j['vmid'], j['id']
+        if not _target_ok(rule, '', vmid):
+            continue
+        obj = f"xcrepl:{vmid}:{jid}"
+        who = _guest_label(guests, vmid)
+        dest = _cluster_name(j['target'])
+        route = (f"{who} to node {j['target_node'] or '?'} of {cname}" if j['target'] == j['source']
+                 else f"{who} from {cname} to {dest}")
+        resolved = f"Resolved: replication of {who}"
+        if not j['enabled']:
+            p.fine[obj] = (resolved, f"Replication job {jid} ({route}) was disabled.")
+            continue
+        if j['held']:
+            p.fine[obj] = (resolved, f"Replication job {jid} ({route}) waits for the failback of its guest.")
+            continue
+        rpo = minutes * 60 or 2 * j['interval']
+        since = max(j['success'] or j['created'] or 0, j['resumed'] or 0)
+        if not since:
+            continue                      # no time to count from: unknown, not fine
+        age = now - since
+        if age <= rpo:
+            p.fine[obj] = (resolved, f"Replication job {jid} ({route}) is within its RPO of {_span(rpo)} again.")
+            continue
+        if j['resumed'] and since == j['resumed']:
+            when = f"came back {_span(age)} ago and has not completed a run since"
+        elif j['success']:
+            when = f"last ran successfully {_span(age)} ago"
+        else:
+            when = f"has no successful run on record since it was created {_span(age)} ago"
+        err = j['last_error'].rstrip('.') if j['last_status'] == 'error' else ''
+        message = f"Replication job {jid} ({route}) {when}; the RPO is {_span(rpo)}"
+        if err:
+            message += f". The last run failed: {err[:SUBJECT_MAX]}"
+        if is_job_inflight(jid):
+            message += '. A run is under way'
+        rows = [('Job', jid), ('Guest', who), ('Source', cname),
+                ('Target', dest + (f", node {j['target_node']}" if j['target_node'] else '')),
+                ('Last success', datetime.fromtimestamp(j['success']).strftime('%Y-%m-%d %H:%M')
+                 if j['success'] else 'none on record'),
+                ('RPO', _span(rpo) + ('' if minutes else ' (twice the interval)'))]
+        if err:
+            rows.append(('Last error', err[:SUBJECT_MAX]))
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'vm', 'target_id': str(vmid), 'target_name': who,
+            'target_key': f"vm:{vmid}", 'name': f"Replication of {who} is past its RPO",
+            'message': message + '.', 'value': float(round(age / 60)), 'display': _span(age),
+            'severity': 'critical' if age > 2 * rpo else 'warning', 'details': rows,
+        }
+    return p
+
+
 # ---------------------------------------------------------------------------
 # incidents and notices
 # ---------------------------------------------------------------------------
@@ -1520,7 +1850,7 @@ def _target_key_of(obj):
     vmid = object_vmid(obj)
     if vmid is not None:
         return f"vm:{vmid}"
-    if obj.startswith(('task:', 'zfs:', 'clock:', 'qdevice:')):
+    if obj.startswith(('task:', 'zfs:', 'clock:', 'qdevice:', 'osd:')):
         return f"node:{obj.split(':')[1]}"
     return ''
 
@@ -1651,6 +1981,10 @@ def _evaluate(A, rule, cid, seen, mutes, settings, now):
             p = _eval_restarts(rule, seen, cname, cid, now)
         elif metric == 'qdevice':
             p = _eval_qdevice(rule, seen)
+        elif metric == 'ceph_osd_latency':
+            p = _eval_osds(rule, seen)
+        elif metric == 'replication_rpo':
+            p = _eval_own_replication(rule, seen, cname, now)
         else:
             p = _eval_snapshots(rule, seen, cname, cid, now)
     except ValueError as e:
@@ -1692,11 +2026,18 @@ def check_event_alerts(now=None):
     order, jobs = [], []
     for cid, crules in by_cluster.items():
         mgr = cluster_managers.get(cid)
-        if mgr is None or not getattr(mgr, 'is_connected', False) \
-                or getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        pve = mgr is not None and getattr(mgr, 'cluster_type', 'proxmox') == 'proxmox'
+        if not (pve and getattr(mgr, 'is_connected', False)):
+            # PegaProx's own replication jobs need nothing of the cluster, and a source
+            # cluster out of reach is just when they fall behind
+            kept = [r for r in crules if pve and r.get('metric') in DB_ONLY]
             for r in crules:
-                A._record_eval(r.get('id'), reason=f"cluster '{cid}' not connected (or not Proxmox VE)",
-                               cluster_id=cid, metric=r.get('metric'))
+                if not (pve and r.get('metric') in DB_ONLY):
+                    A._record_eval(r.get('id'), reason=f"cluster '{cid}' not connected (or not Proxmox VE)",
+                                   cluster_id=cid, metric=r.get('metric'))
+            if kept:
+                order.append((cid, mgr, kept))
+                jobs.append(lambda: {})
             continue
         kinds = {r.get('metric') for r in crules}
         order.append((cid, mgr, crules))
@@ -1705,6 +2046,14 @@ def check_event_alerts(now=None):
         return
     # every cluster at once, so one that does not answer holds up none of the others
     results = run_concurrent(jobs, timeout=90)
+    own = None
+    if any(r.get('metric') == 'replication_rpo' for _c, _m, rs in order for r in rs):
+        listed = own_replications(now)
+        # an unreadable table is no empty one: then nothing is raised or closed this tick
+        if listed is not None:
+            own = {}
+            for j in listed:
+                own.setdefault(j['source'], []).append(j)
 
     plans = [(cid, mgr, (seen or {}).get('snapshot_plan') or [])
              for (cid, mgr, _), seen in zip(order, results)]
@@ -1715,9 +2064,22 @@ def check_event_alerts(now=None):
     for (cid, mgr, crules), seen in zip(order, results):
         if seen is None:
             for r in crules:
-                A._record_eval(r.get('id'), reason='cluster did not answer in time',
-                               cluster_id=cid, metric=r.get('metric'))
-            continue
+                if r.get('metric') not in DB_ONLY:
+                    A._record_eval(r.get('id'), reason='cluster did not answer in time',
+                                   cluster_id=cid, metric=r.get('metric'))
+            crules = [r for r in crules if r.get('metric') in DB_ONLY]
+            if not crules:
+                continue
+            seen = {}
+        if any(r.get('metric') == 'replication_rpo' for r in crules):
+            seen['xcrepl'] = None if own is None else own.get(cid, [])
+            if own is None:
+                _note(cid, 'own_replication', False, 'replication jobs unreadable')
+            else:
+                mine = seen['xcrepl']
+                _note(cid, 'own_replication', True,
+                      f"{len(mine)} PegaProx replication job(s) from this cluster, "
+                      f"{sum(1 for j in mine if j['enabled'] and not j['held'])} running on schedule")
         snap_due = False
         if any(r.get('metric') == 'snapshot_age' for r in crules):
             st = _snaps.get(cid) or {}

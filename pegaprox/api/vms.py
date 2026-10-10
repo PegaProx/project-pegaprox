@@ -9672,9 +9672,12 @@ def _execute_replication(job):
 def _update_repl_status(db, job_id, status, error=''):
     """Update job status in DB after a replication run."""
     try:
+        stamp = datetime.now().isoformat()
+        # MK Oct 2026 - last_ok_at is the last run that went through, what the RPO alert counts from
         db.execute(
-            'UPDATE cross_cluster_replications SET last_run = ?, last_status = ?, last_error = ?, updated_at = ? WHERE id = ?',
-            (datetime.now().isoformat(), status, error or '', datetime.now().isoformat(), job_id)
+            'UPDATE cross_cluster_replications SET last_run = ?, last_status = ?, last_error = ?, updated_at = ?, '
+            'last_ok_at = CASE WHEN ? = \'ok\' THEN ? ELSE last_ok_at END WHERE id = ?',
+            (stamp, status, error or '', stamp, status, stamp, job_id)
         )
     except Exception as e:
         logging.warning(f"[XCREPL] Could not update status for {job_id}: {e}")
