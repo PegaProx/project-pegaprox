@@ -22,7 +22,8 @@ from pegaprox.models.permissions import *
 from pegaprox.utils.auth import require_auth, load_users
 from pegaprox.utils.rbac import get_user_clusters
 from pegaprox.api.helpers import check_cluster_access, load_server_settings, scope_vm_rows, require_unconfined
-from pegaprox.background.metrics import load_metrics_history, start_metrics_collector
+from pegaprox.background.metrics import (load_metrics_history, start_metrics_collector,
+                                         history_range, load_metrics_range)
 from pegaprox.background.syslog_server import DB_FILE, SEVERITY_MAP
 from pegaprox.api.schedules import start_scheduler
 
@@ -1047,6 +1048,11 @@ def get_cluster_report_summary(cluster_id):
     """Get report summary for a specific cluster
 
     Returns both historical data (if available) and current live data
+
+    Query params:
+    - period: 'hour', 'day', 'week' (default: day)
+    - from, to: unix seconds, instead of period: a range picked on the charts, at full
+      resolution as far as the stored history reaches (a year apart at most)
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok:
@@ -1057,6 +1063,12 @@ def get_cluster_report_summary(cluster_id):
 
     mgr = cluster_managers[cluster_id]
     period = request.args.get('period', 'day')
+    picked = None
+    if 'from' in request.args or 'to' in request.args:
+        start, end, why = history_range(request.args)
+        if why:
+            return jsonify({'error': why}), 400
+        picked, period = (start, end), 'range'
 
     # Get LIVE current data from cluster using get_node_status()
     live_cpu = 0
@@ -1114,12 +1126,20 @@ def get_cluster_report_summary(cluster_id):
 
     # Load historical metrics for the requested window (oldest first, so the
     # chart below runs left-to-right and 'current' really is the newest sample)
-    window_days, cutoff = _period_cutoff(period)
-    history = load_metrics_history(days=window_days, totals_only=True)
-    snapshots = history.get('snapshots', [])
+    if picked:
+        # MK Oct 2026 - only this cluster's totals are kept of each snapshot
+        def _totals(clusters):
+            c = clusters.get(cluster_id)
+            return {cluster_id: {'totals': c.get('totals') or {}}} if isinstance(c, dict) else {}
+        filtered = [{'timestamp': ts, 'clusters': kept}
+                    for ts, kept in load_metrics_range(picked[0], picked[1], _totals)]
+    else:
+        window_days, cutoff = _period_cutoff(period)
+        history = load_metrics_history(days=window_days, totals_only=True)
+        snapshots = history.get('snapshots', [])
 
-    cutoff_str = cutoff.isoformat()
-    filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]
+        cutoff_str = cutoff.isoformat()
+        filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]
 
     # Extract data for this cluster only
     report = {
@@ -1142,6 +1162,8 @@ def get_cluster_report_summary(cluster_id):
             'mem_used': mem_used
         }
     }
+    if picked:
+        report['from'], report['to'] = int(picked[0]), int(picked[1])
 
     for snapshot in filtered:
         cluster_data = snapshot.get('clusters', {}).get(cluster_id)

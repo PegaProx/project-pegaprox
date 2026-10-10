@@ -252,6 +252,35 @@ def get_node_temperature_history_api(cluster_id, node):
     return jsonify({'series': series, 'unit': '°C', 'count': len(series)})
 
 
+# MK Oct 2026 - a range picked on the node charts that no RRD preset draws with more than
+# a handful of points (a few hours a week back): CPU and memory from the 5-minute snapshots
+# PegaProx stores itself. The same gate as the RRD charts it zooms.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/metrics-history', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_metrics_history_api(cluster_id, node):
+    """CPU and memory of a node over a picked time range, from PegaProx's stored metrics
+
+    Query params:
+    - from, to: unix seconds, a year apart at most; cut to what is stored
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.background.metrics import history_range, load_metrics_range, history_series
+    start, end, why = history_range(request.args)
+    if why:
+        return jsonify({'error': why}), 400
+
+    def _node(clusters):
+        return ((clusters.get(cluster_id) or {}).get('nodes') or {}).get(node)
+    out = history_series(load_metrics_range(start, end, _node), {'cpu': 'cpu', 'memory': 'mem_percent'})
+    out.update({'node': node, 'from': int(start), 'to': int(end)})
+    return jsonify(out)
+
+
 # ── In-band hardware monitoring / BMC (#609) ──────────────────────────────────
 # Credential-free reads via local ipmitool on the node (see pegaprox/core/bmc.py).
 # Gated behind a one-time, versioned compliance acknowledgement that is written to

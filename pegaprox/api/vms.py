@@ -5859,6 +5859,36 @@ def get_vm_rrd_api(cluster_id, node, vm_type, vmid, timeframe):
         return jsonify({'error': result['error']}), 500
 
 
+# MK Oct 2026 - the guest twin of nodes/<node>/metrics-history: CPU and memory of a picked
+# range from the snapshots PegaProx stores every 5 minutes, where the RRD presets have only
+# a few points in it. Keyed by vmid in the snapshots, so a guest that moved keeps its line.
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/metrics-history', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_metrics_history_api(cluster_id, vmid):
+    """CPU and memory of a guest over a picked time range, from PegaProx's stored metrics
+
+    Query params:
+    - from, to: unix seconds, a year apart at most; cut to what is stored
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view')
+    if denied: return denied
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.background.metrics import history_range, load_metrics_range, history_series
+    start, end, why = history_range(request.args)
+    if why:
+        return jsonify({'error': why}), 400
+    key = str(vmid)
+
+    def _guest(clusters):
+        return ((clusters.get(cluster_id) or {}).get('vms') or {}).get(key)
+    out = history_series(load_metrics_range(start, end, _guest), {'cpu': 'cpu', 'memory': 'mem'})
+    out.update({'vmid': vmid, 'from': int(start), 'to': int(end)})
+    return jsonify(out)
+
+
 # MK Oct 2026 - rng0 is a property string PVE parses as pve-qm-rng: the source is one of
 # three host files, max_bytes and period are any integer to PVE. QEMU then refuses to start
 # the VM on a negative limit or a period of 0, so both are held to what QEMU takes here.
