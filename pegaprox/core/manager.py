@@ -12626,6 +12626,11 @@ echo "AGENT_INSTALLED_OK"
 
             host = self.host
             primary_ip = self.config.host
+            # MK Oct 2026 - the address no other node may resolve to is the one of the host
+            # this manager talks to (answered by the local-node shortcut below). In a failover
+            # that is not config.host: the configured host is then just another member, and
+            # skipping its address left that node with none (SSH and its own password, #1136)
+            connected = host
 
             # If target is the local/primary node, return its IP directly
             # Otherwise the logic below skips it (ip == primary_ip filter)
@@ -12779,7 +12784,7 @@ echo "AGENT_INSTALLED_OK"
                     for item in cs_resp.json().get('data', []):
                         if item.get('type') == 'node' and item.get('name') == node_name:
                             node_direct_ip = item.get('ip', '')
-                            if node_direct_ip and node_direct_ip != primary_ip:
+                            if node_direct_ip and node_direct_ip != connected:
                                 in_mgmt_net = True
                                 if primary_network:
                                     try:
@@ -12888,7 +12893,7 @@ echo "AGENT_INSTALLED_OK"
             # ================================================================
             probed = 0
             for score, ip, iface, reason in candidates:
-                if score < 20 or ip == primary_ip:
+                if score < 20 or ip == connected:
                     continue
                 if probed >= 3:
                     self.logger.debug(f"[NodeIP] {node_name}: probe cap reached, falling through to STEP 4")
@@ -12931,7 +12936,7 @@ echo "AGENT_INSTALLED_OK"
             # STEP 5: High-confidence without probe (firewall may block)
             # ================================================================
             for score, ip, iface, reason in candidates:
-                if score >= 85 and ip != primary_ip:
+                if score >= 85 and ip != connected:
                     self.logger.warning(f"[NodeIP] {node_name} -> {ip} (score={score}, {reason}) -- probe failed, high confidence")
                     return ip
             
@@ -12944,7 +12949,7 @@ echo "AGENT_INSTALLED_OK"
                 addrs = socket.getaddrinfo(node_name, 8006, socket.AF_UNSPEC, socket.SOCK_STREAM)
                 for af, socktype, proto, canonname, sa in addrs:
                     ip = sa[0]
-                    if ip and ip != primary_ip and not ip.startswith('127.') and ip != '::1':
+                    if ip and ip != connected and not ip.startswith('127.') and ip != '::1':
                         if _quick_probe(ip, port=probe_port):
                             self.logger.info(f"[NodeIP] Resolved {node_name} to {ip} (DNS, {'IPv6' if af == socket.AF_INET6 else 'IPv4'})")
                             return ip

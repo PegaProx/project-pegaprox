@@ -2591,7 +2591,7 @@ class PegaProxDB:
         went with the old credential and is dropped; a clear drops the kept address too,
         so a password set later does not start from an address nobody placed it at since."""
         cur = self.conn.cursor()
-        now = datetime.now().isoformat(timespec='seconds')
+        now = datetime.now().astimezone().isoformat(timespec='seconds')  # with its offset, like the check answer
         sealed = self._encrypt(password_plain) if password_plain else ''
         cur.execute('''
             INSERT INTO cluster_node_credentials
@@ -2609,7 +2609,7 @@ class PegaProxDB:
     def record_node_credential_checks(self, cluster_id, results):
         """results: {node: (status, detail, credential)}; one transaction for all of them."""
         cur = self.conn.cursor()
-        now = datetime.now().isoformat(timespec='seconds')
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
         for node, (status, detail, credential) in results.items():
             cur.execute('''
                 INSERT INTO cluster_node_credentials
