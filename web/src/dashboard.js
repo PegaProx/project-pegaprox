@@ -554,6 +554,102 @@
             return field;
         }
 
+        // LW Oct 2026 - the query language of the search (pegaprox/utils/search_query.py):
+        // examples to click into the box, and what the server says when it cannot read one
+        const SEARCH_SYNTAX_EXAMPLES = [
+            ['web', 'searchSyntaxFree'],
+            ['tag:prod node:pve1', 'searchSyntaxAnd'],
+            ['tag:web OR tag:api', 'searchSyntaxOr'],
+            ['-status:running', 'searchSyntaxNot'],
+            ['(tag:db OR tag:cache) AND NOT node:pve3', 'searchSyntaxGroup'],
+            ['name:"web 01"', 'searchSyntaxQuote'],
+            ['id:100-199', 'searchSyntaxRange'],
+        ];
+        const SEARCH_SYNTAX_PREFIXES = 'tag: node: name: id: ip: mac: notes: status: type: cluster: pool:';
+        const SEARCH_SYNTAX_ERRORS = {
+            unclosed_paren: 'searchErrUnclosedParen', unexpected_paren: 'searchErrUnexpectedParen',
+            empty_group: 'searchErrEmptyGroup', unclosed_quote: 'searchErrUnclosedQuote',
+            term_before: 'searchErrTermBefore', term_after: 'searchErrTermAfter', empty_value: 'searchErrEmptyValue',
+            bad_id: 'searchErrBadId', bad_type: 'searchErrBadType', too_long: 'searchErrTooLong',
+            too_many_terms: 'searchErrTooManyTerms', too_deep: 'searchErrTooDeep',
+        };
+        function searchSyntaxMessage(t, err) {
+            if (!err) return '';
+            const key = SEARCH_SYNTAX_ERRORS[err.reason];
+            const text = key ? t(key) : '';
+            if (!text || text === key) return err.error || '';
+            return text.replace('{at}', String((err.position || 0) + 1)).replace('{token}', err.token || '')
+                .replace('{limit}', String(err.limit || ''));
+        }
+        // a picked tag in place of the term it completes, the rest of the query kept
+        function searchWithTag(res, tag) {
+            const c = res && res.tag_complete;
+            if (!c || typeof res.query !== 'string') return `tag:${tag}`;
+            return res.query.slice(0, c.start) + c.prefix + tag + res.query.slice(c.end);
+        }
+        // the popover goes to the body: the search boxes it sits in clip what overflows them
+        function SearchSyntaxHelp({ t, onPick, align }) {
+            const { isCorporate } = useLayout();
+            const [pos, setPos] = useState(null);
+            const btnRef = useRef(null);
+            const popRef = useRef(null);
+            const toggle = () => {
+                if (pos || !btnRef.current) { setPos(null); return; }
+                const r = btnRef.current.getBoundingClientRect();
+                const width = Math.min(320, window.innerWidth - 32);
+                const left = Math.max(16, Math.min(align === 'left' ? r.left : r.right - width, window.innerWidth - width - 16));
+                setPos({ top: r.bottom + 8, left, width });
+            };
+            useEffect(() => {
+                if (!pos) return;
+                const away = (e) => {
+                    if (btnRef.current?.contains(e.target) || popRef.current?.contains(e.target)) return;
+                    setPos(null);
+                };
+                const esc = (e) => { if (e.key === 'Escape') setPos(null); };
+                const shut = () => setPos(null);
+                document.addEventListener('mousedown', away);
+                document.addEventListener('keydown', esc);
+                window.addEventListener('resize', shut);
+                return () => {
+                    document.removeEventListener('mousedown', away);
+                    document.removeEventListener('keydown', esc);
+                    window.removeEventListener('resize', shut);
+                };
+            }, [pos]);
+            return (
+                <>
+                    <button ref={btnRef} type="button" data-search-syntax onClick={toggle} aria-expanded={!!pos}
+                        title={t('searchSyntaxHelp')} aria-label={t('searchSyntaxHelp')}
+                        className="w-5 h-5 flex-shrink-0 rounded-full border border-proxmox-border text-[11px] leading-none text-gray-400 hover:text-white hover:border-proxmox-orange flex items-center justify-center">
+                        ?
+                    </button>
+                    {pos && ReactDOM.createPortal(
+                        <div ref={popRef} data-search-syntax-help className={`p-3 rounded-lg shadow-2xl text-left ${isCorporate ? 'border-2' : 'bg-proxmox-card border border-proxmox-border'}`}
+                             style={{position: 'fixed', top: pos.top, left: pos.left, width: pos.width, zIndex: 110,
+                                     ...(isCorporate ? {background: '#243542', borderColor: '#49afd9'} : {})}}>
+                            <div className="text-sm font-medium text-white mb-2">{t('searchSyntaxTitle')}</div>
+                            <div className="space-y-1">
+                                {SEARCH_SYNTAX_EXAMPLES.map(([example, key]) => (
+                                    <button key={example} type="button" data-search-syntax-example={example}
+                                        onClick={() => { setPos(null); if (onPick) onPick(example); }}
+                                        className="w-full flex flex-col items-start text-left px-2 py-1 rounded hover:bg-proxmox-hover">
+                                        <code className="text-xs font-mono text-proxmox-orange">{example}</code>
+                                        <span className="text-[11px] text-gray-400">{t(key)}</span>
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="mt-2 pt-2 border-t border-proxmox-border text-[11px] text-gray-400">
+                                <div><span className="text-gray-300">{t('searchSyntaxPrefixes')}:</span> <code className="font-mono">{SEARCH_SYNTAX_PREFIXES}</code></div>
+                                <div className="mt-1">{t('searchSyntaxNote')}</div>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
+                </>
+            );
+        }
+
         // LW Apr 2026 — Global command palette. Opens on Ctrl/Cmd+K.
         // Indexes: clusters, VMs, storage (from resources), and a curated action list.
         // Keyboard-first: ↑/↓ to move, enter to pick, esc to close.
@@ -582,12 +678,19 @@
                     const res = await authFetch(`${API_URL}/global/search?q=${encodeURIComponent(q)}&type=all`, { signal: ctrl.signal });
                     if (ctrl.signal.aborted) return;
                     let hits = [];
+                    let error = null;
                     if (res && res.ok) {
                         const data = await res.json().catch(() => null);
-                        hits = ((data && data.results) || []).filter(h => h.vmid != null && SEARCH_INDEX_FIELDS.includes(h.match_field));
+                        // an expression (tag:web OR node:pve2) means nothing to the fuzzy match
+                        // here: every guest the server found is listed then
+                        const expression = !!data && data.syntax === 'expression';
+                        hits = ((data && data.results) || []).filter(h => (expression && h.vmid != null) || (h.vmid != null && SEARCH_INDEX_FIELDS.includes(h.match_field)));
+                    } else if (res && res.status === 400) {
+                        const body = await res.json().catch(() => null);
+                        if (body && body.code === 'SEARCH_SYNTAX') error = body;
                     }
                     if (ctrl.signal.aborted) return;
-                    setRemote({ q, hits });
+                    setRemote({ q, hits, error });
                     setRemoteLoading(false);
                 }, 250);
                 return () => { clearTimeout(timer); ctrl.abort(); };
@@ -681,7 +784,7 @@
                             subtitle: [`VMID ${h.vmid}`, h.node, h.cluster_name || h.cluster_id].filter(Boolean).join(' · '),
                             icon: h.type === 'ct' ? 'Container' : 'VM',
                             score: 20,
-                            match: { field: h.match_field, value: h.match_value || '', net: h.match_net || '' },
+                            match: SEARCH_INDEX_FIELDS.includes(h.match_field) ? { field: h.match_field, value: h.match_value || '', net: h.match_net || '' } : null,
                             pick: () => onPickHit && onPickHit(h),
                         });
                     });
@@ -728,8 +831,14 @@
                                 placeholder={t('commandPalettePlaceholder') || 'Type to search clusters, VMs, actions…'}
                                 className="flex-1 bg-transparent text-white outline-none text-base placeholder:text-gray-500"
                             />
+                            <SearchSyntaxHelp t={t} onPick={(example) => { setQuery(example); inputRef.current?.focus(); }} />
                             <span className="text-xs text-gray-500">ESC</span>
                         </div>
+                        {remote.error && remote.q === query.trim() && (
+                            <div data-cmdpal-syntax-error className="px-4 py-1.5 text-xs text-red-400 border-b border-proxmox-border">
+                                {searchSyntaxMessage(t, remote.error)}
+                            </div>
+                        )}
                         <div className="flex-1 overflow-y-auto" style={{scrollbarWidth: 'thin'}}>
                             {results.length === 0 ? (
                                 <div className="text-center text-sm text-gray-500 py-10">
@@ -12415,6 +12524,13 @@
                         const data = await response.json();
                         setGlobalSearchResults(data);
                         setGlobalSearchIndex(0);
+                    } else if (response && response.status === 400) {
+                        // LW Oct 2026 - a query the server cannot read: the dropdown says where
+                        const body = await response.json().catch(() => null);
+                        if (body && body.code === 'SEARCH_SYNTAX') {
+                            setGlobalSearchResults({ query, count: 0, results: [], tag_suggestions: [], syntaxError: body });
+                            setGlobalSearchIndex(0);
+                        }
                     }
                 } catch (err) {
                     console.error('Global search error:', err);
@@ -17460,6 +17576,15 @@
                                                 }}
                                                 className={`${isCorporate ? 'w-48 md:w-72 lg:w-96 px-2 py-1' : 'w-48 md:w-72 lg:w-80 px-2 py-2'} bg-transparent text-white placeholder-gray-500 focus:outline-none text-sm`}
                                             />
+                                            {/* above the click-away layer of the open dropdown */}
+                                            <span className="relative z-50 mr-2 flex items-center flex-shrink-0">
+                                                <SearchSyntaxHelp t={t} onPick={(example) => {
+                                                    setGlobalSearchQuery(example);
+                                                    performGlobalSearch(example);
+                                                    setShowGlobalSearch(true);
+                                                    globalSearchRef.current?.focus();
+                                                }} />
+                                            </span>
                                             {globalSearchLoading ? (
                                                 <Icons.RotateCw className="w-4 h-4 mr-3 text-gray-400 animate-spin flex-shrink-0" />
                                             ) : (
@@ -17485,14 +17610,21 @@
                                                                 <Icons.X className="w-4 h-4" />
                                                             </button>
                                                         </div>
+                                                        {globalSearchResults.syntaxError && (
+                                                            <div data-search-syntax-error className="text-xs text-red-400 mt-1">
+                                                                {searchSyntaxMessage(t, globalSearchResults.syntaxError)}
+                                                            </div>
+                                                        )}
                                                         {/* MK: clickable tag pills for quick filtering */}
-                                                        {globalSearchResults.tag_suggestions?.length > 0 && !globalSearchQuery.startsWith('tag:') && (
+                                                        {/* LW Oct 2026 - a pill completes the last term (after AND/OR too), the rest stays */}
+                                                        {globalSearchResults.tag_suggestions?.length > 0 && (globalSearchResults.tag_complete || !globalSearchQuery.startsWith('tag:')) && (
                                                             <div className="flex flex-wrap gap-1 mt-2">
                                                                 <span className="text-xs text-gray-500 mr-1">Tags:</span>
                                                                 {globalSearchResults.tag_suggestions.slice(0, 6).map((tag, i) => (
-                                                                    <button key={i} onClick={() => {
-                                                                        setGlobalSearchQuery(`tag:${tag}`);
-                                                                        performGlobalSearch(`tag:${tag}`);
+                                                                    <button key={i} data-search-tag-pill={tag} onClick={() => {
+                                                                        const next = searchWithTag(globalSearchResults, tag);
+                                                                        setGlobalSearchQuery(next);
+                                                                        performGlobalSearch(next);
                                                                     }} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 transition-colors">
                                                                         {tag}
                                                                     </button>
@@ -17500,7 +17632,7 @@
                                                             </div>
                                                         )}
                                                     </div>
-                                                    {globalSearchResults.results.length === 0 ? (
+                                                    {globalSearchResults.syntaxError ? null : globalSearchResults.results.length === 0 ? (
                                                         <div className="p-6 text-center text-gray-500">
                                                             <Icons.Search className="mx-auto mb-2 opacity-50" />
                                                             <p>{t('noResults') || 'No results'}</p>
@@ -17553,7 +17685,7 @@
                                                                             <div className="flex flex-wrap gap-1 mt-1">
                                                                                 {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).slice(0, 4).map((tag, i) => (
                                                                                     <span key={i} className={`px-1.5 py-0.5 text-xs rounded ${
-                                                                                        globalSearchQuery.toLowerCase().replace('tag:', '').split(',').some(q => tag.trim().toLowerCase().includes(q.trim()))
+                                                                                        (globalSearchResults.highlight || globalSearchQuery.toLowerCase().replace('tag:', '').split(',')).some(q => q.trim() && tag.trim().toLowerCase().includes(q.trim()))
                                                                                         ? 'bg-proxmox-orange/30 text-proxmox-orange ring-1 ring-proxmox-orange/50'
                                                                                         : 'bg-proxmox-dark text-gray-400'
                                                                                     }`}>

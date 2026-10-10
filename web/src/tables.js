@@ -3108,6 +3108,8 @@
             });
             const [data, setData] = useState(null);
             const [loading, setLoading] = useState(false);
+            // the text filter takes the expressions of the global search; one the server cannot read
+            const [syntaxError, setSyntaxError] = useState(null);
             const [picked, setPicked] = useState({});
             const [bulk, setBulk] = useState(null);
             const [migrate, setMigrate] = useState(null);
@@ -3132,8 +3134,13 @@
                 ['q', 'cluster', 'status', 'type', 'tag'].forEach(k => { if (view[k]) p.set(k, view[k]); });
                 const res = await authFetch(`${API_URL}/inventory/guests/page?${p.toString()}`);
                 const body = res && res.ok ? await res.json().catch(() => null) : null;
+                const refused = res && res.status === 400 ? await res.json().catch(() => null) : null;
                 if (mine !== seq.current) return;  // a newer read is on its way
                 setLoading(false);
+                const bad = refused && refused.code === 'SEARCH_SYNTAX' ? refused : null;
+                setSyntaxError(bad);
+                // the rows of the last filter that could be read stay until the query reads again
+                if (bad) return;
                 if (!body || !Array.isArray(body.guests)) {
                     // what was read stays shown
                     setData(prev => ({ ...(prev || {}), failed: true }));
@@ -3269,6 +3276,7 @@
                             : 'pr-2 py-1.5 text-sm bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange w-64'}
                         style={isCorporate ? { paddingLeft: '28px', borderColor: 'var(--corp-border-medium)', borderRadius: '2px' } : { paddingLeft: '1.75rem' }} />
                 </div>
+                <SearchSyntaxHelp t={t} align="left" onPick={setQuery} />
                 <select data-all-guests-cluster value={view.cluster} onChange={e => refine({ cluster: e.target.value })} className={selectCls}>
                     <option value="">{t('allGuestsAnyCluster')}</option>
                     {((data && data.clusters) || []).map(c => <option key={c.cluster_id} value={c.cluster_id}>{label(c.cluster_id, c.cluster_name)}</option>)}
@@ -3324,7 +3332,8 @@
                 </div>
             );
             const notes = (<>
-                {!data && <div className="text-sm text-gray-500 p-3">{t('loading')}</div>}
+                {syntaxError && <div data-all-guests-syntax-error className="text-sm text-red-400 p-3">{searchSyntaxMessage(t, syntaxError)}</div>}
+                {!data && !syntaxError && <div className="text-sm text-gray-500 p-3">{t('loading')}</div>}
                 {data && data.failed && <div data-all-guests-failed className="text-sm text-amber-400 p-3">{t('allGuestsFailed')}</div>}
                 {data && !data.failed && rows.length === 0 && (
                     <div data-all-guests-empty className="text-sm text-gray-400 p-3">{data.count ? t('allGuestsNoMatch') : t('allGuestsEmpty')}</div>
