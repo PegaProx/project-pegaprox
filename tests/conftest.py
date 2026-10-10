@@ -209,6 +209,16 @@ def _ha_state_out_of_the_checkout(tmp_path, monkeypatch, request):
                     'mark the test guard_refusals where the refusal is what it tests')
 
 
+@pytest.fixture(autouse=True)
+def _node_history_forgotten():
+    """What core/node_history.py knows of each node lives as long as the process, and the
+    next test's cluster_1 is another cluster with another database."""
+    from pegaprox.core import node_history
+    node_history.forget()
+    yield
+    node_history.forget()
+
+
 def _reset_api_rate_window():
     """Forget every client the API rate limiter has seen. Shared process state, and the
     whole harness looks like one client to it."""

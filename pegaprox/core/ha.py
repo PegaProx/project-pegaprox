@@ -215,7 +215,8 @@ _FORWARD_CHUNK = 1024 * 1024
 # (LEADER_ONLY_READS). A GET rule, as app.url_map writes it; the active serves nothing
 # else as a forwarded read.
 #
-# Leader-only: the alerts that fire, drift, the push inbox and the migration history.
+# Leader-only: the alerts that fire, drift, the push inbox and the migration history, and
+# the timeline that reads them together with the node state history.
 # A standby has rows of its own in those tables, under ids of its own (from when it
 # acted, or from before it joined), and an ack picked from such a list would name
 # another row on the active. When the active does not answer, a forwarding standby
@@ -229,6 +230,7 @@ LEADER_ONLY_READS = frozenset((
     '/api/migration-history',
     '/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history',
     '/api/clusters/<cluster_id>/balance-history',
+    '/api/timeline',
 ))
 # The task lists of an XCP-ng pool. PegaProx follows the XAPI tasks it started itself, in
 # the process that started them (core/xcpng.py _active_tasks), so a member lists none of
@@ -343,6 +345,8 @@ LOCAL_TABLES = (
     'site_recovery_screenshots',
     'snapshot_runs', 'drift_events', 'auto_install_runs', 'push_inbox',
     'balance_recommendations', 'logs', 'logs_fts',
+    # when the nodes went offline, into maintenance or out of quorum, as this instance saw it
+    'node_state_history',
     # who wrote what on the active, and the change counter behind cv_tick
     'ha_change_journal', 'ha_cv_dirty',
 )

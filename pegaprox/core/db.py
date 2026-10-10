@@ -2498,6 +2498,40 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating auto_install tables: {e}")
 
+        # MK Oct 2026 - when a node went offline, came back, entered or left maintenance, and
+        # when the cluster lost or regained quorum (node ''), as the poller saw it
+        # (core/node_history.py). at is UTC with its offset, so the rows sort by it. Per host
+        # (core/ha.py LOCAL_TABLES) like the migration history: what this instance saw.
+        # The other indexes are the windows the timeline reads (api/timeline.py).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS node_state_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    previous TEXT NOT NULL DEFAULT '',
+                    at TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_node_state_cluster '
+                           'ON node_state_history(cluster_id, at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_node_state_node '
+                           'ON node_state_history(cluster_id, node, at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cluster_time ON audit_log(cluster_id, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_cluster_fired '
+                           'ON active_alerts(cluster_id, triggered_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_cluster_resolved '
+                           'ON active_alerts(cluster_id, resolved_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_migration_cluster_time '
+                           'ON migration_history(cluster_id, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_backup_verify_cluster_time '
+                           'ON backup_verifications(cluster_id, started_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_status_incidents_started ON status_incidents(started_at)')
+        except Exception as e:
+            logging.error(f"Error creating node_state_history and the timeline indexes: {e}")
+
         conn.commit()
         logging.info("DB schema initialized")
     
@@ -3987,6 +4021,53 @@ class PegaProxDB:
                         'status': row['status'], 'duration': row['duration_seconds'],
                         'timestamp': row['timestamp']})
         return out
+
+    # MK Oct 2026 - node state changes (core/node_history.py); the newest rows of each cluster stay
+    NODE_STATE_KEEP = 5000
+
+    def add_node_states(self, cluster_id, rows):
+        """rows: [(node, state, previous, at, detail)], one transaction, then the trim."""
+        if not rows:
+            return
+        cursor = self.conn.cursor()
+        cursor.executemany(
+            'INSERT INTO node_state_history (cluster_id, node, state, previous, at, detail) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            [(cluster_id, node or '', state, previous or '', at, (detail or '')[:300])
+             for node, state, previous, at, detail in rows])
+        cursor.execute('''
+            DELETE FROM node_state_history WHERE cluster_id = ? AND id <= (
+                SELECT id FROM node_state_history WHERE cluster_id = ?
+                ORDER BY id DESC LIMIT 1 OFFSET ?)
+        ''', (cluster_id, cluster_id, self.NODE_STATE_KEEP))
+        self.conn.commit()
+
+    def last_node_states(self, cluster_id, states):
+        """{node: newest of `states`} of one cluster: where each node stood when this
+        process last looked, before a restart. Reads the bounded rows of one cluster."""
+        marks = ','.join('?' * len(states))
+        out = {}
+        for row in self.query(
+                f'SELECT node, state FROM node_state_history WHERE id IN ('
+                f'SELECT MAX(id) FROM node_state_history WHERE cluster_id = ? AND state IN ({marks}) '
+                f'GROUP BY node)', (cluster_id, *states)):
+            out[row['node']] = row['state']
+        return out
+
+    def list_node_states(self, cluster_id, since, until, node=None, limit=200):
+        """State changes of one cluster with since <= at < until, newest first. `node`
+        keeps that node's rows; since and until compare as text with the stored UTC."""
+        if node is None:
+            sql = ('SELECT id, node, state, previous, at, detail FROM node_state_history '
+                   'WHERE cluster_id = ? AND at >= ? AND at < ?')
+            params = [cluster_id, since, until]
+        else:
+            sql = ('SELECT id, node, state, previous, at, detail FROM node_state_history '
+                   'WHERE cluster_id = ? AND node = ? AND at >= ? AND at < ?')
+            params = [cluster_id, node, since, until]
+        sql += ' ORDER BY at DESC, id DESC LIMIT ?'
+        params.append(int(limit))
+        return [dict(r) for r in self.query(sql, tuple(params))]
 
     # XCP-ng VMID mapping helpers - MK Mar 2026
     #

@@ -60,6 +60,7 @@ from pegaprox.core import ha  # PegaProx's own warm standby (#625), not PVE HA
 from pegaprox.core import ha_transport, ha_vote
 from pegaprox.core import rolling_runs
 from pegaprox.core import node_creds
+from pegaprox.core import node_history
 from pegaprox.core.ha_transport import node_cmd
 from pegaprox.utils.ssh import read_capped as _read_capped
 
@@ -2266,6 +2267,8 @@ class PegaProxManager:
                         }
                         self.logger.info(f"Node {ha_node}: OFFLINE (from HA tracking)")
 
+                # what changed since the last read goes into the node state history (MK Oct 2026)
+                node_history.observe(getattr(self, 'id', None), node_status)
                 # cache the successful result for the short TTL (see top of method)
                 if _ns_ttl > 0 and node_status:
                     self._node_status_cache = (time.monotonic(), node_status)
@@ -7602,7 +7605,9 @@ class PegaProxManager:
         # where the nodes outside can be asked, should this host be the one outside
         self.__dict__['_ha_status_ips'] = {e.get('name'): e.get('ip') for e in entries
                                            if e.get('type') == 'node' and e.get('name') and e.get('ip')}
-        return self._ha_quorum_in(entries)
+        quorate, outside = self._ha_quorum_in(entries)
+        node_history.observe_quorum(getattr(self, 'id', None), quorate, outside)
+        return quorate, outside
 
     QUORATE_LOOK_EVERY = 30    # seconds between two looks from the monitor
     QUORATE_LOOK_HOSTS = 8     # hosts asked per look, side by side

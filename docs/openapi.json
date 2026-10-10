@@ -48985,6 +48985,41 @@
         ]
       }
     },
+    "/api/timeline": {
+      "get": {
+        "operationId": "timeline.get_timeline_get",
+        "tags": [
+          "timeline"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Events of one cluster, newest first. ?cluster=<id> (required) ?node= ?vmid= ?from= ?to= (ISO 8601 or epoch seconds; the last 24 h by default, 30 days at most) ?kinds=audit,alert,... ?severity=info,warning,critical ?limit=1..500 ?before=<next_before of the page before> ?correlate=<minutes, 0..120>",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/shellws": {
       "get": {
         "operationId": "__flask_sock.node_shell_websocket_proxy_get",
