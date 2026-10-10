@@ -432,6 +432,8 @@
                     { id: 'insights', label: 'Insights', icon: 'Zap' },
                     { id: 'costs', label: 'Costs', icon: 'DollarSign' },
                     { id: 'power', label: 'Power & Carbon', icon: 'Zap' },
+                    // LW Oct 2026 - what-if simulator of the selected cluster
+                    { id: 'whatif', label: t('whatifTitle'), icon: 'Scale' },
                     { id: 'apihealth', label: 'API Health', icon: 'Activity' },
                     { id: 'cve', label: 'CVE Scanner', icon: 'Shield' },
                 ] },
@@ -2489,6 +2491,7 @@
                 insights: T('insights') || 'Insights',
                 costs: T('costDashboard') || 'Costs',
                 power: T('powerTitle') || 'Power & Carbon',
+                whatif: T('whatifTitle') || 'What-if',
                 apihealth: T('apiHealth') || 'API Health',
                 drift: T('configDrift') || 'Config Drift',
                 siem: T('siem') || 'SIEM',
@@ -2626,6 +2629,9 @@
                         break;
                     case 'power':
                         body = <div className="cloud-mounted"><PowerCarbonTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;
+                        break;
+                    case 'whatif':
+                        body = <div className="cloud-mounted">{cid && <WhatIfTab clusterId={cid} authFetch={authFetch} />}</div>;
                         break;
                     case 'apihealth':
                         body = <div className="cloud-mounted"><ApiLatencyDashboard clusterId={cid} authFetch={authFetch} apiUrl={API_URL} t={T} /></div>;

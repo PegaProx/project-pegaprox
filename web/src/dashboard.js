@@ -7329,6 +7329,555 @@
             );
         }
 
+        // LW Oct 2026 - What-if simulator of a cluster (Reports > What-if, the cloud Reports
+        // group). Picks a scenario, POSTs it to /whatif and shows the report: what becomes of
+        // each guest, the nodes before and after against the thresholds, the HA limits hit,
+        // the reserve and the assumptions. It only reads, so a standby runs it as well.
+        const WHATIF_SCENARIOS = [
+            { id: 'node_failure', label: 'whatifNodeFailure', desc: 'whatifNodeFailureDesc' },
+            { id: 'maintenance', label: 'whatifMaintenance', desc: 'whatifMaintenanceDesc' },
+            { id: 'headroom', label: 'whatifHeadroom', desc: 'whatifHeadroomDesc' },
+            { id: 'storage_failure', label: 'whatifStorageFailure', desc: 'whatifStorageFailureDesc' },
+            { id: 'network_failure', label: 'whatifNetworkFailure', desc: 'whatifNetworkFailureDesc' },
+        ];
+        const WHATIF_REASONS = {
+            not_ha: 'whatifRsnNotHa', ha_state: 'whatifRsnHaState', ha_unreadable: 'whatifRsnHaUnreadable',
+            local_disks: 'whatifRsnLocalDisks', storage_unknown: 'whatifRsnStorageUnknown',
+            passthrough: 'whatifRsnPassthrough', ha_restart: 'whatifRsnHaRestart',
+            pegaprox_restart: 'whatifRsnPegaproxRestart', no_node_rule: 'whatifRsnNoNodeRule',
+            no_node_storage: 'whatifRsnNoNodeStorage', no_node_apart: 'whatifRsnNoNodeApart',
+            apart_refused: 'whatifRsnApartRefused', no_target: 'whatifRsnNoTarget',
+            quorum_lost: 'whatifRsnQuorumLost', fence_reset: 'whatifRsnFenceReset',
+            overcommitted: 'whatifRsnOvercommitted', moved_live: 'whatifRsnMovedLive',
+            ct_restart: 'whatifRsnCtRestart', local_disks_copied: 'whatifRsnLocalCopied',
+            local_disks_stay: 'whatifRsnLocalStay', pin_strict: 'whatifRsnPinStrict', off_pin: 'whatifRsnOffPin',
+            disk_on_storage: 'whatifRsnDiskOnStorage', data_disk_on_storage: 'whatifRsnDataDisk',
+            cdrom_on_storage: 'whatifRsnCdrom', volumes_on_storage: 'whatifRsnVolumes',
+            copy_on_storage: 'whatifRsnCopy', all_nics: 'whatifRsnAllNics', some_nics: 'whatifRsnSomeNics',
+            config_unread: 'whatifRsnConfigUnread',
+        };
+        const WHATIF_LIMITS = {
+            quorum_lost: 'whatifLimQuorumLost', fence_reset: 'whatifLimFenceReset', not_ha: 'whatifLimNotHa',
+            local_disks: 'whatifLimLocalDisks', passthrough: 'whatifLimPassthrough',
+            storage_unknown: 'whatifLimStorageUnknown', no_node_rule: 'whatifLimNoNodeRule',
+            no_node_storage: 'whatifLimNoNodeStorage', no_node_apart: 'whatifLimNoNodeApart',
+            apart_refused: 'whatifLimApartRefused', pin_strict: 'whatifLimPinStrict', no_target: 'whatifLimNoTarget',
+            local_disks_stay: 'whatifLimLocalStay', over_threshold: 'whatifLimOverThreshold',
+            overcommitted: 'whatifLimOvercommitted', ha_unreadable: 'whatifLimHaUnreadable',
+            configs_unread: 'whatifLimConfigsUnread', no_ha_reaction: 'whatifLimNoHaReaction',
+        };
+        const WHATIF_ASSUMPTIONS = {
+            mem_configured: 'whatifAsmMemConfigured', mem_current: 'whatifAsmMemCurrent', cpu_now: 'whatifAsmCpuNow',
+            votes: 'whatifAsmVotes', votes_qdevice: 'whatifAsmVotesQdevice', ha_choice: 'whatifAsmHaChoice',
+            pegaprox_choice: 'whatifAsmPegaproxChoice', restart_order: 'whatifAsmRestartOrder',
+            fence_delay: 'whatifAsmFenceDelay', passthrough_local: 'whatifAsmPassthrough',
+            configs_unread: 'whatifAsmConfigsUnread', no_service_model: 'whatifAsmNoServiceModel',
+            headroom_all: 'whatifAsmHeadroomAll', headroom_ha: 'whatifAsmHeadroomHa',
+            headroom_no_storage: 'whatifAsmHeadroomNoStorage', headroom_pairs: 'whatifAsmHeadroomPairs',
+            storage_disks: 'whatifAsmStorageDisks', storage_content: 'whatifAsmStorageContent',
+            net_underlay: 'whatifAsmNetUnderlay', net_down: 'whatifAsmNetDown',
+            maint_evacuator: 'whatifAsmMaintEvacuator', maint_apart: 'whatifAsmMaintApart',
+        };
+        const WHATIF_OUTCOMES = [
+            { id: 'down', label: 'whatifDown', cls: 'bg-red-500/10 text-red-400 border-red-500/30' },
+            { id: 'degraded', label: 'whatifDegraded', cls: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' },
+            { id: 'restarted', label: 'whatifRestarted', cls: 'bg-blue-500/10 text-blue-400 border-blue-500/30' },
+            { id: 'moved', label: 'whatifMoved', cls: 'bg-green-500/10 text-green-400 border-green-500/30' },
+            { id: 'unknown', label: 'whatifUnknown', cls: 'bg-gray-500/20 text-gray-300 border-proxmox-border' },
+            { id: 'unaffected', label: 'whatifUnaffected', cls: 'bg-gray-500/10 text-gray-400 border-proxmox-border' },
+        ];
+        const WHATIF_STATES = { up: 'whatifStateUp', failed: 'whatifStateFailed', maintenance: 'whatifStateMaintenance',
+                                reset: 'whatifStateReset', offline: 'whatifStateOffline' };
+        const WHATIF_PAGE = 200;
+
+        function WhatIfTab({ clusterId, authFetch }) {
+            const { t } = useTranslation();
+            const [opts, setOpts] = React.useState(null);
+            const [optsError, setOptsError] = React.useState('');
+            const [kind, setKind] = React.useState('node_failure');
+            const [nodes, setNodes] = React.useState([]);
+            const [allowLocal, setAllowLocal] = React.useState(false);
+            const [relax, setRelax] = React.useState(false);
+            const [depth, setDepth] = React.useState(1);
+            const [guestsMode, setGuestsMode] = React.useState('all');
+            const [storage, setStorage] = React.useState('');
+            const [where, setWhere] = React.useState('');
+            const [netKind, setNetKind] = React.useState('bridge');
+            const [bridge, setBridge] = React.useState('');
+            const [vnet, setVnet] = React.useState('');
+            const [vlan, setVlan] = React.useState('');
+            const [memory, setMemory] = React.useState('configured');
+            const [cpuThr, setCpuThr] = React.useState('');
+            const [memThr, setMemThr] = React.useState('');
+            const [running, setRunning] = React.useState(false);
+            const [report, setReport] = React.useState(null);
+            const [error, setError] = React.useState('');
+            const [filter, setFilter] = React.useState('all');
+            const [shown, setShown] = React.useState(WHATIF_PAGE);
+
+            // t() hands back the key on a miss: the server's English stands in then
+            const say = (key, args, fallback) => {
+                const raw = key ? t(key) : '';
+                let text = raw && raw !== key ? raw : (fallback || key || '');
+                Object.entries(args || {}).forEach(([k, v]) => {
+                    const val = Array.isArray(v) ? v.join(', ') : String(v);
+                    text = text.split(`{${k}}`).join(val);
+                });
+                return text;
+            };
+            const gib = (b) => b == null ? '-' : `${(b / 1073741824).toFixed(1)} GiB`;
+            const pct = (v) => v == null ? '-' : `${Number(v).toFixed(1)}%`;
+
+            React.useEffect(() => {
+                let gone = false;
+                setOpts(null); setReport(null); setError(''); setOptsError('');
+                setNodes([]); setStorage(''); setWhere(''); setBridge(''); setVnet('');
+                if (!clusterId) return;
+                (async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/whatif/options`);
+                        const d = r ? await r.json().catch(() => null) : null;
+                        if (gone) return;
+                        if (!r || !r.ok || !d) { setOptsError((d && d.error) || t('whatifOptionsFailed')); return; }
+                        setOpts(d);
+                        if (d.thresholds) {
+                            setCpuThr(String(d.thresholds.cpu ?? ''));
+                            setMemThr(String(d.thresholds.memory ?? ''));
+                        }
+                    } catch (e) {
+                        if (!gone) setOptsError(t('whatifOptionsFailed'));
+                    }
+                })();
+                return () => { gone = true; };
+            }, [clusterId]);
+
+            const onlineNodes = (opts?.nodes || []).filter(n => n.status === 'online');
+            const toggleNode = (name) => setNodes(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
+            const pickedStorage = (opts?.storages || []).find(s => s.storage === storage);
+            const pickedBridge = (opts?.bridges || []).find(b => b.name === bridge);
+
+            const body = () => {
+                const out = { type: kind, memory };
+                const thr = {};
+                const c = parseFloat(cpuThr), m = parseFloat(memThr);
+                if (!isNaN(c) && opts?.thresholds && c !== opts.thresholds.cpu) thr.cpu = c;
+                if (!isNaN(m) && opts?.thresholds && m !== opts.thresholds.memory) thr.memory = m;
+                if (Object.keys(thr).length) out.thresholds = thr;
+                if (kind === 'node_failure' || kind === 'maintenance') out.nodes = nodes;
+                if (kind === 'maintenance') { out.allow_local_disks = allowLocal; out.relax_anti_affinity = relax; }
+                if (kind === 'headroom') { out.depth = depth; out.guests = guestsMode; }
+                if (kind === 'storage_failure') { out.storage = storage; if (where) out.node = where; }
+                if (kind === 'network_failure') {
+                    if (netKind === 'bridge') out.bridge = bridge; else out.vnet = vnet;
+                    if (vlan !== '' && !isNaN(parseInt(vlan, 10))) out.vlan = parseInt(vlan, 10);
+                    if (where) out.node = where;
+                }
+                return out;
+            };
+            const missing = (kind === 'node_failure' || kind === 'maintenance') && !nodes.length ? 'whatifPickNode'
+                : kind === 'storage_failure' && !storage ? 'whatifPickStorage'
+                : kind === 'network_failure' && !(netKind === 'bridge' ? bridge : vnet) ? 'whatifPickNetwork' : '';
+
+            const simulate = async () => {
+                if (missing || running) return;
+                setRunning(true); setError('');
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/whatif`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body()),
+                    });
+                    const d = r ? await r.json().catch(() => null) : null;
+                    if (!r || !r.ok || !d || d.error) { setError((d && d.error) || t('whatifRunFailed')); return; }
+                    setReport(d); setFilter('all'); setShown(WHATIF_PAGE);
+                } catch (e) {
+                    setError(t('whatifRunFailed'));
+                } finally { setRunning(false); }
+            };
+
+            const Basis = ({ b }) => {
+                const map = { known: ['whatifKnown', 'bg-blue-500/10 text-blue-400'],
+                              calculated: ['whatifCalculated', 'bg-purple-500/10 text-purple-400'],
+                              assumed: ['whatifAssumed', 'bg-yellow-500/10 text-yellow-400'] };
+                const [key, cls] = map[b] || map.assumed;
+                return <span data-whatif-basis={b} className={`px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap ${cls}`}>{t(key)}</span>;
+            };
+            const field = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-proxmox-orange';
+            const label = 'block text-xs text-gray-400 mb-1';
+
+            if (opts && opts.supported === false) {
+                return <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 text-sm text-gray-400">{t('whatifNotSupported')}</div>;
+            }
+
+            const rows = (report?.guests || []).filter(g => filter === 'all' || g.outcome === filter);
+            const outcomeOf = (id) => WHATIF_OUTCOMES.find(o => o.id === id) || WHATIF_OUTCOMES[4];
+            const thrSource = (src) => src === 'alert_rule' ? t('whatifThrFromRule') : src === 'request' ? t('whatifThrFromRun') : t('whatifThrDefault');
+
+            return (
+                <div className="space-y-4" data-whatif="view">
+                    <div>
+                        <h2 className="text-lg font-semibold text-white flex items-center gap-2">
+                            <Icons.Scale className="w-5 h-5 text-proxmox-orange" />
+                            {t('whatifTitle')}
+                        </h2>
+                        <p className="text-xs text-gray-500 mt-1">{t('whatifDesc')}</p>
+                    </div>
+
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 space-y-4" data-whatif="picker">
+                        <div>
+                            <div className={label}>{t('whatifScenario')}</div>
+                            <div className="flex flex-wrap gap-2">
+                                {WHATIF_SCENARIOS.map(s => (
+                                    <button key={s.id} type="button" data-whatif-scenario={s.id}
+                                        onClick={() => { setKind(s.id); setWhere(''); }}
+                                        className={`px-3 py-1.5 rounded-lg text-sm border ${kind === s.id
+                                            ? 'border-proxmox-orange bg-proxmox-orange/10 text-white'
+                                            : 'border-proxmox-border text-gray-400 hover:text-white hover:bg-proxmox-hover'}`}>
+                                        {t(s.label)}
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="text-xs text-gray-500 mt-2">{t((WHATIF_SCENARIOS.find(s => s.id === kind) || WHATIF_SCENARIOS[0]).desc)}</p>
+                        </div>
+
+                        {optsError && <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3">{optsError}</div>}
+                        {!opts && !optsError && <div className="text-sm text-gray-500">{t('whatifLoading')}</div>}
+
+                        {opts && (kind === 'node_failure' || kind === 'maintenance') && (
+                            <div>
+                                <div className={label}>{t('whatifNodes')}</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {onlineNodes.map(n => (
+                                        <label key={n.name} className={`px-2.5 py-1 rounded-lg border text-sm cursor-pointer flex items-center gap-1.5 ${nodes.includes(n.name)
+                                            ? 'border-proxmox-orange bg-proxmox-orange/10 text-white' : 'border-proxmox-border text-gray-300'}`}>
+                                            <input type="checkbox" data-whatif-node={n.name} checked={nodes.includes(n.name)} onChange={() => toggleNode(n.name)} />
+                                            {n.name}
+                                            {n.maintenance && <span className="text-[10px] text-yellow-400">({t('whatifStateMaintenance')})</span>}
+                                        </label>
+                                    ))}
+                                </div>
+                                {kind === 'maintenance' && (
+                                    <div className="flex flex-wrap gap-4 mt-3 text-sm text-gray-300">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input type="checkbox" checked={allowLocal} onChange={e => setAllowLocal(e.target.checked)} />
+                                            {t('whatifAllowLocal')}
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input type="checkbox" checked={relax} onChange={e => setRelax(e.target.checked)} />
+                                            {t('whatifRelaxApart')}
+                                        </label>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {opts && kind === 'headroom' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                    <div className={label}>{t('whatifDepth')}</div>
+                                    <select value={depth} onChange={e => setDepth(parseInt(e.target.value, 10))} className={`${field} w-full`} data-whatif-field="depth">
+                                        <option value={1}>{t('whatifN1')}</option>
+                                        <option value={2}>{t('whatifN2')}</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifGuestsLabel')}</div>
+                                    <select value={guestsMode} onChange={e => setGuestsMode(e.target.value)} className={`${field} w-full`}>
+                                        <option value="all">{t('whatifGuestsAll')}</option>
+                                        <option value="ha">{t('whatifGuestsHa')}</option>
+                                    </select>
+                                </div>
+                            </div>
+                        )}
+
+                        {opts && kind === 'storage_failure' && (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div>
+                                    <div className={label}>{t('whatifStorage')}</div>
+                                    <select value={storage} onChange={e => { setStorage(e.target.value); setWhere(''); }} className={`${field} w-full`} data-whatif-field="storage">
+                                        <option value="">-</option>
+                                        {(opts.storages || []).map(s => (
+                                            <option key={s.storage} value={s.storage}>{s.storage} ({s.shared ? t('whatifShared') : t('whatifLocal')})</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifWhere')}</div>
+                                    <select value={where} onChange={e => setWhere(e.target.value)} className={`${field} w-full`} data-whatif-field="where">
+                                        <option value="">{t('whatifEverywhere')}</option>
+                                        {(pickedStorage?.nodes || []).map(n => <option key={n} value={n}>{n}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+                        )}
+
+                        {opts && kind === 'network_failure' && (
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                <div>
+                                    <div className={label}>{t('whatifNetKind')}</div>
+                                    <select value={netKind} onChange={e => setNetKind(e.target.value)} className={`${field} w-full`} data-whatif-field="netkind">
+                                        <option value="bridge">{t('whatifBridge')}</option>
+                                        <option value="vnet" disabled={!(opts.vnets || []).length}>{t('whatifVnet')}</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div className={label}>{netKind === 'bridge' ? t('whatifBridge') : t('whatifVnet')}</div>
+                                    {netKind === 'bridge' ? (
+                                        <select value={bridge} onChange={e => { setBridge(e.target.value); setWhere(''); }} className={`${field} w-full`} data-whatif-field="bridge">
+                                            <option value="">-</option>
+                                            {(opts.bridges || []).map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
+                                        </select>
+                                    ) : (
+                                        <select value={vnet} onChange={e => setVnet(e.target.value)} className={`${field} w-full`} data-whatif-field="vnet">
+                                            <option value="">-</option>
+                                            {(opts.vnets || []).map(v => <option key={v.vnet} value={v.vnet}>{v.vnet}{v.tag ? ` (${v.tag})` : ''}</option>)}
+                                        </select>
+                                    )}
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifVlan')}</div>
+                                    <input type="number" min="1" max="4094" value={vlan} onChange={e => setVlan(e.target.value)} className={`${field} w-full`} data-whatif-field="vlan" />
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifWhere')}</div>
+                                    <select value={where} onChange={e => setWhere(e.target.value)} className={`${field} w-full`} data-whatif-field="where">
+                                        <option value="">{t('whatifEverywhere')}</option>
+                                        {(netKind === 'bridge' && pickedBridge ? pickedBridge.nodes : onlineNodes.map(n => n.name)).map(n => <option key={n} value={n}>{n}</option>)}
+                                    </select>
+                                </div>
+                            </div>
+                        )}
+
+                        {opts && (
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 border-t border-proxmox-border pt-3">
+                                <div>
+                                    <div className={label}>{t('whatifMemoryBasis')}</div>
+                                    <select value={memory} onChange={e => setMemory(e.target.value)} className={`${field} w-full`}>
+                                        <option value="configured">{t('whatifMemConfigured')}</option>
+                                        <option value="current">{t('whatifMemCurrent')}</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifCpuThreshold')} <span className="text-gray-500">({thrSource(opts.thresholds?.cpu_source)})</span></div>
+                                    <input type="number" min="1" max="100" value={cpuThr} onChange={e => setCpuThr(e.target.value)} className={`${field} w-full`} data-whatif-field="cpu" />
+                                </div>
+                                <div>
+                                    <div className={label}>{t('whatifMemThreshold')} <span className="text-gray-500">({thrSource(opts.thresholds?.memory_source)})</span></div>
+                                    <input type="number" min="1" max="100" value={memThr} onChange={e => setMemThr(e.target.value)} className={`${field} w-full`} data-whatif-field="memory" />
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="flex items-center gap-3">
+                            <button type="button" onClick={simulate} disabled={!opts || !!missing || running} data-whatif="run"
+                                className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white flex items-center gap-2 disabled:opacity-50">
+                                {running ? <Icons.RotateCw className="w-4 h-4 animate-spin" /> : <Icons.Play className="w-4 h-4" />}
+                                {running ? t('whatifRunning') : t('whatifRun')}
+                            </button>
+                            {opts && missing && <span className="text-xs text-gray-500">{t(missing)}</span>}
+                        </div>
+                    </div>
+
+                    {error && <div className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3" data-whatif="error">{error}</div>}
+
+                    {report && (
+                        <div className="space-y-4" data-whatif="report">
+                            {/* a headroom check moves no guest of its own: its table is the answer */}
+                            {!report.headroom && <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+                                {WHATIF_OUTCOMES.map(o => (
+                                    <button key={o.id} type="button" data-whatif-count={o.id}
+                                        onClick={() => o.id !== 'unaffected' && setFilter(filter === o.id ? 'all' : o.id)}
+                                        className={`border rounded-xl p-3 text-left ${o.cls} ${filter === o.id ? 'border-proxmox-orange' : ''}`}>
+                                        <div className="text-2xl font-bold">{report.summary?.[o.id] ?? 0}</div>
+                                        <div className="text-xs">{t(o.label)}</div>
+                                    </button>
+                                ))}
+                            </div>}
+                            {report.stopped_affected > 0 && (
+                                <div className="text-xs text-gray-400">{say('whatifStoppedAffected', { n: report.stopped_affected })}</div>
+                            )}
+
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-whatif="limits">
+                                <h3 className="text-sm font-semibold text-white mb-3 flex items-center gap-2">
+                                    <Icons.AlertTriangle />
+                                    {t('whatifLimits')}
+                                </h3>
+                                {!(report.limits || []).length && <div className="text-sm text-green-400">{t('whatifNoLimits')}</div>}
+                                <ul className="space-y-2">
+                                    {(report.limits || []).map(l => (
+                                        <li key={l.code} data-whatif-limit={l.code} className="flex items-start justify-between gap-3 text-sm text-gray-300">
+                                            <span className="min-w-0">{say(WHATIF_LIMITS[l.code], l.args, l.text)}</span>
+                                            <Basis b={l.basis} />
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+
+                            {report.headroom && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-whatif="headroom">
+                                    <h3 className="text-sm font-semibold text-white mb-1">{t('whatifHeadroomTitle')}</h3>
+                                    <p className={`text-sm mb-3 ${report.headroom.ok ? 'text-green-400' : 'text-red-400'}`}>
+                                        {report.headroom.ok ? t('whatifHeadroomOk')
+                                            : say('whatifHeadroomFailing', { n: report.headroom.failing, total: report.headroom.checked })}
+                                    </p>
+                                    <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                                        <table className="w-full text-sm">
+                                            <thead className="text-xs text-gray-400">
+                                                <tr>
+                                                    <th className="text-left p-2">{t('whatifFailedNodes')}</th>
+                                                    <th className="text-left p-2">{t('whatifQuorum')}</th>
+                                                    <th className="text-right p-2">{t('whatifWorstMem')}</th>
+                                                    <th className="text-right p-2">{t('whatifWorstCpu')}</th>
+                                                    <th className="text-left p-2">{t('whatifOverloaded')}</th>
+                                                    <th className="text-right p-2">{t('whatifUnplaced')}</th>
+                                                    <th className="text-right p-2">{t('whatifReserveMem')}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {report.headroom.combinations.map(c => (
+                                                    <tr key={c.failed.join('+')} className={`border-t border-proxmox-border ${c.ok ? '' : 'text-red-400'}`}>
+                                                        <td className="p-2 font-mono">{c.failed.join(' + ')}</td>
+                                                        <td className="p-2">{c.quorate ? t('whatifQuorumOk') : t('whatifNoQuorum')}</td>
+                                                        <td className="p-2 text-right font-mono">{c.checked === 'totals' ? t('whatifByTotals') : pct(c.worst_mem_pct)}</td>
+                                                        <td className="p-2 text-right font-mono">{c.checked === 'totals' ? '-' : pct(c.worst_cpu_pct)}</td>
+                                                        <td className="p-2">{[...new Set([...(c.over_mem || []), ...(c.over_cpu || [])])].join(', ') || '-'}</td>
+                                                        <td className="p-2 text-right font-mono">{c.unplaced == null ? '-' : c.unplaced}</td>
+                                                        <td className="p-2 text-right font-mono">{gib(c.mem_reserve)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-whatif="nodes">
+                                <div className="flex items-center justify-between mb-3 gap-2">
+                                    <h3 className="text-sm font-semibold text-white">{t('whatifNodesTitle')}</h3>
+                                    <span className="flex items-center gap-1 text-xs text-gray-500">
+                                        {t('whatifBefore')} <Basis b="known" /> {t('whatifAfter')} <Basis b="calculated" />
+                                    </span>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead className="text-xs text-gray-400">
+                                            <tr>
+                                                <th className="text-left p-2">{t('whatifNode')}</th>
+                                                <th className="text-left p-2">{t('whatifState')}</th>
+                                                <th className="text-right p-2">{t('whatifCpu')} {t('whatifBefore')}</th>
+                                                <th className="text-right p-2">{t('whatifCpu')} {t('whatifAfter')}</th>
+                                                <th className="text-right p-2">{t('whatifMem')} {t('whatifBefore')}</th>
+                                                <th className="text-right p-2">{t('whatifMem')} {t('whatifAfter')}</th>
+                                                <th className="text-right p-2">{t('whatifThresholds')}</th>
+                                                <th className="text-right p-2">{t('whatifGuestsMoved')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {(report.nodes || []).map(n => (
+                                                <tr key={n.node} data-whatif-node-row={n.node} className="border-t border-proxmox-border">
+                                                    <td className="p-2 text-white">
+                                                        {n.node}
+                                                        {n.worst_when && <div className="text-[10px] text-gray-500">{say('whatifWorstWhen', { nodes: n.worst_when })}</div>}
+                                                    </td>
+                                                    <td className="p-2 text-gray-400">{t(WHATIF_STATES[n.state] || 'whatifStateUp')}</td>
+                                                    <td className="p-2 text-right font-mono text-gray-400">{pct(n.cpu_before)}</td>
+                                                    <td className={`p-2 text-right font-mono ${n.over_cpu ? 'text-red-400' : 'text-gray-300'}`}>{pct(n.cpu_after)}</td>
+                                                    <td className="p-2 text-right font-mono text-gray-400">{pct(n.mem_before)}</td>
+                                                    <td className={`p-2 text-right font-mono ${n.over_mem ? 'text-red-400' : 'text-gray-300'}`}>{pct(n.mem_after)}</td>
+                                                    <td className="p-2 text-right font-mono text-gray-500">{n.cpu_threshold}% / {n.mem_threshold}%</td>
+                                                    <td className="p-2 text-right font-mono text-gray-400">+{n.guests_in} / -{n.guests_out}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {report.reserve && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3" data-whatif="reserve">
+                                        <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 text-sm">
+                                            <div className="text-xs text-gray-400 flex items-center justify-between gap-2">{t('whatifReserveMem')} <Basis b={report.reserve.basis} /></div>
+                                            <div className="text-white font-mono mt-1">{gib(report.reserve.mem_to_threshold)} / {gib(report.reserve.mem_to_full)}</div>
+                                        </div>
+                                        <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3 text-sm">
+                                            <div className="text-xs text-gray-400 flex items-center justify-between gap-2">{t('whatifReserveCpu')} <Basis b={report.reserve.basis} /></div>
+                                            <div className="text-white font-mono mt-1">{report.reserve.cpu_to_threshold} / {report.reserve.cpu_to_full}</div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {!report.headroom && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-whatif="guests">
+                                    <div className="flex items-center justify-between mb-3 gap-2">
+                                        <h3 className="text-sm font-semibold text-white">{t('whatifGuestsTitle')}</h3>
+                                        <select value={filter} onChange={e => { setFilter(e.target.value); setShown(WHATIF_PAGE); }} className={field}>
+                                            <option value="all">{t('whatifAllOutcomes')}</option>
+                                            {WHATIF_OUTCOMES.filter(o => o.id !== 'unaffected').map(o => <option key={o.id} value={o.id}>{t(o.label)}</option>)}
+                                        </select>
+                                    </div>
+                                    {!rows.length && <div className="text-sm text-gray-500">{t('whatifNoGuests')}</div>}
+                                    {rows.length > 0 && (
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-sm">
+                                                <thead className="text-xs text-gray-400">
+                                                    <tr>
+                                                        <th className="text-left p-2">{t('whatifGuest')}</th>
+                                                        <th className="text-left p-2">{t('whatifNode')}</th>
+                                                        <th className="text-left p-2">{t('whatifOutcome')}</th>
+                                                        <th className="text-left p-2">{t('whatifTarget')}</th>
+                                                        <th className="text-left p-2">{t('whatifReason')}</th>
+                                                        <th className="text-left p-2">{t('whatifBasis')}</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {rows.slice(0, shown).map(g => (
+                                                        <tr key={g.vmid} data-whatif-guest={g.vmid} className="border-t border-proxmox-border">
+                                                            <td className="p-2">
+                                                                <span className="text-white">{g.name || g.vmid}</span>
+                                                                <span className="text-xs text-gray-500 ml-2 font-mono">{g.vmid}</span>
+                                                            </td>
+                                                            <td className="p-2 text-gray-400">{g.node}</td>
+                                                            <td className="p-2">
+                                                                <span className={`px-1.5 py-0.5 rounded border text-xs ${outcomeOf(g.outcome).cls}`}>{t(outcomeOf(g.outcome).label)}</span>
+                                                            </td>
+                                                            <td className="p-2 text-gray-300">
+                                                                {g.target || '-'}
+                                                                {g.target && g.target_basis && <span className="ml-1"><Basis b={g.target_basis} /></span>}
+                                                                {g.risk === 'overcommitted' && <div className="text-[10px] text-red-400">{t('whatifRiskOvercommitted')}</div>}
+                                                            </td>
+                                                            <td className="p-2 text-gray-300">{say(WHATIF_REASONS[g.reason?.code], g.reason?.args, g.text)}</td>
+                                                            <td className="p-2"><Basis b={g.basis} /></td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                    {rows.length > shown && (
+                                        <button type="button" onClick={() => setShown(shown + WHATIF_PAGE)} className="mt-2 text-xs text-proxmox-orange hover:text-white">
+                                            {t('whatifShowMore')} ({rows.length - shown})
+                                        </button>
+                                    )}
+                                    {report.guests_hidden > 0 && <div className="text-xs text-gray-500 mt-2">{say('whatifHidden', { n: report.guests_hidden })}</div>}
+                                    {report.guests_truncated > 0 && <div className="text-xs text-gray-500 mt-2">{say('whatifTruncated', { n: report.guests_truncated })}</div>}
+                                </div>
+                            )}
+
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-whatif="assumptions">
+                                <h3 className="text-sm font-semibold text-white mb-2 flex items-center gap-2">{t('whatifAssumptions')} <Basis b="assumed" /></h3>
+                                <ul className="list-disc pl-5 space-y-1 text-sm text-gray-300">
+                                    {(report.assumptions || []).map(a => (
+                                        <li key={a.code} data-whatif-assumption={a.code}>{say(WHATIF_ASSUMPTIONS[a.code], a.args, a.text)}</li>
+                                    ))}
+                                </ul>
+                                <p className="text-xs text-gray-500 mt-3">{t('whatifBasisHelp')}</p>
+                                {report.reads && (
+                                    <p className="text-xs text-gray-500 mt-1">{say('whatifReads', { read: report.reads.configs_read, cached: report.reads.configs_cached, unread: report.reads.configs_unread })}</p>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         // NS Apr 2026 — Compliance Dashboard (top-level read-only audit view).
         // Aggregates per-cluster hardening scores, BSI/ISO/NIS2 mapping, audit activity.
         // Available to ops/Compliance Officers without admin rights (admin.audit or
@@ -21444,6 +21993,7 @@
                                                         { id: 'costs', label: t('costDashboard') || 'Costs', icon: Icons.DollarSign },
                                                         { id: 'power', label: t('powerTitle') || 'Power & Carbon', icon: Icons.Zap },
                                                         { id: 'topology', label: t('topologyTitle') || 'Topology', icon: Icons.Network },
+                                                        { id: 'whatif', label: t('whatifTitle'), icon: Icons.Scale },
                                                         { id: 'api-health', label: t('apiHealth') || 'API Health', icon: Icons.Zap },
                                                     ].map(tab => (
                                                         <button
@@ -22165,6 +22715,11 @@
                                                         addToast={addToast}
                                                         t={t}
                                                     />
+                                                )}
+
+                                                {/* LW Oct 2026 - what-if simulator of the cluster */}
+                                                {reportSubTab === 'whatif' && selectedCluster?.id && (
+                                                    <WhatIfTab clusterId={selectedCluster.id} authFetch={authFetch} />
                                                 )}
 
                                                 {/* MK May 2026 — API latency dashboard */}
