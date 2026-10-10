@@ -437,7 +437,11 @@
                     { id: 'apihealth', label: 'API Health', icon: 'Activity' },
                     { id: 'cve', label: 'CVE Scanner', icon: 'Shield' },
                 ] },
-                { label: 'ACTIVITY', items: [{ id: 'tasks', label: 'Tasks', icon: 'ClipboardList' }] },
+                { label: 'ACTIVITY', items: [
+                    { id: 'tasks', label: 'Tasks', icon: 'ClipboardList' },
+                    // LW Oct 2026 - the flight recorder of the selected cluster
+                    { id: 'timeline', label: t('tlTab'), icon: 'Clock' },
+                ] },
             ];
             if (isAdmin) {
                 groups.push({ label: 'GOVERNANCE', items: [
@@ -2503,6 +2507,7 @@
                 schedules: T('scheduledActions') || 'Schedules',
                 cve: T('cveScanner') || 'CVE Scanner',
                 tasks: T('cloud.tasks') || 'Tasks',
+                timeline: T('tlTab') || 'Timeline',
                 users: T('cloud.users') || 'Users',
                 settings: T('cloud.settings') || 'Settings',
             };
@@ -2635,6 +2640,9 @@
                         break;
                     case 'apihealth':
                         body = <div className="cloud-mounted"><ApiLatencyDashboard clusterId={cid} authFetch={authFetch} apiUrl={API_URL} t={T} /></div>;
+                        break;
+                    case 'timeline':
+                        body = <div className="cloud-mounted"><TimelineView key={cid} clusterId={cid} authFetch={authFetch} t={t} /></div>;
                         break;
                     case 'drift':
                         body = <div className="cloud-mounted"><DriftTab clusterId={cid} clusterName={selectedCluster && selectedCluster.name} authFetch={authFetch} addToast={addToast} t={T} isAdmin={isAdmin} /></div>;

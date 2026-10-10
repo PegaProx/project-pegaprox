@@ -851,6 +851,8 @@
             const [guestInfo, setGuestInfo] = useState(null);
             // MK #334 — fsinfo for the modern/compact panel (mirrors the Corporate one)
             const [fsInfo, setFsInfo] = useState(null);
+            // LW Oct 2026 - the timeline section loads once it is opened
+            const [showTimeline, setShowTimeline] = useState(false);
 
             // LW: inline arrow fn, less boilerplate
             const authFetch = async (url, opts = {}) => {
@@ -1543,6 +1545,19 @@
                         </div>
                     </div>
 
+                    {/* Timeline of this guest and its host */}
+                    <div className="px-6 pb-6" data-vm-timeline>
+                        <button type="button" onClick={() => setShowTimeline(v => !v)} data-vm-timeline-toggle
+                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-white mb-3">
+                            {showTimeline ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('tlTab')}
+                        </button>
+                        {showTimeline && (
+                            <div className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
+                                <TimelineView key={`${clusterId}:${vm.vmid}`} clusterId={clusterId} vmid={vm.vmid} authFetch={authFetch} t={t} compact />
+                            </div>
+                        )}
+                    </div>
+
                     {/* Tags */}
                     {vm.tags && (
                         <div className="px-6 pb-6">
@@ -2097,6 +2112,9 @@
                             onClick={() => { setActiveDetailTab('snapshots'); fetchSnapshots(); }}>
                             <Icons.Clock className="w-3 h-3 inline mr-1" />{t('snapshotsTab') || 'Snapshots'}
                         </button>
+                        <button className={activeDetailTab === 'timeline' ? 'active' : ''} onClick={() => setActiveDetailTab('timeline')} data-corp-vm-timeline>
+                            <Icons.Activity className="w-3 h-3 inline mr-1" />{t('tlTab')}
+                        </button>
                         <button onClick={() => onOpenConfig(vm)}>
                             <Icons.Settings className="w-3 h-3 inline mr-1" />{t('configure')}
                         </button>
@@ -2573,6 +2591,13 @@
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {/* LW Oct 2026 - what happened to this guest and its host */}
+                    {activeDetailTab === 'timeline' && (
+                        <div className="p-4">
+                            <TimelineView key={`${clusterId}:${vm.vmid}`} clusterId={clusterId} vmid={vm.vmid} authFetch={authFetch} t={t} />
                         </div>
                     )}
 

@@ -1526,6 +1526,7 @@
                 { id: 'system', label: 'System', icon: Icons.Cog },
                 { id: 'disks', label: t('storageRepos') || 'Storage', icon: Icons.HardDrive },
                 { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
             ] : [
                 { id: 'summary', label: 'Summary', icon: Icons.Activity },
                 { id: 'performance', label: 'Performance', icon: Icons.BarChart },
@@ -1536,6 +1537,8 @@
                 { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
                 { id: 'repos', label: 'Repositories', icon: Icons.Package },
                 { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                // LW Oct 2026 - what happened on this node, from the flight recorder
+                { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
                 { id: 'subscription', label: 'Subscription', icon: Icons.Shield },
                 { id: 'ceph', label: 'Ceph', icon: Icons.Database },
             ];
@@ -1544,7 +1547,7 @@
             // changes it through the active, so only a read-only one locks them. The shell
             // tab points to the shell on the active instead, unless this one serves users.
             const tabs = allTabs;
-            const lockedTab = haReadOnly && !['summary', 'performance', 'tasks'].includes(activeTab);
+            const lockedTab = haReadOnly && !['summary', 'performance', 'tasks', 'timeline'].includes(activeTab);
             // spread on the fieldsets around the parts that change the node; what only reads
             // (Refresh, SMART) sits outside them and keeps working on a standby
             const haLock = { disabled: lockedTab, 'data-ha-locked': lockedTab ? '' : undefined };
@@ -1554,7 +1557,8 @@
             const loadTabData = async (tab) => {
                 // LW Oct 2026 (#1143) - the shell loads nothing here, and the spinner in between
                 // unmounted its terminal right after it mounted: two sessions per visit
-                if (tab === 'shell') return;
+                // the timeline loads itself (TimelineView)
+                if (tab === 'shell' || tab === 'timeline') return;
                 setLoading(true);
                 try {
                     const endpoints = {
@@ -3619,6 +3623,11 @@
                                                 </div>
                                             )) : <div className="text-center py-8 text-gray-500">{t('noTasks') || 'No tasks'}</div>}
                                         </div>
+                                    )}
+
+                                    {activeTab === 'timeline' && (
+                                        <TimelineView clusterId={clusterId} node={node} t={t}
+                                            authFetch={(u, o = {}) => fetch(u, { ...o, credentials: 'include', headers: { ...(o.headers || {}), ...authHeaders } }).catch(() => null)} />
                                     )}
 
                                     {activeTab === 'subscription' && (
@@ -5716,6 +5725,7 @@
                                 <div className="corp-subnav">
                                     <button className={`corp-subnav-item ${monitorSubTab === 'performance' ? 'active' : ''}`} onClick={() => setMonitorSubTab('performance')}>{t('performance')}</button>
                                     <button className={`corp-subnav-item ${monitorSubTab === 'tasks' ? 'active' : ''}`} onClick={() => { setMonitorSubTab('tasks'); if (!data.tasks) loadTabData('tasks'); }}>{t('tasks')}</button>
+                                    <button className={`corp-subnav-item ${monitorSubTab === 'timeline' ? 'active' : ''}`} onClick={() => setMonitorSubTab('timeline')} data-corp-node-timeline>{t('tlTab')}</button>
                                 </div>
                                 <div className="flex-1 pl-4">
                                     {monitorSubTab === 'performance' && (
@@ -5754,6 +5764,14 @@
                                                 <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.BarChart className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">No performance data available</p></div>
                                             )}
                                         </div>
+                                    )}
+                                    {/* LW Oct 2026 - what happened on this node, a guest opens its own view */}
+                                    {monitorSubTab === 'timeline' && (
+                                        <TimelineView key={navKey} clusterId={clusterId} node={node} authFetch={authFetch} t={t}
+                                            onOpenGuest={onSelectVm ? (vmid) => {
+                                                const vm = (clusterResources || []).find(r => Number(r.vmid) === Number(vmid));
+                                                if (vm) onSelectVm(vm);
+                                            } : undefined} />
                                     )}
                                     {monitorSubTab === 'tasks' && (
                                         <div>

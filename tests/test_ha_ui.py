@@ -1341,7 +1341,8 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
     # the shell tab stays on every standby and points to the shell on the active, unless
     # the standby serves users
     assert 'const tabs = allTabs;' in body
-    assert "const lockedTab = haReadOnly && !['summary', 'performance', 'tasks'].includes(activeTab);" in body
+    # the timeline only reads as well
+    assert "const lockedTab = haReadOnly && !['summary', 'performance', 'tasks', 'timeline'].includes(activeTab);" in body
     assert "{activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}" in body
     assert "{activeTab === 'shell' && !haConsolesElsewhere && (" in body
     # fullscreen is the same panel behind that gate, no second terminal of its own (#1143)
@@ -1358,7 +1359,7 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
             'subscription', 'ceph'} <= set(tabs)
     for name in ('network', 'hardware', 'repos', 'ceph'):
         assert tabs[name].split('\n', 1)[1].lstrip().startswith('<fieldset {...haLock} className="contents">'), name
-    for name in ('summary', 'performance', 'tasks'):
+    for name in ('summary', 'performance', 'tasks', 'timeline'):
         assert 'haLock' not in tabs[name], name
 
     def locked(tab, needle):

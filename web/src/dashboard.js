@@ -6205,6 +6205,237 @@
             );
         }
 
+        // LW Oct 2026 - the flight recorder: what happened on a cluster, a node or a guest in one
+        // list, newest first (GET /api/timeline). What hangs under an event is correlation, the
+        // same guest or node shortly before, and the page says so. Only reads, so a standby
+        // shows it too; only the leader keeps these rows (#625).
+        const TL_PAGE = 50;
+        const TL_KINDS = {
+            audit: ['tlKindAudit', Icons.FileText], alert: ['tlKindAlert', Icons.Bell],
+            migration: ['tlKindMigration', Icons.ArrowRight], balancer: ['tlKindBalancer', Icons.Activity],
+            drift: ['tlKindDrift', Icons.Shield], task: ['tlKindTask', Icons.Play], backup: ['tlKindBackup', Icons.Database],
+            backup_verify: ['tlKindBackupVerify', Icons.CheckCircle], node: ['tlKindNode', Icons.Server],
+            site_recovery: ['tlKindSiteRecovery', Icons.Globe], rolling_update: ['tlKindRollingUpdate', Icons.RefreshCw],
+            syslog: ['tlKindSyslog', Icons.Terminal], incident: ['tlKindIncident', Icons.AlertTriangle],
+        };
+        const TL_SEVERITY = {
+            critical: ['tlSevCritical', 'bg-red-500', 'text-red-400'],
+            warning: ['tlSevWarning', 'bg-yellow-500', 'text-yellow-400'],
+            info: ['tlSevInfo', 'bg-gray-500', 'text-gray-200'],
+        };
+        const TL_RANGES = [['tlRange1h', 1], ['tlRange24h', 24], ['tlRange7d', 168], ['tlRange30d', 720]];
+        const TL_NODE_TEXT = {
+            offline: 'tlNodeOffline', online: 'tlNodeOnline', unknown: 'tlNodeUnknown', maintenance: 'tlNodeMaintenance',
+            maintenance_end: 'tlNodeMaintenanceEnd', no_quorum: 'tlNodeNoQuorum', quorate: 'tlNodeQuorate',
+        };
+        // where a kind has a view of its own in the cluster
+        const TL_VIEWS = { drift: 'compliance', site_recovery: 'site-recovery', balancer: 'settings', rolling_update: 'settings' };
+
+        function tlFill(t, key, vals) {
+            return Object.keys(vals).reduce((s, k) => s.split(`{${k}}`).join(String(vals[k] ?? '')), t(key));
+        }
+
+        function tlText(e, t) {
+            const p = e.params || {};
+            const guest = e.guest_name ? `${e.guest_name} (${e.guest})` : (e.guest != null ? String(e.guest) : '');
+            const nodeKey = (e.what || '').startsWith('node.') && TL_NODE_TEXT[e.what.slice(5)];
+            if (nodeKey) {
+                return tlFill(t, nodeKey, { node: p.node || e.node || '' }) + (p.detail === 'in maintenance' ? ' ' + t('tlInMaintenance') : '');
+            }
+            switch (e.what) {
+                case 'alert.fired': return tlFill(t, 'tlAlertFired', { text: e.title });
+                case 'alert.resolved': return tlFill(t, 'tlAlertResolved', { text: e.title });
+                case 'migration': {
+                    const vals = { guest, source: p.source || '', target: p.target || '' };
+                    if (p.status === 'failed') return tlFill(t, 'tlMigrationFailed', vals);
+                    if (p.status === 'dry_run') return tlFill(t, 'tlBalancerDryRun', vals);
+                    return tlFill(t, e.kind === 'balancer' ? 'tlBalancerMoved' : 'tlMigrated', vals);
+                }
+                case 'backup_verify':
+                    return tlFill(t, p.status === 'passed' ? 'tlVerifyPassed'
+                        : (p.status === 'failed' || p.status === 'error') ? 'tlVerifyFailed' : 'tlVerifyRunning', { guest });
+                case 'rolling.started': return tlFill(t, 'tlRollingStarted', { nodes: p.nodes });
+                case 'rolling.ended': return tlFill(t, 'tlRollingEnded', { status: p.status || '' });
+                case 'site_recovery': return tlFill(t, 'tlSiteRecovery', { plan: p.plan || '', type: p.event_type || '', status: p.status || '' });
+                default: return e.title || e.kind;
+            }
+        }
+
+        function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab }) {
+            const [hours, setHours] = React.useState(24);
+            const [kind, setKind] = React.useState('');
+            const [severity, setSeverity] = React.useState('');
+            const [rows, setRows] = React.useState([]);
+            const [next, setNext] = React.useState(null);
+            const [sources, setSources] = React.useState({});
+            const [linkWindow, setLinkWindow] = React.useState(10);
+            const [loaded, setLoaded] = React.useState(false);
+            const [failed, setFailed] = React.useState(false);
+            const [loading, setLoading] = React.useState(false);
+            const [leaderAway, setLeaderAway] = React.useState(false);
+            const [open, setOpen] = React.useState({});
+            const gen = React.useRef(0);
+            const from = React.useRef(null);
+            // the detail views build their fetch on every render; the list loads on what it asks, not on that
+            const fetchRef = React.useRef(authFetch);
+            fetchRef.current = authFetch;
+
+            const load = React.useCallback(async (before) => {
+                if (!clusterId) return;
+                const mine = before ? gen.current : ++gen.current;
+                if (!before) from.current = new Date(Date.now() - hours * 3600 * 1000).toISOString();
+                setLoading(true);
+                try {
+                    const q = new URLSearchParams({ cluster: clusterId, limit: String(TL_PAGE), from: from.current });
+                    if (node) q.set('node', node);
+                    if (vmid != null) q.set('vmid', String(vmid));
+                    if (kind) q.set('kinds', kind);
+                    if (severity) q.set('severity', severity);
+                    if (before) q.set('before', before);
+                    const r = await fetchRef.current(`${API_URL}/timeline?${q.toString()}`);
+                    const away = await haLeaderAway(r);
+                    const d = r && r.ok ? await r.json().catch(() => null) : null;
+                    if (mine !== gen.current) return;
+                    setLeaderAway(away);
+                    setFailed(!d && !away);
+                    if (!d) return;
+                    setRows(prev => before ? prev.concat(d.events || []) : (d.events || []));
+                    setNext(d.next_before || null);
+                    setSources(d.sources || {});
+                    setLinkWindow((d.correlation || {}).window_minutes ?? 10);
+                    setLoaded(true);
+                } finally {
+                    if (mine === gen.current) setLoading(false);
+                }
+            }, [clusterId, node, vmid, hours, kind, severity]);
+
+            React.useEffect(() => {
+                setRows([]); setNext(null); setLoaded(false); setOpen({});
+                load(null);
+                return () => { gen.current += 1; };
+            }, [load]);
+
+            if (!clusterId) return null;
+            const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
+            const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
+            const before = (s) => s >= 60 ? tlFill(t, 'tlMinBefore', { m: Math.round(s / 60) }) : tlFill(t, 'tlSecBefore', { s });
+            const hidden = Object.keys(sources).filter(k => TL_KINDS[k] && sources[k] && sources[k].shown === false);
+            const badge = (k) => {
+                const [key, Icon] = TL_KINDS[k] || [null, null];
+                return (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-gray-500/20 text-gray-300 whitespace-nowrap" data-tl-badge={k}>
+                        {Icon && <Icon />}{key ? t(key) : k}
+                    </span>
+                );
+            };
+            const guestLabel = (e) => e.guest_name ? `${e.guest_name} (${e.guest})` : String(e.guest);
+
+            return (
+                <div className="space-y-3 min-w-0" data-timeline={vmid != null ? 'guest' : node ? 'node' : 'cluster'}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                            <h3 className="font-semibold flex items-center gap-2">
+                                <span className="text-blue-400 flex-shrink-0"><Icons.Clock /></span>
+                                {t('tlTitle')}
+                            </h3>
+                            <p className="text-xs text-gray-500 mt-1">{t(vmid != null ? 'tlDescGuest' : node ? 'tlDescNode' : 'tlDesc')}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <select value={hours} onChange={e => setHours(Number(e.target.value))} className={selectCls} data-tl-range aria-label={t('tlFilterRange')}>
+                                {TL_RANGES.map(([key, h]) => <option key={h} value={h}>{t(key)}</option>)}
+                            </select>
+                            <select value={kind} onChange={e => setKind(e.target.value)} className={selectCls} data-tl-filter-kind aria-label={t('tlFilterKind')}>
+                                <option value="">{t('tlAllKinds')}</option>
+                                {Object.keys(TL_KINDS).map(k => <option key={k} value={k}>{t(TL_KINDS[k][0])}</option>)}
+                            </select>
+                            <select value={severity} onChange={e => setSeverity(e.target.value)} className={selectCls} data-tl-filter-severity aria-label={t('tlFilterSeverity')}>
+                                <option value="">{t('tlAllSeverities')}</option>
+                                {['critical', 'warning', 'info'].map(s => <option key={s} value={s}>{t(TL_SEVERITY[s][0])}</option>)}
+                            </select>
+                            <button type="button" onClick={() => load(null)} disabled={loading} title={t('refresh')}
+                                className="p-1 text-gray-400 hover:text-white disabled:opacity-40" data-tl-refresh>
+                                {loading ? <Icons.RotateCw /> : <Icons.RefreshCw />}
+                            </button>
+                        </div>
+                    </div>
+                    {leaderAway && <div className="text-xs text-yellow-400" data-tl-leader-away>{t('pgHaLeaderAwayView')}</div>}
+                    {failed && <div className="text-xs text-red-400" data-tl-error>{t('tlLoadError')}</div>}
+                    {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
+                    {loaded && hidden.length > 0 && (
+                        <div className="text-xs text-gray-500" data-tl-hidden>
+                            {tlFill(t, 'tlHidden', { kinds: hidden.map(k => t(TL_KINDS[k][0])).join(', ') })}
+                        </div>
+                    )}
+                    {loaded && rows.length === 0 && (
+                        <div className="text-xs text-gray-500 p-2 bg-proxmox-dark rounded-lg" data-tl-empty>
+                            {t(kind || severity ? 'tlNoMatch' : 'tlNone')}
+                        </div>
+                    )}
+                    {rows.length > 0 && (
+                        <div className={compact ? 'space-y-2 max-h-96 overflow-y-auto' : 'space-y-2'}>
+                            {rows.map(e => {
+                                const sev = TL_SEVERITY[e.severity] || TL_SEVERITY.info;
+                                const links = e.shortly_before || [];
+                                const view = onOpenTab && TL_VIEWS[e.kind];
+                                return (
+                                    <div key={e.id} data-tl-row={e.id} data-tl-row-kind={e.kind}
+                                        className="flex flex-col gap-1 bg-proxmox-dark rounded-lg px-3 py-2 text-xs min-w-0">
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0">
+                                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${sev[1]}`} title={t(sev[0])} data-tl-sev={e.severity}></span>
+                                            <span className="text-gray-500 whitespace-nowrap">{when(e.time)}</span>
+                                            {badge(e.kind)}
+                                            <span className={`text-sm min-w-0 ${sev[2]}`} data-tl-text>{tlText(e, t)}</span>
+                                            {e.node && e.node !== node && (onOpenNode ? (
+                                                <button type="button" onClick={() => onOpenNode(e.node)} data-tl-open-node={e.node}
+                                                    className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.Server />{e.node}</button>
+                                            ) : <span className="flex items-center gap-1 text-gray-400"><Icons.Server />{e.node}</span>)}
+                                            {e.guest != null && vmid == null && (onOpenGuest ? (
+                                                <button type="button" onClick={() => onOpenGuest(e.guest)} data-tl-open-guest={e.guest}
+                                                    className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.Monitor />{guestLabel(e)}</button>
+                                            ) : <span className="flex items-center gap-1 text-gray-400"><Icons.Monitor />{guestLabel(e)}</span>)}
+                                            {view && (
+                                                <button type="button" onClick={() => onOpenTab(view)} data-tl-open-view={view}
+                                                    className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.ExternalLink />{t('tlOpenView')}</button>
+                                            )}
+                                        </div>
+                                        {e.details && <div className="text-gray-400 leading-relaxed break-all" data-tl-details>{e.details}</div>}
+                                        {links.length > 0 && (
+                                            <div>
+                                                <button type="button" onClick={() => setOpen(o => ({ ...o, [e.id]: !o[e.id] }))} data-tl-links-toggle
+                                                    className="flex items-center gap-1 text-blue-400 hover:text-blue-300">
+                                                    {open[e.id] ? <Icons.ChevronDown /> : <Icons.ChevronRight />}
+                                                    {tlFill(t, 'tlShortlyBefore', { n: links.length })}
+                                                </button>
+                                                {open[e.id] && (
+                                                    <div className="mt-1 pl-3 border-l border-proxmox-border space-y-1" data-tl-links>
+                                                        <div className="text-gray-500" data-tl-links-note>{tlFill(t, 'tlShortlyBeforeNote', { min: linkWindow })}</div>
+                                                        {links.map(x => (
+                                                            <div key={x.id} className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0" data-tl-link={x.id}>
+                                                                <span className="text-gray-500 whitespace-nowrap">{before(x.seconds_before)}</span>
+                                                                {badge(x.kind)}
+                                                                <span className="text-gray-300 min-w-0">{tlText(x, t)}</span>
+                                                                {x.node && <span className="flex items-center gap-1 text-gray-400"><Icons.Server />{x.node}</span>}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                    {next && (
+                        <button type="button" onClick={() => load(next)} disabled={loading} data-tl-more
+                            className="text-xs text-blue-400 hover:text-blue-300 disabled:opacity-40">
+                            {t('tlLoadMore')}
+                        </button>
+                    )}
+                </div>
+            );
+        }
+
         // MK May 2026 — Web Push (browser notifications).
         // Topbar bell button: shows unread count + popover (enable/disable, test,
         // recent inbox). Subscribes via SW + VAPID, persists subscription on the
@@ -18387,7 +18618,7 @@
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current"><Icons.Server className="w-3 h-3" />{selectedCluster.display_name || selectedCluster.name}</span></>
                                         )}
                                         {activeTab && selectedCluster && (
-                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t(activeTab)}</span></>
+                                            <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className={(selectedSidebarVm || selectedSidebarNode || selectedSidebarDatastore || selectedSidebarQdevice) ? 'corp-breadcrumb-segment' : 'corp-breadcrumb-current'} onClick={() => { if (selectedSidebarVm) setSelectedSidebarVm(null); if (selectedSidebarNode) setSelectedSidebarNode(null); if (selectedSidebarDatastore) setSelectedSidebarDatastore(null); if (selectedSidebarQdevice) setSelectedSidebarQdevice(null); }}>{t(activeTab === 'timeline' ? 'tlTab' : activeTab)}</span></>
                                         )}
                                         {selectedSidebarQdevice && activeTab === 'overview' && (
                                             <><Icons.ChevronRight className="w-3 h-3" style={{color:'#4a6070'}} /><span className="corp-breadcrumb-current" data-qdevice-crumb=""><Icons.Scale className="w-3 h-3" />{t('qdeviceTitle')}</span></>
@@ -19664,6 +19895,7 @@
                                                     { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
                                                     { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
                                                     { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
+                                                    { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
                                                     { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
                                                     { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
                                                     { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
@@ -22739,6 +22971,35 @@
                                             this is a read-only audit view for ops/Compliance Officers
                                             without admin rights. Available with admin.audit OR
                                             node.maintenance permission. */}
+                                        {/* LW Oct 2026 - the flight recorder of the cluster */}
+                                        {activeTab === 'timeline' && (
+                                            <div className={isCorporate ? 'p-1' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}>
+                                                <TimelineView
+                                                    key={selectedCluster.id}
+                                                    clusterId={selectedCluster.id}
+                                                    authFetch={authFetch}
+                                                    t={t}
+                                                    onOpenGuest={(vmid) => {
+                                                        const guest = (clusterResources || []).find(r => Number(r.vmid) === Number(vmid));
+                                                        if (!guest) return;
+                                                        setActiveTab('resources');
+                                                        setResourcesSubTab('management');
+                                                        setSelectedSidebarVm({ ...guest, _clusterId: selectedCluster.id });
+                                                        setSelectedSidebarNode(null);
+                                                        setHighlightedVm({ vmid: guest.vmid, node: guest.node });
+                                                        setTimeout(() => setHighlightedVm(null), 3000);
+                                                    }}
+                                                    onOpenNode={(name) => {
+                                                        if (!isCorporate) { setConfigNode(name); return; }
+                                                        setActiveTab('overview');
+                                                        setSelectedSidebarVm(null);
+                                                        setSelectedSidebarNode({ name, clusterId: selectedCluster.id });
+                                                    }}
+                                                    onOpenTab={(tab) => setActiveTab(tab)}
+                                                />
+                                            </div>
+                                        )}
+
                                         {activeTab === 'compliance' && (
                                             <div className="space-y-4">
                                                 <div className={isCorporate
