@@ -58,7 +58,7 @@ from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_gu
                                   node_maintenance_for_caller)
 from pegaprox.api.ha import standby_console_refusal, STANDBY_CONSOLE_ERROR
 from pegaprox.core import ha, ha_transport
-from pegaprox.core import transfer_net
+from pegaprox.core import transfer_net, preflight
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
 from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for
@@ -13284,41 +13284,9 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
 # not move a local disk that is part of a snapshot while the VM runs (unless replication has
 # it on the target already), and offline it only takes the snapshots along where the storage
 # keeps them in the volume: ZFS, btrfs or a qcow2 file. Read only, one call per dialog.
-_MIG_VOLUME_KEYS = {'qemu': re.compile(r'^(?:(?:ide|sata|scsi|virtio)\d+|efidisk0|tpmstate0|unused\d+)$'),
-                    'lxc': re.compile(r'^(?:rootfs|mp\d+|unused\d+)$')}
-_MIG_PATH_STORAGES = ('dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs')
+# The volume rules live in core/preflight.py, which checks a whole set of guests that way.
+_guest_volumes, _snapshot_family = preflight.guest_volumes, preflight.snapshot_family
 _MIG_SNAPSHOTS_LISTED = 50
-
-
-def _snapshot_family(stype, fmt, vm_type):
-    """How an offline migration carries the snapshots of a volume: 'zfs', 'btrfs' or 'qcow2',
-    None where Proxmox cannot take them along (LVM-thin, a raw file, ...)."""
-    if vm_type == 'qemu' and fmt in ('qcow2', 'vmdk') and stype in _MIG_PATH_STORAGES:
-        return 'qcow2'
-    return {'zfspool': 'zfs', 'btrfs': 'btrfs'}.get(stype)
-
-
-def _guest_volumes(cfg, vm_type):
-    """The storage volumes of a guest config: [{key, storage, format, flagged_shared}]."""
-    out = []
-    for key in sorted(cfg):
-        val = cfg.get(key)
-        if not _MIG_VOLUME_KEYS[vm_type].match(key) or not isinstance(val, str):
-            continue
-        parts = val.split(',')
-        opts = dict(p.split('=', 1) for p in parts[1:] if '=' in p)
-        vol = parts[0]
-        if '=' in vol:
-            name, _, rest = vol.partition('=')
-            vol = rest if name in ('volume', 'file') else opts.get('volume', '')
-        if opts.get('media') == 'cdrom' or vol.startswith('/') or ':' not in vol:
-            continue
-        storage, volname = vol.split(':', 1)
-        base = volname.rsplit('/', 1)[-1]
-        fmt = opts.get('format') or (base.rsplit('.', 1)[1] if '.' in base else 'raw')
-        out.append({'key': key, 'storage': storage, 'format': fmt.lower(),
-                    'flagged_shared': opts.get('shared') in ('1', 'on', 'yes', 'true')})
-    return out
 
 
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/migrate-check', methods=['GET'])
@@ -13459,6 +13427,92 @@ def delete_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': result.get('error', 'Delete failed')}), 500
 
 
+def _scoped_guests(cluster_id, mgr, wanted, user):
+    """(the cluster's guests by VMID, an error answer for a VMID elsewhere or out of reach)"""
+    guests = {}
+    rows = mgr.get_vm_resources(max_age=2)
+    for row in (rows if isinstance(rows, list) else []):
+        if isinstance(row, dict) and row.get('type') in ('qemu', 'lxc'):
+            try:
+                guests[int(row.get('vmid'))] = row
+            except (TypeError, ValueError):
+                continue
+    # one answer for a guest elsewhere and one out of reach: which is which stays unsaid
+    refused = [v for v in wanted if v not in guests
+               or not user_can_access_vm(user, cluster_id, v, 'vm.migrate', guests[v].get('type'))]
+    if refused:
+        return guests, (jsonify({'error': f"Not on this cluster or out of reach: "
+                                          f"{', '.join(str(v) for v in refused[:20])}"}), 400)
+    return guests, None
+
+
+@bp.route('/api/clusters/<cluster_id>/migration-preflight', methods=['POST'])
+@require_auth(perms=['vm.migrate'])
+def migration_preflight_api(cluster_id):
+    """What a migration of these guests inside the cluster would run into
+
+    Body: vms (VMIDs, or {vmid} objects as bulk-migrate takes them, at most 1000), target (a
+    node; left out or empty, each guest goes to the node it fits best), online (default
+    true), with_local_disks, and mode and parallel as bulk-migrate takes them, for the
+    order of the steps; override as bulk-migrate takes it.
+
+    Per guest ready, warning or blocked with the reasons (a block says whether it may be
+    overridden) and what an abort leaves behind; the totals, what the target nodes hold
+    afterwards and the steps a run would take. The set is placed as a whole: what one
+    guest takes on a node counts for the guests after it. Reads only, so a standby
+    answers it as well.
+    """
+    from pegaprox.core import bulk_migrate as bulk
+    from pegaprox.utils.sanitization import validate_hostname
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    raw = data.get('vms')
+    if not isinstance(raw, list) or not raw or len(raw) > preflight.GUESTS_MAX:
+        return jsonify({'error': f'vms is a list of 1 to {preflight.GUESTS_MAX} guests'}), 400
+    wanted = _vmid_list([v.get('vmid') if isinstance(v, dict) else v for v in raw])
+    if wanted is None:
+        return jsonify({'error': 'vms holds something that is no VMID'}), 400
+    wanted = list(dict.fromkeys(wanted))
+    target = data.get('target') or None
+    if target is not None and (not isinstance(target, str) or not validate_hostname(target)):
+        return jsonify({'error': 'target is a node name'}), 400
+    online, local = data.get('online', True), data.get('with_local_disks', False)
+    if not isinstance(online, bool) or not isinstance(local, bool):
+        return jsonify({'error': 'online and with_local_disks are true or false'}), 400
+    mode, parallel = data.get('mode'), data.get('parallel', 2)
+    if mode is not None and mode not in bulk.MODES:
+        return jsonify({'error': 'mode is sequential, parallel or all'}), 400
+    if mode == 'parallel' and (isinstance(parallel, bool) or not isinstance(parallel, int)
+                               or not 2 <= parallel <= bulk.PARALLEL_MAX):
+        return jsonify({'error': f'parallel is a number from 2 to {bulk.PARALLEL_MAX}'}), 400
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.utils.rbac import has_permission
+        if not has_permission(user, 'xapi.vm.migrate'):
+            return jsonify({'error': 'Permission denied: xapi.vm.migrate'}), 403
+    _guests, refused = _scoped_guests(cluster_id, mgr, wanted, user)
+    if refused:
+        return refused
+    override, oerr = _override_ids(dict(data, dry_run=True), wanted)
+    if oerr:
+        return jsonify({'error': oerr}), 400
+    try:
+        res = preflight.intra(cluster_id, mgr, wanted, target, online, local, mode, parallel,
+                              busy=bulk.busy_vmids(cluster_id), scoped=caller_is_scoped(user, cluster_id),
+                              override=override)
+    except Exception as e:
+        logging.error(f"[PREFLIGHT] {cluster_id}: {e}", exc_info=True)
+        return jsonify({'error': 'The migration preflight failed - see the PegaProx log'}), 500
+    return jsonify(res)
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/bulk-migrate', methods=['POST'])
 @require_auth(perms=['vm.migrate'])
 def bulk_migrate_api(cluster_id):
@@ -13473,18 +13527,24 @@ def bulk_migrate_api(cluster_id):
       migration starts at once and nobody waits for them)
     - with_local_disks: (VMs) move local disks along
     A guest that is not on the cluster or out of the caller's reach refuses the request
-    (400); one an enforced affinity rule keeps off the target, one already there and one
-    another running run still moves are listed as skipped.
+    (400); one already there, one another running run still moves and one the migration
+    preflight blocks are listed as skipped, with the reason.
 
     Without mode every migration starts at once, and the answer lists what Proxmox said
     to each start.
+
+    Either way the preflight (POST .../migration-preflight) is asked first: what it blocks
+    does not start. override names guests whose blocks may be overridden (an enforced
+    affinity rule, too little memory or disk space on the target, ...), with
+    confirm_override: true; that goes to the audit log. dry_run: true starts nothing and
+    answers with the preflight and the steps the run would take.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
-    
+
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
-    
+
     mgr = cluster_managers[cluster_id]
     data = request.get_json(silent=True)
     if data is None:
@@ -13499,21 +13559,33 @@ def bulk_migrate_api(cluster_id):
         return jsonify({'error': 'Too many VMs in one request (max 1000). Split into smaller batches.'}), 400
     target_node = data.get('target')
     online = data.get('online', True)
-    
+
     if not target_node:
         return jsonify({'error': 'Target node is required'}), 400
-    
+
     if not vms:
         return jsonify({'error': 'No VMs specified'}), 400
-    
+
     # the single-guest route asks this of an XCP-ng pool, the bulk one never did
     if getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng':
         from pegaprox.utils.rbac import has_permission
         if not has_permission(build_authz_user(request.session.get('user', ''), request.session), 'xapi.vm.migrate'):
             return jsonify({'error': 'Permission denied: xapi.vm.migrate'}), 403
 
-    if data.get('mode') is not None:
+    if data.get('dry_run', False) not in (True, False):
+        return jsonify({'error': 'dry_run is true or false'}), 400
+    if data.get('mode') is not None or data.get('dry_run') is True:
         return _start_bulk_run(cluster_id, mgr, data)
+
+    if not isinstance(vms, list) or not all(isinstance(v, dict) and v.get('node') and v.get('type') in ('qemu', 'lxc')
+                                             for v in vms):
+        return jsonify({'error': 'vms is a list of {vmid, node, type}'}), 400
+    wanted = _vmid_list([v.get('vmid') for v in vms])
+    if wanted is None:
+        return jsonify({'error': 'vms holds something that is no VMID'}), 400
+    override, oerr = _override_ids(data, wanted)
+    if oerr:
+        return jsonify({'error': oerr}), 400
 
     user = getattr(request, 'session', {}).get('user', 'system')
     log_audit(user, 'vm.bulk_migrated', f"Bulk migration of {len(vms)} VMs to {target_node}", cluster=mgr.config.name)
@@ -13526,36 +13598,35 @@ def bulk_migrate_api(cluster_id):
     _authz_user = build_authz_user(request.session['user'], request.session)
 
     # LW: Feb 2026 - enforced violations skip that VM but don't abort the whole batch
-    from pegaprox.api.history import check_affinity_violation
+    # MK Oct 2026 - the preflight judges the affinity rules now, with everything else it checks
+    reach = [v for v, vm in zip(wanted, vms)
+             if user_can_access_vm(_authz_user, cluster_id, v, 'vm.migrate', vm.get('type', 'qemu'))]
+    verdicts = _bulk_preflight(cluster_id, mgr, reach, target_node, online is not False, False, None, 1,
+                               _authz_user, override)
+    _audit_overrides(user, mgr, f"Bulk migration to {target_node}", verdicts)
 
     results = []
-    for vm in vms:
-        if not user_can_access_vm(_authz_user, cluster_id, vm['vmid'], 'vm.migrate', vm.get('type', 'qemu')):
+    for vmid, vm in zip(wanted, vms):
+        if vmid not in reach:
             results.append({
-                'vmid': vm['vmid'], 'success': False, 'task': None,
+                'vmid': vmid, 'success': False, 'task': None,
                 'error': 'Permission denied: vm.migrate'
             })
             continue
 
-        # NS: affinity check per VM
-        aff = check_affinity_violation(cluster_id, vm['vmid'], target_node)
-        if aff.get('violation') and aff.get('enforce'):
-            results.append({
-                'vmid': vm['vmid'], 'success': False, 'task': None,
-                'error': f"Blocked by affinity rule '{aff['rule']}': {aff['message']}"
-            })
+        pv = verdicts.get(vmid)
+        if pv and not preflight.moving(pv):
+            results.append({'vmid': vmid, 'success': False, 'task': None, 'error': preflight.block_note(pv)})
             continue
-        elif aff.get('violation'):
-            logging.warning(f"Affinity warning for VMID {vm['vmid']} -> {target_node}: {aff['message']} (not enforced)")
 
-        result = mgr.migrate_vm_manual(vm['node'], vm['vmid'], vm['type'], target_node, online)
+        result = mgr.migrate_vm_manual(vm['node'], vmid, vm['type'], target_node, online)
 
         # NS: Register PegaProx user for each migration task
         if result.get('task') or result.get('upid'):
             register_task_user(result.get('task') or result.get('upid'), user, cluster_id)
 
         results.append({
-            'vmid': vm['vmid'],
+            'vmid': vmid,
             'success': result.get('success', False),
             'task': result.get('task'),
             'error': result.get('error')
@@ -13578,11 +13649,50 @@ def bulk_migrate_api(cluster_id):
 _BULK_HOW = {'sequential': 'one at a time', 'parallel': '{n} at a time', 'all': 'all at once'}
 
 
+def _override_ids(data, wanted):
+    """The guests whose overridable blocks the caller overrides, (ids, error): a list of their
+    VMIDs in override, and confirm_override: true beside it"""
+    raw = data.get('override')
+    if raw in (None, []):
+        return set(), None
+    ids = _vmid_list(raw) if isinstance(raw, list) and len(raw) <= 1000 else None
+    if ids is None:
+        return set(), 'override is a list of VMIDs'
+    if not set(ids) <= set(wanted):
+        return set(), 'override names a guest this request does not move'
+    if data.get('confirm_override') is not True and data.get('dry_run') is not True:
+        return set(), 'Overriding a block of the migration preflight needs confirm_override: true'
+    return set(ids), None
+
+
+def _bulk_preflight(cluster_id, mgr, vmids, target, online, local, mode, parallel, user, override,
+                    backups=False, busy=()):
+    """{vmid: preflight row} of a bulk migration that starts now, {} when the preflight broke
+    (the migrations then go as they did before it existed)"""
+    try:
+        res = preflight.intra(cluster_id, mgr, vmids, target, online, local, mode, parallel, busy=busy,
+                              scoped=caller_is_scoped(user, cluster_id), override=override, backups=backups)
+    except Exception as e:
+        logging.error(f"[PREFLIGHT] bulk migration to {target} on {cluster_id}: {e}", exc_info=True)
+        return {}
+    return {r['vmid']: r for r in res['guests']}
+
+
+def _audit_overrides(usr, mgr, what, verdicts):
+    done = [r for r in verdicts.values() if r.get('overridden')]
+    if done:
+        log_audit(usr, 'vm.migrate_block_overridden',
+                  f"{what}: blocks of the migration preflight overridden for "
+                  + '; '.join(f"{r['vmid']} ({preflight.block_note(r)})" for r in done[:20])
+                  + (' ...' if len(done) > 20 else ''), cluster=mgr.config.name)
+
+
 def _start_bulk_run(cluster_id, mgr, data):
     from pegaprox.core import bulk_migrate as bulk
     from pegaprox.utils.sanitization import validate_hostname
+    dry_run = data.get('dry_run') is True
     mode = data.get('mode')
-    if mode not in bulk.MODES:
+    if mode not in bulk.MODES and not (dry_run and mode is None):
         return jsonify({'error': 'mode is sequential, parallel or all'}), 400
     parallel = 1
     if mode == 'parallel':
@@ -13610,31 +13720,36 @@ def _start_bulk_run(cluster_id, mgr, data):
     wanted = list(dict.fromkeys(wanted))
 
     user = build_authz_user(request.session.get('user', ''), request.session)
-    guests = {}
-    for g in (mgr.get_vm_resources(max_age=2) or []):
-        if g.get('type') in ('qemu', 'lxc'):
-            try:
-                guests[int(g.get('vmid'))] = g
-            except (TypeError, ValueError):
-                continue
-    # one answer for a guest elsewhere and one out of reach: which is which stays unsaid
-    refused = [v for v in wanted if v not in guests
-               or not user_can_access_vm(user, cluster_id, v, 'vm.migrate', guests[v].get('type'))]
+    guests, refused = _scoped_guests(cluster_id, mgr, wanted, user)
     if refused:
-        return jsonify({'error': f"Not on this cluster or out of reach: "
-                                 f"{', '.join(str(v) for v in refused[:20])}"}), 400
+        return refused
 
-    held = _affinity_held(cluster_id, wanted, target)
+    override, oerr = _override_ids(data, wanted)
+    if oerr:
+        return jsonify({'error': oerr}), 400
     busy = bulk.busy_vmids(cluster_id)
+    # MK Oct 2026 - what the preflight blocks (an enforced affinity rule among it) is skipped
+    # with its reason, unless the caller overrides a block that may be overridden
+    if dry_run:
+        try:
+            res = preflight.intra(cluster_id, mgr, wanted, target, online, local, mode, parallel, busy=busy,
+                                  scoped=caller_is_scoped(user, cluster_id), override=override)
+        except Exception as e:
+            logging.error(f"[PREFLIGHT] dry run of a bulk migration to {target}: {e}", exc_info=True)
+            return jsonify({'error': 'The migration preflight failed - see the PegaProx log'}), 500
+        return jsonify({'dry_run': True, 'preflight': res, 'steps': res['steps']})
+    verdicts = _bulk_preflight(cluster_id, mgr, wanted, target, online, local, mode, parallel, user, override,
+                               busy=busy)
     rows = []
     for vmid in wanted:
         g = guests[vmid]
-        if vmid in held:
-            rows.append(bulk.new_row(g, 'skipped', f"Affinity rule '{held[vmid]}' keeps it off {target}"))
-        elif g.get('node') == target:
+        pv = verdicts.get(vmid)
+        if g.get('node') == target:
             rows.append(bulk.new_row(g, 'skipped', f'Already on {target}'))
         elif vmid in busy:
             rows.append(bulk.new_row(g, 'skipped', 'Another bulk migration moves it already'))
+        elif pv and not preflight.moving(pv):
+            rows.append(bulk.new_row(g, 'skipped', preflight.block_note(pv)))
         else:
             rows.append(bulk.new_row(g))
     if not any(r['state'] == bulk.WAITING for r in rows):
@@ -13654,8 +13769,12 @@ def _start_bulk_run(cluster_id, mgr, data):
               f"Bulk migration {run.id} of {len(moving)} guest(s) to {target}, "
               f"{_BULK_HOW[mode].format(n=parallel)} ({', '.join(moving[:50])}{' ...' if len(moving) > 50 else ''})",
               cluster=mgr.config.name)
+    _audit_overrides(usr, mgr, f"Bulk migration {run.id} to {target}",
+                     {v: r for v, r in verdicts.items() if str(v) in moving})
     bulk.launch(run)
-    return jsonify({'run': run.view(run.rows_copy(), me=usr)}), 202
+    warned = sum(1 for r in verdicts.values() if r['verdict'] == preflight.WARNING)
+    return jsonify({'run': run.view(run.rows_copy(), me=usr),
+                    'preflight': {'checked': bool(verdicts), 'warnings': warned}}), 202
 
 
 def _bulk_view(run, with_rows=True):
@@ -13839,6 +13958,150 @@ def remote_migrate_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({'error': result.get('error', 'Remote migration failed')}), 500
 
 
+def _vmid_or_none(value):
+    got = _vmid_list([value]) if value not in (None, '') else None
+    return got[0] if got else None
+
+
+def _cross_preflight_args(data, storage_map, bridge_map):
+    """The flags and maps of a cross-cluster body the preflight takes: (dict, error)"""
+    flags = {}
+    for name, default in (('dry_run', False), ('online', True), ('force_online', False), ('delete_source', True)):
+        flags[name] = data.get(name, default)
+    if not isinstance(flags['dry_run'], bool):
+        return None, 'dry_run is true or false'
+    smap, err = preflight.map_arg(storage_map if isinstance(storage_map, dict) else None, 'target_storage_map')
+    if err:
+        return None, err
+    bmap, err = preflight.map_arg(bridge_map if isinstance(bridge_map, dict) else None, 'target_bridge_map')
+    if err:
+        return None, err
+    return dict(flags, storage_map=smap, bridge_map=bmap), None
+
+
+def _cross_preflight_for(data, src_id, tgt_id, vmids, vm_type, target_node, storage_map, target_storage,
+                         bridge_map, target_bridge, target_vmid, online, force_online, delete_source, user):
+    """The preflight a cross-cluster migration starts with: (result or None, an answer to
+    return instead of migrating: the dry run, a 400 or the 409 of a block)"""
+    args, err = _cross_preflight_args(data, storage_map, bridge_map)
+    if err:
+        return None, (jsonify({'error': err}), 400)
+    override, err = _override_ids(data, vmids)
+    if err:
+        return None, (jsonify({'error': err}), 400)
+    try:
+        pf = preflight.cross(src_id, cluster_managers[src_id], tgt_id, cluster_managers[tgt_id], vmids, target_node,
+                             storage_map=args['storage_map'], target_storage=None if args['storage_map'] else target_storage,
+                             bridge_map=args['bridge_map'],
+                             target_bridge=None if args['bridge_map'] else (target_bridge or 'vmbr0'),
+                             target_vmid=_vmid_or_none(target_vmid), online=bool(online),
+                             force_online=bool(force_online), delete_source=bool(delete_source), may_delete=True,
+                             user=user, vm_type=vm_type, scoped=caller_is_scoped(user, src_id), override=override,
+                             backups=args['dry_run'])
+    except Exception as e:
+        logging.error(f"[PREFLIGHT] cross-cluster {src_id} -> {tgt_id}: {e}", exc_info=True)
+        if args['dry_run']:
+            return None, (jsonify({'error': 'The migration preflight failed - see the PegaProx log'}), 500)
+        return None, None
+    if args['dry_run']:
+        return pf, (jsonify({'dry_run': True, 'preflight': pf, 'steps': pf['steps']}), 200)
+    row = pf['guests'][0]
+    if not preflight.moving(row):
+        return pf, (jsonify({'error': f"The migration preflight blocks it: {preflight.block_note(row)}",
+                             'preflight': pf}), 409)
+    return pf, None
+
+
+@bp.route('/api/cross-cluster-migrate/preflight', methods=['POST'])
+@require_auth(perms=['vm.migrate'])
+def cross_cluster_preflight_api():
+    """What a migration of guests to another cluster would run into
+
+    Body as POST /api/cross-cluster-migrate takes it - source_cluster, target_cluster,
+    target_node, target_storage or target_storage_map, target_bridge or target_bridge_map,
+    target_vmid, online, force_online, delete_source - with vms (a list of up to 100 VMIDs)
+    in place of vmid where several guests go.
+
+    Per guest ready, warning or blocked with the reasons and what an abort leaves behind:
+    the storage and bridge maps against the target node, its memory and CPU with the whole
+    set on it, the VMID there and the tenant's range and quota, the CPU type, snapshots,
+    devices, HA and replication on the source, the newest backup, and whether the transfer
+    network of the target is used. The totals and the steps of the migration. Reads only,
+    so a standby answers it as well.
+    """
+    from pegaprox.utils.sanitization import validate_hostname
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    src_id, tgt_id = data.get('source_cluster'), data.get('target_cluster')
+    if not isinstance(src_id, str) or not isinstance(tgt_id, str) or not src_id or not tgt_id or src_id == tgt_id:
+        return jsonify({'error': 'source_cluster and target_cluster are two different clusters'}), 400
+    raw = data.get('vms') if data.get('vms') is not None else [data.get('vmid')]
+    if not isinstance(raw, list) or not raw or len(raw) > preflight.CROSS_GUESTS_MAX:
+        return jsonify({'error': f'vms is a list of 1 to {preflight.CROSS_GUESTS_MAX} guests'}), 400
+    wanted = _vmid_list([v.get('vmid') if isinstance(v, dict) else v for v in raw])
+    if wanted is None:
+        return jsonify({'error': 'vms holds something that is no VMID'}), 400
+    wanted = list(dict.fromkeys(wanted))
+    target_node = data.get('target_node')
+    if not isinstance(target_node, str) or not validate_hostname(target_node):
+        return jsonify({'error': 'Target node is required for cross-cluster migration'}), 400
+    vm_type = data.get('vm_type', 'qemu')
+    if vm_type not in ('qemu', 'lxc'):
+        return jsonify({'error': 'vm_type is qemu or lxc'}), 400
+    target_vmid = data.get('target_vmid')
+    if target_vmid not in (None, '') and (_vmid_or_none(target_vmid) is None or len(wanted) > 1):
+        return jsonify({'error': 'target_vmid is one VMID, for a single guest'}), 400
+    for name in ('target_storage', 'target_bridge'):
+        if data.get(name) not in (None, '') and (not isinstance(data[name], str) or not preflight.NAME_RE.match(data[name])):
+            return jsonify({'error': f'{name} is a name'}), 400
+    if src_id not in cluster_managers:
+        return jsonify({'error': 'Source cluster not found'}), 404
+    if tgt_id not in cluster_managers:
+        return jsonify({'error': 'Target cluster not found'}), 404
+    ok, err = check_cluster_access(src_id)
+    if not ok:
+        return err
+    ok, err = check_cluster_access(tgt_id)
+    if not ok:
+        return err
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    src_rows = cluster_managers[src_id].get_vm_resources(max_age=2)
+    kinds = {}
+    for row in (src_rows if isinstance(src_rows, list) else []):
+        if isinstance(row, dict) and row.get('type') in ('qemu', 'lxc'):
+            kinds[str(row.get('vmid'))] = row['type']
+    for vmid in wanted:
+        if not user_can_access_vm(user, src_id, vmid, 'vm.migrate', kinds.get(str(vmid), vm_type)):
+            return jsonify({'error': 'Access denied to this VM (vm.migrate)'}), 403
+    if caller_is_scoped(user, tgt_id):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
+    args, err = _cross_preflight_args(dict(data, dry_run=False), data.get('target_storage_map'),
+                                      data.get('target_bridge_map'))
+    if err:
+        return jsonify({'error': err}), 400
+    override, err = _override_ids(dict(data, dry_run=True), wanted)
+    if err:
+        return jsonify({'error': err}), 400
+    delete_source = bool(args['delete_source'])
+    may_delete = not delete_source or all(
+        user_can_access_vm(user, src_id, v, 'vm.delete', kinds.get(str(v), vm_type)) for v in wanted)
+    try:
+        res = preflight.cross(src_id, cluster_managers[src_id], tgt_id, cluster_managers[tgt_id], wanted, target_node,
+                              storage_map=args['storage_map'],
+                              target_storage=None if args['storage_map'] else data.get('target_storage'),
+                              bridge_map=args['bridge_map'],
+                              target_bridge=None if args['bridge_map'] else (data.get('target_bridge') or 'vmbr0'),
+                              target_vmid=_vmid_or_none(target_vmid), online=bool(args['online']),
+                              force_online=bool(args['force_online']), delete_source=delete_source,
+                              may_delete=may_delete, user=user, vm_type=vm_type,
+                              scoped=caller_is_scoped(user, src_id), override=override)
+    except Exception as e:
+        logging.error(f"[PREFLIGHT] cross-cluster {src_id} -> {tgt_id}: {e}", exc_info=True)
+        return jsonify({'error': 'The migration preflight failed - see the PegaProx log'}), 500
+    return jsonify(res)
+
+
 @bp.route('/api/cross-cluster-migrate', methods=['POST'])
 @require_auth(perms=['vm.migrate'])
 def cross_cluster_migrate_api():
@@ -13932,6 +14195,14 @@ def cross_cluster_migrate_api():
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
 
+    # MK Oct 2026 - the preflight first: what it blocks does not start (override as on the bulk
+    # migration), and a dry run answers with it and the steps instead of starting anything
+    pf, refusal = _cross_preflight_for(data, source_cluster_id, target_cluster_id, [vmid], vm_type, target_node,
+                                       storage_map, target_storage, bridge_map, target_bridge, target_vmid,
+                                       online, force_online, delete_source, _xu)
+    if refusal:
+        return refusal
+
     # MK Oct 2026 - the guest lands as a new one on the target; kept at the source too it is
     # one more for the tenant quota, moved between two of the tenant's clusters it is not
     from pegaprox.utils.rbac import landing_adds, quota_tenant
@@ -13950,38 +14221,12 @@ def cross_cluster_migrate_api():
     try:
         vm_info = source_manager.get_vm_config(source_node, vmid, vm_type)
         if vm_info.get('success'):
-            config = vm_info.get('config', {})
-            total_disk_gb = 0
-            for key, value in config.items():
-                if key.startswith(('scsi', 'virtio', 'sata', 'ide', 'efidisk', 'tpmstate')) and 'size' in str(value):
-                    # Extract size from disk config
-                    import re
-                    size_match = re.search(r'size=(\d+)([GMT])', str(value))
-                    if size_match:
-                        size_val = int(size_match.group(1))
-                        size_unit = size_match.group(2)
-                        if size_unit == 'G':
-                            total_disk_gb += size_val
-                        elif size_unit == 'T':
-                            total_disk_gb += size_val * 1024
-                        elif size_unit == 'M':
-                            total_disk_gb += size_val / 1024
-            
-            if total_disk_gb > 100 and online and not force_online:
-                # MK: Proxmox WebSocket tickets have internal timeout (~5 min)
-                # Large disk migrations take longer than this, causing 401 errors
-                # during RAM sync phase. Auto-switch to offline migration.
-                # 
-                # Math: 100GB in 5 min = 333 MB/s = ~2.7 Gbit/s sustained
-                # Most cross-cluster links can't sustain this.
-                required_speed_mbps = (total_disk_gb * 1024) / 300  # MB/s needed for 5 min
-                warnings.append(f"VM has {total_disk_gb:.0f}GB disk. Would need {required_speed_mbps:.0f} MB/s ({required_speed_mbps*8/1000:.1f} Gbit/s) to complete in 5 min. Automatically using offline migration.")
-                logging.warning(f"[CROSS-MIGRATE] Large VM ({total_disk_gb}GB) - forcing offline migration due to Proxmox WebSocket ticket timeout limitation")
-                online = False  # Force offline migration for large disks
-            elif total_disk_gb > 100 and online and force_online:
-                required_speed_mbps = (total_disk_gb * 1024) / 300
-                warnings.append(f"VM has {total_disk_gb:.0f}GB disk with forced online migration. Need {required_speed_mbps:.0f} MB/s sustained to avoid timeout. Migration may fail with '401 Unauthorized'.")
-                logging.warning(f"[CROSS-MIGRATE] Large VM ({total_disk_gb}GB) - online migration forced by user, may fail")
+            online, total_disk_gb, note = preflight.cross_online(vm_info.get('config', {}), online, force_online)
+            if note:
+                warnings.append(note)
+                logging.warning(f"[CROSS-MIGRATE] Large VM ({total_disk_gb}GB) - "
+                                + ("online migration forced by user, may fail" if online else
+                                   "forcing offline migration due to Proxmox WebSocket ticket timeout limitation"))
     except Exception as e:
         logging.debug(f"Could not check VM size: {e}")
     
@@ -14155,6 +14400,13 @@ def cross_cluster_migrate_api():
             if _qwarn:
                 response['quota_warning'] = _qwarn
             
+            if pf:
+                response['preflight'] = {'verdict': pf['guests'][0]['verdict'], 'reasons': pf['guests'][0]['reasons']}
+                if pf['guests'][0].get('overridden'):
+                    _audit_overrides(user, source_manager, f"Cross-cluster migration of {vm_type}/{vmid} to "
+                                                           f"{target_cluster_id}/{target_node}",
+                                     {vmid: pf['guests'][0]})
+
             return jsonify(response)
         else:
             # Migration failed - cleanup token immediately

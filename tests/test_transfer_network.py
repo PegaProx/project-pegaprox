@@ -446,7 +446,8 @@ def test_without_the_setting_nothing_changes(xc):
     assert r.status_code == 200
     assert 'host=10.0.0.11,' in _endpoint_of(xc.src) and tgt.fp_asked == 1
     assert 'transfer_network' not in r.get_json()
-    assert tgt.pve.calls == []
+    # none of its reads: the migration preflight reads the target's node list, nothing else here
+    assert [u for u in tgt.pve.calls if not u.endswith('/api2/json/nodes')] == []
 
 
 def test_a_site_recovery_migration_goes_over_the_transfer_network(monkeypatch):

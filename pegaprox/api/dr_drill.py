@@ -201,24 +201,12 @@ def _execute_drill(drill_id):
             return ('warn', 'no network mappings configured (VMs keep original bridge names — risky if names differ)', '')
         if not (tgt_mgr and getattr(tgt_mgr, 'is_connected', False)):
             return ('warn', 'target offline — cannot verify mappings', f"mappings={list(net_maps.keys())}")
-        # gather target bridges across all nodes
-        tgt_bridges = set()
+        # the bridges of every target node and the SDN VNets, as the migration preflight reads them
+        from pegaprox.core.preflight import cluster_bridges
         try:
-            for node in (tgt_mgr.nodes or {}).keys():
-                r = tgt_mgr._api_get(f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{node}/network")
-                if r and r.status_code == 200:
-                    for nic in (r.json().get('data') or []):
-                        if nic.get('type') in ('bridge', 'OVSBridge', 'bond'):
-                            tgt_bridges.add(nic.get('iface', ''))
-        except Exception: pass
-        # also check SDN VNets cluster-wide
-        try:
-            r = tgt_mgr._api_get(f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/sdn/vnets")
-            if r and r.status_code == 200:
-                for v in (r.json().get('data') or []):
-                    n = v.get('vnet') or v.get('name')
-                    if n: tgt_bridges.add(n)
-        except Exception: pass
+            tgt_bridges = cluster_bridges(tgt_mgr, plan['target_cluster'])
+        except Exception:
+            tgt_bridges = set()
         missing = [v for v in net_maps.values() if v not in tgt_bridges]
         if missing:
             return ('fail', f'{len(missing)} network mapping(s) point at non-existent target bridge: {", ".join(missing[:5])}',
@@ -240,14 +228,10 @@ def _execute_drill(drill_id):
         except Exception:
             data = []
         by_id = {s.get('storage'): s for s in data if s.get('storage')}
-        problems = []
-        for src, dst in stor_maps.items():
-            if dst not in by_id:
-                problems.append(f"{src}→{dst}: target storage missing")
-                continue
-            content = by_id[dst].get('content') or ''
-            if 'images' not in content.split(','):
-                problems.append(f"{src}→{dst}: target lacks 'images' content")
+        from pegaprox.core.preflight import storage_mapping_problems
+        problems = [f"{src}→{dst}: target storage missing" if why == 'missing'
+                    else f"{src}→{dst}: target lacks 'images' content"
+                    for src, dst, why in storage_mapping_problems(stor_maps, by_id)]
         if problems:
             return ('fail', f'{len(problems)} storage mapping issue(s)',
                     '\n'.join(problems[:5]))

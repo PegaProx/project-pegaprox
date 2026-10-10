@@ -142,6 +142,7 @@
     "pegaprox/core/manager.py",
     "pegaprox/core/node_creds.py",
     "pegaprox/core/pbs.py",
+    "pegaprox/core/preflight.py",
     "pegaprox/core/qdevice.py",
     "pegaprox/core/recovery.py",
     "pegaprox/core/redfish.py",

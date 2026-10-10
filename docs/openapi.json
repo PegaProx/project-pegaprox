@@ -15360,6 +15360,62 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/migration-preflight": {
+      "post": {
+        "operationId": "vms.migration_preflight_api_post",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What a migration of these guests inside the cluster would run into",
+        "description": "Body: vms (VMIDs, or {vmid} objects as bulk-migrate takes them, at most 1000), target (a\nnode; left out or empty, each guest goes to the node it fits best), online (default\ntrue), with_local_disks, and mode and parallel as bulk-migrate takes them, for the\norder of the steps; override as bulk-migrate takes it.\n\nPer guest ready, warning or blocked with the reasons (a block says whether it may be\noverridden) and what an abort leaves behind; the totals, what the target nodes hold\nafterwards and the steps a run would take. The set is placed as a whole: what one\nguest takes on a node counts for the guests after it. Reads only, so a standby\nanswers it as well.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.migrate"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/bulk-migrate": {
       "post": {
         "operationId": "vms.bulk_migrate_api_post",
@@ -15381,7 +15437,7 @@
           }
         },
         "summary": "Migrate several guests to one node",
-        "description": "Body: vms (a list of {vmid, node, type}), target, online (default true).\n\nWith mode the migrations run on the server as a bulk run (#952) and the answer is the\nrun (202, {run}), to follow with GET /api/bulk-migrations/<run_id>:\n- mode: sequential (one guest after another: the next starts when the migration\n  task before it has ended), parallel (`parallel` at a time, 2-5) or all (every\n  migration starts at once and nobody waits for them)\n- with_local_disks: (VMs) move local disks along\nA guest that is not on the cluster or out of the caller's reach refuses the request\n(400); one an enforced affinity rule keeps off the target, one already there and one\nanother running run still moves are listed as skipped.\n\nWithout mode every migration starts at once, and the answer lists what Proxmox said\nto each start.",
+        "description": "Body: vms (a list of {vmid, node, type}), target, online (default true).\n\nWith mode the migrations run on the server as a bulk run (#952) and the answer is the\nrun (202, {run}), to follow with GET /api/bulk-migrations/<run_id>:\n- mode: sequential (one guest after another: the next starts when the migration\n  task before it has ended), parallel (`parallel` at a time, 2-5) or all (every\n  migration starts at once and nobody waits for them)\n- with_local_disks: (VMs) move local disks along\nA guest that is not on the cluster or out of the caller's reach refuses the request\n(400); one already there, one another running run still moves and one the migration\npreflight blocks are listed as skipped, with the reason.\n\nWithout mode every migration starts at once, and the answer lists what Proxmox said\nto each start.\n\nEither way the preflight (POST .../migration-preflight) is asked first: what it blocks\ndoes not start. override names guests whose blocks may be overridden (an enforced\naffinity rule, too little memory or disk space on the target, ...), with\nconfirm_override: true; that goes to the audit log. dry_run: true starts nothing and\nanswers with the preflight and the steps the run would take.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -15654,6 +15710,52 @@
             }
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.migrate"
+        ]
+      }
+    },
+    "/api/cross-cluster-migrate/preflight": {
+      "post": {
+        "operationId": "vms.cross_cluster_preflight_api_post",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What a migration of guests to another cluster would run into",
+        "description": "Body as POST /api/cross-cluster-migrate takes it - source_cluster, target_cluster,\ntarget_node, target_storage or target_storage_map, target_bridge or target_bridge_map,\ntarget_vmid, online, force_online, delete_source - with vms (a list of up to 100 VMIDs)\nin place of vmid where several guests go.\n\nPer guest ready, warning or blocked with the reasons and what an abort leaves behind:\nthe storage and bridge maps against the target node, its memory and CPU with the whole\nset on it, the VMID there and the tenant's range and quota, the CPU type, snapshots,\ndevices, HA and replication on the source, the newest backup, and whether the transfer\nnetwork of the target is used. The totals and the steps of the migration. Reads only,\nso a standby answers it as well.",
         "requestBody": {
           "required": false,
           "content": {

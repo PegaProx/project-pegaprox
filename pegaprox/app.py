@@ -435,6 +435,10 @@ def create_app():
         ('POST', '/api/sse/subscribe'),
         # a read that takes its filter in the body; the GET beside it is open anyway
         ('POST', '/api/snapshots/overview'),
+        # the migration preflights read the clusters and change nothing (core/preflight.py);
+        # a dry run of the migrations themselves goes to the active like any write
+        ('POST', '/api/clusters/<cluster_id>/migration-preflight'),
+        ('POST', '/api/cross-cluster-migrate/preflight'),
         # the ESXi VM detail watch: which VMs the live stream pushes details for, a dict
         # in this process like the SSE subscription (vmware.vm.view, the per-server
         # check still applies). The push only reads the VM, its guest info and its

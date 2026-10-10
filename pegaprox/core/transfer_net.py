@@ -128,6 +128,13 @@ def addresses_of(entries):
     return out
 
 
+def bridges_of(entries):
+    """The bridges a guest NIC can name, from the same answer: Linux and OVS bridges, as the
+    network list of a node offers them (core/manager.py get_network_list)."""
+    return sorted({str(e.get('iface')) for e in entries or [] if isinstance(e, dict)
+                   and e.get('type') in ('bridge', 'OVSBridge') and e.get('iface')})
+
+
 def pick(ifaces, net):
     """(iface, address) of the address inside net, an interface that is up first, or None."""
     hits = []
@@ -149,21 +156,23 @@ def _fresh(entry, now):
     return now - entry['at'] < (ERROR_TTL if entry.get('error') else TTL)
 
 
-def node_addresses(mgr, node, refresh=False):
-    """The addresses in one member node's network config: {'at', 'ifaces', 'error'}.
-    From the cache while it is fresh, else one API read."""
+def node_addresses(mgr, node, refresh=False, max_age=None):
+    """The addresses in one member node's network config: {'at', 'ifaces', 'bridges', 'error'}.
+    From the cache while it is fresh (and younger than max_age when given), else one API
+    read. The migration preflight takes the bridges from here (core/preflight.py)."""
     key, now = (_cid(mgr), node), time.time()
     with _lock:
         entry = _nets.get(key)
-    if not refresh and _fresh(entry, now):
+    if not refresh and _fresh(entry, now) and (max_age is None or now - entry['at'] < max_age):
         return entry
     try:
         r = mgr._api_get(f"{_base(mgr)}/nodes/{quote(node, safe='')}/network")
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}")
-        entry = {'at': now, 'ifaces': addresses_of(r.json().get('data') or []), 'error': None}
+        data = r.json().get('data') or []
+        entry = {'at': now, 'ifaces': addresses_of(data), 'bridges': bridges_of(data), 'error': None}
     except Exception as e:
-        entry = {'at': now, 'ifaces': [], 'error': (str(e) or type(e).__name__)[:200]}
+        entry = {'at': now, 'ifaces': [], 'bridges': [], 'error': (str(e) or type(e).__name__)[:200]}
     with _lock:
         _nets[key] = entry
     return entry

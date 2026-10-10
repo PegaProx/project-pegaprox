@@ -2942,51 +2942,78 @@ class PegaProxManager:
             r = self._create_session().get(cfg_url, timeout=8)
             if r.status_code != 200:
                 return {'compatible': True, 'reason': 'config_unavailable'}
-            raw_cpu = r.json().get('data', {}).get('cpu', 'kvm64')
-            # MK: PVE cpu config is composite: "host,flags=+pcid;-spec-ctrl" or "cputype=x86-64-v3,hidden=1"
-            vm_cpu = raw_cpu.split(',')[0].replace('cputype=', '')
+            vm_cpu = self.cpu_type_of(r.json().get('data', {}))
         except Exception:
             return {'compatible': True, 'reason': 'config_error'}
 
+        ns = node_status or (self.get_node_status() if vm_cpu in ('host', 'max') else {})
+        return self.cpu_verdict(vm_cpu, ns.get(source_node, {}).get('cpuinfo', {}),
+                                ns.get(target_node, {}).get('cpuinfo', {}),
+                                getattr(self.config, 'cpu_baseline', None))
+
+    @staticmethod
+    def cpu_type_of(config):
+        """The CPU type of a VM config. MK: PVE cpu config is composite:
+        "host,flags=+pcid;-spec-ctrl" or "cputype=x86-64-v3,hidden=1" """
+        raw_cpu = (config or {}).get('cpu', 'kvm64') or 'kvm64'
+        return str(raw_cpu).split(',')[0].replace('cputype=', '')
+
+    @staticmethod
+    def cpu_vendor(cpuinfo):
+        """GenuineIntel or AuthenticAMD of a node's cpuinfo, '' when it does not say. PVE's
+        node status names the model only, so the vendor comes from that when it is missing."""
+        vendor = str((cpuinfo or {}).get('vendor') or '')
+        if vendor:
+            return vendor
+        model = str((cpuinfo or {}).get('model') or '')
+        if 'Intel' in model:
+            return 'GenuineIntel'
+        if 'AMD' in model:
+            return 'AuthenticAMD'
+        return ''
+
+    @classmethod
+    def cpu_verdict(cls, vm_cpu, src_info, tgt_info, baseline=None):
+        """Whether a VM of this CPU type runs on after a live move between two nodes, from their
+        cpuinfo - the nodes may be in two clusters (the migration preflight asks it that way).
+        Returns {compatible, reason, warning}."""
         # cpu:host requires matching physical CPU vendor
         if vm_cpu == 'host' or vm_cpu == 'max':
-            ns = node_status or self.get_node_status()
-            src_info = ns.get(source_node, {}).get('cpuinfo', {})
-            tgt_info = ns.get(target_node, {}).get('cpuinfo', {})
-            src_model = src_info.get('model', '')
-            tgt_model = tgt_info.get('model', '')
+            src_model = (src_info or {}).get('model', '')
+            tgt_model = (tgt_info or {}).get('model', '')
 
             # if same model string, definitely compatible
             if src_model and tgt_model and src_model == tgt_model:
                 return {'compatible': True, 'reason': 'same_cpu_model'}
 
-            # different model — check at least same vendor
-            src_vendor = src_info.get('vendor', '')
-            tgt_vendor = tgt_info.get('vendor', '')
+            # different model - check at least same vendor
+            src_vendor = cls.cpu_vendor(src_info)
+            tgt_vendor = cls.cpu_vendor(tgt_info)
             if src_vendor and tgt_vendor and src_vendor != tgt_vendor:
                 return {
                     'compatible': False,
                     'reason': f"cpu:host - vendor mismatch ({src_vendor} vs {tgt_vendor})"
                 }
+            if not src_model or not tgt_model:
+                return {'compatible': True, 'reason': 'cpu_model_unknown'}
 
-            # same vendor but different model — risky, warn but allow
+            # same vendor but different model - risky, warn but allow
             return {
                 'compatible': True,
-                'warning': f"cpu:host with different models ({src_model} → {tgt_model}) — migration may fail on CPU flag mismatch"
+                'warning': f"cpu:host with different models ({src_model} -> {tgt_model}) - migration may fail on CPU flag mismatch"
             }
 
         # check cpu_baseline enforcement
-        baseline = getattr(self.config, 'cpu_baseline', None)
         if baseline and baseline != 'none':
-            bl_level = self._CPU_COMPAT_LEVELS.get(baseline, -1)
-            vm_level = self._CPU_COMPAT_LEVELS.get(vm_cpu, -1)
+            bl_level = cls._CPU_COMPAT_LEVELS.get(baseline, -1)
+            vm_level = cls._CPU_COMPAT_LEVELS.get(vm_cpu, -1)
             if bl_level >= 0 and vm_level >= 0 and vm_level > bl_level:
                 return {
                     'compatible': False,
                     'reason': f"VM cpu '{vm_cpu}' exceeds cluster baseline '{baseline}'"
                 }
 
-        # named cpu type — always compatible as long as QEMU supports it on target
+        # named cpu type - always compatible as long as QEMU supports it on target
         # (Proxmox emulates named types on any hardware that's >= the type level)
         return {'compatible': True, 'reason': 'named_cpu_type'}
 
@@ -3592,21 +3619,8 @@ class PegaProxManager:
         (exit 2) and the CRM quietly drops a move to a node without the guest's storage,
         and we used to pick such targets. Returns (vmid -> allowed nodes, storage ->
         nodes it is limited to); a guest or storage missing from a map is unrestricted."""
-        def _on(v):
-            return str(v).strip().lower() in ('1', 'true', 'yes', 'on')
-
-        def _nodes(spec):
-            # 'pve1:2,pve2' -> {'pve1', 'pve2'}, priorities dropped
-            return {p.split(':')[0].strip() for p in str(spec or '').split(',') if p.strip()}
-
+        from pegaprox.core.preflight import ha_node_limits, node_names, restricted_groups
         ha_nodes, storage_nodes = {}, {}
-
-        def _restrict(sid, nodes):
-            try:
-                vmid = int(str(sid).strip().split(':')[-1])
-            except ValueError:
-                return
-            ha_nodes[vmid] = ha_nodes[vmid] & nodes if vmid in ha_nodes else set(nodes)
 
         try:
             base = f"https://{self.host}:{self.api_port}/api2/json"
@@ -3621,24 +3635,15 @@ class PegaProxManager:
                 self.logger.debug(f"[MAINT] {path} unreadable for placement: {e}")
                 return []
 
-        # PVE 9 node-affinity rules; only strict ones forbid, the rest are preferences
-        for rule in _data('/cluster/ha/rules'):
-            if (str(rule.get('type') or '').lower() == 'node-affinity'
-                    and _on(rule.get('strict')) and not _on(rule.get('disable'))):
-                for sid in str(rule.get('resources') or '').split(','):
-                    if sid.strip():
-                        _restrict(sid, _nodes(rule.get('nodes')))
-        # PVE 8 restricted groups (and a 9.0 cluster that has not migrated them yet)
-        groups = {g.get('group'): _nodes(g.get('nodes'))
-                  for g in _data('/cluster/ha/groups') if _on(g.get('restricted'))}
-        if groups:
-            for res in _data('/cluster/ha/resources'):
-                if res.get('group') in groups:
-                    _restrict(res.get('sid'), groups[res['group']])
+        # PVE 9 node-affinity rules and PVE 8 restricted groups (and a 9.0 cluster that has
+        # not migrated them yet); the migration preflight reads them the same way
+        rules = _data('/cluster/ha/rules')
+        groups = restricted_groups(_data('/cluster/ha/groups'))
+        ha_nodes = ha_node_limits(rules, groups, _data('/cluster/ha/resources') if groups else [])
 
         for s in _data('/storage'):
             if s.get('nodes'):
-                storage_nodes[s.get('storage')] = _nodes(s['nodes'])
+                storage_nodes[s.get('storage')] = node_names(s['nodes'])
         return ha_nodes, storage_nodes
 
     def _evacuation_allowed_nodes(self, vm, placement):
@@ -4087,6 +4092,22 @@ class PegaProxManager:
             'held': held_now,
         }
 
+    def placement_pool(self, node_status, drop=()):
+        """The nodes a guest may be placed on, mirroring get_best_target_node's filters:
+        online, not in maintenance, not excluded from balancing in the config and not one a
+        rolling update has out, without the nodes in drop. The capacity preview below and the
+        migration preflight (core/preflight.py) pick from these."""
+        exclude = []
+        if hasattr(self, '_rolling_update') and self._rolling_update:
+            rebooting = self._rolling_update.get('rebooting_nodes', [])
+            current = self._rolling_update.get('current_node', '')
+            exclude = [n for n in rebooting + [current] if n]
+        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
+        all_excluded = set(exclude) | set(config_excluded) | set(drop)
+        return {n: d for n, d in node_status.items()
+                if d.get('status') == 'online' and not d.get('maintenance_mode', False)
+                and n not in all_excluded}
+
     def maintenance_capacity_preview(self, node_name, threshold=90.0):
         """#611 — read-only pre-flight: would evacuating node_name push any
         remaining node past `threshold`% RAM?
@@ -4114,23 +4135,11 @@ class PegaProxManager:
                     'guest_count': 0, 'total_guest_mem': 0, 'nodes': [],
                     'over_threshold': [], 'headroom_sufficient': True}
 
-        # Target pool — mirror get_best_target_node's filters (rolling-update
-        # exclusions + config excluded_nodes + online + not-in-maintenance) and
-        # drop the source node itself.
-        exclude = []
-        if hasattr(self, '_rolling_update') and self._rolling_update:
-            rebooting = self._rolling_update.get('rebooting_nodes', [])
-            current = self._rolling_update.get('current_node', '')
-            exclude = [n for n in rebooting + [current] if n]
-        config_excluded = getattr(self.config, 'excluded_nodes', []) or []
-        all_excluded = set(exclude) | set(config_excluded) | {node_name}
+        # Target pool, without the source node itself
         targets = {
             n: {'mem_used': d.get('mem_used', 0), 'mem_total': d.get('mem_total', 0),
                 'mem_percent': d.get('mem_percent', 0)}
-            for n, d in node_status.items()
-            if d.get('status') == 'online'
-            and not d.get('maintenance_mode', False)
-            and n not in all_excluded
+            for n, d in self.placement_pool(node_status, drop=(node_name,)).items()
         }
 
         # Guests to evacuate — mirror _evacuate_node (running qemu/lxc on node).

@@ -359,6 +359,9 @@ def test_a_guest_that_moved_meanwhile_is_taken_from_where_it_is(api, seed):
 
 def test_the_options_reach_proxmox(api, seed):
     pve = _Pve(api)
+    # offline: Proxmox moves no running guest that way, the preflight would skip them
+    pve.set(100, status='stopped')
+    pve.set(200, status='stopped')
     c = api.as_user(seed.user('root', role='admin'))
     run = _start(c, [100, 200], mode='all', online=False, with_local_disks=True)
     _wait(lambda: _over(run['id']))
@@ -406,7 +409,8 @@ def test_what_cannot_move_is_listed_and_the_rest_runs(api, seed, monkeypatch):
     pve = _Pve(api)
     monkeypatch.setattr(history, 'load_affinity_rules', lambda: {'rules': [
         {'cluster_id': 'cluster_1', 'enabled': True, 'vms': [101], 'type': 'separate'}]})
-    monkeypatch.setattr(history, 'check_affinity_violation', lambda cid, vmid, target: {
+    # the preflight hands in where every guest of the set ends up (vm_nodes) and the rules
+    monkeypatch.setattr(history, 'check_affinity_violation', lambda cid, vmid, target, **kw: {
         'violation': True, 'enforce': True, 'rule': 'keep-apart', 'message': 'x'})
     c = api.as_user(seed.user('root', role='admin'))
     first = _start(c, [100])

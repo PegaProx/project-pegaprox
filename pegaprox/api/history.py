@@ -406,25 +406,31 @@ def save_affinity_rules(config):
         logging.error(f"Error saving affinity rules: {e}")
         return False
 
-def check_affinity_violation(cluster_id: str, vmid: int, target_node: str) -> dict:
+def check_affinity_violation(cluster_id: str, vmid: int, target_node: str, vm_nodes: dict = None,
+                             config: dict = None) -> dict:
     """Check if moving a VM/CT to a node would violate affinity rules
 
     NS: Feb 2026 - returns enforce flag so callers can block or just warn.
     Works for both QEMU and LXC now (Issue #73).
+    MK Oct 2026 - vm_nodes ({'vmid': node}) and config (the rules) from a caller that asks for
+    many guests at once: the migration preflight hands in where each guest will be once the
+    whole set moved, and reads the rules once.
     """
-    config = load_affinity_rules()
-    
+    if config is None:
+        config = load_affinity_rules()
+
     if cluster_id not in cluster_managers:
         return {'violation': False}
-    
-    manager = cluster_managers[cluster_id]
-    resources = manager.get_vm_resources()
-    
-    # Build map of VM -> current node
-    vm_nodes = {}
-    for res in resources:
-        if res.get('type') in ['qemu', 'lxc']:
-            vm_nodes[str(res.get('vmid'))] = res.get('node')
+
+    if vm_nodes is None:
+        manager = cluster_managers[cluster_id]
+        resources = manager.get_vm_resources()
+
+        # Build map of VM -> current node
+        vm_nodes = {}
+        for res in resources:
+            if res.get('type') in ['qemu', 'lxc']:
+                vm_nodes[str(res.get('vmid'))] = res.get('node')
     
     for rule in config.get('rules', []):
         if rule.get('cluster_id') != cluster_id or not rule.get('enabled', True):
