@@ -11287,7 +11287,7 @@
             const [alertMutes, setAlertMutes] = useState([]);
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
-            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
+            const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'ceph_osd_latency', 'replication', 'replication_rpo', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
             const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -13237,6 +13237,8 @@
                 if (alert.metric === 'clock_drift') return t('clockDriftSummary').replace('{n}', n);
                 if (alert.metric === 'restart_loop') return t('restartLoopSummary').replace('{n}', n).replace('{m}', alert.restart_window_minutes || 15);
                 if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
+                if (alert.metric === 'ceph_osd_latency') return t('cephOsdLatencySummary').replace('{n}', n);
+                if (alert.metric === 'replication_rpo') return Number(n) > 0 ? t('replicationRpoSummary').replace('{n}', n) : t('replicationRpoSummaryAuto');
                 return `${alert.metric?.toUpperCase()} ${alert.operator} ${alert.threshold}%`;
             };
 
@@ -27765,8 +27767,8 @@
                                             <label className="block text-sm text-gray-400 mb-1">{t('targetType') || 'Apply to'}</label>
                                             <select name="target_type" defaultValue={editingAlert ? editingAlert.target_type : 'cluster'} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg">
                                                 <option value="cluster">{t('entireCluster') || 'Entire Cluster'}</option>
-                                                <option value="node">{t('specificNode') || 'Specific Node'}</option>
-                                                {alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && alertMetricSel !== 'qdevice' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
+                                                {alertMetricSel !== 'replication_rpo' && <option value="node">{t('specificNode') || 'Specific Node'}</option>}
+                                                {alertMetricSel !== 'ceph_osd_latency' && alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && alertMetricSel !== 'qdevice' && <option value="vm">{t('specificVm') || 'Specific VM'}</option>}
                                             </select>
                                         </div>
                                         <div>
@@ -27790,7 +27792,9 @@
                                                 <option value="backup_sla_compliance_pct">{t('backupSlaCompliancePct') || 'Backup SLA compliance %'}</option>
                                                 <option value="task_failed">{t('failedTasks')}</option>
                                                 <option value="ceph_health">{t('alertMetricCeph')}</option>
+                                                <option value="ceph_osd_latency">{t('cephOsdLatencyTitle')}</option>
                                                 <option value="replication">{t('replication')}</option>
+                                                <option value="replication_rpo">{t('replicationRpoTitle')}</option>
                                                 <option value="snapshot_age">{t('alertMetricSnapshots')}</option>
                                                 <option value="backup_coverage">{t('backupCoverageTitle')}</option>
                                                 <option value="zfs_health">{t('zfsAlertTitle')}</option>
@@ -27813,6 +27817,8 @@
                                                     : alertMetricSel === 'clock_drift' ? t('clockDriftHelp')
                                                     : alertMetricSel === 'restart_loop' ? t('restartLoopHelp')
                                                     : alertMetricSel === 'qdevice' ? t('qdeviceAlertHelp')
+                                                    : alertMetricSel === 'ceph_osd_latency' ? t('cephOsdLatencyHelp')
+                                                    : alertMetricSel === 'replication_rpo' ? t('replicationRpoHelp')
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
@@ -27932,6 +27938,20 @@
                                                         <label className="block text-sm text-gray-400 mb-1">{t('restartLoopWindow')}</label>
                                                         <input name="restart_window_minutes" type="number" min="1" max="1440" required defaultValue={saved ? (saved.restart_window_minutes || 15) : 15} className={field} />
                                                     </div>
+                                                </div>
+                                            )}
+                                            {/* LW Oct 2026 - an OSD limit in ms; an RPO in minutes, 0 leaves it to each job's schedule */}
+                                            {alertMetricSel === 'ceph_osd_latency' && (
+                                                <div data-event-fields="ceph_osd_latency">
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('cephOsdLatencyLimit')}</label>
+                                                    <input name="threshold" type="number" min="5" max="10000" required defaultValue={saved ? saved.threshold : 100} className={field} />
+                                                </div>
+                                            )}
+                                            {alertMetricSel === 'replication_rpo' && (
+                                                <div data-event-fields="replication_rpo" className="space-y-1">
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('replicationRpoLimit')}</label>
+                                                    <input name="threshold" type="number" min="0" max="10080" required defaultValue={saved ? saved.threshold : 0} className={field} />
+                                                    <p className="text-xs text-gray-500">{t('replicationRpoAutoHint')}</p>
                                                 </div>
                                             )}
                                             {alertMetricSel !== 'rolling_update' && (

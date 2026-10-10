@@ -97,8 +97,9 @@ def test_every_class_is_in_the_static_tailwind_build():
 def test_a_clock_rule_offers_no_guest_target():
     dash = _read('web', 'src', 'dashboard.js')
     # the QDevice rule (#1137) is a node rule as well and sits in the same condition
-    assert ("{alertMetricSel !== 'zfs_health' && alertMetricSel !== 'clock_drift' && "
-            "alertMetricSel !== 'qdevice' && <option value=\"vm\">") in dash
+    # and so does the Ceph OSD latency rule
+    assert ("{alertMetricSel !== 'ceph_osd_latency' && alertMetricSel !== 'zfs_health' && "
+            "alertMetricSel !== 'clock_drift' && alertMetricSel !== 'qdevice' && <option value=\"vm\">") in dash
     assert "'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];" in dash
     assert "payload.restart_window_minutes = parseInt(form.restart_window_minutes.value)" in dash
 
