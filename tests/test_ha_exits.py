@@ -768,6 +768,8 @@ AUTOMATIONS = {
     ('pegaprox/core/backup_verify.py', 'start_verification'): (1, 'job'),
     # a bulk migration of a user, one guest after another (#952)
     ('pegaprox/core/bulk_migrate.py', 'launch'): (1, 'job'),
+    # one SSH login per node after a cluster was added, `sudo -n true` at most (#1136)
+    ('pegaprox/core/node_creds.py', 'check_in_background'): (1, 'read'),
     ('pegaprox/core/ha.py', '_later'): (1, 'lease'),
     ('pegaprox/core/ha.py', 'restart_process'): (1, 'lease'),
     ('pegaprox/core/ha.py', '_fan_out'): (1, 'peer'),
@@ -1131,6 +1133,8 @@ READ_SITES = [
      {'_ssh_run_command_with_key_output': 1, '_ssh_run_command_output': 1,
       '_ssh_run_command_with_password_output': 1}),
     ('pegaprox/utils/vnc_grab.py', 'screendump_to_png', {'_pve_node_exec': 1}),
+    # the login check of a cluster just added: a login and `sudo -n true` per node (#1136)
+    ('pegaprox/core/node_creds.py', 'check_in_background.run', {'run_check': 1}),
     # the progress of an ESXi import: stat, lvs and the dd log of the target volume, from
     # a plain thread of the import job
     ('pegaprox/core/v2p.py', '_monitor_disk_write.probe', {'_pve_node_exec': 1}),

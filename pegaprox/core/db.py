@@ -935,6 +935,26 @@ class PegaProxDB:
             )
         ''')
 
+        # MK Oct 2026 (#1136) - a root password of one node, for clusters whose nodes do not
+        # share one. Sealed like clusters.pass_encrypted. A row without a password only holds
+        # the last login check of that node (core/node_creds.py).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cluster_node_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                password_encrypted TEXT DEFAULT '',
+                updated_by TEXT DEFAULT '',
+                updated_at TEXT,
+                address TEXT DEFAULT '',
+                check_status TEXT DEFAULT '',
+                check_detail TEXT DEFAULT '',
+                check_credential TEXT DEFAULT '',
+                checked_at TEXT,
+                UNIQUE(cluster_id, node)
+            )
+        ''')
+
         # NS #501 Jun 2026 — persisted active (fired) alert instances for ack +
         # escalation tracking. The in-memory cooldown map only deduped sends; this
         # records each ongoing incident so the UI can acknowledge it and the loop
@@ -2517,6 +2537,94 @@ class PegaProxDB:
     def delete_bmc_endpoint(self, cluster_id, node):
         cur = self.conn.cursor()
         cur.execute('DELETE FROM node_bmc_endpoints WHERE cluster_id=? AND node=?',
+                    (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- #1136: per-node root passwords (core/node_creds.py) -------------------
+    _NODE_CRED_STATE = ('node', 'password_encrypted', 'updated_by', 'updated_at', 'address',
+                        'check_status', 'check_detail', 'check_credential', 'checked_at')
+
+    def list_node_credentials(self, cluster_id):
+        """Every row of one cluster, the password reduced to has_password."""
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT {', '.join(self._NODE_CRED_STATE)} FROM cluster_node_credentials "
+                    "WHERE cluster_id = ? ORDER BY node", (cluster_id,))
+        out = []
+        for r in cur.fetchall():
+            row = dict(r)
+            row['has_password'] = bool(row.pop('password_encrypted'))
+            out.append(row)
+        return out
+
+    def node_credential_secrets(self, cluster_id, with_addresses=False):
+        """{node: password} of one cluster, opened. Server side only, never into a response.
+        A value that does not open is left out: that node gets the cluster's password.
+        with_addresses: ({node: password}, {node: last address the manager placed it at})."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT node, password_encrypted, address FROM cluster_node_credentials "
+                    "WHERE cluster_id = ? AND password_encrypted IS NOT NULL "
+                    "AND password_encrypted != ''", (cluster_id,))
+        out, where = {}, {}
+        for r in cur.fetchall():
+            try:
+                plain = self._decrypt(r['password_encrypted'])
+            except Exception:
+                logging.warning(f"[NodeCreds] the password of node {r['node']} does not open "
+                                "with this key - that node gets the cluster password")
+                continue
+            if plain:
+                out[r['node']] = plain
+                if r['address']:
+                    where[r['node']] = r['address']
+        return (out, where) if with_addresses else out
+
+    def set_node_credential_address(self, cluster_id, node, address):
+        """Where the manager last placed a node that has a password of its own."""
+        cur = self.conn.cursor()
+        cur.execute("UPDATE cluster_node_credentials SET address = ? WHERE cluster_id = ? AND node = ?",
+                    (address or '', cluster_id, node))
+        self.conn.commit()
+
+    def save_node_credential(self, cluster_id, node, password_plain, updated_by):
+        """Set (or with '' clear) the password of one node. Either way the last check
+        went with the old credential and is dropped; a clear drops the kept address too,
+        so a password set later does not start from an address nobody placed it at since."""
+        cur = self.conn.cursor()
+        now = datetime.now().isoformat(timespec='seconds')
+        sealed = self._encrypt(password_plain) if password_plain else ''
+        cur.execute('''
+            INSERT INTO cluster_node_credentials
+              (cluster_id, node, password_encrypted, updated_by, updated_at,
+               check_status, check_detail, check_credential, checked_at)
+            VALUES (?, ?, ?, ?, ?, '', '', '', NULL)
+            ON CONFLICT(cluster_id, node) DO UPDATE SET
+              password_encrypted = excluded.password_encrypted,
+              updated_by = excluded.updated_by, updated_at = excluded.updated_at,
+              address = CASE WHEN excluded.password_encrypted = '' THEN '' ELSE address END,
+              check_status = '', check_detail = '', check_credential = '', checked_at = NULL
+        ''', (cluster_id, node, sealed, updated_by or '', now))
+        self.conn.commit()
+
+    def record_node_credential_checks(self, cluster_id, results):
+        """results: {node: (status, detail, credential)}; one transaction for all of them."""
+        cur = self.conn.cursor()
+        now = datetime.now().isoformat(timespec='seconds')
+        for node, (status, detail, credential) in results.items():
+            cur.execute('''
+                INSERT INTO cluster_node_credentials
+                  (cluster_id, node, password_encrypted, check_status, check_detail,
+                   check_credential, checked_at)
+                VALUES (?, ?, '', ?, ?, ?, ?)
+                ON CONFLICT(cluster_id, node) DO UPDATE SET
+                  check_status = excluded.check_status, check_detail = excluded.check_detail,
+                  check_credential = excluded.check_credential, checked_at = excluded.checked_at
+            ''', (cluster_id, node, status or '', (detail or '')[:300], credential or '', now))
+        self.conn.commit()
+
+    def delete_node_credential(self, cluster_id, node):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM cluster_node_credentials WHERE cluster_id = ? AND node = ?',
                     (cluster_id, node))
         self.conn.commit()
         return cur.rowcount > 0
@@ -5059,7 +5167,9 @@ class PegaProxDB:
                                 # password of the host it builds. Missing here would mean a
                                 # rotation leaves every stored profile unreadable and the
                                 # next ISO fetch answering 500.
-                                ('auto_install_profiles', ('answer_encrypted',))):
+                                ('auto_install_profiles', ('answer_encrypted',)),
+                                # the root passwords of single nodes (#1136)
+                                ('cluster_node_credentials', ('password_encrypted',))):
                 try:
                     cursor.execute(f"SELECT id, {', '.join(_cols)} FROM {_tbl}")
                     for _r in cursor.fetchall():

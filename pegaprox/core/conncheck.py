@@ -361,6 +361,21 @@ def _ssh_user(mgr):
     return cfg.ssh_user if getattr(cfg, 'ssh_user', '') else (cfg.user or 'root').split('@')[0]
 
 
+def _credential_at(mgr, ip):
+    """Which login the node at `ip` gets: 'key', its own password ('node', #1136) or the
+    cluster's ('cluster'). The key goes first, so with one stored the answer is the key."""
+    if getattr(mgr.config, 'ssh_key', ''):
+        return 'key'
+    own = getattr(mgr, '_own_password_at', None)
+    if callable(own):
+        try:
+            if own(ip):
+                return 'node'
+        except Exception:
+            pass
+    return 'cluster'
+
+
 def probe_ssh(mgr, node):
     """One login attempt at most, and only where ssh_diagnose has nothing against it."""
     method = 'key' if getattr(mgr.config, 'ssh_key', '') else 'password'
@@ -377,6 +392,7 @@ def probe_ssh(mgr, node):
     if not ip:
         return _item('ssh', 'fail', item_id=iid, hint='ssh_no_ip', code='NO_IP', **base)
     base['ip'] = ip
+    base['credential'] = _credential_at(mgr, ip)
     failure = {}
     client = mgr._ssh_connect(ip, retries=1, connect_timeout=SSH_TIMEOUT, failure=failure)
     if client is None:
@@ -407,7 +423,8 @@ def probe_ssh(mgr, node):
 
 def check_ssh(mgr, nodes):
     """Per online node, except when SSH is off or has no credential for the whole
-    cluster: then one item says so and no node is contacted."""
+    cluster: then one item says so and no node is contacted. Each node is tried with
+    what it would get anywhere else, its own password where it has one (#1136)."""
     blocked = mgr.ssh_blocked_reason()
     if blocked:
         diag = mgr.ssh_diagnose(nodes[0]['name']) if nodes else None

@@ -309,6 +309,8 @@ SYNC_TABLES = (
     'balancing_excluded_pools', 'affinity_rules', 'vm_tags', 'alerts', 'cluster_alerts',
     'alert_mutes', 'scheduled_tasks', 'scheduled_actions', 'update_schedules', 'custom_scripts',
     'node_bmc_endpoints', 'esxi_storages', 'storage_clusters', 'pbs_servers',
+    # the root passwords of single nodes, sealed like the cluster's own (#1136)
+    'cluster_node_credentials',
     'vmware_servers', 'xcpng_pools', 'xcpng_pool_members', 'xcpng_vmid_map',
     'cross_cluster_replications', 'efficient_snapshots', 'site_recovery_plans',
     'site_recovery_vms', 'snapshot_policies', 'drift_baselines', 'multi_cluster_vnets',
@@ -375,6 +377,7 @@ ENCRYPTED_COLUMNS = {
                  'ha_settings'),
     'esxi_storages': ('password_encrypted',),
     'node_bmc_endpoints': ('bmc_password_encrypted',),
+    'cluster_node_credentials': ('password_encrypted',),
     'pbs_servers': ('pass_encrypted', 'api_token_secret_encrypted', 'ssh_key_encrypted'),
     'vmware_servers': ('pass_encrypted',),
     'auto_install_profiles': ('answer_encrypted',),

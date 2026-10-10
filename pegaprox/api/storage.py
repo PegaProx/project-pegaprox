@@ -27,7 +27,7 @@ from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
 from pegaprox.api.helpers import upstream_failure
-from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_for, ssh_blocked_for
+from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_to, ssh_blocked_for
 from pegaprox import globals as _g
 from pegaprox.utils.ssh import read_capped as _read_capped
 
@@ -1913,11 +1913,14 @@ def rescan_storage(cluster_id, storage_id):
                             ssh_user = manager.config.ssh_user if hasattr(manager.config, 'ssh_user') and manager.config.ssh_user else 'root'
                             ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
                             ssh_key = getattr(manager.config, 'ssh_key', '')
-                            # None rather than '' so paramiko offers no password at all
-                            ssh_pass = ssh_password_for(manager.config) or None
-                            
-                            # Determine node hostname
-                            node_host = host if node == nodes[0] else f"{node}.{host.split('.', 1)[1] if '.' in host else host}"
+
+                            # Determine node hostname. MK Oct 2026 (#1136): the node's own
+                            # address first - the cluster host is not necessarily nodes[0]
+                            node_host = manager.member_node_ip(node) or (
+                                host if node == nodes[0] else f"{node}.{host.split('.', 1)[1] if '.' in host else host}")
+                            # None rather than '' so paramiko offers no password at all;
+                            # the node's own password where it has one
+                            ssh_pass = ssh_password_to(manager, node_host) or None
                             
                             # Try to connect via SSH
                             # its commands ask the transport guard of an automatic group (#625)

@@ -36,7 +36,7 @@ def _updating_manager(back):
     m.logger = MagicMock()
     m.nodes_in_maintenance = {}
     m._get_node_ip = lambda node: '10.0.0.5'
-    m._ssh_connect = lambda ip: _ssh()
+    m._ssh_connect = lambda ip, **kw: _ssh()
     # needrestart is not installed (exit 1): the reboot is forced, as on the reported node
     m._ssh_execute = lambda ssh, cmd, task=None: (1 if 'dpkg -s needrestart' in cmd else 0, '', '')
     m._wait_for_node_online = lambda node: back

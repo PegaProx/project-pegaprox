@@ -247,6 +247,12 @@ def add_cluster():
     # NS: let frontend know if we auto-created an API token (#110)
     if getattr(manager, '_token_auto_created', False):
         result['api_token_created'] = True
+    if cluster_type == 'proxmox':
+        # MK Oct 2026 (#1136) - one login per node in the background: a node with a root
+        # password of its own refuses the cluster's, and the UI points at Node credentials
+        from pegaprox.core import node_creds
+        node_creds.check_in_background(cluster_id)
+        result['node_check'] = True
     return jsonify(result), 201
 
 
@@ -449,6 +455,15 @@ def reconfigure_cluster(cluster_id):
             return jsonify({'error': f'Connection failed: {new_mgr.connection_error or "unknown"}',
                             'error_code': getattr(new_mgr, 'connection_error_code', None)}), 400
 
+    # MK Oct 2026 (#1136) - the dialog types the cluster's credential again, never the
+    # nodes' own passwords. Where it points the cluster elsewhere those go, as in
+    # _config_edit_checks, before the new manager resolves a single node
+    cleared = []
+    if cluster_type != 'xcpng':
+        moved = _moved_by_reconfigure(old_mgr.config, new_config, data)
+        if moved:
+            cleared = _drop_node_passwords(cluster_id, data.get('name') or cluster_id, moved)
+
     # Stop old manager, swap in new one
     try:
         old_mgr.stop()
@@ -464,7 +479,34 @@ def reconfigure_cluster(cluster_id):
     result = {'success': True, 'message': 'Cluster re-configured successfully'}
     if getattr(new_mgr, '_token_auto_created', False):
         result['api_token_created'] = True
+    if cleared:
+        result['node_passwords_cleared'] = cleared
     return jsonify(result)
+
+
+def _moved_by_reconfigure(old, new, data):
+    """What of host, fallback_hosts, ssh_port and ssl_verification a re-configure moves,
+    by the rule of _config_edit_checks: an address not among the old ones, another SSH
+    port, verification switched off. The dialog sends no SSH port; one the body leaves
+    out is the default port 22 of the node itself, no move."""
+    known = {_host_key(old.host)} | {_host_key(h) for h in (getattr(old, 'fallback_hosts', None) or [])}
+    moved = []
+    if _host_key(new.host) not in known:
+        moved.append('host')
+    fallback = getattr(new, 'fallback_hosts', None) or []
+    if isinstance(fallback, (list, tuple)) and any(_host_key(h) not in known for h in fallback):
+        moved.append('fallback_hosts')
+
+    def port(cfg):
+        try:
+            return int(getattr(cfg, 'ssh_port', 22) or 22)
+        except (TypeError, ValueError):
+            return 22
+    if data.get('ssh_port') not in (None, '') and port(new) != port(old):
+        moved.append('ssh_port')
+    if getattr(old, 'ssl_verification', False) and not getattr(new, 'ssl_verification', False):
+        moved.append('ssl_verification')
+    return moved
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes', methods=['GET'])
@@ -639,6 +681,14 @@ def check_cluster_connection(cluster_id):
         return jsonify({'error': safe_error(e, 'The connection check failed')}), 500
     report['cluster_id'] = cluster_id
     report['ssh_checked'] = with_ssh
+    if with_ssh:
+        # what each node said goes to its row under Node credentials (#1136)
+        from pegaprox.core import node_creds
+        try:
+            node_creds.record(cluster_id, report.get('items') or [], [])
+        except Exception as e:
+            logging.warning(f"[NodeCreds] could not keep the SSH results of {_sl(cluster_id)}: {e}")
+        report['refused'] = node_creds.refused(report.get('items') or [])
     s = report['summary']
     log_audit(request.session['user'], 'cluster.connection_check',
               f"Connection check of {mgr.config.name}: {s['ok']} ok, {s['warn']} warnings, "
@@ -746,6 +796,181 @@ def check_transfer_network(cluster_id):
               cluster=mgr.config.name)
     report.update(cluster_id=cluster_id, source_cluster=src_id)
     return jsonify(report)
+
+
+# --- per-node root passwords (#1136) -----------------------------------------------------
+# MK Oct 2026 - a node with a root password of its own gets that one instead of the
+# cluster's (core/node_creds.py). Seen and set like the cluster's own credentials: by
+# whoever may re-configure the cluster, never by a confined admin or a caller who reaches
+# the cluster through a pool. The value goes in and never comes back out.
+
+def _node_creds_cluster(cluster_id):
+    """(manager, None) for a cluster whose node logins the caller may see and set, else
+    (None, the response)."""
+    if cluster_id not in cluster_managers:
+        return None, (jsonify({'error': 'Cluster not found'}), 404)
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return None, err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return None, _cerr
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, (jsonify({'error': 'Node credentials are for Proxmox VE clusters',
+                               'code': 'PVE_ONLY'}), 400)
+    return mgr, None
+
+
+def _cluster_members(mgr):
+    """{node: /nodes entry} as the cluster lists itself, {} when it does not answer."""
+    try:
+        members = mgr.nodes
+        return dict(members) if isinstance(members, dict) else {}
+    except Exception:
+        return {}
+
+
+def _node_check_view(row):
+    if not row or not row.get('checked_at'):
+        return None
+    return {'code': row.get('check_status') or '', 'detail': row.get('check_detail') or '',
+            'credential': row.get('check_credential') or '', 'checked_at': row.get('checked_at')}
+
+
+@bp.route('/api/clusters/<cluster_id>/node-credentials', methods=['GET'])
+@require_auth(perms=['cluster.config'])
+def get_node_credentials(cluster_id):
+    """Every node of the cluster with whether it has a password of its own, who set it
+    when, and what its last login check said. Never the value."""
+    mgr, err = _node_creds_cluster(cluster_id)
+    if err:
+        return err
+    from pegaprox.core import node_creds
+    from pegaprox.utils.ssh import ssh_password_for
+    rows = {r['node']: r for r in node_creds.state(cluster_id)}
+    members = _cluster_members(mgr)
+    nodes = []
+    for name in sorted(set(members) | set(rows)):
+        row = rows.get(name) or {}
+        info = members.get(name) or {}
+        nodes.append({
+            'node': name,
+            'member': (name in members) if members else None,
+            'online': (info.get('status') == 'online') if info else None,
+            'has_password': bool(row.get('has_password')),
+            'updated_at': row.get('updated_at') if row.get('has_password') else None,
+            'updated_by': (row.get('updated_by') or None) if row.get('has_password') else None,
+            # where the manager last placed it, the one address its password goes to
+            'address': (row.get('address') or None) if row.get('has_password') else None,
+            'last_check': _node_check_view(row),
+        })
+    cfg = mgr.config
+    user = getattr(cfg, 'user', '') or ''
+    return jsonify({
+        'cluster_id': cluster_id,
+        'nodes': nodes,
+        'ssh_user': getattr(cfg, 'ssh_user', '') or (user or 'root').split('@')[0],
+        'ssh_key': bool(getattr(cfg, 'ssh_key', '')),
+        'ssh_disabled': bool(getattr(cfg, 'ssh_disabled', False)),
+        'token_auth': '!' in user,
+        'cluster_password': bool(ssh_password_for(cfg)),
+        'max_length': node_creds.MAX_LEN,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/node-credentials/<node>', methods=['PUT'])
+@require_auth(perms=['cluster.config'])
+def set_node_credential(cluster_id, node):
+    """{"password": "..."}: the root password of this one node. It is offered to that
+    node's own address only, in place of the cluster password."""
+    mgr, err = _node_creds_cluster(cluster_id)
+    if err:
+        return err
+    from pegaprox.core import node_creds
+    if not node_creds.node_name_ok(node):
+        return jsonify({'error': 'Invalid node name'}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The request body must be a JSON object'}), 400
+    problem = node_creds.value_problem(data.get('password'))
+    if problem:
+        return jsonify({'error': problem}), 400
+    members = _cluster_members(mgr)
+    if not members:
+        return jsonify({'error': 'The node list of this cluster could not be read'}), 503
+    if node not in members:
+        return jsonify({'error': f'{node} is no node of this cluster'}), 404
+    user = request.session['user']
+    try:
+        node_creds.store(cluster_id, node, data['password'], user)
+    except Exception as e:
+        logging.error(f"[NodeCreds] storing the password of {_sl(node)} failed: {type(e).__name__}")
+        return jsonify({'error': 'The password could not be stored'}), 500
+    log_audit(user, 'cluster.node_credential_set',
+              f"Set the own root password of node {node} (it replaces the cluster password there)",
+              cluster=mgr.config.name)
+    return jsonify({'success': True, 'node': node, 'has_password': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/node-credentials/<node>', methods=['DELETE'])
+@require_auth(perms=['cluster.config'])
+def clear_node_credential(cluster_id, node):
+    """The node gets the cluster password again."""
+    mgr, err = _node_creds_cluster(cluster_id)
+    if err:
+        return err
+    from pegaprox.core import node_creds
+    if not node_creds.node_name_ok(node):
+        return jsonify({'error': 'Invalid node name'}), 400
+    row = next((r for r in node_creds.state(cluster_id) if r['node'] == node), None)
+    if not row or not row.get('has_password'):
+        return jsonify({'error': f'{node} has no password of its own'}), 404
+    user = request.session['user']
+    node_creds.clear(cluster_id, node, user)
+    log_audit(user, 'cluster.node_credential_cleared',
+              f"Cleared the own root password of node {node} (the cluster password applies again)",
+              cluster=mgr.config.name)
+    return jsonify({'success': True, 'node': node, 'has_password': False})
+
+
+@bp.route('/api/clusters/<cluster_id>/node-credentials/check', methods=['POST'])
+@require_auth(perms=['cluster.config'])
+def check_node_credentials(cluster_id):
+    """One SSH login per online node with what that node gets (its own password, the
+    cluster's or the key), kept per node; `refused` names the nodes that said no.
+    {"nodes": [...]} narrows it down. A standby forwards or refuses it like any write."""
+    mgr, err = _node_creds_cluster(cluster_id)
+    if err:
+        return err
+    from pegaprox.core import node_creds
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'The request body must be a JSON object'}), 400
+    only = data.get('nodes')
+    if only is not None:
+        if (not isinstance(only, list) or len(only) > 512
+                or not all(node_creds.node_name_ok(n) for n in only)):
+            return jsonify({'error': 'nodes must be a list of node names'}), 400
+    if not getattr(mgr, 'is_connected', False):
+        return jsonify({'error': 'The cluster is not connected', 'code': 'NOT_CONNECTED'}), 409
+    try:
+        items, names = node_creds.run_check(mgr, cluster_id, only=set(only) if only else None)
+    except Exception as e:
+        logging.warning(f"[NodeCreds] login check of {_sl(cluster_id)} failed: {e}")
+        return jsonify({'error': safe_error(e, 'The login check failed')}), 502
+    refused = node_creds.refused(items)
+    ok = sum(1 for it in items if it.get('code') in node_creds.LOGIN_OK)
+    log_audit(request.session['user'], 'cluster.node_credential_check',
+              f"Checked the node logins of {mgr.config.name}: {ok} of {len(names)} logged in"
+              + (f", refused by {', '.join(refused)}" if refused else ''),
+              cluster=mgr.config.name)
+    from datetime import datetime, timezone
+    return jsonify({'cluster_id': cluster_id, 'nodes': items, 'refused': refused,
+                    'checked': names,
+                    'checked_at': datetime.now(timezone.utc).isoformat(timespec='seconds')})
 
 
 def _retire_cluster_claim(mgr, every_node=False):
@@ -900,6 +1125,10 @@ def delete_cluster(cluster_id):
         # affinity_rules, cluster_alerts, pool_permissions, node_maintenance, … ~20 of them), so the
         # per-table DELETEs that used to live here are gone — they only ever covered three of them.
         db.delete_cluster(cluster_id)
+        # the node passwords went with it (cluster_node_credentials), and so does what this
+        # process remembers of them (#1136)
+        from pegaprox.core import node_creds
+        node_creds.forget_cluster(cluster_id)
 
         # tenants.clusters is a JSON array, not a cluster_id column, so prune it separately: drop the
         # deleted cluster from every tenant's assigned-clusters list, else the tenant's "N clusters"
@@ -1716,9 +1945,30 @@ def _config_edit_checks(mgr, data):
     return None, {'creds': creds, 'moved': moved}
 
 
-def _rebind(mgr, rebind):
+def _drop_node_passwords(cluster_id, cluster_name, moved):
+    """MK Oct 2026 (#1136) - the root passwords of single nodes are stored secrets of the
+    cluster as well, and go wherever the cluster then says its nodes are. Nobody typed
+    them again for this edit, so they are dropped like the cluster's own. Before the edit
+    is applied: a drop that fails stops the edit. Returns the nodes that lost theirs."""
+    from pegaprox.core import node_creds
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    gone = [r['node'] for r in node_creds.state(cluster_id) if r.get('has_password')]
+    for node in gone:
+        node_creds.clear(cluster_id, node, usr)
+    # what this process placed where came from the old endpoint
+    node_creds.forget_cluster(cluster_id)
+    if gone:
+        log_audit(usr, 'cluster.node_credential_removed',
+                  f"Cluster {cluster_name}: cleared the own root password of node(s) {', '.join(gone)}, "
+                  f"{', '.join(moved)} changed and they were not entered again", cluster=cluster_name)
+    return gone
+
+
+def _rebind(mgr, rebind, cluster_id):
     """Swap in the credential the request typed and forget the login of the old
     destination, so the next call logs in afresh where the admin pointed it."""
+    rebind['node_passwords_cleared'] = _drop_node_passwords(
+        cluster_id, getattr(mgr.config, 'name', cluster_id), rebind['moved'])
     for key, value in rebind['creds'].items():
         setattr(mgr.config, key, value)
     for attr in ('_ticket', '_csrf_token', '_api_token', '_original_host'):
@@ -1729,6 +1979,13 @@ def _rebind(mgr, rebind):
     reset = getattr(mgr, '_reset_auth_failures', None)
     if callable(reset):
         reset()
+
+
+def _with_cleared(body, rebind):
+    """The response of an edit, naming the nodes whose own password it cleared."""
+    if rebind and rebind.get('node_passwords_cleared'):
+        body['node_passwords_cleared'] = rebind['node_passwords_cleared']
+    return body
 
 
 @bp.route('/api/clusters/<cluster_id>', methods=['PUT'])
@@ -1765,7 +2022,7 @@ def update_cluster_config(cluster_id):
     if _err:
         return _err
     if rebind:
-        _rebind(mgr, rebind)
+        _rebind(mgr, rebind, cluster_id)
 
     # update config - only allowed fields
     updated = []
@@ -1783,7 +2040,8 @@ def update_cluster_config(cluster_id):
                   f"{', '.join(rebind['moved'])} changed with the credential re-entered")
     log_audit(usr, 'cluster.config_changed', f"Cluster {mgr.config.name} config updated: {', '.join(updated)}")
 
-    return jsonify({'message': 'Configuration updated successfully', 'updated_fields': updated})
+    return jsonify(_with_cleared({'message': 'Configuration updated successfully',
+                                  'updated_fields': updated}, rebind))
 
 @bp.route('/api/clusters/<cluster_id>/config', methods=['PATCH'])
 @require_auth(perms=['cluster.config'])
@@ -1819,7 +2077,7 @@ def update_cluster_config_live(cluster_id):
     if _err:
         return _err
     if rebind:
-        _rebind(mgr, rebind)
+        _rebind(mgr, rebind, cluster_id)
 
     updated = []
     for key, value in data.items():
@@ -1838,7 +2096,8 @@ def update_cluster_config_live(cluster_id):
         log_audit(usr, 'cluster.config_changed', f"Cluster {mgr.config.name} config updated: "
                   f"{', '.join(updated)}")
 
-    return jsonify({'message': 'Configuration updated successfully', 'updated_fields': updated})
+    return jsonify(_with_cleared({'message': 'Configuration updated successfully',
+                                  'updated_fields': updated}, rebind))
 
 
 @bp.route('/api/clusters/<cluster_id>/cpu-compatibility', methods=['GET'])
@@ -2285,7 +2544,7 @@ def set_fallback_hosts(cluster_id):
         return _err
     fallback_hosts = edit['fallback_hosts']
     if rebind:
-        _rebind(mgr, rebind)
+        _rebind(mgr, rebind, cluster_id)
     mgr.config.fallback_hosts = fallback_hosts
     
     # Save to database
@@ -2307,11 +2566,11 @@ def set_fallback_hosts(cluster_id):
     log_audit(request.session['user'], 'cluster.fallback_hosts_changed', 
               f"Cluster {mgr.config.name}: fallback hosts set to {fallback_hosts}")
     
-    return jsonify({
+    return jsonify(_with_cleared({
         'success': True,
         'fallback_hosts': fallback_hosts,
         'message': f'{len(fallback_hosts)} fallback host(s) configured'
-    })
+    }, rebind))
 
 
 @bp.route('/api/clusters/<cluster_id>/migrations', methods=['GET'])

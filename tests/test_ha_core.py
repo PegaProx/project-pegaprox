@@ -1407,6 +1407,38 @@ def test_a_legacy_fernet_value_travels_resealed_under_the_field_key(env, db, see
     assert db._decrypt(pbs) == 'pbs-pass'
 
 
+def test_a_node_password_travels_like_the_cluster_password(env, db, seed, monkeypatch):
+    """(#1136) The root password of a single node is configuration the active acts on: it
+    goes to the standby sealed as it is stored, as clusters.pass_encrypted does, a legacy
+    Fernet value resealed under the field key, and opens there. MK Oct 2026"""
+    from cryptography.fernet import Fernet
+    _be_active()
+    db.save_cluster('c1', {'name': 'c1', 'host': '10.0.0.1', 'user': 'root@pam', 'pass': 'cluster-pw'})
+    db.save_node_credential('c1', 'pve2', 'pve2-own-root', 'alice')
+    db.conn.execute("INSERT INTO cluster_node_credentials (cluster_id, node, password_encrypted) "
+                    "VALUES ('c1', 'pve3', ?)", (db.fernet.encrypt(b'pve3-legacy').decode(),))
+    db.conn.commit()
+    stored = db.conn.execute("SELECT password_encrypted FROM cluster_node_credentials "
+                             "WHERE node = 'pve2'").fetchone()[0]
+
+    snap = _wire(ha.build_snapshot())
+
+    assert 'cluster_node_credentials' in snap['tables']
+    sent2 = _row(snap, 'cluster_node_credentials', 'node', 'pve2')
+    sent3 = _row(snap, 'cluster_node_credentials', 'node', 'pve3')
+    assert sent2['password_encrypted'] == stored and stored.startswith('aes256:')
+    assert sent3['password_encrypted'].startswith('aes256:')
+    assert 'pve2-own-root' not in json.dumps(snap) and 'pve3-legacy' not in json.dumps(snap)
+
+    monkeypatch.setattr(db, 'fernet', Fernet(Fernet.generate_key()))
+    db.conn.execute('DELETE FROM cluster_node_credentials')
+    db.conn.commit()
+    _be_standby()
+    ha.apply_snapshot(snap)
+
+    assert db.node_credential_secrets('c1') == {'pve2': 'pve2-own-root', 'pve3': 'pve3-legacy'}
+
+
 # --- plugin configuration --------------------------------------------------------
 
 def _plugin(name, text=None, mode=None):

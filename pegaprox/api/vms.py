@@ -61,7 +61,7 @@ from pegaprox.core import ha, ha_transport
 from pegaprox.core import transfer_net
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
-from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_blocked_for
+from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for
 from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name
 from urllib.parse import urlencode, quote as url_quote
 import signal
@@ -3850,7 +3850,6 @@ def remove_node_from_cluster(cluster_id, node_name):
         if not ssh_user:
             api_user = cluster_config.user
             ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
-        ssh_password = ssh_password_for(cluster_config)
         ssh_key_content = getattr(cluster_config, 'ssh_key', '') or ''
         
         # Find an online node to execute the removal from
@@ -3876,8 +3875,12 @@ def remove_node_from_cluster(cluster_id, node_name):
         # would return wrong/stale data, potentially wiping another node's config!
         removed_node_ip = mgr._get_node_ip(node_name) if hasattr(mgr, '_get_node_ip') else None
         logging.info(f"[RemoveNode] Pre-resolved IP for {node_name}: {removed_node_ip}")
+        # its password too, while it is still a member (#1136)
+        removed_node_password = ssh_password_to(mgr, removed_node_ip) if removed_node_ip else ''
         
-        # Connect to an online node via SSH (its commands ask the transport guard, #625)
+        # Connect to an online node via SSH (its commands ask the transport guard, #625).
+        # Each of the two nodes gets its own password where it has one (#1136)
+        ssh_password = ssh_password_to(mgr, online_node_ip)
         ssh = secure_ssh_client(paramiko)
         
         # Try SSH key first, then password
@@ -3940,6 +3943,7 @@ def remove_node_from_cluster(cluster_id, node_name):
                 
                 # Try to connect to the removed node
                 cleanup_connected = False
+                ssh_password = removed_node_password
                 if ssh_key_content:
                     try:
                         import io
@@ -4042,6 +4046,17 @@ def remove_node_from_cluster(cluster_id, node_name):
         # Clean up maintenance task
         if node_name in mgr.nodes_in_maintenance:
             del mgr.nodes_in_maintenance[node_name]
+
+        # MK Oct 2026 (#1136) - the stored login of the node goes with it
+        try:
+            from pegaprox.core import node_creds
+            if node_creds.forget(cluster_id, node_name):
+                log_audit(getattr(request, 'session', {}).get('user', 'system'),
+                          'cluster.node_credential_removed',
+                          f"Dropped the stored login of node {node_name}: removed from the cluster",
+                          cluster=mgr.config.name)
+        except Exception as e:
+            logging.warning(f"[RemoveNode] could not drop the stored login of {node_name}: {e}")
         
         # MK: Clean up excluded_nodes - remove the deleted node
         excluded = getattr(mgr.config, 'excluded_nodes', []) or []
@@ -5010,7 +5025,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
                 cluster_id=getattr(mgr, 'id', ''), pve_host=host,
                 ssh_user=_ssh_user, ssh_port=_ssh_port,
                 ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
-                ssh_password=ssh_password_for(mgr.config),
+                ssh_password=ssh_password_to(mgr, host),
                 target_host='127.0.0.1', target_port=_api_port,
             )
             target_host, target_port = '127.0.0.1', tunnel_endpoint.local_port
@@ -5240,7 +5255,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                     cluster_id=cluster_id, pve_host=host,
                     ssh_user=_ssh_user, ssh_port=_ssh_port,
                     ssh_key_content=getattr(mgr.config, 'ssh_key', '') or '',
-                    ssh_password=ssh_password_for(mgr.config),
+                    ssh_password=ssh_password_to(mgr, host),
                     target_host='127.0.0.1', target_port=port,
                 )
                 target_host = '127.0.0.1'
@@ -10933,7 +10948,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                     _ssh_user = getattr(manager.config, 'ssh_user', None) or (manager.config.user or 'root').split('@')[0]
                     _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
                     _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
-                    _ssh_pass = ssh_password_for(manager.config)
+                    _ssh_pass = ssh_password_to(manager, host)
                     # MK Apr 2026 — _vt.acquire() is sync. On the *first* call for a
                     # cluster it builds the SSH transport (~1-2s on a fast LAN, more
                     # over WAN). If we ran it directly on the event loop, that 1-2s

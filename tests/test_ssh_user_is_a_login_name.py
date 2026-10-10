@@ -197,7 +197,7 @@ def test_content_sync_does_not_put_a_bad_user_into_the_node_shell(monkeypatch):
     m.get_node_status = lambda: {'pve1': {'status': 'online'}, 'pve2': {'status': 'online'}}
     m.member_node_ip = lambda n: {'pve1': '10.20.0.1', 'pve2': '10.20.0.2'}[n]
     m._resolve_storage_path = lambda *a, **k: '/var/lib/vz/template/iso'
-    m.ssh_password_to_offer = lambda: 'pw'
+    m.ssh_password_to_offer = lambda host=None: 'pw'
     sent = []
 
     def connect(ip):
@@ -227,7 +227,7 @@ def test_content_sync_quotes_and_ends_the_options_for_a_valid_user(monkeypatch):
     m.get_node_status = lambda: {'pve1': {'status': 'online'}, 'pve2': {'status': 'online'}}
     m.member_node_ip = lambda n: {'pve1': '10.20.0.1', 'pve2': '10.20.0.2'}[n]
     m._resolve_storage_path = lambda *a, **k: '/var/lib/vz/template/iso'
-    m.ssh_password_to_offer = lambda: ''
+    m.ssh_password_to_offer = lambda host=None: ''
     sent = []
 
     def connect(ip):

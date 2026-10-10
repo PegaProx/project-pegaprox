@@ -16,7 +16,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to
 from pegaprox.utils.sanitization import validate_ssh_user
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
@@ -722,7 +722,7 @@ def _run_xcpng_to_pve(task):
                     return
 
                 pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
-                pve_pass = ssh_password_for(tgt_mgr.config)
+                pve_pass = ssh_password_to(tgt_mgr, pve_host)
                 pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
 
@@ -1236,7 +1236,7 @@ def _run_pve_to_xcpng(task):
             # SSH into PVE, stream disk -> PegaProx -> HTTP PUT to XCP-ng
             try:
                 pve_user = getattr(src_mgr.config, 'ssh_user', '') or 'root'
-                pve_pass = ssh_password_for(src_mgr.config)
+                pve_pass = ssh_password_to(src_mgr, pve_host)
                 pve_key = getattr(src_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(src_mgr.config, 'ssh_port', 22))
 
@@ -1563,12 +1563,15 @@ def _next_pve_vmid(pve_mgr):
 
 def _resolve_pve_node_ip(pve_mgr, node_name):
     """Get the SSH-reachable IP of a Proxmox node. Tries API, then cluster host."""
+    # the node's own addresses go into the manager's address book, for its password (#1136)
+    from pegaprox.core import node_creds
     try:
         nr = pve_mgr._api_get(
             f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node_name}/network")
         if nr.status_code == 200:
             for iface in nr.json().get('data', []):
                 if iface.get('type') == 'bridge' and iface.get('address'):
+                    node_creds.note_address(getattr(pve_mgr, 'id', None), node_name, iface['address'])
                     return iface['address']
     except:
         pass
@@ -1577,6 +1580,7 @@ def _resolve_pve_node_ip(pve_mgr, node_name):
         if hasattr(pve_mgr, 'nodes') and pve_mgr.nodes:
             node_info = pve_mgr.nodes.get(node_name, {})
             if node_info.get('ip'):
+                node_creds.note_address(getattr(pve_mgr, 'id', None), node_name, node_info['ip'])
                 return node_info['ip']
     except:
         pass
@@ -1883,7 +1887,7 @@ def _run_esxi_to_pve(task):
             task.set_phase('failed', 'The SSH user of the ESXi source is not a valid user name')
             return
         pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
-        pve_pass = ssh_password_for(tgt_mgr.config)
+        pve_pass = ssh_password_to(tgt_mgr, pve_host)
         pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
         pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
 

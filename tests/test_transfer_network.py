@@ -621,6 +621,28 @@ def test_another_key_type_there_gets_no_password_either(known_hosts):
     assert client is None and failure['kind'] == 'host_key' and sshd.logins == []
 
 
+def test_a_transfer_address_gets_the_password_of_its_node(known_hosts, monkeypatch):
+    """A node with a root password of its own (#1136) gets it at its transfer address too:
+    the login there is credited to the management address the host key was held to."""
+    node = paramiko.RSAKey.generate(1024)
+    port, sshd = _serve(node)
+    _pin(known_hosts, f'[10.0.0.12]:{port}', node)
+    import pegaprox.core.node_creds as node_creds
+    monkeypatch.setattr(node_creds, 'secrets_of', lambda cid: {'pve2': 'node-pw'} if cid == 'ssh' else {})
+    m = _ssh_manager(port)
+    asked = []
+
+    def own(addr):
+        asked.append(addr)
+        return 'node-pw' if addr == '10.0.0.12' else ''
+    m._own_password_at = own
+    client = m._ssh_connect('127.0.0.1', retries=1, connect_timeout=10, pinned_as='10.0.0.12')
+    assert client is not None
+    client.close()
+    assert sshd.logins == [('root', 'node-pw')]
+    assert '127.0.0.1' not in asked
+
+
 def test_no_pin_for_the_management_address_means_no_connection(known_hosts):
     port, sshd = _serve(paramiko.RSAKey.generate(1024))
     failure = {}

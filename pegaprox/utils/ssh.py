@@ -436,16 +436,32 @@ def ssh_password_for(config):
     return getattr(config, 'pass_', '') or ''
 
 
-def ssh_blocked_for(mgr):
+def ssh_password_to(mgr, host):
+    """The password an SSH login to `host` of this manager's cluster may offer, '' for none.
+
+    MK Oct 2026 (#1136) - the node at `host` gets its own root password where it has one,
+    the cluster's otherwise (PegaProxManager.ssh_password_to_offer). For the paths outside
+    the manager that build their own login; config.pass_ directly stays wrong there too.
+    """
+    offer = getattr(mgr, 'ssh_password_to_offer', None)
+    if callable(offer):
+        found = offer(host)
+        if isinstance(found, str):
+            return found
+    return ssh_password_for(getattr(mgr, 'config', None))
+
+
+def ssh_blocked_for(mgr, host=None):
     """Why SSH to this manager's nodes must not happen - a code, or None.
 
     For the routes that build their own paramiko client from config.ssh_key: blanking the
     password was not enough there, the key still logged in with SSH switched off (#941).
-    Managers without ssh_blocked_reason (XCP-ng) answer by the switch alone.
+    Managers without ssh_blocked_reason (XCP-ng) answer by the switch alone. `host`: the
+    address about to be dialled, which may hold a credential of its own (#1136).
     """
     probe = getattr(mgr, 'ssh_blocked_reason', None)
     if callable(probe):
-        reason = probe()
+        reason = probe(host) if host is not None else probe()
         return reason if isinstance(reason, str) else None
     if bool(getattr(getattr(mgr, 'config', None), 'ssh_disabled', False)):
         return 'SSH_DISABLED'
@@ -577,14 +593,16 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         # token WE minted (#110) keeps its password, and blanking it here took node
         # commands away from the most common configuration we have.
         _token_auth = '!' in (getattr(pve_mgr.config, 'user', '') or '')
-        _ssh_pass = ssh_password_for(pve_mgr.config)
+        # the node's own password where it has one (#1136)
+        _ssh_pass = ssh_password_to(pve_mgr, node_host)
         if not _ssh_pass:
             # Say which of the three it actually is. The first version of this asserted a
             # stored key in every case, but the branch is also reached on a cluster with no
             # credential at all — whenever ssh_diagnose raised and its own message never
             # got the chance to say so.
             _why = ("this cluster authenticates with an API token, and the stored secret is "
-                    "that token, not an SSH password") if _token_auth else \
+                    "that token, not an SSH password, and this node has no password of its "
+                    "own") if _token_auth else \
                    "no SSH password is stored for this cluster"
             if getattr(pve_mgr.config, 'ssh_key', ''):
                 _why += (" — the stored SSH key cannot help here, this path authenticates "

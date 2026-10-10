@@ -40,6 +40,7 @@ def seeded(db):
         "INSERT OR REPLACE INTO auto_install_profiles (id, name, answer_encrypted, token_hash) "
         "VALUES (?, ?, ?, ?)",
         ('ai1', 'rack-7', db._encrypt('[global]\nroot-password = "in the rack"\n'), 'deadbeef'))
+    db.save_node_credential('c1', 'pve2', 'nodepw', 'root')
     db.save_server_setting('ldap_bind_password', db._encrypt('bindpw'))
     db.save_server_setting(VAPID, {'private_pem': db._encrypt('-----BEGIN PRIVATE KEY-----'),
                                    'public_b64': 'pub'})
@@ -67,6 +68,8 @@ def test_every_secret_survives_a_rotation(seeded):
     # ISO gets a 500 instead of an install.
     assert 'in the rack' in seeded._decrypt(
         _col(seeded, 'auto_install_profiles', 'answer_encrypted', 'ai1'))
+    # the root password of a single node (#1136)
+    assert seeded.node_credential_secrets('c1') == {'pve2': 'nodepw'}
     settings = seeded.get_server_settings()
     assert seeded._decrypt(settings['ldap_bind_password']) == 'bindpw'
     assert seeded._decrypt(settings[VAPID]['private_pem']).startswith('-----BEGIN')
