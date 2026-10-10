@@ -11397,6 +11397,7 @@
             // LW Oct 2026 (#1136) - nodes of a new cluster that refused the login, and which part
             // of the re-configure dialog to open on
             const [nodeCredsNotice, setNodeCredsNotice] = useState(null);
+            const [nodeLoginsAfterAdd, setNodeLoginsAfterAdd] = useState(null);  // LW Oct 2026 (#1136)
             const reconfigureFocusRef = useRef(null);
             // NS: Mar 2026 - pool/folder view for corporate sidebar
             const [sidebarViewMode, setSidebarViewMode] = useState(() => localStorage.getItem('pegaprox-sidebar-view') || 'tree');
@@ -16428,7 +16429,7 @@
                         await fetchClusters();
                         setShowAddModal(false);
                         addToast(t('clusterAdded') || 'Cluster added successfully');
-                        if (data.node_check && data.id) watchNodeLogins(data.id, config.name, config.host);
+                        if (data.node_check && data.id) setNodeLoginsAfterAdd({ id: data.id, name: config.name });
                         // LW: show extra toast when API token was auto-created (#110)
                         if (data.api_token_created) {
                             addToast(t('apiTokenCreated') || 'API token created on PVE', 'success');
@@ -16453,25 +16454,6 @@
                     setError(t('connectionError') + ': ' + error.message);
                 }
                 setLoading(false);
-            };
-
-            // LW Oct 2026 (#1136) - the server tries one login per node in the background once a
-            // cluster was added. Read what it found a few times; a node that refused gets a
-            // notice that leads to Re-configure > Node credentials.
-            const watchNodeLogins = async (clusterId, name, host) => {
-                for (let i = 0; i < 12; i++) {
-                    await new Promise(r => setTimeout(r, 5000));
-                    let body = null;
-                    try {
-                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/node-credentials`);
-                        if (r && r.ok) body = await r.json();
-                    } catch (e) { body = null; }
-                    const checked = ((body && body.nodes) || []).filter(n => n.last_check);
-                    if (!checked.length) continue;
-                    const refused = checked.filter(n => n.last_check.code === 'AUTH_REFUSED').map(n => n.node);
-                    if (refused.length) setNodeCredsNotice({ clusterId, name, host, nodes: refused });
-                    return;
-                }
             };
 
             const openNodeCredentials = (notice) => {
@@ -29173,6 +29155,9 @@
 
                     {/* LW Oct 2026 (#1136) - nodes of a new cluster that refused the login, or whose
                         own passwords a re-configure to another address dropped */}
+                    {nodeLoginsAfterAdd && (
+                        <NodeLoginsAfterAddModal cluster={nodeLoginsAfterAdd} onClose={() => setNodeLoginsAfterAdd(null)} />
+                    )}
                     {nodeCredsNotice && (
                         <div data-node-creds-notice={nodeCredsNotice.clusterId} data-node-creds-reason={nodeCredsNotice.reason || 'refused'}
                             className="fixed bottom-6 right-6 z-50 w-full max-w-sm p-4 rounded-xl border border-red-500/30 bg-proxmox-card shadow-2xl">

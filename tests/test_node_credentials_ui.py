@@ -1,6 +1,7 @@
 """Node credentials in the web UI (#1136): the section of the re-configure dialog, the
-notice after a cluster was added whose nodes refused the login, and the refused nodes
-in the connection check.
+popup right after a cluster was added that asks the nodes which refused the login for
+their own password, the notice after a re-configure that cleared them, and the refused
+nodes in the connection check.
 
 The routes are tested in tests/test_node_credentials_1136.py. These read the source and
 the bundle, and drive the built bundle in headless Chromium against the fake server of
@@ -65,10 +66,10 @@ def _lang_blocks():
 # -- source ------------------------------------------------------------------------------------
 
 def test_every_key_exists_once_per_language_and_none_is_unused(modals, dash):
-    used = set(re.findall(r"t\('(nodeCreds[A-Za-z0-9]+)'\)", modals + dash))
+    used = set(re.findall(r"t\('(node(?:Creds|Logins)[A-Za-z0-9]+)'\)", modals + dash))
     assert len(used) >= 25, sorted(used)
     for lang, block in _lang_blocks().items():
-        defined = set(re.findall(r'^                (nodeCreds[A-Za-z0-9]+): ', block, re.M))
+        defined = set(re.findall(r'^                (node(?:Creds|Logins)[A-Za-z0-9]+): ', block, re.M))
         assert defined == used, (lang, defined ^ used)
         for key in used | {'sshKeyExplanation'}:
             assert len(re.findall(r'^                %s: ' % key, block, re.M)) == 1, (lang, key)
@@ -77,7 +78,8 @@ def test_every_key_exists_once_per_language_and_none_is_unused(modals, dash):
 def test_placeholders_survive_translation():
     blocks = _lang_blocks()
     for key in ('nodeCredsSaved', 'nodeCredsCleared', 'nodeCredsSetBy', 'nodeCredsRefusedNotice',
-                'nodeCredsRefusedHint', 'nodeCredsCheckedAt', 'nodeCredsClearedByMove'):
+                'nodeCredsRefusedHint', 'nodeCredsCheckedAt', 'nodeCredsClearedByMove',
+                'nodeLoginsTitle', 'nodeLoginsRefused'):
         want = None
         for lang, block in blocks.items():
             line = re.search(r'^                %s: (.*)$' % key, block, re.M).group(1)
@@ -100,7 +102,7 @@ def test_no_em_dash_icons_exist_and_classes_are_in_the_build(modals, dash, notic
     new_code = section + notice
     assert '\u2014' not in new_code and '\u2013' not in new_code
     for block in _lang_blocks().values():
-        for line in re.findall(r'^                (?:nodeCreds[A-Za-z0-9]+|sshKeyExplanation): .*$', block, re.M):
+        for line in re.findall(r'^                (?:node(?:Creds|Logins)[A-Za-z0-9]+|sshKeyExplanation): .*$', block, re.M):
             assert '\u2014' not in line and '\u2013' not in line, line
     icons = _read('web', 'src', 'icons.js')
     for name in set(re.findall(r'Icons\.([A-Za-z]+)', new_code)):
@@ -124,7 +126,7 @@ def test_a_standby_gets_no_buttons(modals, notice):
 def test_the_bundle_was_rebuilt():
     bundle = _read('web', 'index.html')
     for needle in ('function NodeCredentialsSection(', '/node-credentials', 'nodeCredsRefusedNotice',
-                   'watchNodeLogins', 'data-check-refused', 'nodeCredsClearedByMove'):
+                   'function NodeLoginsAfterAddModal(', 'data-check-refused', 'nodeCredsClearedByMove'):
         assert needle in bundle, needle
 
 
@@ -263,26 +265,38 @@ def _add_cluster(app, layout):
 
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
-def test_runtime_a_refusal_after_adding_leads_to_the_section(open_app, layout):
+def test_runtime_adding_a_cluster_asks_the_refused_nodes_right_away(open_app, layout):
+    """No trip through Re-configure: the popup waits for the background login check and
+    puts the password field of the refused node in front of the user."""
     c2 = '/api/clusters/c2/node-credentials'
     state = dict(STATE, cluster_id='c2')
     app = open_app(role='standalone', layout=layout, clusters=[CLUSTER], extra={
         ('POST', '/api/clusters'): (201, {'id': 'c2', 'message': 'Cluster added successfully', 'node_check': True}),
         ('GET', c2): (200, state),
-        ('POST', '/api/auth/verify-password'): (200, {'success': True}),
-        ('GET', '/api/clusters/c2/config/export'): (200, dict(EXPORT, name='Lab Two', host='10.0.9.1')),
+        ('PUT', f'{c2}/pve2'): (200, {'success': True, 'node': 'pve2', 'has_password': True}),
+        ('POST', f'{c2}/check'): (200, {'cluster_id': 'c2', 'nodes': [], 'refused': [], 'checked': ['pve2']}),
     })
     page = app.page
     _add_cluster(app, layout)
-    note = page.locator('[data-node-creds-notice="c2"]')
-    note.wait_for(timeout=15000)
-    assert 'pve2 refused the login to Lab Two' in note.inner_text()
-    note.locator('button', has_text='Open node credentials').click()
+    pop = page.locator('[data-node-logins="c2"]')
+    pop.wait_for(timeout=8000)
+    assert _wait(page, lambda: pop.get_attribute('data-node-logins-phase') == 'refused', timeout=10)
+    text = pop.inner_text()
+    assert 'Node logins of Lab Two' in text and '1 node(s) refuse the cluster' in text
+    # the section is open on its own, no re-auth, no notice
+    row = pop.locator('[data-node-cred="pve2"]')
+    row.wait_for(timeout=5000)
+    assert row.get_attribute('data-node-cred-state') == 'refused'
     assert page.locator('[data-node-creds-notice]').count() == 0
-    _reauth(page)
-    # the dialog opens on the section, already expanded
-    page.locator('[data-node-creds="c2"] [data-node-cred="pve2"]').wait_for(timeout=5000)
-    assert page.locator('[data-node-cred="pve2"]').get_attribute('data-node-cred-state') == 'refused'
+    row.locator('input[type="password"]').fill('pve2-own')
+    row.locator('input[type="password"]').press('Enter')
+    assert _wait(page, lambda: f'{c2}/check' in app.server.bodies)
+    assert app.server.bodies[f'{c2}/pve2'][-1] == {'password': 'pve2-own'}
+    # the saved password is tried on that node at once
+    assert app.server.bodies[f'{c2}/check'][-1] == {'nodes': ['pve2']}
+    # offline pve3 has no result and does not hold the popup up
+    pop.locator('button', has_text='Later').click()
+    assert page.locator('[data-node-logins]').count() == 0
     assert not app.errors, app.errors
 
 
@@ -327,16 +341,32 @@ def test_runtime_a_re_configure_that_cleared_nothing_shows_no_notice(open_app):
     assert not app.errors, app.errors
 
 
-def test_runtime_no_notice_when_every_node_logged_in(open_app):
+def test_runtime_every_node_logged_in_says_so_and_closes(open_app):
     c2 = '/api/clusters/c2/node-credentials'
     fine = dict(STATE, cluster_id='c2', nodes=[dict(STATE['nodes'][0])])
     app = open_app(role='standalone', layout='corporate', clusters=[CLUSTER], extra={
         ('POST', '/api/clusters'): (201, {'id': 'c2', 'node_check': True}),
         ('GET', c2): (200, fine)})
     _add_cluster(app, 'corporate')
-    assert _wait(app.page, lambda: ('GET', c2) in app.server.calls, timeout=12)
-    app.page.wait_for_timeout(500)
+    pop = app.page.locator('[data-node-logins="c2"]')
+    pop.wait_for(timeout=8000)
+    assert _wait(app.page, lambda: pop.count() and pop.get_attribute('data-node-logins-phase') == 'ok', timeout=10)
+    assert 'Every node accepts the login.' in pop.inner_text()
+    assert app.page.locator('[data-node-cred]').count() == 0
+    # it goes by itself
+    assert _wait(app.page, lambda: app.page.locator('[data-node-logins]').count() == 0, timeout=8)
     assert app.page.locator('[data-node-creds-notice]').count() == 0
+    assert not app.errors, app.errors
+
+
+def test_runtime_no_popup_without_a_login_check(open_app):
+    """An API token cluster without SSH, or SSH switched off: the add answers node_check false"""
+    app = open_app(role='standalone', layout='modern', clusters=[CLUSTER], extra={
+        ('POST', '/api/clusters'): (201, {'id': 'c2', 'node_check': False})})
+    _add_cluster(app, 'modern')
+    assert _wait(app.page, lambda: '/api/clusters' in app.server.bodies)
+    app.page.wait_for_timeout(2500)
+    assert app.page.locator('[data-node-logins]').count() == 0
     assert not app.errors, app.errors
 
 

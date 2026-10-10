@@ -2018,6 +2018,8 @@
                 if (res && res.ok) {
                     setDrafts(d => ({ ...d, [node]: '' }));
                     setNotice(t('nodeCredsSaved').replace('{node}', node));
+                    // try the new password on that node right away, so the state says whether it works
+                    await call('/check', { method: 'POST', body: JSON.stringify({ nodes: [node] }) });
                     await load();
                 } else setError(body.error || t('saveFailed'));
                 setBusy('');
@@ -2127,6 +2129,78 @@
                             )}
                         </div>
                     )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 (#1136) - opens right after a cluster was added. The server tries the login
+        // on every node in the background; a node that refuses it gets its own password here,
+        // without a trip through Re-configure first. Every node fine: it says so and goes.
+        function NodeLoginsAfterAddModal({ cluster, onClose }) {
+            const { t } = useTranslation();
+            const [phase, setPhase] = useState('checking');   // checking | refused | ok | slow
+            const [count, setCount] = useState(0);
+            useEffect(() => {
+                let stop = false;
+                (async () => {
+                    for (let i = 0; i < 30; i++) {
+                        await new Promise(r => setTimeout(r, 2000));
+                        if (stop) return;
+                        let body = null;
+                        try {
+                            const r = await fetch(`${API_URL}/clusters/${encodeURIComponent(cluster.id)}/node-credentials`, {
+                                credentials: 'include', headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                            if (r.ok) body = await r.json();
+                        } catch (e) { body = null; }
+                        if (stop) return;
+                        // done once every node that is up has a result
+                        const due = ((body && body.nodes) || []).filter(n => n.online !== false);
+                        if (!due.length || due.some(n => !n.last_check)) continue;
+                        const refused = due.filter(n => n.last_check.code === 'AUTH_REFUSED').length;
+                        setCount(refused);
+                        setPhase(refused ? 'refused' : 'ok');
+                        return;
+                    }
+                    if (!stop) setPhase('slow');
+                })();
+                return () => { stop = true; };
+            }, [cluster.id]);
+            useEffect(() => {
+                if (phase !== 'ok') return;
+                const tm = setTimeout(onClose, 4000);
+                return () => clearTimeout(tm);
+            }, [phase]);
+
+            return (
+                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+                    data-node-logins={cluster.id} data-node-logins-phase={phase}>
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-4">
+                        <div className="flex items-center justify-between gap-4">
+                            <h2 className="text-lg font-semibold text-white">{t('nodeLoginsTitle').replace('{cluster}', cluster.name || '')}</h2>
+                            <button type="button" onClick={onClose} className="p-1 rounded-lg hover:bg-proxmox-hover text-gray-400">
+                                <Icons.X className="w-5 h-5" />
+                            </button>
+                        </div>
+                        {phase === 'checking' && (
+                            <div className="flex items-center gap-2 text-sm text-gray-300">
+                                <span className="inline-flex animate-spin"><Icons.Loader /></span>{t('nodeLoginsChecking')}
+                            </div>
+                        )}
+                        {phase === 'ok' && (
+                            <div className="p-3 rounded-lg bg-green-500/10 border border-green-500/30 text-sm text-green-400">{t('nodeLoginsAllOk')}</div>
+                        )}
+                        {phase === 'refused' && (
+                            <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-sm text-yellow-300">{t('nodeLoginsRefused').replace('{count}', count)}</div>
+                        )}
+                        {phase === 'slow' && <p className="text-sm text-gray-400">{t('nodeLoginsSlow')}</p>}
+                        {(phase === 'refused' || phase === 'slow') && <NodeCredentialsSection clusterId={cluster.id} focus={true} />}
+                        <div className="flex justify-end">
+                            <button type="button" onClick={onClose}
+                                className="px-4 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:bg-proxmox-hover">
+                                {phase === 'refused' ? t('nodeLoginsLater') : t('close')}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             );
         }
