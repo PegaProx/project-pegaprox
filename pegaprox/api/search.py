@@ -22,6 +22,7 @@ from pegaprox.utils.rbac import (
 )
 from pegaprox.api.helpers import get_connected_manager, safe_error, check_cluster_access, scope_vm_rows
 from pegaprox.background import guest_index
+from pegaprox.utils import search_query
 
 bp = Blueprint('search', __name__)
 
@@ -157,12 +158,25 @@ def global_search():
     """Search across all clusters for VMs, containers, and nodes
     
     Query params:
-    - q: search query (name, vmid, ip, node name, tags, MAC address, notes)
+    - q: search query (name, vmid, ip, node name, tags, MAC address, notes), at most 256 characters
     - type: filter by type (vm, ct, node, all) - default: all
     
     Also supports prefix filters like tag:web, node:pve1, ip:192.168, status:running,
-    mac:bc:24:11, notes:backup
+    mac:bc:24:11, notes:backup, name:web, id:100 or id:100-199, type:vm|ct|node,
+    cluster:lab, pool:dev
     You can combine tags with comma: tag:web,production (AND logic)
+
+    Terms combine with AND, OR and NOT (or a '-' in front), terms side by side are ANDed,
+    parentheses group and quotes keep a value with spaces together:
+    (tag:db OR tag:cache) -node:pve3 name:"web 01". A query without operators, parentheses
+    or quotes is first read as before: one prefix at the start and the rest its value; its
+    words count as terms of their own only when that finds nothing. At most 20 terms and 8
+    levels of nesting. A query that cannot be read answers 400 with code SEARCH_SYNTAX, a
+    reason and the position (from 0) where reading stopped.
+
+    The answer says how the query was read (syntax: plain or expression), which values
+    the tags of a hit are marked for (highlight), and with tag_suggestions where a picked
+    tag goes (tag_complete: start, end and the prefix to put in front).
     
     A MAC address matches without regard to separators and case (bc2411aabbcc finds
     BC:24:11:AA:BB:CC). ip: looks at every address the guest agent reports and the static
@@ -182,22 +196,18 @@ def global_search():
     if not raw_query or len(raw_query) < 2:
         return jsonify({'error': 'Search query must be at least 2 characters'}), 400
     
-    # MK: prefix filters - type tag:xxx to search only tags, node:xxx for nodes etc
-    prefix_filter = None
-    query = raw_query.lower()
-    for prefix in ['tag:', 'node:', 'ip:', 'status:', 'mac:', 'notes:']:
-        if query.startswith(prefix):
-            prefix_filter = prefix[:-1]  # 'tag', 'node', 'ip', 'status', 'mac', 'notes'
-            query = query[len(prefix):].strip()
-            break
+    # MK Oct 2026 - the query language lives in utils/search_query. A query without
+    # operators, parentheses or quotes is read the old way first (one prefix, the rest
+    # its value, tag:web,production ANDed); its words are terms of their own only when
+    # that finds nothing, so whatever found something before finds the same
+    try:
+        if search_query.explicit(raw_query):
+            reading, plain = search_query.parse(raw_query), False
+        else:
+            reading, plain = search_query.read_plain(raw_query), True
+    except search_query.SearchSyntaxError as e:
+        return jsonify(e.to_json()), 400
     
-    if not query:
-        return jsonify({'error': 'Search query is empty after prefix'}), 400
-    
-    # LW: you can do tag:web,production to filter by multiple tags at once
-    tag_queries = [t.strip() for t in query.split(',')] if prefix_filter == 'tag' else [query]
-    
-    results = []
     user = request.session.get('user', '')
     # #491 — token-scoped identity so an admin-owned viewer/user token doesn't get all-cluster search results
     user_data = build_authz_user(user, request.session)
@@ -208,6 +218,8 @@ def global_search():
 
     # MK: collect tags for the autocomplete dropdown in the frontend
     all_tags = set()
+    # what each cluster has to search, read once for both readings of a query
+    guests, nodes = [], []
     
     for cluster_id, mgr in list(cluster_managers.items()):
         # Check cluster access - NS: important for multi-tenant setups
@@ -231,122 +243,46 @@ def global_search():
                 # few seconds old is plenty for a search and spares PVE the walk per keystroke
                 resources = scope_vm_rows(cluster_id, mgr.get_vm_resources(max_age=6))
                 indexed = guest_index.snapshot(cluster_id)
-                for r in resources:
-                    name = (r.get('name') or '').lower()
-                    vmid = str(r.get('vmid', ''))
-                    node = (r.get('node') or '').lower()
-                    ip = (r.get('ip') or '').lower()
-                    tags_str = (r.get('tags') or '').lower()
-                    tags_list = [t.strip() for t in tags_str.split(';') if t.strip()] if tags_str else []
-                    status = (r.get('status') or '').lower()
-                    
-                    # collect tags for autocomplete
-                    for t in tags_list:
-                        all_tags.add(t)
-                    
-                    # Match based on prefix filter or global search
-                    matched = False
-                    match_field = None
-                    # what the guest search index knows of this guest: MACs, notes, the
-                    # static IPs of its config. A hit there says which value it was
-                    hit = None
-                    entry = indexed.get((r.get('type'), int(vmid))) if vmid.isdigit() else None
-                    live_ips = r.get('ip_addresses') or ([r['ip']] if r.get('ip') else [])
-                    
-                    if prefix_filter == 'tag':
-                        # All tag queries must match (AND logic for multi-tag)
-                        matched = all(any(tq in tag for tag in tags_list) for tq in tag_queries)
-                        if matched:
-                            match_field = 'tag'
-                    elif prefix_filter == 'node':
-                        matched = query in node
-                        if matched:
-                            match_field = 'node'
-                    elif prefix_filter in ('ip', 'mac', 'notes'):
-                        hit = guest_index.find(entry, live_ips, query, fields=(prefix_filter,), prefixed=True)
-                    elif prefix_filter == 'status':
-                        matched = status.startswith(query)
-                        if matched:
-                            match_field = 'status'
-                    else:
-                        # Global search: match name, vmid, node, ip, AND tags
-                        if query in name:
-                            matched, match_field = True, 'name'
-                        elif query == vmid or query in vmid:
-                            matched, match_field = True, 'vmid'
-                        elif query in node:
-                            matched, match_field = True, 'node'
-                        elif query in ip:
-                            matched, match_field = True, 'ip'
-                        elif any(query in tag for tag in tags_list):
-                            matched, match_field = True, 'tag'
-                        else:
-                            hit = guest_index.find(entry, live_ips, query)
-                    if hit:
-                        matched, match_field = True, hit[0]
-                    
-                    if not matched:
-                        continue
-                    
-                    # Type filter
-                    vm_type = r.get('type', 'qemu')
-                    if search_type == 'vm' and vm_type != 'qemu':
-                        continue
-                    if search_type == 'ct' and vm_type != 'lxc':
-                        continue
-                    
-                    row = {
-                        'type': 'vm' if vm_type == 'qemu' else 'ct',
-                        'cluster_id': cluster_id,
-                        'cluster_name': cluster_name,
-                        'vmid': r.get('vmid'),
-                        'name': r.get('name'),
-                        'node': r.get('node'),
-                        'status': r.get('status'),
-                        'ip': r.get('ip'),
-                        'tags': r.get('tags', ''),
-                        'cpu': r.get('cpu'),
-                        'mem': r.get('mem'),
-                        'maxmem': r.get('maxmem'),
-                        'match_field': match_field,
-                    }
-                    if hit:
-                        row['match_value'] = hit[1]
-                        if hit[2]:
-                            row['match_net'] = hit[2]
-                    elif match_field == 'ip':
-                        row['match_value'] = r.get('ip')
-                    results.append(row)
+                found = [_search_facts(r, cluster_id, cluster_name, indexed) for r in resources]
+                # collect tags for autocomplete
+                for g in found:
+                    all_tags.update(g['tags'])
+                guests.extend(found)
             except Exception as e:
                 logging.debug(f"Error searching cluster {cluster_id}: {e}")
         
         # Search Nodes
-        if search_type in ['all', 'node'] and prefix_filter in [None, 'node']:
+        if search_type in ['all', 'node']:
             try:
                 for node_name, node_data in (mgr.nodes or {}).items():
-                    if query in node_name.lower():
-                        results.append({
-                            'type': 'node',
-                            'cluster_id': cluster_id,
-                            'cluster_name': cluster_name,
-                            'name': node_name,
-                            'status': node_data.get('status', 'unknown'),
-                            'cpu': node_data.get('cpu'),
-                            'mem': node_data.get('mem'),
-                            'maxmem': node_data.get('maxmem'),
-                            'match_field': 'name',
-                        })
+                    node_data = node_data or {}
+                    nodes.append({'node_name': node_name, 'data': node_data, 'cluster_id': cluster_id,
+                                  'cluster_name': cluster_name, 'name': node_name.lower(),
+                                  'status': str(node_data.get('status') or '').lower(),
+                                  'cluster': str(cluster_name).lower()})
             except Exception as e:
                 logging.debug(f"Error searching nodes in {cluster_id}: {e}")
     
+    results = _search_results(reading, guests, nodes, search_type)
+    if plain and not results:
+        # nothing the old way: the words as terms of their own
+        try:
+            expression = search_query.parse(raw_query)
+        except search_query.SearchSyntaxError as e:
+            return jsonify(e.to_json()), 400
+        if not expression.same_as(reading):
+            reading = expression
+            results = _search_results(reading, guests, nodes, search_type)
+
     # Sort by relevance (exact matches first, then partial)
+    rank = reading.rank_text()
     def sort_key(r):
         name = (r.get('name') or str(r.get('vmid', ''))).lower()
         mf = r.get('match_field', '')
         # Exact name matches first, then name prefix, then tag matches, then rest
-        if name == query:
+        if rank is not None and name == rank:
             return (0, name)
-        elif name.startswith(query):
+        elif rank is not None and name.startswith(rank):
             return (1, name)
         elif mf == 'tag':
             return (2, name)
@@ -358,14 +294,107 @@ def global_search():
     results.sort(key=sort_key)
     
     # NS: show matching tags as clickable suggestions in the UI
-    tag_suggestions = sorted([t for t in all_tags if query in t])[:10] if not prefix_filter or prefix_filter == 'tag' else []
+    # for the term at the end of the query, so they go on after AND/OR too
+    complete = reading.tag_completion()
+    tag_suggestions = sorted([t for t in all_tags if complete[0] in t])[:10] if complete else []
     
-    return jsonify({
+    out = {
         'query': raw_query,
         'count': len(results),
         'results': results[:100],  # Limit to 100 results
         'tag_suggestions': tag_suggestions,
-    })
+        'syntax': 'plain' if reading.plain else 'expression',
+        'highlight': reading.highlight(),
+    }
+    if complete:
+        out['tag_complete'] = {'start': complete[1], 'end': complete[2], 'prefix': complete[3]}
+    return jsonify(out)
+
+
+def _search_facts(r, cluster_id, cluster_name, indexed):
+    """What the search compares of one guest row (search_query.guest_hit)."""
+    vmid = str(r.get('vmid', ''))
+    tags = r.get('tags') or ''
+    if isinstance(tags, (list, tuple)):
+        tags = ';'.join(str(t) for t in tags)
+    tags_str = str(tags).lower()
+    return {
+        'row': r,
+        'name': (r.get('name') or '').lower(),
+        'vmid': vmid,
+        'node': (r.get('node') or '').lower(),
+        'ip': (r.get('ip') or '').lower(),
+        'ip_raw': r.get('ip'),
+        'tags': [t.strip() for t in tags_str.split(';') if t.strip()] if tags_str else [],
+        'status': (r.get('status') or '').lower(),
+        'type': r.get('type', 'qemu'),
+        'cluster_id': cluster_id,
+        'cluster_name': cluster_name,
+        'cluster': str(cluster_name).lower(),
+        'pool': str(r.get('pool') or '').lower(),
+        # what the guest search index knows of this guest: MACs, notes, the
+        # static IPs of its config. A hit there says which value it was
+        'entry': indexed.get((r.get('type'), int(vmid))) if vmid.isdigit() else None,
+        'live_ips': r.get('ip_addresses') or ([r['ip']] if r.get('ip') else []),
+    }
+
+
+def _search_results(reading, guests, nodes, search_type):
+    """The rows global_search answers with for one reading of the query."""
+    results = []
+    for g in guests:
+        hits = reading.match(search_query.guest_hit, g)
+        if hits is None:
+            continue
+        # Type filter
+        vm_type = g['type']
+        if search_type == 'vm' and vm_type != 'qemu':
+            continue
+        if search_type == 'ct' and vm_type != 'lxc':
+            continue
+        hit = search_query.best_hit(hits)
+        r = g['row']
+        row = {
+            'type': 'vm' if vm_type == 'qemu' else 'ct',
+            'cluster_id': g['cluster_id'],
+            'cluster_name': g['cluster_name'],
+            'vmid': r.get('vmid'),
+            'name': r.get('name'),
+            'node': r.get('node'),
+            'status': r.get('status'),
+            'ip': r.get('ip'),
+            'tags': r.get('tags', ''),
+            'cpu': r.get('cpu'),
+            'mem': r.get('mem'),
+            'maxmem': r.get('maxmem'),
+            'match_field': hit[0] if hit else None,
+        }
+        if hit and hit[1] is not None:
+            row['match_value'] = hit[1]
+            if hit[2]:
+                row['match_net'] = hit[2]
+        results.append(row)
+    # nodes only for a query that can be about one (free text, node:, name:, type:,
+    # cluster:); tag:, ip:, status:, mac: and notes: never listed any
+    if reading.about_nodes():
+        for n in nodes:
+            hits = reading.match(search_query.node_hit, n)
+            if hits is None:
+                continue
+            hit = search_query.best_hit(hits)
+            node_data = n['data']
+            results.append({
+                'type': 'node',
+                'cluster_id': n['cluster_id'],
+                'cluster_name': n['cluster_name'],
+                'name': n['node_name'],
+                'status': node_data.get('status', 'unknown'),
+                'cpu': node_data.get('cpu'),
+                'mem': node_data.get('mem'),
+                'maxmem': node_data.get('maxmem'),
+                'match_field': hit[0] if hit else 'name',
+            })
+    return results
 
 
 @bp.route('/api/global/summary', methods=['GET'])

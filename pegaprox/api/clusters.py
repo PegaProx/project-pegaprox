@@ -2770,6 +2770,8 @@ def _guest_page_query(args):
             'limit': number('limit', 100, 1, _GUEST_PAGE_MAX),
             'offset': number('offset', 0, 0, 10_000_000),
             'q': text('q', _GUEST_PAGE_TEXT),
+            # as typed: AND, OR and NOT are capitals
+            'q_text': (args.get('q') or '').strip(),
             'tag': text('tag', 64),
             'status': choice('status', _GUEST_STATES),
             'type': choice('type', _GUEST_KINDS),
@@ -2814,6 +2816,49 @@ def _guest_text(g):
                     + g['ip_addresses'] + g['tags']).lower()
 
 
+def _guest_text_filter(rows, text):
+    """The rows the text filter of the page keeps. Plain text is looked for in the row's
+    text as before; a query with AND/OR/NOT, parentheses or quotes, and plain text that
+    finds nothing that way, is an expression of the global search (utils/search_query),
+    its free text still the row's text. Raises SearchSyntaxError."""
+    from pegaprox.background import guest_index
+    from pegaprox.utils import search_query
+    if not text:
+        return rows
+    plain = None
+    if not search_query.explicit(text):
+        q = text.lower()
+        plain = [g for g in rows if q in _guest_text(g)]
+        if plain:
+            return plain
+    reading = search_query.parse(text)
+    if plain is not None and reading.whole_text():
+        return plain
+    # MK Oct 2026 - MAC, notes and configured IPs from the guest search index, one copy
+    # per cluster and only when a term asks for them
+    indexes = {}
+    wants_index = any(t.field in ('ip', 'mac', 'notes') for t in reading.terms)
+    out = []
+    for g in rows:
+        entry = None
+        if wants_index:
+            cid = g['cluster_id']
+            if cid not in indexes:
+                indexes[cid] = guest_index.snapshot(cid)
+            entry = indexes[cid].get((g['type'], g['vmid']))
+        ips = g['ip_addresses']
+        facts = {
+            'name': g['name'].lower(), 'vmid': str(g['vmid']), 'node': g['node'].lower(),
+            'ip': (ips[0] if ips else '').lower(), 'ip_raw': ips[0] if ips else None,
+            'tags': [t.lower() for t in g['tags']], 'status': g['status'].lower(), 'type': g['type'],
+            'cluster_id': g['cluster_id'], 'cluster': g['cluster_name'].lower(), 'pool': g['pool'].lower(),
+            'entry': entry, 'live_ips': ips, 'text': _guest_text(g),
+        }
+        if reading.match(search_query.guest_hit, facts) is not None:
+            out.append(g)
+    return out
+
+
 def _guest_page_can(user, cid, xen, g, may):
     """What the per-guest routes would let this caller do to the guest: the checks of
     vm_action_api, create_snapshot_api and bulk_migrate_api, without acting."""
@@ -2848,9 +2893,12 @@ def get_guest_page():
     leave), count (all the caller sees), status_counts (by status, the status filter aside),
     tags (every tag among the guests) and clusters (each with its state and guest count).
     The figures are those of the cluster's guest list, a few seconds old at most.
+    q also takes the expressions of the global search (tag:web OR node:pve2, -status:running);
+    one that cannot be read answers 400 with code SEARCH_SYNTAX.
     """
     from pegaprox.background import alert_events
     from pegaprox.utils.concurrent import run_concurrent
+    from pegaprox.utils.search_query import SearchSyntaxError
     want, err = _guest_page_query(request.args)
     if err:
         return err
@@ -2891,9 +2939,12 @@ def get_guest_page():
         managers[cid] = mgr
 
     all_tags = sorted({t for g in seen for t in g['tags']})[:_GUEST_PAGE_TAGS]
-    q, tag, kind = want['q'], want['tag'], want['type']
-    left = [g for g in seen if _guest_kind_fits(g, kind) and (not tag or tag in g['tags'])
-            and (not q or q in _guest_text(g))]
+    tag, kind = want['tag'], want['type']
+    left = [g for g in seen if _guest_kind_fits(g, kind) and (not tag or tag in g['tags'])]
+    try:
+        left = _guest_text_filter(left, want['q_text'])
+    except SearchSyntaxError as e:
+        return jsonify(e.to_json()), 400
     status_counts = {s: 0 for s in _GUEST_STATES}
     for g in left:
         status_counts[_guest_state(g)] += 1
