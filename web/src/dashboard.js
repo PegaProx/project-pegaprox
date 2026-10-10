@@ -1812,7 +1812,7 @@
                                 {it.code && <span className="text-xs px-1.5 py-0.5 rounded bg-proxmox-dark border border-proxmox-border font-mono">{it.code}</span>}
                                 {it.status === 'ok' && <span className="text-xs text-gray-400">{t('connCheckSshOk')}</span>}
                             </div>
-                            {it.user && it.ip && <div className="text-xs text-gray-400">{mono(`${it.user}@${it.ip}`)} - {it.method === 'key' ? t('connCheckSshKey') : t('connCheckSshPassword')}</div>}
+                            {it.user && it.ip && <div className="text-xs text-gray-400">{mono(`${it.user}@${it.ip}`)} - {it.method === 'key' ? t('connCheckSshKey') : t('connCheckSshPassword')}{it.credential === 'node' ? ` (${t('nodeCredsViaOwn')})` : it.credential === 'cluster' ? ` (${t('nodeCredsViaCluster')})` : ''}</div>}
                         </div>);
                     default:
                         return null;
@@ -1880,6 +1880,12 @@
                                             </div>
                                         );
                                     })}
+                                    {(report.refused || []).length > 0 && (
+                                        // LW Oct 2026 (#1136) - where a node's own root password goes
+                                        <div data-check-refused className="mt-4 p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-sm text-red-300">
+                                            {t('nodeCredsRefusedHint').replace('{nodes}', report.refused.join(', '))}
+                                        </div>
+                                    )}
                                     <div className="text-xs text-gray-500 mt-4">{t('connCheckCheckedAt').replace('{time}', new Date(report.checked_at).toLocaleString()).replace('{s}', (report.duration_ms / 1000).toFixed(1))}</div>
                                 </div>
                             )}
@@ -11388,6 +11394,10 @@
             const [reconfigurePassword, setReconfigurePassword] = useState('');
             const [reconfigureConfig, setReconfigureConfig] = useState(null);
             const [reconfigureLoading, setReconfigureLoading] = useState(false);
+            // LW Oct 2026 (#1136) - nodes of a new cluster that refused the login, and which part
+            // of the re-configure dialog to open on
+            const [nodeCredsNotice, setNodeCredsNotice] = useState(null);
+            const reconfigureFocusRef = useRef(null);
             // NS: Mar 2026 - pool/folder view for corporate sidebar
             const [sidebarViewMode, setSidebarViewMode] = useState(() => localStorage.getItem('pegaprox-sidebar-view') || 'tree');
             const [sidebarSearch, setSidebarSearch] = useState('');
@@ -16418,6 +16428,7 @@
                         await fetchClusters();
                         setShowAddModal(false);
                         addToast(t('clusterAdded') || 'Cluster added successfully');
+                        if (data.node_check && data.id) watchNodeLogins(data.id, config.name, config.host);
                         // LW: show extra toast when API token was auto-created (#110)
                         if (data.api_token_created) {
                             addToast(t('apiTokenCreated') || 'API token created on PVE', 'success');
@@ -16442,6 +16453,31 @@
                     setError(t('connectionError') + ': ' + error.message);
                 }
                 setLoading(false);
+            };
+
+            // LW Oct 2026 (#1136) - the server tries one login per node in the background once a
+            // cluster was added. Read what it found a few times; a node that refused gets a
+            // notice that leads to Re-configure > Node credentials.
+            const watchNodeLogins = async (clusterId, name, host) => {
+                for (let i = 0; i < 12; i++) {
+                    await new Promise(r => setTimeout(r, 5000));
+                    let body = null;
+                    try {
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/node-credentials`);
+                        if (r && r.ok) body = await r.json();
+                    } catch (e) { body = null; }
+                    const checked = ((body && body.nodes) || []).filter(n => n.last_check);
+                    if (!checked.length) continue;
+                    const refused = checked.filter(n => n.last_check.code === 'AUTH_REFUSED').map(n => n.node);
+                    if (refused.length) setNodeCredsNotice({ clusterId, name, host, nodes: refused });
+                    return;
+                }
+            };
+
+            const openNodeCredentials = (notice) => {
+                reconfigureFocusRef.current = 'nodeCreds';
+                setNodeCredsNotice(null);
+                setReconfigureCluster({ id: notice.clusterId, name: notice.name, display_name: notice.name, host: notice.host });
             };
 
             const handleDeleteCluster = async (clusterId) => {
@@ -16538,6 +16574,8 @@
                     const cfg = await cfgResp.json();
                     cfg._cluster_id = reconfigureCluster.id;
                     cfg._current_password = reconfigurePassword;
+                    cfg._focus = reconfigureFocusRef.current;
+                    reconfigureFocusRef.current = null;
                     setReconfigureConfig(cfg);
                     setReconfigureCluster(null);
                     setReconfigurePassword('');
@@ -28740,6 +28778,11 @@
                                 const data = await r?.json();
                                 if (r?.ok && data?.success) {
                                     addToast(t('clusterReconfigured') || 'Cluster re-configured successfully', 'success');
+                                    // LW Oct 2026 (#1136) - pointed elsewhere, the nodes' own passwords were dropped
+                                    if ((data.node_passwords_cleared || []).length) {
+                                        setNodeCredsNotice({ clusterId: reconfigureConfig._cluster_id, name: config.name, host: config.host,
+                                            nodes: data.node_passwords_cleared, reason: 'moved' });
+                                    }
                                     setShowAddModal(false); setReconfigureConfig(null);
                                     fetchClusters();
                                 } else {
@@ -29128,9 +29171,37 @@
                         </div>
                     )}
 
+                    {/* LW Oct 2026 (#1136) - nodes of a new cluster that refused the login, or whose
+                        own passwords a re-configure to another address dropped */}
+                    {nodeCredsNotice && (
+                        <div data-node-creds-notice={nodeCredsNotice.clusterId} data-node-creds-reason={nodeCredsNotice.reason || 'refused'}
+                            className="fixed bottom-6 right-6 z-50 w-full max-w-sm p-4 rounded-xl border border-red-500/30 bg-proxmox-card shadow-2xl">
+                            <div className="flex items-start gap-3">
+                                <Icons.AlertTriangle />
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm text-gray-300">
+                                        {(nodeCredsNotice.reason === 'moved' ? t('nodeCredsClearedByMove') : t('nodeCredsRefusedNotice')).replace('{nodes}', nodeCredsNotice.nodes.join(', ')).replace('{cluster}', nodeCredsNotice.name || '')}
+                                    </p>
+                                    <div className="flex flex-wrap gap-2 mt-3">
+                                        {!haReadOnly && (
+                                            <button onClick={() => openNodeCredentials(nodeCredsNotice)}
+                                                className="px-3 py-1.5 rounded-lg text-sm font-medium bg-proxmox-orange hover:bg-orange-600 text-white">
+                                                {t('nodeCredsOpen')}
+                                            </button>
+                                        )}
+                                        <button onClick={() => setNodeCredsNotice(null)}
+                                            className="px-3 py-1.5 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:bg-proxmox-hover">
+                                            {t('close')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* #256: Re-configure cluster password dialog */}
                     {reconfigureCluster && (
-                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); }}>
+                        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); reconfigureFocusRef.current = null; }}>
                             <div className="bg-proxmox-card border border-proxmox-border rounded-2xl w-full max-w-sm shadow-2xl animate-scale-in overflow-hidden" onClick={e => e.stopPropagation()}>
                                 <div className="px-6 py-4 border-b border-proxmox-border bg-gradient-to-r from-orange-500/10 to-yellow-500/5">
                                     <div className="flex items-center justify-between">
@@ -29138,7 +29209,7 @@
                                             <Icons.Settings className="w-4 h-4 text-proxmox-orange" />
                                             {t('reconfigureCluster') || 'Re-configure Cluster'}
                                         </h3>
-                                        <button onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); }} className="text-gray-400 hover:text-white transition-colors"><Icons.X className="w-4 h-4" /></button>
+                                        <button onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); reconfigureFocusRef.current = null; }} className="text-gray-400 hover:text-white transition-colors"><Icons.X className="w-4 h-4" /></button>
                                     </div>
                                     <p className="text-xs text-gray-400 mt-1">{reconfigureCluster.display_name || reconfigureCluster.name} — {reconfigureCluster.host}</p>
                                 </div>
@@ -29164,7 +29235,7 @@
                                         </>
                                     )}
                                     <div className="flex justify-end gap-3 mt-6">
-                                        <button type="button" onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); }} className="px-4 py-2 bg-proxmox-dark border border-proxmox-border hover:bg-proxmox-hover rounded-lg text-sm text-gray-300 transition-colors">
+                                        <button type="button" onClick={() => { setReconfigureCluster(null); setReconfigurePassword(''); reconfigureFocusRef.current = null; }} className="px-4 py-2 bg-proxmox-dark border border-proxmox-border hover:bg-proxmox-hover rounded-lg text-sm text-gray-300 transition-colors">
                                             {t('cancel') || 'Cancel'}
                                         </button>
                                         <button

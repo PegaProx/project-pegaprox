@@ -1965,6 +1965,172 @@
             ssl_verify: false, notes: '',
         });
 
+        // LW Oct 2026 (#1136) - the root password of single nodes, for clusters whose nodes do
+        // not share one. Each save, clear and check is a request of its own, apart from the
+        // dialog's submit. The value goes out and never comes back.
+        const NODE_CRED_LOGIN_OK = ['OK', 'SUDO_REFUSED'];
+        function NodeCredentialsSection({ clusterId, focus = false }) {
+            const { t } = useTranslation();
+            const { haReadOnly } = useAuth();
+            const [open, setOpen] = useState(!!focus);
+            const [info, setInfo] = useState(null);
+            const [error, setError] = useState('');
+            const [notice, setNotice] = useState('');
+            const [drafts, setDrafts] = useState({});
+            const [busy, setBusy] = useState('');
+            const [checking, setChecking] = useState(false);
+            const boxRef = useRef(null);
+            const scrolled = useRef(false);
+
+            const call = async (path, options = {}) => {
+                try {
+                    return await fetch(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/node-credentials${path}`, {
+                        ...options, credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    });
+                } catch (e) {
+                    return null;
+                }
+            };
+            const bodyOf = async (res) => (res ? await res.json().catch(() => ({})) : {});
+
+            const load = async () => {
+                const res = await call('');
+                const body = await bodyOf(res);
+                if (res && res.ok) { setInfo(body); setError(''); }
+                else setError(body.error || t('nodeCredsLoadFailed'));
+            };
+            useEffect(() => { if (open) load(); }, [open, clusterId]);
+            useEffect(() => {
+                // the notice after adding a cluster leads here: show the section, once
+                if (focus && info && boxRef.current && !scrolled.current) {
+                    scrolled.current = true;
+                    boxRef.current.scrollIntoView({ block: 'start' });
+                }
+            }, [focus, info]);
+
+            const save = async (node) => {
+                const value = drafts[node] || '';
+                if (!value || busy) return;
+                setBusy(node); setNotice(''); setError('');
+                const res = await call(`/${encodeURIComponent(node)}`, { method: 'PUT', body: JSON.stringify({ password: value }) });
+                const body = await bodyOf(res);
+                if (res && res.ok) {
+                    setDrafts(d => ({ ...d, [node]: '' }));
+                    setNotice(t('nodeCredsSaved').replace('{node}', node));
+                    await load();
+                } else setError(body.error || t('saveFailed'));
+                setBusy('');
+            };
+            const clear = async (node) => {
+                if (busy) return;
+                setBusy(node); setNotice(''); setError('');
+                const res = await call(`/${encodeURIComponent(node)}`, { method: 'DELETE' });
+                const body = await bodyOf(res);
+                if (res && res.ok) {
+                    setNotice(t('nodeCredsCleared').replace('{node}', node));
+                    await load();
+                } else setError(body.error || t('saveFailed'));
+                setBusy('');
+            };
+            const check = async () => {
+                setChecking(true); setNotice(''); setError('');
+                const res = await call('/check', { method: 'POST', body: '{}' });
+                const body = await bodyOf(res);
+                if (res && res.ok) {
+                    if (!(body.refused || []).length) setNotice(t('nodeCredsCheckDone'));
+                    await load();
+                } else setError(body.error || t('connCheckFailed'));
+                setChecking(false);
+            };
+
+            const when = (iso) => (iso ? new Date(iso).toLocaleString() : '');
+            const via = (c) => c === 'node' ? t('nodeCredsViaOwn') : c === 'cluster' ? t('nodeCredsViaCluster') : c === 'key' ? t('connCheckSshKey') : '';
+            const stateOf = (n) => {
+                if (n.last_check && n.last_check.code === 'AUTH_REFUSED') return ['refused', t('nodeCredsStateRefused'), 'bg-red-500/10 text-red-400 border-red-500/30'];
+                if (n.has_password) return ['own', t('nodeCredsStateOwn'), 'bg-blue-500/10 text-blue-400 border-blue-500/30'];
+                return ['cluster', t('nodeCredsStateCluster'), 'bg-gray-500/10 text-gray-400 border-gray-500/30'];
+            };
+            const nodes = (info && info.nodes) || [];
+            const refusedCount = nodes.filter(n => n.last_check && n.last_check.code === 'AUTH_REFUSED').length;
+
+            return (
+                <div ref={boxRef} data-node-creds={clusterId} className="pt-4 border-t border-proxmox-border">
+                    <button type="button" onClick={() => setOpen(!open)}
+                        className="flex items-center gap-2 text-sm text-gray-400 hover:text-white transition-colors">
+                        <Icons.ChevronRight className={`w-3 h-3 transform transition-transform ${open ? 'rotate-90' : ''}`} />
+                        {t('nodeCredsTitle')}
+                        {refusedCount > 0 && <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/10 text-red-400">{refusedCount}</span>}
+                    </button>
+                    {open && (
+                        <div className="mt-4 space-y-3 p-4 bg-proxmox-dark/50 rounded-lg">
+                            <p className="text-xs text-gray-400">{t('nodeCredsIntro')}</p>
+                            {info && info.ssh_disabled && <p className="text-xs text-yellow-300">{t('nodeCredsSshOff')}</p>}
+                            {info && info.token_auth && <p className="text-xs text-gray-400">{t('nodeCredsTokenHint')}</p>}
+                            {info && info.ssh_key && <p className="text-xs text-gray-400">{t('nodeCredsKeyFirst')}</p>}
+                            {error && <div className="p-2 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-300">{error}</div>}
+                            {notice && <div className="p-2 rounded-lg bg-green-500/10 border border-green-500/30 text-xs text-green-400">{notice}</div>}
+                            {!info && !error && <span className="inline-flex animate-spin text-gray-500"><Icons.Loader /></span>}
+                            {info && !nodes.length && <p className="text-xs text-gray-500">{t('nodeCredsNoNodes')}</p>}
+                            {nodes.map(n => {
+                                const [state, label, cls] = stateOf(n);
+                                const works = n.last_check && NODE_CRED_LOGIN_OK.includes(n.last_check.code);
+                                return (
+                                    <div key={n.node} data-node-cred={n.node} data-node-cred-state={state}
+                                        className="p-3 rounded-lg border border-proxmox-border bg-proxmox-card space-y-2">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            <span className="font-mono text-sm text-white">{n.node}</span>
+                                            {n.address && <span className="font-mono text-xs text-gray-500">{n.address}</span>}
+                                            <span className={`text-xs px-1.5 py-0.5 rounded border ${cls}`}>{label}</span>
+                                            {works && <span className="text-xs text-green-400">{t('nodeCredsStateOk')}</span>}
+                                            {n.online === false && <span className="text-xs text-gray-500">{t('nodeCredsOffline')}</span>}
+                                        </div>
+                                        {n.has_password && n.updated_by && (
+                                            <div className="text-xs text-gray-500">{t('nodeCredsSetBy').replace('{user}', n.updated_by).replace('{time}', when(n.updated_at))}</div>
+                                        )}
+                                        {n.last_check && (
+                                            <div className="text-xs text-gray-500">
+                                                {t('nodeCredsCheckedAt').replace('{time}', when(n.last_check.checked_at))}
+                                                {n.last_check.credential ? ` - ${via(n.last_check.credential)}` : ''}
+                                                {n.last_check.code && !works ? ` - ${n.last_check.code}` : ''}
+                                            </div>
+                                        )}
+                                        {!haReadOnly && (
+                                            <div className="flex gap-2">
+                                                <input type="password" autoComplete="new-password" value={drafts[n.node] || ''}
+                                                    maxLength={(info && info.max_length) || 256}
+                                                    onChange={e => setDrafts(d => ({ ...d, [n.node]: e.target.value }))}
+                                                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); save(n.node); } }}
+                                                    placeholder={t('nodeCredsPlaceholder')}
+                                                    className="flex-1 min-w-0 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-proxmox-orange" />
+                                                <button type="button" onClick={() => save(n.node)} disabled={!!busy || !drafts[n.node]}
+                                                    className="px-3 py-2 rounded-lg text-sm font-medium bg-proxmox-orange hover:bg-orange-600 text-white disabled:opacity-50">
+                                                    {t('save')}
+                                                </button>
+                                                {n.has_password && (
+                                                    <button type="button" onClick={() => clear(n.node)} disabled={!!busy}
+                                                        className="px-3 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:bg-proxmox-hover disabled:opacity-50">
+                                                        {t('nodeCredsClear')}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                            {!haReadOnly && nodes.length > 0 && (
+                                <button type="button" onClick={check} disabled={checking}
+                                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:bg-proxmox-hover disabled:opacity-50">
+                                    {checking ? <span className="inline-flex animate-spin"><Icons.Loader /></span> : <Icons.Activity />}
+                                    {checking ? t('nodeCredsChecking') : t('nodeCredsCheck')}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
         function AddClusterModal({ isOpen, onClose, onSubmit, onAddPBS, onAddVMware, loading, error, initialType = 'proxmox', reconfigureConfig = null }) {
             const { t } = useTranslation();
             const { isCorporate } = useLayout();
@@ -2146,6 +2312,10 @@
                                     </div>
                                 )}
                             </div>
+
+                            {reconfigureConfig && reconfigureConfig._cluster_id && (
+                                <NodeCredentialsSection clusterId={reconfigureConfig._cluster_id} focus={reconfigureConfig._focus === 'nodeCreds'} />
+                            )}
 
                             <div className="space-y-4 pt-4 border-t border-proxmox-border">
                                 <Slider label={t('migrationThreshold')} description={t('migrationThresholdDesc')} value={config.migration_threshold}
