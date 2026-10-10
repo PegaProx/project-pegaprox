@@ -23313,6 +23313,362 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/recovery-settings": {
+      "get": {
+        "operationId": "pbs.get_recovery_settings_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The restore test settings of a cluster: its defaults and the guest and tag rules.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      },
+      "put": {
+        "operationId": "pbs.put_recovery_settings_put",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The cluster's defaults: rto_minutes, agent, ports, command, isolation ('link_down', or 'bridge' with test_bridge), test_storage, boot_timeout. A field sent as null goes back to the built-in default.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/recovery-settings/rules": {
+      "put": {
+        "operationId": "pbs.put_recovery_rule_put",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "A rule for one guest or one tag. Body: {scope: 'guest'|'tag', key: VMID or tag, rto_minutes, agent, ports, command}; a field sent as null is taken from the tag or the cluster again, and a rule left with nothing in it is removed.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/recovery-settings/rules/{scope}/{key}": {
+      "delete": {
+        "operationId": "pbs.delete_recovery_rule_delete",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-roles": [
+          "admin"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/recovery-report": {
+      "get": {
+        "operationId": "pbs.get_recovery_report_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "How recoverable each guest of a cluster looks: the last restore test that passed, the backup it restored, how long restore, boot and checks took against the RTO, the newest backup against the backup SLA, the last failure. ?days= (default 30) is how old a passed test may be before it counts as stale, ?format=csv, ?refresh=1 reads the backups again.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/recovery-report/{vmid}": {
+      "get": {
+        "operationId": "pbs.get_guest_recovery_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One guest of the report, with what its tests check and its last tests.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
+    "/api/tenants/{tenant_id}/recovery-report": {
+      "get": {
+        "operationId": "pbs.get_tenant_recovery_report_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The recovery report over every Proxmox cluster of a tenant the caller reaches; an admin asks for any tenant, everybody else for their own. ?days=, ?format=csv.",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
+        ]
+      }
+    },
     "/api/pbs/probe-fingerprint": {
       "post": {
         "operationId": "pbs.probe_pbs_fingerprint_post",
@@ -23987,7 +24343,7 @@
           }
         },
         "summary": "Read or write the auto-verify policy.",
-        "description": "Schema (in pegaprox config row 'pbs_verify_schedule'):\n  {\"enabled\": bool, \"weekly_count\": int, \"day\": \"sun\", \"hour\": 4,\n   \"scope\": \"all\"|\"latest_per_vm\", \"max_age_days\": int}",
+        "description": "Schema (in pegaprox config row 'pbs_verify_schedule'):\n  {\"enabled\": bool, \"weekly_count\": int, \"day\": \"sun\", \"hour\": 4,\n   \"scope\": \"all\"|\"latest_per_vm\", \"max_age_days\": int}\n\nMK Oct 2026 - background/restore_tests.py runs it now; until then nothing read it. A\nPUT takes what it sends on top of what is stored and answers 400 for a field out of\nrange (an int() of a word was a 500).",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -24021,7 +24377,7 @@
           }
         },
         "summary": "Read or write the auto-verify policy.",
-        "description": "Schema (in pegaprox config row 'pbs_verify_schedule'):\n  {\"enabled\": bool, \"weekly_count\": int, \"day\": \"sun\", \"hour\": 4,\n   \"scope\": \"all\"|\"latest_per_vm\", \"max_age_days\": int}",
+        "description": "Schema (in pegaprox config row 'pbs_verify_schedule'):\n  {\"enabled\": bool, \"weekly_count\": int, \"day\": \"sun\", \"hour\": 4,\n   \"scope\": \"all\"|\"latest_per_vm\", \"max_age_days\": int}\n\nMK Oct 2026 - background/restore_tests.py runs it now; until then nothing read it. A\nPUT takes what it sends on top of what is stored and answers 400 for a field out of\nrange (an int() of a word was a 500).",
         "requestBody": {
           "required": false,
           "content": {
@@ -24043,6 +24399,41 @@
         ],
         "x-pegaprox-permissions": [
           "pbs.config"
+        ]
+      }
+    },
+    "/api/pbs/verify-schedule/status": {
+      "get": {
+        "operationId": "pbs.verify_schedule_status_get",
+        "tags": [
+          "pbs"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The policy, when it runs next (on the group's clock), whether a run is going on, and the last run with what it picked and how each test went: the guests of the clusters and pools the caller sees only.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "backup.view"
         ]
       }
     },

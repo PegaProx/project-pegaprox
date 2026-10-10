@@ -1962,6 +1962,50 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating backup_verifications table: {e}")
 
+        # MK Oct 2026 - restore tests: what each cluster, guest and tag is held to, and the
+        # last result per guest. Both are shared with the standbys (core/ha.py SYNC_TABLES):
+        # the history above stays per host, a new active needs to know what was tested.
+        try:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_backup_verifications_guest '
+                           'ON backup_verifications(cluster_id, vmid, started_at)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS recovery_targets (
+                    cluster_id TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    scope_key TEXT NOT NULL DEFAULT '',
+                    rto_minutes INTEGER,
+                    agent TEXT,
+                    ports TEXT,
+                    command TEXT,
+                    isolation TEXT,
+                    test_bridge TEXT,
+                    test_storage TEXT,
+                    boot_timeout INTEGER,
+                    updated_at TEXT,
+                    updated_by TEXT,
+                    PRIMARY KEY (cluster_id, scope, scope_key)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS restore_test_marks (
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    last_at REAL,
+                    last_result TEXT,
+                    last_task TEXT,
+                    ok_at REAL,
+                    ok_backup_ts INTEGER,
+                    ok_seconds REAL,
+                    ok_rto_seconds INTEGER,
+                    ok_checks TEXT,
+                    fail_at REAL,
+                    fail_cause TEXT,
+                    PRIMARY KEY (cluster_id, vmid)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating the restore test tables: {e}")
+
         # NS: Apr 2026 - portal_only column for client portal
         try:
             cols = [r[1] for r in cursor.execute("PRAGMA table_info(users)").fetchall()]

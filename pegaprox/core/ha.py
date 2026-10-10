@@ -257,6 +257,9 @@ FORWARDED_READS = LEADER_ONLY_READS | XCPNG_TASK_READS | frozenset((
     '/api/clusters/<cluster_id>/backup-verify/<task_id>',
     '/api/clusters/<cluster_id>/backup-verify/active',
     '/api/clusters/<cluster_id>/backup-verify/history',
+    # whether the weekly restore tests run right now, and a guest's tests: the active's
+    '/api/pbs/verify-schedule/status',
+    '/api/clusters/<cluster_id>/recovery-report/<int:vmid>',
     '/api/clusters/<cluster_id>/iso-sync/last-result',
     '/api/clusters/<cluster_id>/migrations',
     '/api/cluster-groups/<group_id>/lb-history',
@@ -326,6 +329,9 @@ SYNC_TABLES = (
     'ha_recovery_journal',
     # where the group's schedules were last checked and reported (5.7); made on its first write
     'ha_schedule_marks',
+    # what restore tests check per cluster, guest and tag, and each guest's last result: the
+    # weekly run and the restore_test_age alert go by them on whichever instance leads
+    'recovery_targets', 'restore_test_marks',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

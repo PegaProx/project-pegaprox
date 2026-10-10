@@ -36,6 +36,8 @@ What it reads, per cluster that has such a rule:
   - PegaProx's own replication jobs (cross_cluster_replications, the ones behind the
     recovery plans included) need nothing from a cluster: one query per tick for all of
     them, and a source cluster out of reach is still watched
+  - restore tests need the guest list above and one query per cluster and tick of the
+    last result of each guest (restore_test_marks, core/recovery.py)
 Nothing here asks a cluster per guest on every tick. Only the active instance runs any
 of it (alerts.alert_check_loop, #625); active_alerts is a table of its own, so after a
 takeover a condition that still holds is said once more by the new active.
@@ -65,7 +67,9 @@ except ImportError:  # python < 3.11
 
 EVENT_METRICS = ('task_failed', 'ceph_health', 'replication', 'snapshot_age', 'backup_coverage',
                  'zfs_health', 'clock_drift', 'restart_loop', 'qdevice', 'ceph_osd_latency',
-                 'replication_rpo')
+                 'replication_rpo', 'restore_test_age')
+# the rules that leave out the guests tagged like this
+TAGGED_OUT = ('backup_coverage', 'restore_test_age')
 # the rules that have no number to set; a threshold sent along is ignored
 _NO_THRESHOLD = ('task_failed', 'qdevice')
 # the rules that read PegaProx's database only: they go on while their cluster is out of reach
@@ -132,6 +136,7 @@ _THRESHOLDS = {
     'qdevice': (0, 0, 0),               # nothing to set: connected or not
     'ceph_osd_latency': (100, 5, 10000),  # ms of apply or commit latency
     'replication_rpo': (0, 0, 10080),   # minutes since the last successful run; 0: twice the interval
+    'restore_test_age': (30, 1, 365),   # days a guest may go without a restore test that passed
 }
 _SNAPSHOT_TASKS = frozenset(('qmsnapshot', 'qmdelsnapshot', 'qmrollback',
                              'vzsnapshot', 'vzdelsnapshot', 'vzrollback'))
@@ -271,7 +276,7 @@ def normalize_rule(rule, data, prev_metric=None):
     metric = rule.get('metric')
     if 'notify_resolved' in data:
         rule['notify_resolved'] = bool(data.get('notify_resolved'))
-    if metric != 'backup_coverage':
+    if metric not in TAGGED_OUT:
         rule.pop('backup_exclude_tags', None)
     if metric != 'restart_loop':
         rule.pop('restart_window_minutes', None)
@@ -307,7 +312,7 @@ def normalize_rule(rule, data, prev_metric=None):
     if metric == 'snapshot_age':
         rule['snapshot_ignore_policy'] = bool(
             data.get('snapshot_ignore_policy', rule.get('snapshot_ignore_policy', True)))
-    if metric == 'backup_coverage':
+    if metric in TAGGED_OUT:
         # a guest tagged like this is left out on purpose: no alert, and an open one closes
         raw = data['backup_exclude_tags'] if 'backup_exclude_tags' in data \
             else rule.get('backup_exclude_tags', list(EXCLUDE_TAGS_DEFAULT))
@@ -1160,7 +1165,7 @@ def _read_cluster(cid, mgr, kinds, now):
         else:
             _note(cid, 'tasks', False, f'task list unreadable (HTTP {status})')
     if kinds & {'task_failed', 'snapshot_age', 'replication', 'backup_coverage', 'restart_loop',
-                 'replication_rpo'}:
+                 'replication_rpo', 'restore_test_age'}:
         try:
             seen['resources'] = mgr.get_vm_resources(max_age=60) or []
         except Exception:
@@ -1766,6 +1771,68 @@ def _eval_own_replication(rule, seen, cname, now):
     return p
 
 
+def _restore_marks(cid):
+    """{vmid: mark} of the restore tests of a cluster, None when unreadable."""
+    try:
+        from pegaprox.core.recovery import load_marks
+        marks = load_marks(cid)
+    except Exception as e:
+        _note(cid, 'restore_tests', False, f'restore test results unreadable: {e}')
+        return None
+    _note(cid, 'restore_tests', True, f'{len(marks)} guest(s) with a restore test on record')
+    return marks
+
+
+def _eval_restore_tests(rule, seen, cname, now):
+    """One incident per guest that passed no restore test within the rule's days: never
+    tested, tested too long ago, or failing since. Closed by a test that passes. The test
+    guests of a run (tagged pegaprox-verify) and guests tagged as the rule leaves out are
+    not watched, and an incident of one closes without a word."""
+    marks, guests = seen.get('restore_marks'), seen.get('guests')
+    if marks is None or not guests:
+        return None                       # an empty guest list may be a read that failed
+    days = _int_in(rule.get('threshold'), 1, _THRESHOLDS['restore_test_age'][2]) or _THRESHOLDS['restore_test_age'][0]
+    cutoff = now - days * 86400
+    from pegaprox.core.recovery import TEST_TAG
+    skip = {t.lower() for t in (rule.get('backup_exclude_tags') or ())}
+    tags = seen.get('tags') or {}
+    p = _Pass(guests)
+    p.known = set()
+    for vmid, r in guests.items():
+        own = tags.get(vmid) or {t.strip().lower() for t in re.split(r'[;,\s]+', str(r.get('tags') or '')) if t.strip()}
+        if TEST_TAG in own or (skip & own) or not _target_ok(rule, r.get('node') or '', vmid):
+            continue
+        obj = f"vm:{vmid}"
+        p.known.add(obj)
+        who = _guest_label(guests, vmid)
+        m = marks.get(vmid) or {}
+        ok_at = m.get('ok_at') if isinstance(m.get('ok_at'), (int, float)) else None
+        if ok_at and ok_at >= cutoff:
+            p.fine[obj] = (f"Resolved: restore test of {who}",
+                           f"A restore test of {who} passed {_span(now - ok_at)} ago.")
+            continue
+        fail_at = m.get('fail_at') if isinstance(m.get('fail_at'), (int, float)) else None
+        failing = m.get('last_result') in ('failed', 'error') and fail_at and (not ok_at or fail_at >= ok_at)
+        when = (f"the last one that passed was {_span(now - ok_at)} ago" if ok_at
+                else 'none has passed yet' if fail_at else 'it has never been tested')
+        message = f"No restore test of {who} passed in the last {days} days: {when}"
+        rows = [('Guest', who), ('Cluster', cname), ('Window', f"{days} days"),
+                ('Last passed', datetime.fromtimestamp(ok_at).strftime('%Y-%m-%d %H:%M') if ok_at else 'never')]
+        if failing:
+            cause = str(m.get('fail_cause') or 'failed')[:SUBJECT_MAX]
+            message += f". The last test, {_span(now - fail_at)} ago, failed: {cause}"
+            rows.append(('Last failure', cause))
+        age = (now - ok_at) / 86400 if ok_at else None
+        p.firing[obj] = {
+            'object': obj, 'target_type': 'vm', 'target_id': str(vmid), 'target_name': who,
+            'target_key': obj, 'name': f"No recent restore test of {who}",
+            'message': message + '.', 'value': float(round(age)) if age is not None else -1.0,
+            'display': f"{age:.0f} days" if age is not None else 'never',
+            'severity': 'critical' if failing else 'warning', 'details': rows,
+        }
+    return p
+
+
 # ---------------------------------------------------------------------------
 # incidents and notices
 # ---------------------------------------------------------------------------
@@ -1985,6 +2052,8 @@ def _evaluate(A, rule, cid, seen, mutes, settings, now):
             p = _eval_osds(rule, seen)
         elif metric == 'replication_rpo':
             p = _eval_own_replication(rule, seen, cname, now)
+        elif metric == 'restore_test_age':
+            p = _eval_restore_tests(rule, seen, cname, now)
         else:
             p = _eval_snapshots(rule, seen, cname, cid, now)
     except ValueError as e:
@@ -2093,6 +2162,11 @@ def check_event_alerts(now=None):
         if seen.get('backup') is not None and any(r.get('metric') == 'backup_coverage'
                                                   and r.get('backup_exclude_tags') for r in crules):
             seen['tags'] = guest_tags(cid, seen.get('resources'))
+        if any(r.get('metric') == 'restore_test_age' for r in crules) and seen.get('guests'):
+            seen['restore_marks'] = _restore_marks(cid)
+            if 'tags' not in seen and any(r.get('metric') == 'restore_test_age' and r.get('backup_exclude_tags')
+                                          for r in crules):
+                seen['tags'] = guest_tags(cid, seen.get('resources'))
         for rule in crules:
             if rule.get('metric') == 'snapshot_age' and not snap_due:
                 continue

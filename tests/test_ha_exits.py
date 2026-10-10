@@ -759,12 +759,14 @@ AUTOMATIONS = {
     ('pegaprox/background/metrics.py', 'start_metrics_collector'): (1, 'read'),
     ('pegaprox/background/password_expiry.py', 'start_password_expiry_thread'): (1, 'read'),
     ('pegaprox/background/scheduler.py', 'start_scheduler_thread'): (1, 'confirm'),
+    # the weekly restore tests: the loop confirms each test, the run is a job of its own
+    ('pegaprox/background/restore_tests.py', 'start_restore_test_thread'): (1, 'confirm'),
+    ('pegaprox/background/restore_tests.py', 'tick'): (1, 'job'),
     ('pegaprox/background/site_recovery.py', '_migrate_vm_cross_cluster'): (1, 'job'),
     ('pegaprox/background/site_recovery.py', 'start_heartbeat'): (1, 'confirm'),
     ('pegaprox/background/syslog_server.py', '_tcp_listener'): (1, 'local'),
     ('pegaprox/background/syslog_server.py', '_syslog_loop'): (3, 'local'),
     ('pegaprox/background/syslog_server.py', 'start_syslog_server'): (1, 'local'),
-    ('pegaprox/core/backup_verify.py', 'start_verification.run'): (1, 'read'),
     ('pegaprox/core/backup_verify.py', 'start_verification'): (1, 'job'),
     # a bulk migration of a user, one guest after another (#952)
     ('pegaprox/core/bulk_migrate.py', 'launch'): (1, 'job'),
@@ -966,6 +968,7 @@ CONFIRM_SITES = [
     ('pegaprox/core/xcpng.py', 'XcpngManager.run_balance_check', ['_do_balance_migrate']),
     ('pegaprox/api/storage.py', 'run_auto_storage_balance', ['post']),
     ('pegaprox/background/scheduler.py', 'run_scheduled_tasks', ['execute_scheduled_task']),
+    ('pegaprox/background/restore_tests.py', '_run_slot', ['run_verification']),
     ('pegaprox/api/schedules.py', 'check_schedules', ['execute_scheduled_action']),
     ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update.run_scheduled_update',
      ['enter_maintenance_mode', 'start_node_update']),
