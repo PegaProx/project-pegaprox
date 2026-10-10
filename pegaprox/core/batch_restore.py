@@ -61,6 +61,72 @@ def start_restore(mgr, volid, node, vmid, storage, overwrite):
     return {'error': err, 'status': r.status_code}
 
 
+def backup_footprint(mgr, node, volid):
+    """{cores, memory_gb, disk_gb} of the guest inside a backup, from the config Proxmox reads
+    out of it (vzdump/extractconfig, PBS snapshots included). None when it cannot be read."""
+    from pegaprox.utils.rbac import config_footprint
+    is_lxc = '/ct/' in volid or volid.endswith('.lxc.tar') or 'vzdump-lxc' in volid or 'vzdump-openvz' in volid
+    try:
+        r = mgr._api_get(f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/vzdump/extractconfig",
+                         params={'volume': volid}, timeout=20)
+        text = r.json().get('data') if r.status_code == 200 else None
+    except Exception as e:
+        logging.debug(f"[quota] config of {volid} unreadable: {e}")
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return config_footprint(text, 'lxc' if is_lxc else 'qemu')
+
+
+def _config_of(mgr, row):
+    """config_footprint of a guest the live view has, from its own config (every disk, not
+    the boot disk maxdisk stands for). None when it cannot be read."""
+    from pegaprox.utils.rbac import config_footprint
+    kind = row.get('type') or 'qemu'
+    try:
+        got = mgr.get_vm_config(row.get('node'), int(row['vmid']), kind)
+    except Exception as e:
+        logging.debug(f"[quota] config of {row.get('vmid')} unreadable: {e}")
+        return None
+    if not isinstance(got, dict) or got.get('success') is False:
+        return None
+    return config_footprint(got, kind)
+
+
+def restore_adds(mgr, node, volid, src_vmid, target_vmid, overwrite, rows=None, footprint=None,
+                 read_backup=True):
+    """What a restore adds to its tenant (MK Oct 2026): a guest of its own into a new VMID;
+    over a guest that is there, only what the backup has more of. The backup's own config
+    decides, and over a guest it is held against that guest's config (both list every
+    disk; maxdisk in the live view is the boot disk alone). Where the backup's config
+    cannot be read, the guest it came from stands in for it.
+    rows: {vmid: resource row} when the caller has them already (a batch); footprint: the
+    backup's, when the caller read it already (read_backup=False: None means unreadable)."""
+    from pegaprox.utils.rbac import guest_footprint
+    if rows is None:
+        rows = {}
+        for g in (mgr.get_vm_resources(max_age=30) or []):
+            if str(g.get('vmid', '')).isdigit():
+                rows[int(g['vmid'])] = g
+    fp = footprint
+    if fp is None and read_backup:
+        fp = backup_footprint(mgr, node, volid)
+    cur = rows.get(int(target_vmid)) if overwrite else None
+    if cur is not None:
+        if fp is None:
+            return None             # what it brings back is unknown, so is the difference
+        now = _config_of(mgr, cur) or guest_footprint(cur)
+        return {'vms': 0, 'cores': fp['cores'] - now['cores'],
+                'memory_gb': fp['memory_gb'] - now['memory_gb'], 'disk_gb': fp['disk_gb'] - now['disk_gb']}
+    if fp is None and int(src_vmid) in rows:
+        src = rows[int(src_vmid)]
+        fp = guest_footprint(src)
+        cfg = _config_of(mgr, src)
+        if cfg:
+            fp['disk_gb'] = max(fp['disk_gb'], cfg['disk_gb'])
+    return {'vms': 1, **(fp or {})}
+
+
 class BatchRun:
     def __init__(self, cluster_id, cluster_name, user, session, ip, storage, mode, node,
                  target_storage, how, parallel, rows):

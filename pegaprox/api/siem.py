@@ -76,6 +76,40 @@ def enqueue(event: dict):
         logging.warning("[siem] queue full, dropping event")
 
 
+def has_targets():
+    try:
+        return get_db().conn.execute('SELECT 1 FROM siem_targets WHERE enabled = 1 LIMIT 1').fetchone() is not None
+    except Exception:
+        return False
+
+
+def enqueue_checkpoint(cp: dict):
+    """MK Oct 2026 - a signed checkpoint of the audit chain as an event of its own type, so
+    the copy outside this host can contradict a log that was cut back and re-signed here.
+    Only when a target exists: nobody would drain it otherwise."""
+    if not has_targets():
+        return False
+    what = {'genesis': 'chain started', 'periodic': 'chain checkpoint',
+            'prune': 'retention prune'}.get(cp.get('kind'), cp.get('kind') or '')
+    details = (f"{what} {cp.get('cp_seq')}: up to entry {cp.get('chain_seq')}, "
+               f"hash {cp.get('row_hash')}")
+    if cp.get('kind') == 'prune':
+        details += f", {cp.get('pruned_rows') or 0} entries removed (older than {cp.get('cutoff') or '-'})"
+        if cp.get('legacy_changed'):
+            details += ', entries from before the chain changed'
+    enqueue({
+        'event_type': 'audit_checkpoint', 'id': cp.get('id'), 'timestamp': cp.get('created_at'),
+        'user': 'system', 'action': 'audit.checkpoint', 'severity': 'info', 'cluster': '',
+        'ip_address': '', 'details': details,
+        'instance': cp.get('instance') or '', 'chain_id': cp.get('chain_id') or '',
+        'checkpoint': {k: cp.get(k) for k in ('kind', 'cp_seq', 'prev_cp_hash', 'chain_seq',
+                                              'row_hash', 'created_at', 'pruned_rows', 'cutoff',
+                                              'legacy_count', 'legacy_digest', 'legacy_changed',
+                                              'instance', 'hmac_signature')},
+    })
+    return True
+
+
 def _current_user():
     try:
         u = request.session.get('user') if hasattr(request, 'session') else ''
@@ -190,11 +224,18 @@ def _to_syslog_5424(event, app='pegaprox', facility='local0'):
         return _re.sub(r'[\x00-\x1f\x7f]', ' ', str(v))
     msgid = _sc(event.get('action', '-')).replace(' ', '_')[:32] or '-'
     sd = '-'
+    # MK Oct 2026 - the entry's place in this host's audit chain, as the JSON targets get it,
+    # so a syslog copy can name the entry that went missing too
+    chain = ''
+    if event.get('chain_seq') is not None:
+        chain = (f"chain_seq={_sc(event['chain_seq'])} chain_hash={_sc(event.get('chain_hash') or '-')} "
+                 f"chain_id={_sc(event.get('chain_id') or '-')} ")
     msg = (
         f"user={_sc(event.get('user', '-'))} "
         f"action={_sc(event.get('action', '-'))} "
         f"cluster={_sc(event.get('cluster', '') or '-')} "
         f"ip={_sc(event.get('ip_address', '') or '-')} "
+        f"{chain}"
         f"details={_sc(event.get('details') or '-')[:400]}"
     )
     return f"<{pri}>1 {ts} {host} {app} - {msgid} {sd} {msg}"
@@ -202,7 +243,7 @@ def _to_syslog_5424(event, app='pegaprox', facility='local0'):
 
 def _to_json_line(event):
     """Plain JSON dict for HTTP-JSON / Splunk / Elastic / generic webhook bodies."""
-    return {
+    line = {
         'timestamp': event.get('timestamp'),
         'user': event.get('user', ''),
         'action': event.get('action', ''),
@@ -211,7 +252,20 @@ def _to_json_line(event):
         'ip': event.get('ip_address', ''),
         'details': event.get('details', ''),
         'source': 'pegaprox',
+        'event_type': event.get('event_type') or 'audit',
+        # an active and its standby each keep a chain of their own, both numbered from 1:
+        # the host and the chain's name tell the copies apart
+        'host': event.get('instance') or socket.gethostname() or '',
     }
+    # the entry's place in this host's audit chain, and a checkpoint's signed fields
+    if event.get('chain_seq') is not None:
+        line['chain_seq'] = event['chain_seq']
+        line['chain_hash'] = event.get('chain_hash', '')
+    if event.get('chain_id'):
+        line['chain_id'] = event['chain_id']
+    if isinstance(event.get('checkpoint'), dict):
+        line['checkpoint'] = event['checkpoint']
+    return line
 
 
 # ── Senders per target type ───────────────────────────────────────────────

@@ -1317,6 +1317,30 @@ def start_vmware_migration(vmware_id, vm_id):
     vm_detail = mgr.get_vm(vm_id)
     vm_name = vm_detail.get('data', {}).get('name', vm_id) if 'data' in vm_detail else vm_id
 
+    # MK Oct 2026 - the guest lands on the target as a new one, sized as core/v2p.py builds
+    # it (the wizard's sockets, cores and memory over what ESXi reports): the tenant quota
+    # counts it like a create
+    def _v2p_adds():
+        from pegaprox.utils.rbac import landing_adds, quota_tenant
+        vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+        cpu = vd.get('cpu') or {}
+        sockets = int(data.get('sockets') or cpu.get('sockets') or 0)
+        per = int(data.get('cores_per_socket') or cpu.get('cores_per_socket') or 0)
+        cores = sockets * per if sockets and per else int(cpu.get('count') or 1)
+        mem_mb = float(data.get('memory') or (vd.get('memory') or {}).get('size_MiB') or 0)
+        disks = vd.get('disks') or {}
+        disk_b = sum(float((d or {}).get('capacity') or 0) for d in
+                     (disks.values() if isinstance(disks, dict) else disks))
+        return landing_adds(quota_tenant(_v2p_u), data['target_cluster'],
+                            {'cores': cores, 'memory_gb': mem_mb / 1024.0, 'disk_gb': disk_b / 1024.0 ** 3},
+                            source_cluster=vmware_id, source_removed=bool(data.get('remove_source')))
+    from pegaprox.api.helpers import tenant_quota_gate, quota_hold_alive
+    _qerr, _qwarn = tenant_quota_gate(_v2p_u, f'ESXi migration of {vm_name}', _v2p_adds,
+                                      cluster=data['target_cluster'],
+                                      hold={'cluster_id': data['target_cluster']})
+    if _qerr:
+        return _qerr
+
     # NS: pass all NICs from VMware to migration task so multi-NIC + MAC works
     if 'selected_nics' not in data and 'data' in vm_detail:
         nics = vm_detail['data'].get('nics', [])
@@ -1329,7 +1353,9 @@ def start_vmware_migration(vmware_id, vm_id):
     
     with _migration_lock_v2p:
         _vmware_migrations[mid] = task
-    
+    # the quota holds the new guest while the task runs (MK Oct 2026)
+    quota_hold_alive(alive=lambda: task.status == 'running')
+
     # a user job: in an automatic group each call it sends asks for the lease (#625)
     from pegaprox.core import ha
     thread = threading.Thread(target=ha.as_job(_run_v2p_migration, 'ESXi migration'), args=(task,),
@@ -1344,6 +1370,7 @@ def start_vmware_migration(vmware_id, vm_id):
         'migration_id': mid,
         'message': f'Migration started for {vm_name}',
         'task': task.to_dict(),
+        **({'quota_warning': _qwarn} if _qwarn else {}),
     }), 202
 
 

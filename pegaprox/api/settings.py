@@ -3508,13 +3508,22 @@ def verify_audit_integrity():
     - unsigned: Old entries without signature (pre-upgrade)
     - potentially_tampered: Entries with invalid signature (WARNING!)
     - integrity_percentage: Percentage of verified entries
+    - chain: the hash chain - edited, missing (deleted) and broken-link entries, whether
+      the end was cut off below the last signed checkpoint, how many entries came after
+      it, how far retention pruned
+    - legacy: entries from before the chain, and whether they changed since it started
+    - intact: none of the above found anything
     """
     database = get_db()
     result = database.verify_audit_log_integrity()
     
     # Log this check itself
     usr = getattr(request, 'session', {}).get('user', 'system')
-    log_audit(usr, 'audit.integrity_check', f"Audit integrity check: {result['verified']}/{result['total_entries']} verified, {result['potentially_tampered']} potentially tampered")
+    _ch = result.get('chain') or {}
+    log_audit(usr, 'audit.integrity_check',
+              f"Audit integrity check: {result['verified']}/{result['total_entries']} verified, "
+              f"{result['potentially_tampered']} potentially tampered, {_ch.get('missing', 0)} missing, "
+              f"{_ch.get('broken_links', 0)} broken links")
     
     return jsonify(result)
 
@@ -3564,33 +3573,129 @@ def rotate_encryption_key():
 def get_compliance_status():
     """Get security compliance status (admin only)
     
-    Returns overview of security features for HIPAA/ISO 27001 compliance.
+    Returns overview of security features for HIPAA/ISO 27001 compliance. Each control
+    is passed, failed or not_checked (with the reason); the score counts the checked ones
+    only, checked/total say how many. `checks` maps each control to True, False or None.
     """
+    # MK Oct 2026 - two of the eight checks were the constant True and every check counted,
+    # so a fresh install scored a quarter of its points for nothing. Each control now looks
+    # at what this instance runs with, or says why it could not.
     try:
-        settings = load_server_settings()
         database = get_db()
         key_info = database.get_key_info()
-        
-        # Calculate compliance score
-        # MK: each check is worth the same, simple but effective
-        checks = {
-            'encryption_enabled': ENCRYPTION_AVAILABLE and key_info.get('exists', False),
-            # MK: Apr 2026 - behind reverse proxy, HTTPS is handled by the proxy (#281)
-            'https_enabled': os.path.exists(SSL_CERT_FILE) and os.path.exists(SSL_KEY_FILE)
-                or settings.get('reverse_proxy_enabled', False)
-                or request.headers.get('X-Forwarded-Proto') == 'https',
-            'password_policy_enabled': settings.get('password_min_length', 8) >= 8,
-            'session_timeout_compliant': settings.get('session_timeout', SESSION_TIMEOUT) <= 28800,  # 8h max for HIPAA
-            '2fa_available': TOTP_AVAILABLE,
-            'audit_logging_enabled': True,  # Always enabled
-            'rate_limiting_enabled': API_RATE_LIMIT > 0,
-            'brute_force_protection': True,  # Always enabled
-        }
-        
-        score = sum(1 for v in checks.values() if v) / len(checks) * 100
-        
+        # the store itself, not load_server_settings: that one answers defaults when the
+        # table cannot be read, and defaults would pass most of what is asked below
+        try:
+            saved = database.get_server_settings()
+            settings = {**load_server_settings(), **(saved or {})}
+            settings_err = ''
+        except Exception as e:
+            logging.error(f"compliance: server settings unreadable: {e}")
+            settings, settings_err = {}, 'The server settings could not be read'
+
+        controls = []
+
+        def add(cid, status, detail='', reason=''):
+            controls.append({'id': cid, 'status': status, 'detail': detail, 'reason': reason})
+
+        def from_settings(cid, judge):
+            if settings_err:
+                add(cid, 'not_checked', reason=settings_err)
+            else:
+                ok, detail = judge()
+                add(cid, 'passed' if ok else 'failed', detail)
+
+        # field encryption: a key on disk and one this process signs and seals with
+        enc_ok = bool(ENCRYPTION_AVAILABLE and key_info.get('exists') and database.aes_key)
+        add('encryption_enabled', 'passed' if enc_ok else 'failed',
+            'AES-256-GCM field key loaded' if enc_ok else 'No field encryption key is loaded')
+
+        # TLS: the request this answers came over it, or a trusted proxy said the client's
+        # did. Behind a proxy that says nothing the client side is out of sight.
+        from pegaprox.utils.audit import _is_trusted_proxy
+        from pegaprox.api.helpers import effective_reverse_proxy
+        behind_proxy = effective_reverse_proxy(settings or None)
+        fwd = (request.headers.get('X-Forwarded-Proto') or '').split(',')[0].strip().lower()
+        if request.is_secure:
+            add('https_enabled', 'passed', 'This request arrived over HTTPS')
+        elif fwd and _is_trusted_proxy(request.remote_addr or ''):
+            add('https_enabled', 'passed' if fwd == 'https' else 'failed',
+                f'The reverse proxy reports the client connected over {fwd.upper()}')
+        elif behind_proxy:
+            add('https_enabled', 'not_checked',
+                reason='Behind a reverse proxy that does not report which scheme the client used '
+                       '(X-Forwarded-Proto from a trusted proxy)')
+        else:
+            add('https_enabled', 'failed', 'This request arrived over plain HTTP')
+
+        from_settings('password_policy_enabled', lambda: (
+            int(settings.get('password_min_length', 8) or 0) >= 8,
+            f"Minimum password length {settings.get('password_min_length', 8)}"))
+        # every sign-in may tick "remember me", and such a session idles 30 days (7 at most,
+        # utils/auth.validate_session) whatever session_timeout says; nothing turns that off
+        # yet, so the timeout alone does not make the control pass
+        def _session():
+            mins = int(settings.get('session_timeout', SESSION_TIMEOUT) or 0) // 60
+            if mins * 60 > 28800:
+                return False, f"Sessions expire after {mins} minutes"
+            return False, (f"Sessions expire after {mins} minutes, but a sign-in with "
+                           f"Remember me stays valid for 30 days idle (7 days at most)")
+        from_settings('session_timeout_compliant', _session)
+
+        # 2FA being installable says nothing; whether it is required does - for the admins
+        # too, they are the accounts it matters most for
+        if not TOTP_AVAILABLE:
+            add('two_factor_enforced', 'failed', 'TOTP support is not installed on this server')
+        else:
+            def _two_factor():
+                if not settings.get('force_2fa'):
+                    return False, 'Two-factor sign-in is not required'
+                if settings.get('force_2fa_exclude_admins'):
+                    return False, 'Required for every account except the admins'
+                return True, 'Required for every account'
+            from_settings('two_factor_enforced', _two_factor)
+
+        # the audit trail: the newest entry is signed and in the hash chain
+        try:
+            last = database.conn.execute(
+                'SELECT hmac_signature, chain_seq FROM audit_log ORDER BY id DESC LIMIT 1').fetchone()
+            if last is None:
+                add('audit_logging_enabled', 'not_checked', reason='No audit entry has been written yet')
+            else:
+                signed = bool(last['hmac_signature']) and last['chain_seq'] is not None
+                add('audit_logging_enabled', 'passed' if signed else 'failed',
+                    'Entries are signed and hash-chained' if signed
+                    else 'The newest audit entry is not signed into the chain')
+        except Exception as e:
+            logging.error(f"compliance: audit log unreadable: {e}")
+            add('audit_logging_enabled', 'not_checked', reason='The audit log could not be read')
+
+        # read at start from PEGAPROX_API_RATE_LIMIT, what the limiter runs with
+        add('rate_limiting_enabled', 'passed' if API_RATE_LIMIT > 0 else 'failed',
+            f'{API_RATE_LIMIT} API requests per {API_RATE_WINDOW}s per client' if API_RATE_LIMIT > 0
+            else 'API rate limiting is switched off (PEGAPROX_API_RATE_LIMIT=0)')
+
+        def _lockout():
+            ls = get_login_settings()
+            attempts, lock = int(ls['max_attempts'] or 0), int(ls['lockout_time'] or 0)
+            return (1 <= attempts <= 10 and lock >= 60,
+                    f'Lockout after {attempts} failed sign-ins for {lock}s')
+        from_settings('brute_force_protection', _lockout)
+
+        checks = {c['id']: {'passed': True, 'failed': False}.get(c['status']) for c in controls}
+        checked = [c for c in controls if c['status'] != 'not_checked']
+        passed = sum(1 for c in checked if c['status'] == 'passed')
+        score = round(passed / len(checked) * 100, 1) if checked else None
+        st = {c['id']: c['status'] for c in controls}
+        default_pw = _check_default_password_in_use()
+
         return jsonify({
-            'compliance_score': round(score, 1),
+            'compliance_score': score,
+            'checked': len(checked),
+            'total': len(controls),
+            'passed': passed,
+            'not_checked': len(controls) - len(checked),
+            'controls': controls,
             'checks': checks,
             'encryption': {
                 'algorithm': 'AES-256-GCM',
@@ -3614,15 +3719,23 @@ def get_compliance_status():
             },
             'recommendations': [
                 r for r in [
-                    None if checks['https_enabled'] else 'Enable HTTPS with valid certificates (or enable reverse proxy mode if using nginx/Traefik)',
-                    None if checks['session_timeout_compliant'] else 'Reduce session timeout to 8 hours or less',
-                    None if settings.get('password_require_special') else 'Consider requiring special characters in passwords',
-                    None if settings.get('password_expiry_enabled') else 'Consider enabling password expiry',
+                    'Enable HTTPS with valid certificates (or enable reverse proxy mode if using nginx/Traefik)'
+                    if st.get('https_enabled') == 'failed' else None,
+                    'Reduce session timeout to 8 hours or less'
+                    if st.get('session_timeout_compliant') == 'failed'
+                    and int(settings.get('session_timeout', SESSION_TIMEOUT) or 0) > 28800 else None,
+                    ('Require two-factor sign-in for the admins too (Settings > Security)'
+                     if settings.get('force_2fa') else 'Require two-factor sign-in (Settings > Security)')
+                    if st.get('two_factor_enforced') == 'failed' and TOTP_AVAILABLE else None,
+                    'Lock accounts after at most 10 failed sign-ins, for at least a minute'
+                    if st.get('brute_force_protection') == 'failed' else None,
+                    None if settings_err or settings.get('password_require_special') else 'Consider requiring special characters in passwords',
+                    None if settings_err or settings.get('password_expiry_enabled') else 'Consider enabling password expiry',
                     None if key_info.get('backups') else 'Perform initial key rotation to create backup',
-                    None if not _check_default_password_in_use() else 'CRITICAL: Default admin password is still in use! Change it immediately.',
+                    'CRITICAL: Default admin password is still in use! Change it immediately.' if default_pw else None,
                 ] if r is not None
             ],
-            'default_password_warning': _check_default_password_in_use()
+            'default_password_warning': default_pw
         })
     except Exception as e:
         logging.exception(f"Error getting compliance status: {e}")

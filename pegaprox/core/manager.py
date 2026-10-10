@@ -21468,37 +21468,56 @@ echo DONE""",
         if raw is None:
             return None
 
+        # MK Oct 2026 - every check prints OK or FAIL. A control whose section never came
+        # back (output cut short) or holds neither (the command itself failed) was not
+        # judged, so it answers None - not checked - instead of the False it used to
+        # read as. Every requested control is in the answer.
+        def _verdict(lines):
+            for l in lines:
+                if l.strip() in ('OK', 'FAIL'):
+                    return l.strip() == 'OK'
+            return None
+
         # simple (non-verbose) parse — preserved for backward compat
         if not verbose:
-            results = {}
-            current_id = None
+            results = {cid: None for cid in checks}
+            current_id, seen = None, []
             for line in raw.splitlines():
                 line = line.strip()
                 if line.startswith('---') and line.endswith('---'):
                     tag = line.strip('-')
+                    if current_id:
+                        results[current_id] = _verdict(seen)
+                    current_id, seen = (tag if tag in checks else None), []
                     if tag == 'END':
                         break
-                    if tag in checks:
-                        current_id = tag
                 elif current_id:
-                    results[current_id] = line.strip() == 'OK'
-                    current_id = None
+                    seen.append(line)
+            else:
+                if current_id:      # cut off before END: its verdict line may have come
+                    results[current_id] = _verdict(seen)
             return results
 
         # verbose parse — capture status + everything up to next marker as evidence
-        results = {}
+        results = {cid: {'status': None, 'evidence': '', 'command': ctrl.get('check', ''),
+                         'not_checked': 'No output came back for this control'}
+                   for cid, ctrl in checks.items()}
         current_id = None
         section = 'status'  # 'status' or 'evidence'
         evidence_lines = []
-        status_line = None
+        status_lines = []
 
         def _flush(cid):
             if cid and cid in checks:
+                status = _verdict(status_lines)
+                extra = [l for l in status_lines if l.strip() not in ('OK', 'FAIL')]
                 results[cid] = {
-                    'status': (status_line or '').strip() == 'OK',
-                    'evidence': '\n'.join(l for l in evidence_lines if l.strip())[:2000],
+                    'status': status,
+                    'evidence': '\n'.join(l for l in extra + evidence_lines if l.strip())[:2000],
                     'command': checks[cid].get('check', ''),
                 }
+                if status is None:
+                    results[cid]['not_checked'] = 'The check printed neither OK nor FAIL'
 
         for line in raw.splitlines():
             stripped = line.strip()
@@ -21506,6 +21525,7 @@ echo DONE""",
                 tag = stripped.strip('-')
                 if tag == 'END':
                     _flush(current_id)
+                    current_id = None
                     break
                 # evidence sub-marker like "ssh_perms:EVIDENCE"
                 if ':EVIDENCE' in tag:
@@ -21515,16 +21535,17 @@ echo DONE""",
                 _flush(current_id)
                 current_id = tag if tag in checks else None
                 section = 'status'
-                status_line = None
+                status_lines = []
                 evidence_lines = []
                 continue
 
             if not current_id:
                 continue
-            if section == 'status' and status_line is None:
-                status_line = stripped
+            if section == 'status':
+                status_lines.append(line)
             else:
                 evidence_lines.append(line)  # keep original (with whitespace)
+        _flush(current_id)          # cut off before END
 
         return results
 

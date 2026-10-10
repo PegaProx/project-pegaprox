@@ -674,6 +674,143 @@ def require_unconfined(cluster_id):
     return None
 
 
+def tenant_quota_gate(user, what, adds, cluster='', hold=None):
+    """The tenant quota for an operation that adds guests or resources: (refusal, warning).
+
+    `adds` is {vms, cores, memory_gb, disk_gb} or a callable returning it, called only when the
+    caller's tenant has a quota at all (it may cost a call to the cluster). 'block' refuses
+    with 403 like the create routes; 'warn' lets it through, writes an audit line and hands
+    back what the caller adds to its answer as quota_warning. Open on a failed check, as the
+    create routes are: a quota bug must not stop the work. MK Oct 2026
+
+    hold: where the operation lands, {'cluster_id', 'vmid' or 'vmids', 'grow', 'ttl', 'key',
+    'alive'} (rbac.quota_hold). The check and the hold on what it lets through are taken
+    under one lock per tenant, so two operations at once do not both fit into one slot, and
+    every check after it counts the hold until the cluster shows the guest or the growth.
+    A request that ends in a refusal or an error (400 and up) drops its hold again;
+    quota_hold_alive() ties it to a task that runs on after the answer."""
+    from flask import jsonify
+    from pegaprox.utils import rbac
+    tid = rbac.quota_tenant(user)
+    try:
+        if not rbac.tenant_has_quota(tid):
+            return None, None
+    except Exception as e:
+        logging.debug(f"[quota] {what} pre-flight skipped: {e}")
+        return None, None
+    tok = None
+    with rbac.quota_tenant_lock(tid):
+        try:
+            a = adds() if callable(adds) else adds
+            if not a:
+                return None, None
+            seen = {}
+            v = rbac.quota_verdict(tid, add_vms=a.get('vms', 0), add_cores=a.get('cores', 0),
+                                   add_mem_gb=a.get('memory_gb', 0), add_disk_gb=a.get('disk_gb', 0),
+                                   counted=seen)
+        except Exception as e:
+            logging.debug(f"[quota] {what} pre-flight skipped: {e}")
+            return None, None
+        msg = ''
+        if v is not None:
+            msg = (f"Tenant quota exceeded ({', '.join(v['violations'])}) - usage {v['usage']} "
+                   f"vs quota {v['quota']}")
+            if v.get('enforce') == 'block':
+                return (jsonify({'error': msg, 'quota': v}), 403), None
+        if hold:
+            try:
+                tok = _hold_quota(rbac, tid, a, hold, seen)
+            except Exception as e:
+                logging.debug(f"[quota] {what}: no hold kept: {e}")
+    if v is None:
+        return None, None
+    try:
+        from pegaprox.utils.audit import log_audit
+        log_audit((user or {}).get('username') or 'system', 'tenant.quota_warning',
+                  f"{what}: {msg}", cluster=cluster or None)
+    except Exception:
+        pass
+    return None, {'violations': v['violations'], 'usage': v['usage'], 'quota': v['quota'],
+                  'message': msg}
+
+
+def _hold_quota(rbac, tid, adds, hold, seen):
+    cid = hold.get('cluster_id')
+    vmids = hold.get('vmids')
+    if vmids is None:
+        vmids = [hold['vmid']] if hold.get('vmid') not in (None, '') else []
+    base = None
+    if hold.get('grow') and len(vmids) == 1:
+        try:
+            base = (seen.get(cid) or {}).get(int(vmids[0]))
+        except (TypeError, ValueError):
+            base = None
+    tok = rbac.quota_hold(tid, cid, adds, vmids=vmids, grow=bool(hold.get('grow')), base=base,
+                          ttl=hold.get('ttl'), key=hold.get('key'), alive=hold.get('alive'))
+    if tok is None:
+        return None
+    from flask import g, has_request_context, after_this_request
+    if has_request_context():
+        g.quota_holds = getattr(g, 'quota_holds', []) + [tok]
+
+        @after_this_request
+        def _drop_unless_it_went_through(resp):
+            if resp.status_code >= 400:
+                rbac.quota_release(tok)
+            return resp
+    return tok
+
+
+def quota_hold_alive(alive=None, vmids=None, key=None):
+    """Tie the hold this request's quota gate took to the task that carries the work on:
+    alive() answering False (the task failed) drops it; vmids once the landing VMID is
+    known, key for a release from elsewhere (rbac.quota_release_key)."""
+    from flask import g, has_request_context
+    if not has_request_context():
+        return
+    from pegaprox.utils import rbac
+    for tok in getattr(g, 'quota_holds', []):
+        rbac.quota_hold_update(tok, vmids=vmids, alive=alive, key=key)
+
+
+def guest_size(manager, node, vm_type, vmid):
+    """{cores, memory_gb, disk_gb} of a guest as the tenant quota counts it: cores and memory
+    from its row in the live view the manager keeps, disk from every volume in its config
+    (the row's maxdisk is the boot disk, or a container's rootfs, alone). Where the live view
+    has no row, its config gives all three; {} when neither can be read."""
+    from pegaprox.utils.rbac import guest_footprint, config_footprint
+    row = None
+    try:
+        for g_ in (manager.get_vm_resources(max_age=30) or []):
+            if str(g_.get('vmid')) == str(vmid):
+                row = g_
+                break
+    except Exception as e:
+        logging.debug(f"[quota] live view of {vmid} unreadable: {e}")
+    kind = vm_type or (row or {}).get('type') or 'qemu'
+    cfg = None
+    try:
+        got = manager.get_vm_config(node or (row or {}).get('node'), vmid, kind)
+        if isinstance(got, dict) and got.get('success', True) is not False:
+            if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+                # XAPI's record: vCPUs, memory and VDI sizes in bytes
+                c = got.get('config') or {}
+                cfg = {'cores': int(c.get('vcpus') or 0),
+                       'memory_gb': float(c.get('memory') or 0) / 1024.0 ** 3,
+                       'disk_gb': sum(float((d or {}).get('size') or 0) for d in (c.get('disks') or []))
+                       / 1024.0 ** 3}
+            else:
+                cfg = config_footprint(got, kind)
+    except Exception as e:
+        logging.debug(f"[quota] config of {vmid} unreadable: {e}")
+    if row is not None:
+        fp = guest_footprint(row)
+        if cfg:
+            fp['disk_gb'] = max(fp['disk_gb'], cfg['disk_gb'])
+        return fp
+    return cfg or {}
+
+
 def node_shell_address(mgr, node):
     """The address a shell for `node` logs in at, or None: then there is no shell.
 

@@ -925,6 +925,23 @@ def _periodic_audit_cleanup():
         logging.debug(f"[AuditCleanup] background pass failed: {e}")
 
 
+_AUDIT_CHECKPOINT_INTERVAL = 60 * 60   # hourly
+_last_audit_checkpoint_at = 0.0
+
+
+def _periodic_audit_checkpoint():
+    """MK Oct 2026 - a signed checkpoint of this host's audit chain, hourly when it moved.
+    Rows deleted from the end of the chain leave no hole in the numbers; up to the last
+    checkpoint they do (and the SIEM targets hold a copy of each checkpoint)."""
+    global _last_audit_checkpoint_at
+    now = time.time()
+    if now - _last_audit_checkpoint_at < _AUDIT_CHECKPOINT_INTERVAL:
+        return
+    _last_audit_checkpoint_at = now
+    from pegaprox.utils.audit import checkpoint_audit_log
+    checkpoint_audit_log()
+
+
 def _upsert_active_alert(alert_key, alert_id, alert_data, current_value, threshold, operator, target_id):
     """#501 — create/refresh the persisted active-alert row for an ongoing incident.
     First fire inserts; later fires only bump last_fired_at (used for auto-resolve)."""
@@ -1126,6 +1143,11 @@ def alert_check_loop():
             _periodic_audit_cleanup()
         except Exception as e:
             logging.debug(f"audit cleanup tick error: {e}")
+        # the chain is this host's own (audit_log is per instance), a standby keeps one too
+        try:
+            _periodic_audit_checkpoint()
+        except Exception as e:
+            logging.debug(f"audit checkpoint tick error: {e}")
 
         # Check every 60 seconds
         time.sleep(60)

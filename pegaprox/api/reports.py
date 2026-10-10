@@ -869,8 +869,17 @@ def check_hardening(cluster_id, node):
     # control set of its own and a PDF naming it would be claiming a level nobody checked.
     _eff = mgr._effective_profile(profile) if hasattr(mgr, '_effective_profile') else None
     _eff = _eff or (profile or 'cis-l1')   # always a string - consumers indexed on it before
+    # MK Oct 2026 - a control whose output could not be read is null (verbose: status
+    # null), not a failure; the counts keep it apart so no score divides by it
+    _st = [(v.get('status') if isinstance(v, dict) else v)
+           for v in (result.values() if isinstance(result, dict) else [])]
+    summary = {'total': len(_st), 'passed': sum(1 for s in _st if s is True),
+               'failed': sum(1 for s in _st if s is False),
+               'not_checked': sum(1 for s in _st if s is None)}
+    summary['checked'] = summary['passed'] + summary['failed']
     return jsonify({'node': node, 'controls': result, 'verbose': verbose,
-                    'profile': _eff, 'requested_profile': profile or 'cis-l1'})
+                    'profile': _eff, 'requested_profile': profile or 'cis-l1',
+                    'summary': summary})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening', methods=['POST'])

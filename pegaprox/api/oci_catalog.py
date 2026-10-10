@@ -643,13 +643,22 @@ def deploy(cluster_id):
     from pegaprox.utils.rbac import check_tenant_quota, DEFAULT_TENANT_ID
     tenant = caller.get('tenant_id') or DEFAULT_TENANT_ID
 
-    # tenant quota, open on a failed check like the container create route
+    # tenant quota, open on a failed check like the container create route. MK Oct 2026 - the
+    # container is made after the image pull, minutes from now: the check and a hold on what
+    # it lets through are taken under the tenant's lock, so a deploy next to this one sees it
+    from pegaprox.utils import rbac as _rbac
+    held = None
     try:
-        quota = check_tenant_quota(tenant, add_cores=spec['cores'], add_mem_gb=spec['memory'] / 1024.0,
-                                   add_vms=1, add_disk_gb=spec['disk_gb'])
-        if not quota['ok'] and quota.get('enforce') == 'block':
-            return jsonify({'error': f"Tenant quota exceeded ({', '.join(quota['violations'])})",
-                            'quota': quota}), 403
+        with _rbac.quota_tenant_lock(tenant):
+            quota = check_tenant_quota(tenant, add_cores=spec['cores'], add_mem_gb=spec['memory'] / 1024.0,
+                                       add_vms=1, add_disk_gb=spec['disk_gb'])
+            if not quota['ok'] and quota.get('enforce') == 'block':
+                return jsonify({'error': f"Tenant quota exceeded ({', '.join(quota['violations'])})",
+                                'quota': quota}), 403
+            if quota.get('quota'):
+                held = _rbac.quota_hold(tenant, cluster_id, {'vms': 1, 'cores': spec['cores'],
+                                                             'memory_gb': spec['memory'] / 1024.0,
+                                                             'disk_gb': spec['disk_gb']})
     except Exception as e:
         logging.debug(f"[quota] OCI deploy pre-flight skipped: {e}")
 
@@ -657,9 +666,11 @@ def deploy(cluster_id):
     if auto_vmid:
         vmid = _next_free_id(mgr)
         if vmid is None:
+            _rbac.quota_release(held)
             return jsonify({'error': 'No free CT ID could be read from the cluster'}), 502
     ok, why = _vmid_in_range(tenant, vmid)
     if not ok:
+        _rbac.quota_release(held)
         return jsonify({'error': why}), 403
 
     job = {
@@ -672,6 +683,8 @@ def deploy(cluster_id):
         '_cluster_name': getattr(mgr.config, 'name', cluster_id),
     }
     _remember(job)
+    # held until the container shows, or the job fails
+    _rbac.quota_hold_update(held, vmids=[vmid], alive=lambda: job['status'] != 'failed')
     log_audit(username, 'container.create',
               f"Creating CT {vmid} ({spec['hostname']}) on {node} from OCI image {spec['reference']}",
               cluster=job['_cluster_name'])

@@ -15,7 +15,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, bounded_limit, acts_as_admin, caller_acts_as_admin
-from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import upstream_failure, tenant_quota_gate
 from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server, pbs_config_from_row, pbs_target_refusal
 
 bp = Blueprint('pbs', __name__)
@@ -3740,10 +3740,23 @@ def restore_backup(cluster_id):
         return jsonify({'error': "mode must be 'new', 'overwrite', or 'test'"}), 400
 
     from pegaprox.utils.auth import build_authz_user
-    _refused = _restore_refusal(cluster_id, build_authz_user(request.session.get('user', ''), request.session),
-                                volid, target_node, target_vmid, mode)
+    _caller = build_authz_user(request.session.get('user', ''), request.session)
+    _refused = _restore_refusal(cluster_id, _caller, volid, target_node, target_vmid, mode)
     if _refused:
         return _refused
+
+    # MK Oct 2026 - 'new' and 'test' leave a guest of their own behind, 'overwrite' grows the
+    # guest by what the backup has more of: the tenant quota counts it as a create would
+    from pegaprox.core.batch_restore import restore_adds
+    _src = next((r.search(volid) for r in _SOURCE_RES if r.search(volid)), None)
+    _qerr, _qwarn = tenant_quota_gate(
+        _caller, f'restore of {volid}',
+        lambda: restore_adds(cm, target_node, volid, int(_src.group(1)) if _src else 0, target_vmid,
+                             mode == 'overwrite'),
+        cluster=cm.config.name,
+        hold={'cluster_id': cluster_id, 'vmid': target_vmid, 'grow': mode == 'overwrite'})
+    if _qerr:
+        return _qerr
 
     # Test-mode = verify pipeline without cleanup
     if mode == 'test':
@@ -3756,7 +3769,8 @@ def restore_backup(cluster_id):
                 # NS - pass auto_cleanup=False so the test VM survives for inspection
                 'auto_cleanup': False,
             })
-            return jsonify({'success': True, 'task_id': task_id, 'mode': 'test'})
+            return jsonify({'success': True, 'task_id': task_id, 'mode': 'test',
+                            **({'quota_warning': _qwarn} if _qwarn else {})})
         except Exception as e:
             return jsonify({'error': safe_error(e)}), 500
 
@@ -3769,7 +3783,8 @@ def restore_backup(cluster_id):
             log_audit(request.session.get('user', 'system'), 'backup.restored',
                       f"Restoring {volid} → {got['kind']}/{target_vmid} on {target_node} (mode={mode})",
                       cluster=cm.config.name)
-            return jsonify({'success': True, 'upid': got['upid'], 'mode': mode, 'target_vmid': target_vmid})
+            return jsonify({'success': True, 'upid': got['upid'], 'mode': mode, 'target_vmid': target_vmid,
+                            **({'quota_warning': _qwarn} if _qwarn else {})})
         return upstream_failure(got['status'], got['error'], pve_status=got['status'])
     except Exception as e:
         return jsonify({'error': safe_error(e)}), 500
@@ -3995,6 +4010,32 @@ def restore_backup_batch(cluster_id):
     if clash:
         return clash
 
+    # MK Oct 2026 - the whole batch against the tenant quota before any of it starts, each
+    # item by what its backup brings back: the backup's own config, read 8 at a time, never
+    # the guest it came from as it is now (shrunk since, an old big backup of it went
+    # through). Only where that config cannot be read does the guest stand in for it. Only
+    # for a tenant that has a quota at all
+    def _batch_adds():
+        from pegaprox.core.batch_restore import restore_adds, backup_footprint
+        from pegaprox.utils.concurrent import run_per_node
+        live = {int(g['vmid']): g for g in (cm.get_vm_resources(max_age=30) or [])
+                if str(g.get('vmid', '')).isdigit()}
+        fps = run_per_node({str(i): (lambda _k, r=row: backup_footprint(cm, r['node'], r['volid']))
+                            for i, row in enumerate(rows)}, max_concurrent=8, timeout=120)
+        total = {'vms': 0, 'cores': 0, 'memory_gb': 0.0, 'disk_gb': 0.0}
+        for i, row in enumerate(rows):
+            got = restore_adds(cm, row['node'], row['volid'], row['vmid'], row['target_vmid'],
+                               body['mode'] == 'overwrite', rows=live, footprint=fps.get(str(i)),
+                               read_backup=False)
+            for k in total:
+                total[k] += (got or {}).get(k, 0) or 0
+        return total
+    _qerr, _qwarn = tenant_quota_gate(
+        user, f'batch restore of {len(rows)} backup(s)', _batch_adds, cluster=cm.config.name,
+        hold={'cluster_id': cluster_id, 'vmids': [r['target_vmid'] for r in rows] if body['mode'] == 'new' else []})
+    if _qerr:
+        return _qerr
+
     usr = request.session.get('user', 'system')
     from pegaprox.utils.audit import get_client_ip
     run = batch.BatchRun(cluster_id, cm.config.name, usr, request.session, get_client_ip(), storage,
@@ -4008,8 +4049,12 @@ def restore_backup_batch(cluster_id):
               f"Batch restore {run.id} of {len(rows)} backup(s) from {storage} onto {target_node} "
               f"(mode={body['mode']}, {how}{f' {parallel}' if how == 'parallel' else ''}): {listed}",
               cluster=cm.config.name)
+    # the quota's hold on the batch lasts while it runs; what it restored is counted by then
+    from pegaprox.api.helpers import quota_hold_alive
+    quota_hold_alive(alive=lambda: run.state == 'running')
     batch.launch(run)
-    return jsonify({'run': run.view(run.rows_copy(), me=usr)}), 202
+    return jsonify({'run': run.view(run.rows_copy(), me=usr),
+                    **({'quota_warning': _qwarn} if _qwarn else {})}), 202
 
 
 def _batch_view(run, with_rows=True):

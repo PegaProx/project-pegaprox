@@ -52,7 +52,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_action, push_immedi
 from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.api.helpers import node_shell_address
-from pegaprox.api.helpers import xapi_permission_missing, upstream_failure
+from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
                                   node_maintenance_for_caller)
@@ -1760,6 +1760,17 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             if _nerr:
                 return _nerr
 
+    # MK Oct 2026 - into a new VMID this is a new guest, over the guest it came from it grows
+    # that one by what the backup has more of: the tenant quota counts both, as on create
+    from pegaprox.core.batch_restore import restore_adds
+    _qerr, _qwarn = tenant_quota_gate(
+        _authz_user, f'restore of {volid}',
+        lambda: restore_adds(manager, node, volid, vmid, target_vmid, str(target_vmid) == str(vmid)),
+        cluster=manager.config.name,
+        hold={'cluster_id': cluster_id, 'vmid': target_vmid, 'grow': str(target_vmid) == str(vmid)})
+    if _qerr:
+        return _qerr
+
     try:
         host, port = manager.host, manager.api_port
         session = manager._create_session()
@@ -1797,7 +1808,8 @@ def restore_vm_backup(cluster_id, node, vm_type, vmid):
             task = response.json().get('data', '')
             user = getattr(request, 'session', {}).get('user', 'system')
             log_audit(user, 'backup.restored', f"Restored {volid} to VMID {target_vmid}", cluster=manager.config.name)
-            return jsonify({'success': True, 'task': task, 'vmid': target_vmid})
+            return jsonify({'success': True, 'task': task, 'vmid': target_vmid,
+                            **({'quota_warning': _qwarn} if _qwarn else {})})
         
         # NS: proxmox sometimes returns weird error messages, should probably parse them better
         return upstream_failure(response.status_code, parse_pve_error(response.text))
@@ -4672,6 +4684,164 @@ def get_next_vmid_api(cluster_id):
     return jsonify({'vmid': result['vmid']})
 
 
+_RESIZE_RE = re.compile(r'(\+)?(\d+(?:\.\d+)?)([KMGT]?)', re.I)
+# a replication job makes its replica at its first run, on its schedule (a weekly one too)
+_REPLICA_HOLD_TTL = 8 * 86400
+
+
+def _int_or(v, default):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _node_cores(manager, node):
+    """CPU threads of a node from the status the manager keeps, None when it has none"""
+    try:
+        st = (manager.get_node_status() or {}).get(node) or {}
+        n = (st.get('cpuinfo') or {}).get('cpus') or st.get('maxcpu')
+        return int(n) if n and int(n) > 0 else None
+    except Exception:
+        return None
+
+
+def _imported_size_gb(manager, node, value):
+    """GB of the image a new disk is filled from (import-from=STORAGE:VOLUME), as its
+    storage lists it; None when it cannot be told (a path, no answer)"""
+    from urllib.parse import quote
+    from pegaprox.utils.rbac import property_string, GIB
+    _, opts = property_string(value, 'file')
+    src = opts.get('import-from') or ''
+    if ':' not in src or src.startswith('/'):
+        return None
+    try:
+        r = manager._api_get(f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/storage/"
+                             f"{quote(src.split(':', 1)[0], safe='')}/content/{quote(src, safe='')}", timeout=15)
+        data = r.json().get('data') if r.status_code == 200 else None
+        size = float(data.get('size') or 0) if isinstance(data, dict) else 0.0
+    except Exception:
+        return None
+    return size / GIB if size > 0 else None
+
+
+def _config_growth(manager, node, vm_type, vmid, updates):
+    """What a config change adds to a guest: more cores, more memory, new volumes
+    ('storage:32' allocates 32 GB). None when it touches none of them, so the guest's
+    config is read only when there is something to compare.
+
+    MK Oct 2026 - in every spelling Proxmox VE takes: a drive or mount point with its
+    file=/volume= key written out, memory as 'current=N', a disk filled from an image
+    (import-from: the image's size, more than any quota when that is unknown), and a
+    container whose core limit is deleted, which then runs on every core of its node. The
+    current values are the guest's own config (its raw keys), not the defaults."""
+    from pegaprox.utils.rbac import drive_new_gb, memory_mb, raw_guest_config, QUOTA_UNKNOWN
+    new_gb = 0.0
+    for k, v in updates.items():
+        gb = drive_new_gb(k, v)
+        if gb >= QUOTA_UNKNOWN:
+            gb = _imported_size_gb(manager, node, v) or QUOTA_UNKNOWN
+        new_gb += gb
+    deleted = {p.strip() for p in str(updates.get('delete') or '').split(',') if p.strip()}
+    cpu = {'cores', 'sockets'} & (set(updates) | deleted)
+    mem = 'memory' in updates or 'memory' in deleted
+    if not (cpu or mem or new_gb):
+        return None
+    got = manager.get_vm_config(node, vmid, vm_type) or {}
+    if not isinstance(got, dict) or got.get('success') is False:
+        # without the guest's config only the new volumes are known
+        return {'disk_gb': new_gb} if new_gb else None
+    cur = raw_guest_config(got)
+    adds = {'disk_gb': new_gb}
+    if cpu and vm_type == 'qemu':
+        cores, sockets = _int_or(cur.get('cores'), 1), _int_or(cur.get('sockets'), 1)
+        new_cores = 1 if 'cores' in deleted else _int_or(updates.get('cores', cores), cores)
+        new_sockets = 1 if 'sockets' in deleted else _int_or(updates.get('sockets', sockets), sockets)
+        adds['cores'] = new_cores * new_sockets - cores * sockets
+    elif cpu:
+        # a container without cores is not limited: all of its node's
+        unlimited = _node_cores(manager, node) or QUOTA_UNKNOWN
+        cores = _int_or(cur.get('cores'), 0) or unlimited
+        if 'cores' in deleted:
+            new = unlimited
+        else:
+            new = _int_or(updates.get('cores'), cores) if 'cores' in updates else cores
+        adds['cores'] = new - cores
+    if mem:
+        old = memory_mb(cur.get('memory'), 512)
+        new = 512 if 'memory' in deleted else memory_mb(updates.get('memory'), old)
+        adds['memory_gb'] = (new - old) / 1024.0
+    return adds
+
+
+def _rollback_growth(manager, node, vm_type, vmid, snapname):
+    """What a rollback adds: the snapshot's config (Proxmox VE keeps it with the snapshot)
+    against the guest's config now. None when either cannot be read."""
+    from urllib.parse import quote
+    from pegaprox.utils.rbac import config_footprint
+    if vm_type not in ('qemu', 'lxc'):
+        return None
+    r = manager._api_get(f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/{vm_type}/"
+                         f"{vmid}/snapshot/{quote(str(snapname), safe='')}/config", timeout=15)
+    snap = r.json().get('data') if r.status_code == 200 else None
+    got = manager.get_vm_config(node, vmid, vm_type) or {}
+    if not isinstance(snap, dict) or not isinstance(got, dict) or got.get('success') is False:
+        return None
+    node_cores = _node_cores(manager, node) if vm_type == 'lxc' else None
+    then = config_footprint(snap, vm_type, node_cores)
+    now = config_footprint(got, vm_type, node_cores)
+    return {k: then[k] - now[k] for k in ('cores', 'memory_gb', 'disk_gb')}
+
+
+def _xcp_config_growth(manager, node, vm_type, vmid, updates):
+    """The same for XCP-ng, whose config change takes vcpus and memory (read as
+    xcpng.update_vm_config reads them), against the guest's XAPI record"""
+    from pegaprox.core.xcpng import xapi_memory_bytes
+    if 'vcpus' not in updates and 'memory' not in updates:
+        return None
+    got = manager.get_vm_config(node, vmid, vm_type) or {}
+    cur = (got.get('config') or {}) if isinstance(got, dict) else {}
+    adds = {}
+    if 'vcpus' in updates:
+        new = _int_or(updates.get('vcpus'), None)
+        if new is not None:
+            adds['cores'] = max(1, new) - _int_or(cur.get('vcpus'), 0)
+    if 'memory' in updates:
+        new = xapi_memory_bytes(updates.get('memory'))
+        if new is not None:
+            adds['memory_gb'] = (new - _int_or(cur.get('memory'), 0)) / 1024.0 ** 3
+    return adds or None
+
+
+def _resize_growth(manager, node, vm_type, vmid, disk, size):
+    """GB a disk resize adds: '+10G' adds ten, '50G' what lies above the disk's size now.
+    On XCP-ng as XAPI reads it (xcpng.xapi_resize_bytes): no unit below 4096 is GB, a '+'
+    changes nothing, and the size is always the new total."""
+    from pegaprox.utils.rbac import size_to_gb, QUOTA_SIZE_RE, raw_guest_config, GIB
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.core.xcpng import xapi_resize_bytes
+        want = xapi_resize_bytes(size)
+        if want is None:
+            return None             # XAPI refuses it too
+        got = manager.get_vm_config(node, vmid, vm_type) or {}
+        disks = ((got.get('config') or {}).get('disks') or []) if isinstance(got, dict) else []
+        have = next((d for d in disks if isinstance(d, dict)
+                     and str(disk) in (str(d.get('id', '')), str(d.get('uuid', '')))), None)
+        # a disk whose size is not known grows by all of it at most
+        return {'disk_gb': (want - float((have or {}).get('size') or 0)) / GIB}
+    m = _RESIZE_RE.fullmatch(str(size).strip())
+    if not m:
+        return None                 # Proxmox refuses what it cannot read
+    gb = size_to_gb(m.group(2), m.group(3))
+    if m.group(1):
+        return {'disk_gb': gb}
+    got = manager.get_vm_config(node, vmid, vm_type) or {}
+    have = QUOTA_SIZE_RE.search(str(raw_guest_config(got).get(disk) or ''))
+    if not have:
+        return None                 # no size to grow from in the config: open, as the quota is
+    return {'disk_gb': gb - size_to_gb(have.group(1), have.group(2))}
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/clone', methods=['POST'])
 @require_auth(perms=['vm.clone'])
 def clone_vm_api(cluster_id, node, vm_type, vmid):
@@ -4709,14 +4879,24 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
         if _nerr:
             return _nerr
 
+    # MK Oct 2026 - a clone is a new guest the size of its source: the tenant quota counts it,
+    # and holds it until the new guest shows on the cluster
+    _qerr, _qwarn = tenant_quota_gate(user, f'clone of {vm_type} {vmid}',
+                                      lambda: dict(guest_size(manager, node, vm_type, vmid), vms=1),
+                                      cluster=manager.config.name,
+                                      hold={'cluster_id': cluster_id, 'vmid': newid})
+    if _qerr:
+        return _qerr
+
     if not newid:
         # Get next available VMID
         next_result = manager.get_next_vmid()
         if next_result['success']:
             newid = next_result['vmid']
+            quota_hold_alive(vmids=[newid])
         else:
             return jsonify({'error': 'Could not get next VMID'}), 500
-    
+
     result = manager.clone_vm(
         node=node,
         vmid=vmid,
@@ -4763,7 +4943,8 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
         return jsonify({
             'message': f'Clone gestartet: {vmid} -> {newid}',
             'newid': newid,
-            'data': result.get('data')
+            'data': result.get('data'),
+            **({'quota_warning': _qwarn} if _qwarn else {}),
         })
     else:
         return jsonify({'error': result['error']}), 500
@@ -5997,6 +6178,16 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
             if root_key:
                 return _confined_root_refusal(f'setting {root_key}')
 
+    # MK Oct 2026 - more cores, memory or a new volume grow the tenant like a create does
+    _grow = (_xcp_config_growth if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng'
+             else _config_growth)
+    _qerr, _qwarn = tenant_quota_gate(
+        user, f'config change of {vm_type} {vmid}',
+        lambda: _grow(manager, node, vm_type, vmid, config_updates),
+        cluster=manager.config.name, hold={'cluster_id': cluster_id, 'vmid': vmid, 'grow': True})
+    if _qerr:
+        return _qerr
+
     result = manager.update_vm_config(node, vmid, vm_type, config_updates)
 
     if result['success']:
@@ -6017,7 +6208,7 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
         user = getattr(request, 'session', {}).get('user', 'system')
         changes = ', '.join([f"{k}={v}" for k, v in config_updates.items()][:5])
         log_audit(user, 'vm.config_changed', f"{vm_type.upper()} {vmid} config updated: {changes}", cluster=manager.config.name)
-        return jsonify({'message': result['message']})
+        return jsonify({'message': result['message'], **({'quota_warning': _qwarn} if _qwarn else {})})
     else:
         return jsonify({'error': result['error']}), 500
 
@@ -7242,13 +7433,22 @@ def resize_vm_disk_api(cluster_id, node, vm_type, vmid):
     if not disk or not size:
         return jsonify({'error': 'disk and size required'}), 400
     
+    # MK Oct 2026 - a bigger disk is more of the tenant's disk quota
+    _qerr, _qwarn = tenant_quota_gate(
+        build_authz_user(request.session.get('user', ''), request.session),
+        f'disk resize of {vm_type} {vmid}',
+        lambda: _resize_growth(manager, node, vm_type, vmid, disk, size), cluster=manager.config.name,
+        hold={'cluster_id': cluster_id, 'vmid': vmid, 'grow': True})
+    if _qerr:
+        return _qerr
+
     result = manager.resize_vm_disk(node, vmid, vm_type, disk, size)
     
     if result['success']:
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'vm.disk_resized', f"{vm_type.upper()} {vmid} disk {disk} resized to {size}", cluster=manager.config.name)
-        return jsonify({'message': result['message']})
+        return jsonify({'message': result['message'], **({'quota_warning': _qwarn} if _qwarn else {})})
     else:
         return jsonify({'error': result['error']}), 500
 
@@ -7349,6 +7549,23 @@ def add_disk_api(cluster_id, node, vm_type, vmid):
         if why:
             return jsonify({'error': why}), 400
 
+    # a new disk is new disk quota (MK Oct 2026); manager.add_disk takes 32 GB when none is
+    # given. The size is read the way the manager reads it, XCP-ng's included, so the quota
+    # counts what is created
+    if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
+        from pegaprox.core.xcpng import xapi_add_disk_gb
+        _new_gb = xapi_add_disk_gb(disk_config.get('size', 32))
+        if _new_gb is None or _new_gb < 1:
+            return jsonify({'error': 'Disk size is a number of GB'}), 400
+    else:
+        _new_gb = float(str(disk_config.get('size', '32')).replace('G', '').replace('g', '') or 0)
+    _qerr, _qwarn = tenant_quota_gate(
+        build_authz_user(request.session.get('user', ''), request.session),
+        f'new disk on {vm_type} {vmid}', {'disk_gb': _new_gb},
+        cluster=manager.config.name, hold={'cluster_id': cluster_id, 'vmid': vmid, 'grow': True})
+    if _qerr:
+        return _qerr
+
     result = manager.add_disk(node, vmid, vm_type, disk_config)
     
     if result['success']:
@@ -7368,7 +7585,7 @@ def add_disk_api(cluster_id, node, vm_type, vmid):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'vm.disk_added', f"{vm_type.upper()} {vmid} - disk added: {disk_config.get('size', 'unknown')}GB on {disk_config.get('storage', 'default')}", cluster=manager.config.name)
-        return jsonify({'message': result['message']})
+        return jsonify({'message': result['message'], **({'quota_warning': _qwarn} if _qwarn else {})})
     else:
         return jsonify({'error': result['error']}), 500
 
@@ -7728,13 +7945,26 @@ def rollback_snapshot_api(cluster_id, node, vm_type, vmid, snapname):
     if denied: return denied
 
     mgr = cluster_managers[cluster_id]
+
+    # MK Oct 2026 - a rollback brings the snapshot's config back: cores, memory and disks
+    # taken from the guest since come back with it, past the tenant quota as on a resize
+    _qwarn = None
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
+        _qerr, _qwarn = tenant_quota_gate(
+            user, f"rollback of {vm_type} {vmid} to '{snapname}'",
+            lambda: _rollback_growth(mgr, node, vm_type, vmid, snapname),
+            cluster=mgr.config.name, hold={'cluster_id': cluster_id, 'vmid': vmid, 'grow': True})
+        if _qerr:
+            return _qerr
+
     result = mgr.rollback_snapshot(node, vmid, vm_type, snapname)
-    
+
     if result['success']:
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
         log_audit(user, 'snapshot.restored', f"{vm_type.upper()} {vmid} - rolled back to snapshot '{snapname}'", cluster=mgr.config.name)
-        return jsonify({'message': f'Rollback zu {snapname} gestartet', 'task': result.get('task')})
+        return jsonify({'message': f'Rollback zu {snapname} gestartet', 'task': result.get('task'),
+                        **({'quota_warning': _qwarn} if _qwarn else {})})
     else:
         return jsonify({'error': result['error']}), 500
 
@@ -9757,6 +9987,10 @@ def _update_repl_status(db, job_id, status, error=''):
         )
     except Exception as e:
         logging.warning(f"[XCREPL] Could not update status for {job_id}: {e}")
+    if status == 'ok':
+        # the replica is there now and counted as it is (MK Oct 2026)
+        from pegaprox.utils.rbac import quota_release_key
+        quota_release_key(('xcrepl', job_id))
     # MK May 2026 (audit completeness) — emit terminal audit event so the bundle's
     # audit_log captures the outcome of every xcrepl run, not just `replication.triggered`.
     # Mirrors the gap that surfaced via #438 on the v2p side: started-only audit forces
@@ -10055,6 +10289,20 @@ def create_cross_cluster_replication():
         _rok, _rmsg = check_tenant_vmid(_xu.get('tenant_id') or DEFAULT_TENANT_ID, _land)
         if not _rok:
             return jsonify({'error': _rmsg}), 403
+    # the replica is a guest of its own on the target, for the tenant quota as well (MK Oct 2026).
+    # The job makes it at its first run, maybe days from now: the hold stays until that run
+    # went through or the job is deleted (_update_repl_status, delete_cross_cluster_replication)
+    from pegaprox.utils.rbac import landing_adds, quota_tenant
+    _qerr, _qwarn = tenant_quota_gate(
+        _xu, f'replication of {vmid} to {target_cluster}',
+        lambda: landing_adds(quota_tenant(_xu), target_cluster,
+                             guest_size(cluster_managers[source_cluster], data.get('source_node') or '',
+                                        data.get('vm_type', 'qemu'), int(vmid))),
+        cluster=cluster_managers[target_cluster].config.name,
+        hold={'cluster_id': target_cluster, 'vmid': target_vmid or (None if source_cluster == target_cluster else vmid),
+              'key': ('xcrepl', job_id), 'ttl': _REPLICA_HOLD_TTL})
+    if _qerr:
+        return _qerr
     delete_target = 1 if data.get('delete_target') else 0
     # #174 aderumier — opt-in incremental mode. Validated here; the engine still
     # falls back to 'full' at run time if the VM's disks aren't rbd/zfspool on
@@ -10092,7 +10340,7 @@ def create_cross_cluster_replication():
               f"Cross-cluster replication {job_id}: VM {vmid} from {source_cluster} to {target_cluster} "
               f"(target VMID {target_vmid or 'auto'}{', delete-target ON' if delete_target else ''})")
 
-    return jsonify({'success': True, 'id': job_id})
+    return jsonify({'success': True, 'id': job_id, **({'quota_warning': _qwarn} if _qwarn else {})})
 
 
 def _delete_replica_target(job):
@@ -10244,6 +10492,9 @@ def delete_cross_cluster_replication(job_id):
             target_detail = f' (replica: {detail})'
 
     db.execute('DELETE FROM cross_cluster_replications WHERE id = ?', (job_id,))
+    # a job that never ran leaves no replica to hold the tenant quota for
+    from pegaprox.utils.rbac import quota_release_key
+    quota_release_key(('xcrepl', job_id))
 
     usr = getattr(request, 'session', {}).get('user', 'system')
     log_audit(usr, 'replication.deleted', f"Cross-cluster replication {job_id} deleted{target_detail}")
@@ -13680,6 +13931,19 @@ def cross_cluster_migrate_api():
 
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
+
+    # MK Oct 2026 - the guest lands as a new one on the target; kept at the source too it is
+    # one more for the tenant quota, moved between two of the tenant's clusters it is not
+    from pegaprox.utils.rbac import landing_adds, quota_tenant
+    _qerr, _qwarn = tenant_quota_gate(
+        _xu, f'cross-cluster migration of {vm_type} {vmid}',
+        lambda: landing_adds(quota_tenant(_xu), target_cluster_id,
+                             guest_size(source_manager, source_node, vm_type, vmid),
+                             source_cluster=source_cluster_id, source_removed=bool(delete_source)),
+        cluster=target_manager.config.name,
+        hold={'cluster_id': target_cluster_id, 'vmid': target_vmid or vmid})
+    if _qerr:
+        return _qerr
     
     # MK: Check VM disk size and warn about potential issues with online migration
     warnings = []
@@ -13888,6 +14152,8 @@ def cross_cluster_migrate_api():
                     warnings.append(xfer['note'])
             if warnings:
                 response['warnings'] = warnings
+            if _qwarn:
+                response['quota_warning'] = _qwarn
             
             return jsonify(response)
         else:
@@ -14026,18 +14292,27 @@ def create_vm_api(cluster_id, node):
     vm_config = request.json or {}
 
     # NS #502 — tenant quota pre-flight (fail-open: a quota bug must never block a create)
+    # MK Oct 2026 - under the tenant's lock, with a hold on the new guest until it shows, so
+    # two creates at the same moment do not both fit into one slot
+    _held = None
     try:
         from pegaprox.utils.rbac import check_tenant_quota, DEFAULT_TENANT_ID
+        from pegaprox.utils import rbac as _rbac
         _qu = load_users().get(request.session.get('user', ''), {})
         _tid = _qu.get('tenant_id') or DEFAULT_TENANT_ID
         _qcores = int(vm_config.get('cores') or 1) * int(vm_config.get('sockets') or 1)
         _qmem = float(vm_config.get('memory') or 0) / 1024.0  # MB → GB
         _qdisk = float(vm_config.get('disk_size') or 0)       # already GB
-        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
-                                   add_disk_gb=_qdisk)
-        if not _qchk['ok'] and _qchk.get('enforce') == 'block':
-            return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) — "
-                            f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
+        with _rbac.quota_tenant_lock(_tid):
+            _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
+                                       add_disk_gb=_qdisk)
+            if not _qchk['ok'] and _qchk.get('enforce') == 'block':
+                return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) - "
+                                f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
+            if _qchk.get('quota'):
+                _held = _rbac.quota_hold(_tid, cluster_id, {'vms': 1, 'cores': _qcores, 'memory_gb': _qmem,
+                                                            'disk_gb': _qdisk},
+                                         vmids=[vm_config['vmid']] if vm_config.get('vmid') else ())
     except Exception as _qe:
         logging.debug(f"[quota] qemu pre-flight skipped: {_qe}")
 
@@ -14052,7 +14327,9 @@ def create_vm_api(cluster_id, node):
     except Exception as _re:
         logging.debug(f"[vmid-range] qemu pre-flight skipped: {_re}")
         _rok, _rmsg = True, ''
+    from pegaprox.utils.rbac import quota_release, quota_hold_update
     if not _rok:
+        quota_release(_held)
         return jsonify({'error': _rmsg}), 403
 
     result = manager.create_vm(node, vm_config)
@@ -14061,6 +14338,10 @@ def create_vm_api(cluster_id, node):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'unknown')
         vmid = vm_config.get('vmid') or result.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
+        if str(vmid).isdigit():
+            quota_hold_update(_held, vmids=[vmid])
+        else:
+            quota_release(_held)        # one it cannot tell apart would count twice for hours
         vm_name = vm_config.get('name', f'vm-{vmid}')
         log_audit(user, 'vm.create', f"Created VM {vmid} ({vm_name}) on {node}", cluster=manager.config.name)
 
@@ -14072,6 +14353,7 @@ def create_vm_api(cluster_id, node):
 
         return jsonify(result)
     else:
+        quota_release(_held)
         return jsonify(result), 400
 
 
@@ -14092,19 +14374,27 @@ def create_container_api(cluster_id, node):
     ct_config = request.json or {}
 
     # NS #502 — tenant quota pre-flight (fail-open)
+    # MK Oct 2026 - under the tenant's lock with a hold, as the VM twin above
+    _held = None
     try:
         from pegaprox.utils.rbac import check_tenant_quota, DEFAULT_TENANT_ID
+        from pegaprox.utils import rbac as _rbac
         _qu = load_users().get(request.session.get('user', ''), {})
         _tid = _qu.get('tenant_id') or DEFAULT_TENANT_ID
         _qcores = int(ct_config.get('cores') or 1)
         _qmem = float(ct_config.get('memory') or 0) / 1024.0  # MB → GB
         # CT root disk is 'disk_size' like the VM path; 'rootfs'/'disk' are the PVE-side spellings
         _qdisk = float(ct_config.get('disk_size') or ct_config.get('disk') or 0)
-        _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
-                                   add_disk_gb=_qdisk)
-        if not _qchk['ok'] and _qchk.get('enforce') == 'block':
-            return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) — "
-                            f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
+        with _rbac.quota_tenant_lock(_tid):
+            _qchk = check_tenant_quota(_tid, add_cores=_qcores, add_mem_gb=_qmem, add_vms=1,
+                                       add_disk_gb=_qdisk)
+            if not _qchk['ok'] and _qchk.get('enforce') == 'block':
+                return jsonify({'error': f"Tenant quota exceeded ({', '.join(_qchk['violations'])}) - "
+                                f"usage {_qchk['usage']} vs quota {_qchk['quota']}", 'quota': _qchk}), 403
+            if _qchk.get('quota'):
+                _held = _rbac.quota_hold(_tid, cluster_id, {'vms': 1, 'cores': _qcores, 'memory_gb': _qmem,
+                                                            'disk_gb': _qdisk},
+                                         vmids=[ct_config['vmid']] if ct_config.get('vmid') else ())
     except Exception as _qe:
         logging.debug(f"[quota] lxc pre-flight skipped: {_qe}")
 
@@ -14116,15 +14406,21 @@ def create_container_api(cluster_id, node):
     except Exception as _re:
         logging.debug(f"[vmid-range] lxc pre-flight skipped: {_re}")
         _rok, _rmsg = True, ''
+    from pegaprox.utils.rbac import quota_release, quota_hold_update
     if not _rok:
+        quota_release(_held)
         return jsonify({'error': _rmsg}), 403
 
     result = manager.create_container(node, ct_config)
-    
+
     if result.get('success'):
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'unknown')
         vmid = ct_config.get('vmid') or result.get('data', {}).get('vmid', 'unknown')
+        if str(vmid).isdigit():
+            quota_hold_update(_held, vmids=[vmid])
+        else:
+            quota_release(_held)        # one it cannot tell apart would count twice for hours
         ct_name = ct_config.get('hostname', f'ct-{vmid}')
         log_audit(user, 'container.create', f"Created CT {vmid} ({ct_name}) on {node}", cluster=manager.config.name)
         
@@ -14133,8 +14429,9 @@ def create_container_api(cluster_id, node):
         
         # NS: Push immediate update for live UI
         push_immediate_update(cluster_id, delay=0.5)
-        
+
         return jsonify(result)
     else:
+        quota_release(_held)
         return jsonify(result), 400
 

@@ -98,14 +98,25 @@ def cleanup_audit_log():
         # M5 (scale audit): run the prune OFF the hub. This function was never
         # being called (audit_retention_days went unenforced → audit_log grew
         # unbounded), so the first prune on a months-old install can delete a lot
-        # — don't block the gevent event loop on it. Indexed DELETE on timestamp.
+        # - don't block the gevent event loop on it.
+        # MK Oct 2026 - through the db, which leaves a signed checkpoint of what it cut, so
+        # the integrity check tells retention from someone deleting rows
         from datetime import datetime as _dt, timedelta as _td
-        from pegaprox.core.dbcrypto import run_heavy_write
         cutoff = (_dt.now() - _td(days=retention)).isoformat()
-        run_heavy_write(statements=[("DELETE FROM audit_log WHERE timestamp < ?", (cutoff,))])
-        logging.info(f"Audit-log retention prune ran (retention={retention}d, cutoff<{cutoff[:10]})")
+        cp = db.prune_audit_log(cutoff)
+        logging.info(f"Audit-log retention prune ran (retention={retention}d, cutoff<{cutoff[:10]}, "
+                     f"{cp['pruned_rows'] if cp else 0} removed)")
     except Exception as e:
         logging.error(f"Failed to cleanup audit log: {e}")
+
+
+def checkpoint_audit_log():
+    """Sign where this instance's audit chain stands, when it moved since the last time."""
+    try:
+        return get_db().audit_checkpoint()
+    except Exception as e:
+        logging.error(f"Failed to checkpoint the audit log: {e}")
+        return None
 
 def _via_standby():
     """The standby a write came through while this active runs it for one (#625), ''

@@ -5,6 +5,7 @@ Custom roles, tenants, VM ACLs, pool membership cache.
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -658,7 +659,8 @@ def filter_clusters_for_user(clusters: dict, user: dict) -> dict:
     return {k: v for k, v in clusters.items() if k in allowed}
 
 
-def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk_gb=0, force=False):
+def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk_gb=0, force=False,
+                       counted=None):
     """#502 — sum a tenant's current resource usage across its clusters and decide
     whether adding (add_cores, add_mem_gb, add_vms, add_disk_gb) would exceed its quota.
     Returns {'ok', 'enforce', 'violations', 'usage', 'quota'}. FAIL-OPEN: any error
@@ -667,7 +669,13 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk
 
     NS Sep 2026 — disk joins cores/memory/vms as the fourth dimension. It is the one an MSP
     actually runs out of first, and it was the only one of the four a tenant could grow without
-    limit. Same shape as the others: 0 = unlimited, same enforce mode, same fail-open."""
+    limit. Same shape as the others: 0 = unlimited, same enforce mode, same fail-open.
+
+    MK Oct 2026 - a guest's disk is what its volumes hold on the storages, not maxdisk alone
+    (the boot disk of a VM, the rootfs of a container), and what an earlier check let
+    through that the cluster does not show yet is counted on top (the holds below, under
+    'pending' in the answer). counted: a dict to fill with {cluster: {vmid: footprint}} of
+    the clusters that were read."""
     try:
         global tenants_db
         # NS #502 — always refresh: the cached global goes stale after a quota edit,
@@ -687,6 +695,7 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk
         used_cores = 0
         used_mem = 0.0
         used_disk = 0.0
+        seen = {}
         # iterate a copy — get_vm_resources() below is a live API call, and a
         # concurrent cluster add/remove used to blow up the walk. That lands in the
         # fail-open except at the bottom, so the quota just stopped being enforced.
@@ -697,17 +706,29 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk
                 vms = mgr.get_vm_resources() if hasattr(mgr, 'get_vm_resources') else []
             except Exception:
                 vms = []
+            alloc = guest_disk_allocations(cid, mgr) if (qd > 0 or force) and vms else None
+            # a cluster that did not answer cannot show that a held guest arrived
+            rows = None if getattr(vms, 'unavailable', False) is True else {}
             for vm in (vms or []):
+                fp = guest_footprint(vm, alloc)
                 used_vms += 1
-                used_cores += int(vm.get('maxcpu') or vm.get('cpus') or vm.get('cores') or 0)
-                try:
-                    used_mem += float(vm.get('maxmem') or 0) / (1024.0 ** 3)
-                except (ValueError, TypeError):
-                    pass
-                try:
-                    used_disk += float(vm.get('maxdisk') or 0) / (1024.0 ** 3)
-                except (ValueError, TypeError):
-                    pass
+                used_cores += fp['cores']
+                used_mem += fp['memory_gb']
+                used_disk += fp['disk_gb']
+                if rows is not None:
+                    try:
+                        rows[int(vm.get('vmid'))] = fp
+                    except (TypeError, ValueError):
+                        pass
+            if rows is not None:
+                seen[cid] = rows
+        pending = _pending_usage(tenant_id, seen)
+        used_vms += pending['vms']
+        used_cores += pending['cores']
+        used_mem += pending['memory_gb']
+        used_disk += pending['disk_gb']
+        if counted is not None:
+            counted.update(seen)
         violations = []
         if qv > 0 and used_vms + add_vms > qv:
             violations.append('vms')
@@ -717,15 +738,411 @@ def check_tenant_quota(tenant_id, add_cores=0, add_mem_gb=0, add_vms=1, add_disk
             violations.append('memory')
         if qd > 0 and used_disk + add_disk_gb > qd:
             violations.append('disk')
-        return {
+        out = {
             'ok': not violations, 'enforce': enforce, 'violations': violations,
-            'usage': {'vms': used_vms, 'cores': used_cores, 'memory_gb': round(used_mem, 1),
+            'usage': {'vms': used_vms, 'cores': int(round(used_cores)), 'memory_gb': round(used_mem, 1),
                       'disk_gb': round(used_disk, 1)},
             'quota': {'vms': qv, 'cores': qc, 'memory_gb': qm, 'disk_gb': qd},
         }
+        if any(pending.values()):
+            out['pending'] = {'vms': pending['vms'], 'cores': int(round(pending['cores'])),
+                              'memory_gb': round(pending['memory_gb'], 1),
+                              'disk_gb': round(pending['disk_gb'], 1)}
+        return out
     except Exception as e:
         logging.warning(f"[quota] check failed, allowing create (fail-open): {e}")
         return {'ok': True, 'enforce': 'warn', 'violations': [], 'usage': {}, 'quota': {}}
+
+
+# MK Oct 2026 - the quota stood guard on create only; a clone, a restore into a new VMID, a
+# template deploy, a guest landing from ESXi or another hypervisor and a resize grew a
+# tenant past it unasked. These are what those paths share.
+
+GIB = 1024.0 ** 3
+# a growth whose size cannot be told (an image imported into a new disk, a container whose
+# core limit is lifted on a node of unknown size): more than any quota holds
+QUOTA_UNKNOWN = 10 ** 9
+
+
+def quota_tenant(user):
+    """The tenant an operation counts against: the caller's own, as the create routes take it."""
+    return (user or {}).get('tenant_id') or DEFAULT_TENANT_ID
+
+
+def tenant_has_quota(tenant_id):
+    """Whether any of the four quotas is set, without walking a cluster"""
+    t = (load_tenants() or {}).get(tenant_id) or {}
+    return any(int(t.get(k, 0) or 0) > 0 for k in
+               ('quota_max_vms', 'quota_max_cores', 'quota_max_memory_gb', 'quota_max_disk_gb'))
+
+
+def tenant_counts_cluster(tenant_id, cluster_id):
+    """Whether check_tenant_quota counts the guests of this cluster for the tenant"""
+    allowed = get_user_clusters({'role': ROLE_VIEWER, 'tenant_id': tenant_id})
+    return allowed is None or cluster_id in allowed
+
+
+def _num(v):
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def guest_footprint(row, alloc=None):
+    """{cores, memory_gb, disk_gb} of a guest as check_tenant_quota counts it, from a
+    /cluster/resources row (maxcpu, maxmem, maxdisk). maxdisk is the boot disk of a VM and
+    the rootfs of a container only; alloc ({vmid: GB}, guest_disk_allocations) has all of
+    its volumes, and the bigger of the two counts."""
+    row = row or {}
+    disk = _num(row.get('maxdisk')) / GIB
+    if alloc:
+        try:
+            disk = max(disk, float(alloc.get(int(row.get('vmid')), 0) or 0))
+        except (TypeError, ValueError):
+            pass
+    return {'cores': int(_num(row.get('maxcpu') or row.get('cpus') or row.get('cores'))),
+            'memory_gb': _num(row.get('maxmem')) / GIB, 'disk_gb': disk}
+
+
+# ---- the volumes of every guest, from the storages ------------------------------------------
+
+_DISK_ALLOC_TTL = 300
+_DISK_ALLOC_RETRY = 60
+_disk_alloc_cache = {}      # (cluster id, id(manager)) -> (read at, {vmid: GB} or None)
+
+
+def guest_disk_allocations(cluster_id, mgr, max_age=_DISK_ALLOC_TTL):
+    """{vmid: GB} of the volumes each guest has on the cluster's storages (every disk of a
+    VM, every mount point of a container, detached ones too), from the storage content
+    lists: one call per shared storage and one per node for a local one, run 8 at a time,
+    kept max_age seconds. None for a cluster that is not Proxmox VE, or whose lists did not
+    answer (then maxdisk is all there is, as before)."""
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None
+    key = (cluster_id, id(mgr))
+    hit = _disk_alloc_cache.get(key)
+    now = time.time()
+    if hit and now - hit[0] < max_age:
+        return hit[1]
+    try:
+        got = _read_disk_allocations(mgr)
+    except Exception as e:
+        logging.debug(f"[quota] storage contents of {cluster_id} unreadable: {e}")
+        got = None
+    if got is None:
+        # the last good answer beats none; asked again in a minute, not on every check
+        got = hit[1] if hit else None
+        _disk_alloc_cache[key] = (now - max_age + _DISK_ALLOC_RETRY, got)
+        return got
+    _disk_alloc_cache[key] = (now, got)
+    return got
+
+
+def _read_disk_allocations(mgr):
+    base = f"https://{mgr.host}:{mgr.api_port}/api2/json"
+    r = mgr._api_get(f"{base}/cluster/resources", params={'type': 'storage'}, timeout=15)
+    if getattr(r, 'status_code', None) != 200:
+        return None
+    stores = (r.json() or {}).get('data')
+    if not isinstance(stores, list):
+        return None
+    lists, shared = [], set()
+    for s in stores:
+        if not isinstance(s, dict) or s.get('status') != 'available':
+            continue
+        content = str(s.get('content') or '')
+        name, node = s.get('storage'), s.get('node')
+        if not name or not node or ('images' not in content and 'rootdir' not in content):
+            continue
+        if s.get('shared'):
+            if name in shared:
+                continue
+            shared.add(name)
+        lists.append((node, name))
+    if not lists:
+        return {}
+
+    def _content(node, name):
+        rr = mgr._api_get(f"{base}/nodes/{node}/storage/{name}/content", timeout=20)
+        if getattr(rr, 'status_code', None) != 200:
+            return None
+        data = (rr.json() or {}).get('data')
+        return data if isinstance(data, list) else None
+
+    from pegaprox.utils.concurrent import run_per_node
+    got = run_per_node({f'{n}/{s}': (lambda _k, n=n, s=s: _content(n, s)) for n, s in lists},
+                       max_concurrent=8, timeout=60)
+    vols = {}
+    for where, items in got.items():
+        for v in (items or []):
+            if not isinstance(v, dict) or v.get('content') not in ('images', 'rootdir'):
+                continue
+            try:
+                vmid = int(v.get('vmid'))
+            except (TypeError, ValueError):
+                continue
+            # a shared storage is listed once; a local volume is the node's own
+            vols[(where, v.get('volid'))] = (vmid, _num(v.get('size')) / GIB)
+    out = {}
+    for vmid, gb in vols.values():
+        out[vmid] = out.get(vmid, 0.0) + gb
+    return out
+
+
+# ---- reading a guest config -----------------------------------------------------------------
+
+QUOTA_DISK_KEY_RE = re.compile(r'(?:ide|sata|scsi|virtio|efidisk|tpmstate|mp)\d+|rootfs')
+QUOTA_SIZE_RE = re.compile(r'(?:^|,)size=(\d+(?:\.\d+)?)([KMGT]?)', re.I)
+_QUOTA_UNIT_GB = {'': 1.0 / 1024 ** 3, 'K': 1.0 / 1024 ** 2, 'M': 1.0 / 1024, 'G': 1.0, 'T': 1024.0}
+# STORAGE:SIZE asks Proxmox VE for a new volume of SIZE GiB
+_NEW_VOLUME_RE = re.compile(r'([A-Za-z][\w.-]*):(\d+(?:\.\d+)?)')
+# an EFI vars disk or a TPM state is a few MiB whatever number it was given
+_SMALL_VOLUME_GB = 4.0 / 1024
+
+
+def size_to_gb(num, unit):
+    return float(num) * _QUOTA_UNIT_GB.get((unit or '').upper(), 1.0)
+
+
+def raw_guest_config(got):
+    """The guest's own config keys out of what get_vm_config answers ({'config': {...,
+    'raw': {...}}} on Proxmox VE), out of that 'config' alone, or a config that is flat
+    already. A dict without them is taken as it is."""
+    if not isinstance(got, dict):
+        return {}
+    cfg = got['config'] if isinstance(got.get('config'), dict) else got
+    raw = cfg.get('raw')
+    return raw if isinstance(raw, dict) else cfg
+
+
+def property_string(value, default_key):
+    """(value of the default key, {other key: value}) of a property string: 'x,ssd=1' and
+    'file=x,ssd=1' are the same drive"""
+    main, opts = None, {}
+    for i, part in enumerate(str(value if value is not None else '').split(',')):
+        if '=' in part:
+            k, v = part.split('=', 1)
+            opts[k.strip()] = v.strip()
+        elif i == 0 and part.strip():
+            main = part.strip()
+    if main is None:
+        main = opts.pop(default_key, None)
+    return main, opts
+
+
+def memory_mb(value, default=512):
+    """Memory in MB from a config value: '2048', 2048 or 'current=2048' (PVE 8.1 on)"""
+    main, _ = property_string(value, 'current')
+    try:
+        return int(float(main))
+    except (TypeError, ValueError):
+        return default
+
+
+def drive_new_gb(key, value):
+    """GB a drive or mount point value allocates: 'STORAGE:SIZE' in any spelling of the
+    property string ('file=' / 'volume=' written out or not) is a new volume of SIZE GB;
+    with import-from it is filled from an image of a size the value does not say
+    (QUOTA_UNKNOWN). A volume that exists, a bind mount, a CD-ROM allocate nothing."""
+    key = str(key)
+    if not QUOTA_DISK_KEY_RE.fullmatch(key):
+        return 0.0
+    vol, opts = property_string(value, 'volume' if key.startswith(('mp', 'rootfs')) else 'file')
+    if not vol or opts.get('media') == 'cdrom':
+        return 0.0
+    m = _NEW_VOLUME_RE.fullmatch(vol)
+    if not m:
+        return 0.0
+    if opts.get('import-from'):
+        return float(QUOTA_UNKNOWN)
+    if key.startswith(('efidisk', 'tpmstate')):
+        return _SMALL_VOLUME_GB
+    return float(m.group(2))
+
+
+def config_footprint(cfg, kind='qemu', node_cores=None):
+    """{cores, memory_gb, disk_gb} of a guest config: what get_vm_config answers (its raw
+    keys), a flat dict, or the text of one (a backup's, from vzdump/extractconfig, or a
+    snapshot's). Snapshot sections are not the guest, a CD-ROM is no disk of its own. A
+    container without a core limit runs on every core of its node (node_cores, when
+    known)."""
+    if isinstance(cfg, str):
+        parsed = {}
+        for line in cfg.splitlines():
+            line = line.strip()
+            if line.startswith('['):
+                break
+            if not line or line.startswith('#') or ':' not in line:
+                continue
+            k, v = line.split(':', 1)
+            parsed[k.strip()] = v.strip()
+        cfg = parsed
+    else:
+        cfg = raw_guest_config(cfg)
+
+    def _i(key, default):
+        try:
+            return int(float(cfg.get(key) or default))
+        except (TypeError, ValueError):
+            return default
+    if kind == 'qemu':
+        cores = _i('cores', 1) * _i('sockets', 1)
+    elif cfg.get('cores') in (None, ''):
+        cores = int(node_cores) if node_cores else 1
+    else:
+        cores = _i('cores', 1)
+    disk = 0.0
+    for k, v in cfg.items():
+        if not QUOTA_DISK_KEY_RE.fullmatch(str(k)) or 'media=cdrom' in str(v):
+            continue
+        m = QUOTA_SIZE_RE.search(str(v))
+        if m:
+            disk += size_to_gb(m.group(1), m.group(2))
+    return {'cores': cores, 'memory_gb': memory_mb(cfg.get('memory'), 512) / 1024.0, 'disk_gb': disk}
+
+
+def landing_adds(tenant_id, target_cluster, footprint, source_cluster=None, source_removed=False):
+    """What a guest arriving on target_cluster (a migration, a replica) adds to the tenant: a
+    guest of that footprint where the target is counted for it, nothing where the guest only
+    moves between clusters that are both counted (the source goes once the copy lands)."""
+    from pegaprox.globals import cluster_managers
+    if not tenant_counts_cluster(tenant_id, target_cluster):
+        return None
+    if (source_removed and source_cluster in cluster_managers
+            and tenant_counts_cluster(tenant_id, source_cluster)):
+        return None
+    return dict(footprint or {}, vms=1)
+
+
+def quota_verdict(tenant_id, add_vms=0, add_cores=0, add_mem_gb=0.0, add_disk_gb=0.0, counted=None):
+    """check_tenant_quota for an operation, narrowed to what it grows: None when it adds
+    nothing or fits, else the answer with only those violations. A dimension the operation
+    does not add to is not its violation, even where the tenant is over already (a quota
+    lowered later); a shrink in one does not pay for growth in another."""
+    adds = {'vms': max(0, int(add_vms or 0)), 'cores': max(0, int(add_cores or 0)),
+            'memory': max(0.0, float(add_mem_gb or 0)), 'disk': max(0.0, float(add_disk_gb or 0))}
+    if not any(adds.values()):
+        return None
+    q = check_tenant_quota(tenant_id, add_cores=adds['cores'], add_mem_gb=adds['memory'],
+                           add_vms=adds['vms'], add_disk_gb=adds['disk'], counted=counted)
+    viol = [d for d in (q.get('violations') or []) if adds.get(d)]
+    if not viol:
+        return None
+    return dict(q, violations=viol)
+
+
+# ---- what a check let through that the cluster does not show yet -----------------------------
+# A clone, a deploy, a migration create their guest seconds to hours after the check, and
+# /cluster/resources shows a change some seconds after it is made (a new volume up to
+# _DISK_ALLOC_TTL later). Every check that lets an operation through keeps a hold on what
+# it adds, taken under one lock per tenant together with the check, and check_tenant_quota
+# counts a tenant's holds on top of what it reads. A hold goes once the new guest shows on
+# its cluster, once the growth shows on the guest, when the work behind it reports a
+# failure, or when it runs out. Kept in memory: a restart forgets them.
+
+_QUOTA_HOLD_TTL = 6 * 3600
+_quota_holds = {}           # token -> hold
+_quota_tenant_locks = {}    # tenant -> the lock around a check and the hold it leaves
+_HOLD_DIMS = ('vms', 'cores', 'memory_gb', 'disk_gb')
+
+
+def quota_tenant_lock(tenant_id):
+    lk = _quota_tenant_locks.get(tenant_id)
+    if lk is None:
+        lk = _quota_tenant_locks.setdefault(tenant_id, threading.RLock())
+    return lk
+
+
+def quota_hold(tenant_id, cluster_id, adds, vmids=(), grow=False, base=None, ttl=None,
+               key=None, alive=None):
+    """Hold what an operation adds to a tenant until the cluster shows it. vmids: where it
+    lands (the new guests, or the one guest that grows); grow: base is that guest's
+    footprint as counted before. alive: a callable that answers False once the work behind
+    the hold failed. Returns the token, None when it adds nothing."""
+    a = {d: max(0.0, _num((adds or {}).get(d))) for d in _HOLD_DIMS}
+    if grow:
+        a['vms'] = 0.0
+    if not any(a.values()):
+        return None
+    ids = set()
+    for v in (vmids or ()):
+        try:
+            ids.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    tok = uuid.uuid4().hex
+    _quota_holds[tok] = {'tenant': tenant_id, 'cluster': cluster_id, 'adds': a, 'vmids': ids,
+                         'total': len(ids), 'grow': bool(grow) and len(ids) == 1,
+                         'base': {d: _num((base or {}).get(d)) for d in _HOLD_DIMS},
+                         'until': time.time() + (ttl or _QUOTA_HOLD_TTL), 'key': key, 'alive': alive}
+    return tok
+
+
+def quota_hold_update(token, vmids=None, alive=None, key=None):
+    h = _quota_holds.get(token)
+    if h is None:
+        return
+    if vmids is not None:
+        h['vmids'] = {int(v) for v in vmids}
+        h['total'] = len(h['vmids'])
+    if alive is not None:
+        h['alive'] = alive
+    if key is not None:
+        h['key'] = key
+
+
+def quota_release(token):
+    if token:
+        _quota_holds.pop(token, None)
+
+
+def quota_release_key(key):
+    for tok, h in list(_quota_holds.items()):
+        if h.get('key') == key:
+            _quota_holds.pop(tok, None)
+
+
+def _pending_usage(tenant_id, seen):
+    """What the tenant's holds add to what check_tenant_quota read. seen: {cluster: {vmid:
+    footprint}} of the clusters it read; a cluster it could not read keeps its holds."""
+    tot = {d: 0.0 for d in _HOLD_DIMS}
+    now = time.time()
+    for tok, h in list(_quota_holds.items()):
+        if h['tenant'] != tenant_id:
+            continue
+        if h['until'] < now:
+            _quota_holds.pop(tok, None)
+            continue
+        try:
+            if h['alive'] is not None and not h['alive']():
+                _quota_holds.pop(tok, None)
+                continue
+        except Exception:
+            pass
+        rows = seen.get(h['cluster'])
+        add = dict(h['adds'])
+        if rows is not None and h['vmids']:
+            if h['grow']:
+                fp = rows.get(next(iter(h['vmids'])))
+                if fp is None:
+                    _quota_holds.pop(tok, None)          # the guest went
+                    continue
+                # what of the growth the guest does not show yet
+                add = {d: max(0.0, h['base'][d] + h['adds'][d] - _num(fp.get(d)))
+                       for d in ('cores', 'memory_gb', 'disk_gb')}
+                add['vms'] = 0.0
+            else:
+                left = [v for v in h['vmids'] if v not in rows]
+                share = len(left) / float(h['total'] or 1)
+                add = {d: h['adds'][d] * share for d in _HOLD_DIMS}
+            if not any(add.values()):
+                _quota_holds.pop(tok, None)
+                continue
+        for d in _HOLD_DIMS:
+            tot[d] += add[d]
+    tot['vms'] = int(round(tot['vms']))
+    return tot
 
 
 class TenantRangeUnknown(Exception):

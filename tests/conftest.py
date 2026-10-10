@@ -242,6 +242,9 @@ def _reset_rbac_caches():
         rbac._vm_acls_cache = None
         with rbac._pool_cache_lock:
             rbac._pool_membership_cache.clear()
+        # the quota's holds and the storage contents it read are process state too
+        rbac._quota_holds.clear()
+        rbac._disk_alloc_cache.clear()
     except Exception:
         pass
 

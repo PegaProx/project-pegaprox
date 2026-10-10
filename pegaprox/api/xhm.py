@@ -207,6 +207,21 @@ def xhm_start():
     if direction in ('xcpng_to_pve', 'esxi_to_pve') and not data.get('target_node'):
         return jsonify({'error': 'target_node is required for migration to Proxmox'}), 400
 
+    # MK Oct 2026 - the copy is a new guest on the target, the size of its source. It counts
+    # for the tenant quota unless it only moves between two clusters the tenant has
+    from pegaprox.api.helpers import tenant_quota_gate, guest_size
+    from pegaprox.utils.rbac import landing_adds, quota_tenant
+    _qerr, _qwarn = tenant_quota_gate(
+        user, f"cross-hypervisor migration of {data['source_vmid']}",
+        lambda: landing_adds(quota_tenant(user), data['target_cluster'],
+                             guest_size(src_mgr, data.get('source_node', ''), 'qemu', vmid_int),
+                             source_cluster=data['source_cluster'],
+                             source_removed=bool(data.get('remove_source'))),
+        cluster=getattr(getattr(tgt_mgr, 'config', None), 'name', '') or data['target_cluster'],
+        hold={'cluster_id': data['target_cluster']})
+    if _qerr:
+        return _qerr
+
     mid = str(uuid.uuid4())[:8]
     task = XHMigrationTask(
         mid=mid,
@@ -225,6 +240,9 @@ def xhm_start():
     with _xhm_lock:
         _prune_finished_migrations()
         _xhm_migrations[mid] = task
+    # the quota holds the copy while the task runs; once it ended the target shows it, or not
+    from pegaprox.api.helpers import quota_hold_alive
+    quota_hold_alive(alive=lambda: task.status == 'running')
 
     _runners = {
         'xcpng_to_pve': _run_xcpng_to_pve,
@@ -249,6 +267,7 @@ def xhm_start():
         'migration_id': mid,
         'message': f'Migration started ({direction})',
         'task': task.to_dict(),
+        **({'quota_warning': _qwarn} if _qwarn else {}),
     }), 202
 
 

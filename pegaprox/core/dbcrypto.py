@@ -398,6 +398,38 @@ def run_heavy_write(statements=None, build=None):
         return _work()
 
 
+def run_off_hub(work, db_path, commit=False):
+    """work(conn) on a fresh connection to db_path inside gevent's threadpool, inline
+    without a hub. MK Oct 2026 - for jobs that read and write in one transaction (the
+    audit prune and the chain walk); commit=True commits what work did, an exception
+    rolls it back."""
+    def _run():
+        conn = connect(db_path, timeout=30, check_same_thread=False)
+        try:
+            conn.row_factory = Row
+            out = work(conn)
+            if commit:
+                conn.commit()
+            return out
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    try:
+        from gevent import get_hub
+        hub = get_hub()
+    except Exception:
+        return _run()
+    return hub.threadpool.apply(_run)
+
+
 # ─── Auto-migration on app startup ──────────────────────────────────────────
 # NS May 2026 — "nuklear" means auto-on-boot. The CLI tool is the manual
 # escape hatch; normal operators never have to think about migration.

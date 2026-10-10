@@ -33522,7 +33522,7 @@
           }
         },
         "summary": "Verify integrity of audit log using HMAC signatures (admin only)",
-        "description": "Returns statistics about log integrity:\n- total_entries: Total number of entries\n- verified: Entries with valid HMAC signature\n- unsigned: Old entries without signature (pre-upgrade)\n- potentially_tampered: Entries with invalid signature (WARNING!)\n- integrity_percentage: Percentage of verified entries",
+        "description": "Returns statistics about log integrity:\n- total_entries: Total number of entries\n- verified: Entries with valid HMAC signature\n- unsigned: Old entries without signature (pre-upgrade)\n- potentially_tampered: Entries with invalid signature (WARNING!)\n- integrity_percentage: Percentage of verified entries\n- chain: the hash chain - edited, missing (deleted) and broken-link entries, whether\n  the end was cut off below the last signed checkpoint, how many entries came after\n  it, how far retention pruned\n- legacy: entries from before the chain, and whether they changed since it started\n- intact: none of the above found anything",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -33639,7 +33639,7 @@
           }
         },
         "summary": "Get security compliance status (admin only)",
-        "description": "Returns overview of security features for HIPAA/ISO 27001 compliance.",
+        "description": "Returns overview of security features for HIPAA/ISO 27001 compliance. Each control\nis passed, failed or not_checked (with the reason); the score counts the checked ones\nonly, checked/total say how many. `checks` maps each control to True, False or None.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {

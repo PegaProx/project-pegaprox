@@ -531,6 +531,9 @@ def add_custom_template():
         disk_gb = int(body.get('disk_gb') or 10)
     except Exception:
         return jsonify({'error': 'cores/memory/disk_gb must be integers'}), 400
+    # MK Oct 2026 - the tenant quota counts a deploy by these: none of them may be zero or less
+    if cores < 1 or memory < 1 or disk_gb < 1:
+        return jsonify({'error': 'cores, memory and disk_gb must be at least 1'}), 400
 
     tags = body.get('tags', [])
     if isinstance(tags, list):
@@ -677,9 +680,37 @@ def deploy(cluster_id):
         if not _rok:
             return jsonify({'error': _rmsg}), 403
 
+    # MK Oct 2026 - the deployed guest takes the template's cores, memory and disk; the tenant
+    # quota counts it as a create does. A custom template from before the check at creation
+    # can still say 0 or less, which would count as nothing
+    try:
+        _t_cores, _t_mem, _t_disk = (int(tpl.get('cores', 2)), int(tpl.get('memory', 2048)),
+                                     float(tpl.get('disk_gb', 10)))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'the template has no valid cores, memory or disk size'}), 400
+    if _t_cores < 1 or _t_mem < 1 or _t_disk < 1:
+        return jsonify({'error': 'the template has no valid cores, memory or disk size'}), 400
+    dep_id = uuid.uuid4().hex[:12]
+
+    def _deploy_alive():
+        # the hold goes once the deploy failed (the guest shows on the cluster when it worked)
+        try:
+            r = get_db().conn.execute('SELECT status FROM cloud_init_deployments WHERE id = ?',
+                                      (dep_id,)).fetchone()
+            return r is None or r['status'] != 'failed'
+        except Exception:
+            return True
+    from pegaprox.api.helpers import tenant_quota_gate
+    _qerr, _qwarn = tenant_quota_gate(
+        _caller, f"template deploy of {tpl['name']}",
+        {'vms': 1, 'cores': _t_cores, 'memory_gb': _t_mem / 1024.0, 'disk_gb': _t_disk},
+        cluster=getattr(getattr(mgr, 'config', None), 'name', '') or cluster_id,
+        hold={'cluster_id': cluster_id, 'vmid': vmid, 'alive': _deploy_alive})
+    if _qerr:
+        return _qerr
+
     user = _current_user()
 
-    dep_id = uuid.uuid4().hex[:12]
     try:
         c = get_db().conn.cursor()
         c.execute('''
@@ -707,6 +738,7 @@ def deploy(cluster_id):
         'vmid': vmid,
         'name': name,
         'status': 'queued',
+        **({'quota_warning': _qwarn} if _qwarn else {}),
     })
 
 

@@ -81,6 +81,36 @@ def _build_xapi_rrd_url(base_url: str, path: str) -> str:
     return urlunparse(parsed._replace(path=f"/{path}"))
 
 
+# MK Oct 2026 - how add_disk and resize_vm_disk read a size, in one place: the tenant quota
+# (api/vms.py) counts the same number XAPI is then asked for.
+
+def xapi_add_disk_gb(size):
+    """GB add_disk creates for `size`: every G dropped, the rest a whole number. None for
+    what it cannot read (add_disk fails on it as well)."""
+    try:
+        return int(str(size).replace('G', '').replace('g', ''))
+    except ValueError:
+        return None
+
+
+def xapi_resize_bytes(size):
+    """The new size resize_vm_disk asks XAPI for: '64G', '64' (a number below 4096 is GB)
+    or bytes. A '+' is read as a sign, not as 'grow by'. None for what it refuses."""
+    try:
+        sz = int(str(size).replace('G', '').replace('g', ''))
+    except ValueError:
+        return None
+    if sz < 4096:  # probably GB
+        sz = sz * 1024 * 1024 * 1024
+    return sz
+
+
+def xapi_memory_bytes(value):
+    """The memory update_vm_config sets: read as a size (xapi_resize_bytes), 128 MiB at least"""
+    mem = xapi_resize_bytes(value)
+    return None if mem is None else max(mem, 128 * 1024 * 1024)
+
+
 class XcpngManager:
     """
     XCP-ng pool manager - duck-typed to match PegaProxManager's public interface.
@@ -1572,11 +1602,9 @@ class XcpngManager:
 
             # memory
             if 'memory' in config_updates:
-                mem = int(str(config_updates['memory']).replace('G', '').replace('g', ''))
-                if mem < 4096:
-                    mem = mem * 1024 * 1024 * 1024
-                if mem < 128 * 1024 * 1024:
-                    mem = 128 * 1024 * 1024
+                mem = xapi_memory_bytes(config_updates['memory'])
+                if mem is None:
+                    raise ValueError(f"memory {config_updates['memory']!r}")
                 s = str(mem)
 
                 if power == 'Running':
@@ -1902,7 +1930,9 @@ class XcpngManager:
                 if not sr_ref or sr_ref == 'OpaqueRef:NULL':
                     return {'success': False, 'error': 'No default SR configured and no storage specified'}
 
-            size_gb = int(str(disk_config.get('size', 32)).replace('G', '').replace('g', ''))
+            size_gb = xapi_add_disk_gb(disk_config.get('size', 32))
+            if size_gb is None:
+                return {'success': False, 'error': f"Invalid size: {disk_config.get('size')}"}
             size_bytes = size_gb * 1024 * 1024 * 1024
 
             vdi_rec = {
@@ -1977,12 +2007,8 @@ class XcpngManager:
                 return {'success': False, 'error': f'Disk {disk} not found on VM {vmid}'}
 
             # parse size - accept "64G", "64", bytes
-            new_size = str(size).replace('G', '').replace('g', '')
-            try:
-                sz = int(new_size)
-                if sz < 4096:  # probably GB
-                    sz = sz * 1024 * 1024 * 1024
-            except ValueError:
+            sz = xapi_resize_bytes(size)
+            if sz is None:
                 return {'success': False, 'error': f'Invalid size: {size}'}
 
             current = int(api.VDI.get_virtual_size(target_vdi))
@@ -4054,22 +4080,25 @@ echo DONE""",
         if rc == -1:
             return None
 
-        results = {}
+        # MK Oct 2026 - a control with no OK/FAIL line back was not judged: None (not
+        # checked), as on PVE, rather than left out of the answer
+        results = {cid: None for cid in self._CIS_CHECKS}
         current_id = None
         for line in out.splitlines():
             stripped = line.strip()
             if stripped.startswith('---') and stripped.endswith('---'):
                 current_id = stripped.strip('-')
                 continue
-            if current_id and stripped in ('OK', 'FAIL'):
+            if current_id in results and results[current_id] is None and stripped in ('OK', 'FAIL'):
                 results[current_id] = (stripped == 'OK')
         if verbose:
             # Same shape the PVE manager returns for audit reports, so the report builder
             # does not have to special-case the hypervisor. No separate evidence command
             # exists here, so the evidence is the verdict line itself.
             return {cid: {'status': ok,
-                          'evidence': 'OK' if ok else 'FAIL',
-                          'command': self._CIS_CHECKS.get(cid, {}).get('check', '')}
+                          'evidence': {True: 'OK', False: 'FAIL'}.get(ok, 'no verdict came back'),
+                          'command': self._CIS_CHECKS.get(cid, {}).get('check', ''),
+                          **({'not_checked': 'No output came back for this control'} if ok is None else {})}
                     for cid, ok in results.items()}
         return results
 
