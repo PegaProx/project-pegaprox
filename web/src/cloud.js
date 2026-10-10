@@ -1360,6 +1360,55 @@
         function CloudRowActions({ children }) { return <td><div style={{ display: 'flex', gap: 4, justifyContent: 'flex-end' }}>{children}</div></td>; }
 
         // ── Backups (vzdump jobs) ──────────────────────────────────
+        // LW Oct 2026 - the restore tests of the cluster under its backup jobs: how many guests
+        // passed one recently, and the ones that did not. Read only; the schedule and what the
+        // tests check are set in the classic views.
+        const CLOUD_RT_PAGE = 25;
+        function CloudRestoreTests({ clusterId, t }) {
+            const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/recovery-report` : null);
+            const [page, setPage] = React.useState(0);
+            const rows = ((data && data.guests) || []).filter(g => g.state !== 'ok');
+            const sum = (data && data.summary) || {};
+            const stateText = (s) => ({ stale: t('rtestStateStale'), failing: t('rtestStateFailing'), never: t('rtestStateNever'),
+                rto_missed: t('rtestStateRto') })[s] || s;
+            const chip = (s) => (s === 'failing' ? 'cloud-chip-err' : s === 'never' || s === 'stale' ? 'cloud-chip-warn' : 'cloud-chip-soft');
+            const safePage = Math.min(page, Math.max(0, Math.ceil(rows.length / CLOUD_RT_PAGE) - 1));
+            const kpis = [
+                { icon: 'LifeBuoy', value: sum.total ?? 0, label: t('rtestTileTotal'), accent: '#6366f1' },
+                { icon: 'CheckCircle', value: sum.ok ?? 0, label: t('rtestStateOk'), accent: '#22c55e' },
+                { icon: 'XCircle', value: sum.failing ?? 0, label: t('rtestStateFailing'), accent: sum.failing ? '#ef4444' : '#14b8a6' },
+                { icon: 'AlertTriangle', value: (sum.never ?? 0) + (sum.stale ?? 0), label: t('rtestCloudNotRecent'), accent: '#f59e0b' },
+            ];
+            return (
+                <div data-rtest-cloud={clusterId}>
+                    <CloudSectionTitle right={<span style={{ display: 'flex', gap: 8 }}>
+                        <a className="cloud-link-btn" href={`/api/clusters/${clusterId}/recovery-report?format=csv`} download data-rtest-csv><Icons.Download /> {t('rtestExportCsv')}</a>
+                        <button type="button" className="cloud-link-btn" onClick={reload}><Icons.RefreshCw /> {t('refresh') || 'Refresh'}</button>
+                    </span>}>{t('rtestTitle')}</CloudSectionTitle>
+                    <CloudSectionState loading={loading} err={err} empty={!!data && !(data.guests || []).length} emptyIcon="LifeBuoy" emptyTitle={t('rtestNoGuests')} t={t}>
+                        <div className="cloud-kpi-grid">{kpis.map((k, i) => <CloudKpiCard key={i} icon={k.icon} value={k.value} label={k.label} accent={k.accent} />)}</div>
+                        {rows.length > 0 && (
+                            <div className="cloud-card cloud-table-card">
+                                {cloudHead({ icon: <Icons.LifeBuoy />, title: t('rtestCloudAttention'), count: rows.length })}
+                                <div className="cloud-table-scroll"><table className="cloud-table">
+                                    <thead><tr><th>{t('rtestColGuest')}</th><th>{t('rtestColState')}</th><th>{t('rtestColPassed')}</th><th>{t('rtestColFailure')}</th></tr></thead>
+                                    <tbody>{rows.slice(safePage * CLOUD_RT_PAGE, (safePage + 1) * CLOUD_RT_PAGE).map(g => (
+                                        <tr className="cloud-table-row cloud-table-row-static" key={g.vmid} data-rtest-row={g.vmid} data-state={g.state}>
+                                            <td><span className="cloud-table-mono">{g.vmid}</span> {g.name || ''}</td>
+                                            <td><span className={`cloud-chip ${chip(g.state)}`}>{stateText(g.state)}</span></td>
+                                            <td className="cloud-cell-muted">{g.last_success_at ? new Date(g.last_success_at).toLocaleString() : t('rtestNever')}</td>
+                                            <td className="cloud-cell-muted">{g.last_failure_cause || ''}</td>
+                                        </tr>
+                                    ))}</tbody>
+                                </table></div>
+                                <CloudPager page={safePage} pageSize={CLOUD_RT_PAGE} total={rows.length} onPage={setPage} />
+                            </div>
+                        )}
+                    </CloudSectionState>
+                </div>
+            );
+        }
+
         function CloudBackups({ clusterId, t }) {
             const { data, loading, err, reload } = useCloudData(clusterId ? `/api/clusters/${clusterId}/datacenter/backup` : null);
             const mut = useCloudMutate(reload);
@@ -1417,6 +1466,7 @@
                             </table></div>
                         </div>
                     </CloudSectionState>
+                    <CloudRestoreTests clusterId={clusterId} t={t} />
                     {runsOf && <BackupJobRunsModal clusterId={clusterId} job={runsOf} onClose={() => setRunsOf(null)} />}
                 </div>
             );

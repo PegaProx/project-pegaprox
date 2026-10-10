@@ -11647,6 +11647,8 @@
             const [muteMenu, setMuteMenu] = useState(null);
             const [muteWholeObject, setMuteWholeObject] = useState(false);
             const EVENT_ALERT_METRICS = ['task_failed', 'ceph_health', 'ceph_osd_latency', 'replication', 'replication_rpo', 'snapshot_age', 'backup_coverage', 'zfs_health', 'clock_drift', 'restart_loop', 'qdevice'];
+            // LW Oct 2026 - a guest without a restore test that passed within so many days
+            EVENT_ALERT_METRICS.push('restore_test_age');
             const [sessionExpired, setSessionExpired] = useState(false);  // our own 401 -> clear "session expired" overlay instead of silent failure
             const [clusterAffinityRules, setClusterAffinityRules] = useState([]);
             const [showAffinityModal, setShowAffinityModal] = useState(false);
@@ -13605,6 +13607,10 @@
                 if (alert.metric === 'qdevice') return t('qdeviceAlertSummary');
                 if (alert.metric === 'ceph_osd_latency') return t('cephOsdLatencySummary').replace('{n}', n);
                 if (alert.metric === 'replication_rpo') return Number(n) > 0 ? t('replicationRpoSummary').replace('{n}', n) : t('replicationRpoSummaryAuto');
+                if (alert.metric === 'restore_test_age') {
+                    const tags = alert.backup_exclude_tags || [];
+                    return t('restoreTestAgeSummary').replace('{n}', n) + (tags.length ? ` - ${t('backupCoverageExcept').replace('{tags}', tags.join(', '))}` : '');
+                }
                 return `${alert.metric?.toUpperCase()} ${alert.operator} ${alert.threshold}%`;
             };
 
@@ -28176,7 +28182,7 @@
                                         payload.task_warnings = form.task_warnings.checked;
                                     }
                                     if (alertMetricSel === 'snapshot_age') payload.snapshot_ignore_policy = form.snapshot_ignore_policy.checked;
-                                    if (alertMetricSel === 'backup_coverage') payload.backup_exclude_tags = form.backup_exclude_tags.value;
+                                    if (alertMetricSel === 'backup_coverage' || alertMetricSel === 'restore_test_age') payload.backup_exclude_tags = form.backup_exclude_tags.value;
                                     if (alertMetricSel === 'restart_loop') payload.restart_window_minutes = parseInt(form.restart_window_minutes.value);
                                     if (editingAlert) {  // #618 — edit keeps the alert's current enabled state
                                         await updateClusterAlert(editingAlert.id, payload);
@@ -28230,6 +28236,7 @@
                                                 <option value="clock_drift">{t('clockDriftTitle')}</option>
                                                 <option value="restart_loop">{t('restartLoopTitle')}</option>
                                                 <option value="qdevice">{t('qdeviceAlertTitle')}</option>
+                                                <option value="restore_test_age">{t('restoreTestAgeTitle')}</option>
                                             </select>
                                         </div>
                                         {alertMetricSel === 'rolling_update' ? (
@@ -28248,6 +28255,7 @@
                                                     : alertMetricSel === 'qdevice' ? t('qdeviceAlertHelp')
                                                     : alertMetricSel === 'ceph_osd_latency' ? t('cephOsdLatencyHelp')
                                                     : alertMetricSel === 'replication_rpo' ? t('replicationRpoHelp')
+                                                    : alertMetricSel === 'restore_test_age' ? t('restoreTestAgeHelp')
                                                     : t('alertSnapHelp')}
                                             </div>
                                         ) : <>
@@ -28381,6 +28389,22 @@
                                                     <label className="block text-sm text-gray-400 mb-1">{t('replicationRpoLimit')}</label>
                                                     <input name="threshold" type="number" min="0" max="10080" required defaultValue={saved ? saved.threshold : 0} className={field} />
                                                     <p className="text-xs text-gray-500">{t('replicationRpoAutoHint')}</p>
+                                                </div>
+                                            )}
+                                            {/* LW Oct 2026 - days without a restore test that passed; tagged guests are left out as for the backup coverage */}
+                                            {alertMetricSel === 'restore_test_age' && (
+                                                <div data-event-fields="restore_test_age" className="space-y-3">
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('restoreTestAgeDays')}</label>
+                                                            <input name="threshold" type="number" min="1" max="365" required defaultValue={saved ? saved.threshold : 30} className={field} />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-sm text-gray-400 mb-1">{t('backupCoverageExcludeTags')}</label>
+                                                            <input name="backup_exclude_tags" maxLength={500} placeholder="no-backup" defaultValue={saved ? (saved.backup_exclude_tags || []).join(', ') : 'no-backup'} className={`${field} font-mono text-sm`} />
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500">{t('backupCoverageTagsHint')}</p>
                                                 </div>
                                             )}
                                             {alertMetricSel !== 'rolling_update' && (

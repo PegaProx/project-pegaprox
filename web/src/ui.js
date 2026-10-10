@@ -4283,7 +4283,8 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                         body: JSON.stringify(cfg),
                     });
                     if (r && r.ok) onClose();
-                    else setErr(`HTTP ${r?.status}`);
+                    // LW Oct 2026 - what the server refuses, in its words (a field out of range is a 400 now)
+                    else setErr(await PegaProxApiErrors.message(r, `HTTP ${r?.status}`));
                 } catch (e) { setErr(String(e)); }
                 finally { setBusy(false); }
             };
@@ -4352,6 +4353,15 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                                             <option value="all">{t('pbsAllSnapshotsInPool') || 'All snapshots in pool'}</option>
                                         </select>
                                     </label>
+                                    <label className="text-sm block mt-3">
+                                        <div className="opacity-70 mb-1">{t('rtestMaxAge')}</div>
+                                        <input type="number" min="1" max="365" value={cfg.max_age_days ?? 30} data-rtest-max-age
+                                            onChange={(e) => update('max_age_days', Math.max(1, Math.min(365, parseInt(e.target.value) || 1)))}
+                                            disabled={!cfg.enabled}
+                                            className="w-full px-2 py-1.5 text-sm"
+                                            style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
+                                    </label>
+                                    <p className="text-xs opacity-60 mt-2">{t('rtestIsoNote')}</p>
                                 </div>
                                 {err && <div style={{ color: '#f54f47', fontSize: '12px' }}>{err}</div>}
                                 <div className="flex justify-end gap-2 pt-2" style={{ borderTop: '1px solid var(--corp-border, #29414e)' }}>
@@ -4375,3 +4385,432 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
             );
         }
         try { window.PegaProxVerifyScheduleModal = VerifyScheduleModal; } catch (_) {}
+
+        // LW Oct 2026 - the restore tests of a cluster: the weekly run, what the tests check, and
+        // how recoverable each guest looks from the last one that passed. One read of the report
+        // for the whole cluster; the tests of a guest only once its row is opened.
+        const RT_PAGE = 100;
+        const RT_STATES = ['ok', 'stale', 'failing', 'never', 'rto_missed'];
+        const RT_STATE_CLS = {
+            ok: 'bg-green-500/20 text-green-400', stale: 'bg-yellow-500/20 text-yellow-400',
+            failing: 'bg-red-500/20 text-red-400', never: 'bg-orange-500/20 text-orange-400',
+            rto_missed: 'bg-yellow-500/20 text-yellow-400',
+        };
+        const RT_RPO_CLS = { ok: 'text-green-400', warning: 'text-yellow-400', breached: 'text-red-400', no_backup: 'text-orange-400' };
+        function rtAge(hours) {
+            if (hours == null) return '-';
+            return hours < 48 ? `${Number(hours).toFixed(1)} h` : `${Math.floor(hours / 24)} d`;
+        }
+        function rtPorts(text) {
+            return String(text || '').split(/[\s,;]+/).filter(Boolean).map(p => (/^\d+$/.test(p) ? parseInt(p, 10) : p));
+        }
+
+        function RestoreTestsPanel({ clusterId, addToast }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, isAdmin, haReadOnly, haServing } = useAuth();
+            const { isCorporate } = useLayout();
+            const headers = useRef(getAuthHeaders);
+            headers.current = getAuthHeaders;
+            const call = useCallback((url, opts = {}) => fetch(url, { ...opts, credentials: 'include',
+                headers: { ...(opts.headers || {}), ...headers.current() } }), []);
+            const base = `${API_URL}/clusters/${encodeURIComponent(clusterId)}`;
+            const [days, setDays] = useState(30);
+            const [report, setReport] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState('');
+            const [filter, setFilter] = useState('all');
+            const [query, setQuery] = useState('');
+            const [shown, setShown] = useState(RT_PAGE);
+            const [schedule, setSchedule] = useState(null);
+            const [settings, setSettings] = useState(null);
+            const [draft, setDraft] = useState(null);
+            const [rule, setRule] = useState({ scope: 'guest', key: '', rto: '', agent: '', ports: '', command: '' });
+            const [busy, setBusy] = useState('');
+            const [open, setOpen] = useState(null);
+            const [details, setDetails] = useState({});
+            const [editSchedule, setEditSchedule] = useState(false);
+            const look = useRef(0);
+            const say = (msg, kind) => { if (addToast) addToast(msg, kind); };
+
+            const loadSchedule = useCallback(async () => {
+                try {
+                    const res = await call(`${API_URL}/pbs/verify-schedule/status`);
+                    setSchedule(res.ok ? await res.json() : null);
+                } catch (e) { setSchedule(null); }
+            }, [call]);
+            const loadSettings = useCallback(async () => {
+                try {
+                    const res = await call(`${base}/recovery-settings`);
+                    const body = res.ok ? await res.json() : null;
+                    setSettings(body);
+                    if (body && body.cluster) {
+                        const c = body.cluster;
+                        setDraft({ rto: c.rto_minutes ?? '', isolation: c.isolation || 'link_down', bridge: c.test_bridge || '',
+                                   storage: c.test_storage || '', boot: c.boot_timeout ?? '', agent: c.agent || 'auto',
+                                   ports: (c.ports || []).join(', '), command: c.command || '' });
+                    }
+                } catch (e) { setSettings(null); }
+            }, [base, call]);
+            const load = useCallback(async (refresh) => {
+                const mine = ++look.current;
+                setLoading(true);
+                setError('');
+                try {
+                    const res = await call(`${base}/recovery-report?days=${days}${refresh ? '&refresh=1' : ''}`);
+                    if (mine !== look.current) return;
+                    if (res.ok) setReport(await res.json());
+                    else { setReport(null); setError(await PegaProxApiErrors.message(res, t('rtestLoadFailed'))); }
+                } catch (e) {
+                    if (mine === look.current) setError(t('rtestLoadFailed'));
+                }
+                if (mine === look.current) setLoading(false);
+            }, [base, days, call]);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => { load(false); }, [load]);
+            useEffect(() => { loadSchedule(); loadSettings(); }, [loadSchedule, loadSettings]);
+            const closeSchedule = useCallback(() => { setEditSchedule(false); loadSchedule(); }, [loadSchedule]);
+
+            const openGuest = async (vmid) => {
+                if (open === vmid) { setOpen(null); return; }
+                setOpen(vmid);
+                if (details[vmid] && details[vmid].data) return;
+                setDetails(d => ({ ...d, [vmid]: { loading: true } }));
+                try {
+                    const res = await call(`${base}/recovery-report/${vmid}`);
+                    const entry = res.ok ? { data: await res.json() } : { error: await PegaProxApiErrors.message(res, t('rtestLoadFailed')) };
+                    setDetails(d => ({ ...d, [vmid]: entry }));
+                } catch (e) {
+                    setDetails(d => ({ ...d, [vmid]: { error: t('rtestLoadFailed') } }));
+                }
+            };
+
+            const write = async (key, method, url, body, done) => {
+                setBusy(key);
+                try {
+                    const res = await call(url, { method, headers: { 'Content-Type': 'application/json' },
+                                                  body: body === undefined ? undefined : JSON.stringify(body) });
+                    if (res.ok) { say(done, 'success'); await loadSettings(); load(false); }
+                    else say(await bkpError(res, t, haServing), 'error');
+                } catch (e) { say(t('connectionError'), 'error'); }
+                setBusy('');
+            };
+            const saveSettings = () => {
+                const d = draft;
+                write('settings', 'PUT', `${base}/recovery-settings`, {
+                    rto_minutes: d.rto === '' ? null : Number(d.rto), isolation: d.isolation,
+                    test_bridge: d.isolation === 'bridge' ? d.bridge.trim() : null, test_storage: d.storage.trim() || null,
+                    boot_timeout: d.boot === '' ? null : Number(d.boot), agent: d.agent,
+                    ports: rtPorts(d.ports), command: d.command.trim() || null,
+                }, t('rtestSaved'));
+            };
+            const addRule = () => {
+                const body = { scope: rule.scope, key: rule.scope === 'guest' ? Number(rule.key) || rule.key : rule.key.trim() };
+                if (rule.rto !== '') body.rto_minutes = Number(rule.rto);
+                if (rule.agent) body.agent = rule.agent;
+                if (rule.ports.trim()) body.ports = rtPorts(rule.ports);
+                if (rule.command.trim()) body.command = rule.command.trim();
+                write('rule', 'PUT', `${base}/recovery-settings/rules`, body, t('rtestSaved'));
+            };
+
+            const canEdit = !!(settings && settings.can_edit) && isAdmin && !haReadOnly;
+            const rows = (report && report.guests) || [];
+            const q = query.trim().toLowerCase();
+            const list = rows.filter(r => (filter === 'all' || r.state === filter || (filter === 'rpo' && r.rpo_state === 'breached'))
+                && (!q || String(r.vmid).includes(q) || (r.name || '').toLowerCase().includes(q)));
+            const sum = (report && report.summary) || {};
+            const stateText = (s) => ({ ok: t('rtestStateOk'), stale: t('rtestStateStale'), failing: t('rtestStateFailing'),
+                never: t('rtestStateNever'), rto_missed: t('rtestStateRto') })[s] || s;
+            const filterText = (k) => (k === 'all' ? t('rtestTileTotal') : k === 'rpo' ? t('rtestTileRpo') : stateText(k));
+            const runText = (s) => ({ done: t('rtestRunDone'), running: t('rtestRunRunning'), starting: t('rtestRunRunning'),
+                stopped: t('rtestRunStopped'), missed: t('rtestRunMissed'), error: t('rtestRunError') })[s] || s;
+            const field = 'w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm';
+            const card = isCorporate ? 'p-3 bg-proxmox-dark border border-proxmox-border' : 'p-4 bg-proxmox-dark border border-proxmox-border rounded-lg';
+            const checkText = (c) => (c.check === 'agent' ? t('rtestCheckAgent') : c.check === 'port' ? bkpFill(t('rtestCheckPort'), { port: c.target })
+                : c.check === 'booted' ? t('rtestCheckBooted') : `${t('rtestCheckCommand')}: ${c.target}`);
+            const fmtSlot = (iso) => { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso || '') : d.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); };
+
+            const last = schedule && schedule.last_run;
+            const mine = last ? (last.results || []).filter(r => r.cluster_id === clusterId) : [];
+            const ruleRows = settings ? [...(settings.guests || []), ...(settings.tags || [])] : [];
+
+            return (
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-4" data-rtest-panel={clusterId}>
+                    <div className="flex items-start justify-between">
+                        <div>
+                            <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                <Icons.LifeBuoy className="w-5 h-5" />
+                                {t('rtestTitle')}
+                            </h3>
+                            <p className="text-sm text-gray-500 mt-1">{t('rtestDesc')}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <a href={`${base}/recovery-report?days=${days}&format=csv`} download data-rtest-csv
+                                className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-300 hover:text-white border border-proxmox-border rounded">
+                                <Icons.Download className="w-4 h-4" /> {t('rtestExportCsv')}
+                            </a>
+                            <button onClick={() => { load(true); loadSchedule(); }} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh')} data-rtest-refresh>
+                                <Icons.RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* the weekly run */}
+                    <div className={card} data-rtest-schedule={schedule && schedule.policy && schedule.policy.enabled ? 'on' : 'off'}>
+                        <div className="flex items-center gap-3">
+                            <Icons.Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                            <span className="text-sm font-medium text-white">{t('rtestSchedule')}</span>
+                            <span className="text-sm text-gray-400 flex-1" data-rtest-next>
+                                {!schedule ? '...' : schedule.running ? t('rtestRunning')
+                                    : schedule.policy && schedule.policy.enabled && schedule.next_run
+                                        ? bkpFill(t('rtestNextRun'), { when: fmtSlot(schedule.next_run) + (schedule.timezone ? ` (${schedule.timezone})` : '') })
+                                        : t('rtestScheduleOff')}
+                            </span>
+                            {isAdmin && !haReadOnly && (
+                                <button onClick={() => setEditSchedule(true)} className="px-3 py-1 text-sm text-gray-300 hover:text-white border border-proxmox-border rounded" data-rtest-edit-schedule>
+                                    {t('rtestScheduleEdit')}
+                                </button>
+                            )}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-2" data-rtest-last>
+                            {!last ? t('rtestNoRunYet') : (
+                                <span>
+                                    {bkpFill(t('rtestLastRun'), { when: bkpWhen(last.finished_at || last.started_at), state: runText(last.state) })}
+                                    {last.counts && ` - ${bkpFill(t('rtestLastRunCounts'), last.counts)}`}
+                                    {last.reason && ` - ${last.reason}`}
+                                </span>
+                            )}
+                        </div>
+                        {mine.length > 0 && (
+                            <div className="mt-2 space-y-1">
+                                {mine.slice(0, 50).map(r => (
+                                    <div key={`${r.vmid}-${r.task_id}`} className="flex items-center gap-3 text-xs" data-rtest-result={r.vmid} data-state={r.status}>
+                                        <span className="font-mono text-gray-400 w-16">{r.vmid}</span>
+                                        <span className="text-gray-300 truncate flex-1">{r.name || ''}</span>
+                                        <span className={BKP_STATE_CLS[r.status === 'passed' ? 'ok' : r.status === 'skipped' ? 'skipped' : 'failed']}>{r.status}</span>
+                                        {r.cause && <span className="text-gray-500 truncate">{r.cause}</span>}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    {/* what the tests do on this cluster */}
+                    {settings && settings.cluster && draft && 'isolation' in settings.cluster && (
+                        <div className={card} data-rtest-settings>
+                            <div className="text-sm font-medium text-white mb-1">{t('rtestSettings')}</div>
+                            <p className="text-xs text-gray-500 mb-3">{t('rtestIsoNote')}</p>
+                            <fieldset disabled={!canEdit || busy === 'settings'} className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <label className="text-xs text-gray-400">{t('rtestRtoDefault')}
+                                    <input type="number" min="1" max="10080" value={draft.rto} onChange={e => setDraft({ ...draft, rto: e.target.value })} className={field} data-rtest-field="rto" />
+                                </label>
+                                <label className="text-xs text-gray-400">{t('rtestIsolation')}
+                                    <select value={draft.isolation} onChange={e => setDraft({ ...draft, isolation: e.target.value })} className={field} data-rtest-field="isolation">
+                                        <option value="link_down">{t('rtestIsoLinkDown')}</option>
+                                        <option value="bridge">{t('rtestIsoBridge')}</option>
+                                    </select>
+                                </label>
+                                {draft.isolation === 'bridge' && (
+                                    <label className="text-xs text-gray-400">{t('rtestBridgeName')}
+                                        <input value={draft.bridge} maxLength={32} placeholder="vmbr99" onChange={e => setDraft({ ...draft, bridge: e.target.value })} className={`${field} font-mono`} data-rtest-field="bridge" />
+                                    </label>
+                                )}
+                                <label className="text-xs text-gray-400">{t('rtestStorage')}
+                                    <input value={draft.storage} maxLength={64} placeholder={t('rtestStorageHint')} onChange={e => setDraft({ ...draft, storage: e.target.value })} className={`${field} font-mono`} data-rtest-field="storage" />
+                                </label>
+                                <label className="text-xs text-gray-400">{t('rtestBootTimeout')}
+                                    <input type="number" min="30" max="1800" value={draft.boot} placeholder="180" onChange={e => setDraft({ ...draft, boot: e.target.value })} className={field} data-rtest-field="boot" />
+                                </label>
+                                <label className="text-xs text-gray-400">{t('rtestAgentMode')}
+                                    <select value={draft.agent} onChange={e => setDraft({ ...draft, agent: e.target.value })} className={field} data-rtest-field="agent">
+                                        <option value="auto">{t('rtestAgentAuto')}</option>
+                                        <option value="require">{t('rtestAgentRequire')}</option>
+                                        <option value="off">{t('rtestAgentOff')}</option>
+                                    </select>
+                                </label>
+                                <label className="text-xs text-gray-400">{t('rtestPorts')}
+                                    <input value={draft.ports} placeholder={t('rtestPortsHint')} onChange={e => setDraft({ ...draft, ports: e.target.value })} className={`${field} font-mono`} data-rtest-field="ports" />
+                                </label>
+                                <label className="text-xs text-gray-400 col-span-2">{t('rtestCommand')}
+                                    <input value={draft.command} maxLength={500} placeholder={settings.cluster.command_set ? '***' : 'systemctl is-active nginx'} onChange={e => setDraft({ ...draft, command: e.target.value })} className={`${field} font-mono`} data-rtest-field="command" />
+                                </label>
+                            </fieldset>
+                            {canEdit ? (
+                                <div className="flex justify-end mt-3">
+                                    <button onClick={saveSettings} disabled={busy === 'settings'} data-rtest-save
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-1.5">
+                                        {busy === 'settings' && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
+                                        {t('save')}
+                                    </button>
+                                </div>
+                            ) : <div className="text-xs text-gray-500 mt-2" data-rtest-readonly>{t('rtestReadOnly')}</div>}
+
+                            <div className="text-sm font-medium text-white mt-4 mb-2">{t('rtestRules')}</div>
+                            {!ruleRows.length && <div className="text-xs text-gray-500" data-rtest-norules>{t('rtestNoRules')}</div>}
+                            {ruleRows.map(r => (
+                                <div key={`${r.scope}:${r.scope_key}`} className="flex items-center gap-3 text-xs border-t border-proxmox-border py-1" data-rtest-rule={`${r.scope}:${r.scope_key}`}>
+                                    <span className="text-gray-400 w-24">{r.scope === 'guest' ? t('rtestScopeGuest') : t('rtestScopeTag')}</span>
+                                    <span className="font-mono text-white w-24 truncate">{r.scope_key}</span>
+                                    <span className="text-gray-400 flex-1 truncate">
+                                        {[r.rto_minutes != null && `RTO ${r.rto_minutes} min`, r.agent && `${t('rtestAgentMode')}: ${r.agent}`,
+                                          r.ports && r.ports.length && `${t('rtestPorts')}: ${r.ports.join(', ')}`,
+                                          (r.command || r.command_set) && `${t('rtestCheckCommand')}: ${r.command || '***'}`].filter(Boolean).join(' - ') || t('rtestInherit')}
+                                    </span>
+                                    {canEdit && (
+                                        <button onClick={() => write('rule', 'DELETE', `${base}/recovery-settings/rules/${r.scope}/${encodeURIComponent(r.scope_key)}`, undefined, t('rtestSaved'))}
+                                            className="text-red-400 hover:text-red-300" title={t('rtestRemoveRule')} data-rtest-rule-remove={`${r.scope}:${r.scope_key}`}>
+                                            <Icons.Trash className="w-3.5 h-3.5" />
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                            {canEdit && (
+                                <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mt-2 items-end" data-rtest-rule-form>
+                                    <select value={rule.scope} onChange={e => setRule({ ...rule, scope: e.target.value })} className={field} data-rtest-rule-field="scope">
+                                        <option value="guest">{t('rtestScopeGuest')}</option>
+                                        <option value="tag">{t('rtestScopeTag')}</option>
+                                    </select>
+                                    <input value={rule.key} placeholder={t('rtestRuleKey')} onChange={e => setRule({ ...rule, key: e.target.value })} className={`${field} font-mono`} data-rtest-rule-field="key" />
+                                    <input type="number" min="1" max="10080" value={rule.rto} placeholder={t('rtestRtoDefault')} onChange={e => setRule({ ...rule, rto: e.target.value })} className={field} data-rtest-rule-field="rto" />
+                                    <input value={rule.ports} placeholder={t('rtestPorts')} onChange={e => setRule({ ...rule, ports: e.target.value })} className={`${field} font-mono`} data-rtest-rule-field="ports" />
+                                    <input value={rule.command} maxLength={500} placeholder={t('rtestCommand')} onChange={e => setRule({ ...rule, command: e.target.value })} className={`${field} font-mono`} data-rtest-rule-field="command" />
+                                    <button onClick={addRule} disabled={!rule.key.trim() || busy === 'rule'} data-rtest-rule-add
+                                        className="px-3 py-1 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50 flex items-center justify-center gap-1">
+                                        <Icons.Plus className="w-3.5 h-3.5" /> {t('rtestAddRule')}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* the guests */}
+                    {report && (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {[['all', sum.total, 'text-blue-400', 'bg-blue-500/10'],
+                              ['ok', sum.ok, 'text-green-400', 'bg-green-500/10'],
+                              ['failing', sum.failing, 'text-red-400', 'bg-red-500/10'],
+                              ['never', sum.never, 'text-orange-400', 'bg-orange-500/10'],
+                              ['stale', sum.stale, 'text-yellow-400', 'bg-yellow-500/10'],
+                              ['rto_missed', sum.rto_missed, 'text-yellow-400', 'bg-yellow-500/10'],
+                              ['rpo', sum.rpo_breached, 'text-red-400', 'bg-red-500/10']].map(([key, val, color, bg]) => (
+                                <button key={key} onClick={() => { setFilter(key); setShown(RT_PAGE); }} data-rtest-tile={key}
+                                    className={`p-3 rounded-lg border ${filter === key ? 'border-proxmox-orange' : 'border-proxmox-border'} ${bg} text-left hover:border-proxmox-orange transition-colors`}>
+                                    <div className={`text-2xl font-bold ${color}`}>{val ?? 0}</div>
+                                    <div className="text-xs text-gray-400 mt-1">{filterText(key)}</div>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3">
+                        <label className="text-sm text-gray-400 flex items-center gap-2">
+                            {t('rtestWithin')}
+                            <select value={days} onChange={e => { setDays(parseInt(e.target.value, 10)); setShown(RT_PAGE); }} className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" data-rtest-days>
+                                {[7, 14, 30, 60, 90].map(d => <option key={d} value={d}>{bkpFill(t('bkpRunsDays'), { n: d })}</option>)}
+                            </select>
+                        </label>
+                        <input value={query} onChange={e => { setQuery(e.target.value); setShown(RT_PAGE); }} placeholder={t('search')} data-rtest-search
+                            className="px-3 py-1 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                        {filter !== 'all' && (
+                            <button onClick={() => setFilter('all')} className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300" data-rtest-filter={filter}>
+                                {filterText(filter)} <Icons.X className="w-3 h-3" />
+                            </button>
+                        )}
+                    </div>
+                    {report && report.backups_state !== 'ok' && (
+                        <div className="text-xs text-yellow-400" data-rtest-backups-note>{report.backups_state === 'unreadable' ? t('rtestBackupsUnreadable') : t('rtestBackupsPartial')}</div>
+                    )}
+                    {error && <div className="text-sm text-red-400" data-rtest-error>{error}</div>}
+                    {loading && !report && <div className="text-sm text-gray-400">{t('loading')}</div>}
+                    {report && !list.length && <div className="text-sm text-gray-400" data-rtest-none>{t('rtestNoGuests')}</div>}
+                    {list.length > 0 && (
+                        <div className="bg-proxmox-dark border border-proxmox-border rounded-lg overflow-hidden">
+                            <table className="w-full text-sm">
+                                <thead className="bg-proxmox-card border-b border-proxmox-border">
+                                    <tr className="text-left text-xs uppercase text-gray-400">
+                                        <th className="px-3 py-2">{t('rtestColGuest')}</th>
+                                        <th className="px-3 py-2">{t('rtestColState')}</th>
+                                        <th className="px-3 py-2">{t('rtestColPassed')}</th>
+                                        <th className="px-3 py-2">{t('rtestColPoint')}</th>
+                                        <th className="px-3 py-2">{t('rtestColDuration')}</th>
+                                        <th className="px-3 py-2">{t('rtestColRpo')}</th>
+                                        <th className="px-3 py-2">{t('rtestColFailure')}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {list.slice(0, shown).map(r => (
+                                        <React.Fragment key={r.vmid}>
+                                            <tr className="border-b border-proxmox-border/50 hover:bg-proxmox-hover cursor-pointer" data-rtest-row={r.vmid} data-state={r.state} onClick={() => openGuest(r.vmid)}>
+                                                <td className="px-3 py-2">
+                                                    <span className="inline-flex items-center gap-1 text-white">
+                                                        {open === r.vmid ? <Icons.ChevronDown /> : <Icons.ChevronRight />}
+                                                        <span className="font-mono text-gray-400">{r.vmid}</span> {r.name || '-'}
+                                                    </span>
+                                                </td>
+                                                <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-xs ${RT_STATE_CLS[r.state] || ''}`}>{stateText(r.state)}</span></td>
+                                                <td className="px-3 py-2 text-xs text-gray-400">{r.last_success_age_days != null ? bkpFill(t('rtestAgo'), { t: rtAge(r.last_success_age_days * 24) }) : t('rtestNever')}</td>
+                                                <td className="px-3 py-2 text-xs text-gray-400">{r.tested_backup_age_hours != null ? bkpFill(t('rtestAgo'), { t: rtAge(r.tested_backup_age_hours) }) : '-'}</td>
+                                                <td className={`px-3 py-2 text-xs ${r.rto_state === 'missed' ? 'text-red-400' : r.rto_state === 'met' ? 'text-green-400' : 'text-gray-400'}`}>
+                                                    {r.measured_seconds == null ? '-' : r.rto_seconds ? bkpFill(t('rtestVsRto'), { took: bkpTook(Math.round(r.measured_seconds)), rto: bkpTook(r.rto_seconds) }) : `${bkpTook(Math.round(r.measured_seconds))} (${t('rtestNoRto')})`}
+                                                </td>
+                                                <td className={`px-3 py-2 text-xs ${RT_RPO_CLS[r.rpo_state] || 'text-gray-400'}`}>
+                                                    {r.rpo_state === 'no_backup' ? t('rtestNoBackup') : r.rpo_state === 'unknown' ? '?' : bkpFill(t('rtestAgo'), { t: rtAge(r.newest_backup_age_hours) })
+                                                        + (r.sla_hours ? ` / ${bkpFill(t('rtestSlaOf'), { h: r.sla_hours })}` : '')}
+                                                </td>
+                                                <td className="px-3 py-2 text-xs text-red-400 truncate" style={{ maxWidth: '260px' }} title={r.last_failure_cause || ''}>{r.last_failure_cause || ''}</td>
+                                            </tr>
+                                            {open === r.vmid && (
+                                                <tr><td colSpan={7} className="px-3 py-2" data-rtest-detail={r.vmid}>
+                                                    {(() => {
+                                                        const d = details[r.vmid];
+                                                        if (!d || d.loading) return <div className="text-xs text-gray-400">{t('loading')}</div>;
+                                                        if (d.error) return <div className="text-xs text-red-400">{d.error}</div>;
+                                                        const g = d.data.guest, plan = d.data.checks || {};
+                                                        return (
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                                                                <div>
+                                                                    <div className="text-gray-400 mb-1">{t('rtestChecks')}</div>
+                                                                    <div className="text-gray-300">
+                                                                        {[`${t('rtestAgentMode')}: ${plan.agent}`, plan.ports && plan.ports.length ? `${t('rtestPorts')}: ${plan.ports.join(', ')}` : null,
+                                                                          plan.command || plan.command_set ? `${t('rtestCheckCommand')}: ${plan.command || '***'}` : null,
+                                                                          plan.rto_seconds ? `RTO ${bkpTook(plan.rto_seconds)}` : null].filter(Boolean).join(' - ')}
+                                                                    </div>
+                                                                    {(g.last_checks || []).map((c, i) => (
+                                                                        <div key={i} className="flex gap-2" data-rtest-check={c.check}>
+                                                                            <span className={c.ok === true ? 'text-green-400' : c.ok === false ? 'text-red-400' : 'text-gray-500'}>{c.ok === true ? 'OK' : c.ok === false ? 'X' : t('rtestCheckSkipped')}</span>
+                                                                            <span className="text-gray-300">{checkText(c)}</span>
+                                                                            <span className="text-gray-500 truncate">{c.detail}</span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                                <div>
+                                                                    <div className="text-gray-400 mb-1">{t('rtestHistory')}</div>
+                                                                    {!(d.data.history || []).length && <div className="text-gray-500">{t('rtestNoRunYet')}</div>}
+                                                                    {(d.data.history || []).map(h => (
+                                                                        <div key={h.id} className="flex gap-2" data-rtest-history={h.id}>
+                                                                            <span className="text-gray-400">{h.started_at ? new Date(h.started_at).toLocaleString() : '-'}</span>
+                                                                            <span className={h.status === 'passed' ? 'text-green-400' : 'text-red-400'}>{h.status}</span>
+                                                                            <span className="text-gray-500">{h.source === 'schedule' ? t('rtestFromSchedule') : t('rtestByHand')}</span>
+                                                                            {h.measured_seconds != null && <span className="text-gray-400">{bkpTook(Math.round(h.measured_seconds))}</span>}
+                                                                            {h.cause && <span className="text-red-400 truncate">{h.cause}</span>}
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </td></tr>
+                                            )}
+                                        </React.Fragment>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                    {list.length > shown && (
+                        <button onClick={() => setShown(n => n + RT_PAGE)} className="text-xs text-blue-400 hover:text-blue-300" data-rtest-more>
+                            {bkpFill(t('bkpRunsShowMore'), { shown, total: list.length })}
+                        </button>
+                    )}
+                    {editSchedule && <VerifyScheduleModal authFetch={call} apiUrl={API_URL} onClose={closeSchedule} />}
+                </div>
+            );
+        }
+        try { window.PegaProxRestoreTestsPanel = RestoreTestsPanel; } catch (_) {}

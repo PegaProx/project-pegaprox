@@ -18,7 +18,7 @@
             const [storageContent, setStorageContent] = useState([]);
             const [contentLoading, setContentLoading] = useState(false);
             const [expandedNodes, setExpandedNodes] = useState({});
-            const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla
+            const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla, recovery
             const [syncStatus, setSyncStatus] = useState(null);
             const [syncLoading, setSyncLoading] = useState(false);
             const [syncContentType, setSyncContentType] = useState('iso');
@@ -1065,6 +1065,11 @@
                                 <Icons.Shield style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>{t('backupSla') || 'Backup SLA'}</span>
                             </button>
+                            {/* LW Oct 2026 - restore tests: the weekly run and how recoverable each guest is */}
+                            <button onClick={() => setActiveTab('recovery')} className={activeTab === 'recovery' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}} data-rtest-tab>
+                                <Icons.LifeBuoy style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('rtestTab')}</span>
+                            </button>
                         </div>
                     ) : (
                     <div className="flex gap-2">
@@ -1105,6 +1110,15 @@
                         >
                             <Icons.Shield className="inline mr-2" />
                             {t('backupSla') || 'Backup SLA'}
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('recovery')} data-rtest-tab
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'recovery' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.LifeBuoy className="inline mr-2" />
+                            {t('rtestTab')}
                         </button>
                     </div>
                     )}
@@ -1328,6 +1342,8 @@
                                 </div>
                             )}
                         </div>
+                    ) : activeTab === 'recovery' ? (
+                        <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
                     ) : activeTab === 'browse' ? (
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                             {/* Storage Tree */}
