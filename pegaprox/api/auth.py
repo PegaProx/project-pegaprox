@@ -7,7 +7,9 @@ import logging
 import secrets
 import base64
 import ipaddress
+import re
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 from flask import Blueprint, jsonify, request, make_response
 
 from pegaprox.constants import *
@@ -55,6 +57,41 @@ except ImportError:
     pass
 
 bp = Blueprint('auth', __name__)
+
+# ============================================================================
+# SSRF Protection Helper
+# ============================================================================
+
+def build_validated_jwks_url(base_url: str) -> str:
+    """Validate JWKS URL to prevent SSRF attacks.
+    
+    Args:
+        base_url: The JWKS endpoint URL from OIDC configuration
+        
+    Returns:
+        Validated URL string
+        
+    Raises:
+        ValueError: If URL validation fails
+    """
+    try:
+        # Minimal path validation before urlparse
+        if "/../" in base_url or re.search(r"/%2e%2e/", base_url, re.IGNORECASE):
+            raise ValueError("Invalid path")
+        
+        parsed = urlparse(base_url)
+        
+        # Protocol check
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("Invalid protocol")
+        
+        # Host check
+        if not parsed.hostname:
+            raise ValueError("Invalid host")
+        
+        return urlunparse(parsed)
+    except Exception:
+        raise ValueError("Invalid URL")
 
 # ============================================================================
     
@@ -452,7 +489,7 @@ def oidc_test_connection():
                             'detail': f"URL rejected by SSRF guard: {guard_err}{hint}"})
             return jsonify({'success': False, 'results': results})
         # NS Oct 2026 - not followed: a redirect target is a URL the guard above never saw
-        resp = requests.get(validated_jwks_url, allow_redirects=False, timeout=10)
+        resp = requests.get(build_validated_jwks_url(validated_jwks_url), allow_redirects=False, timeout=10)
         if resp.status_code == 200:
             keys = resp.json().get('keys', [])
             results.append({'step': 'JWKS Endpoint', 'status': 'ok', 'detail': f"Found {len(keys)} signing keys"})
