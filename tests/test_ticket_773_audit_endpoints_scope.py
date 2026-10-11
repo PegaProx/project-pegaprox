@@ -94,8 +94,10 @@ def test_costs_per_vm_pool_user_scoped(api, seed, monkeypatch):
 
 def test_power_per_vm_pool_user_scoped(api, seed, monkeypatch):
     mallory = _pool_user(seed)
-    monkeypatch.setattr('pegaprox.api.power._load_history', lambda *a, **k: [{'x': 1}])
-    monkeypatch.setattr('pegaprox.api.power._compute_per_vm', lambda *a, **k: _canned_rows())
+    monkeypatch.setattr('pegaprox.api.power._load_history', lambda *a, **k: [(0, {})])
+    # #965 - the power model returns its hosts next to the guest rows
+    monkeypatch.setattr('pegaprox.api.power._compute_power',
+                        lambda *a, **k: {'rows': _canned_rows(), 'hosts': {}, 'covered_h': 1.0})
     api.set_manager('cluster_1', api.make_fake_manager(cluster_id='cluster_1'))
     resp = api.as_user(mallory).get('/api/clusters/cluster_1/power/per-vm')
     assert resp.status_code == 200, resp.get_data(as_text=True)

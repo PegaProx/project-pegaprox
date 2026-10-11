@@ -2332,6 +2332,24 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating power_rates table: {e}")
 
+        # #965 - per-host power profile (whole-system idle/max watts). A host without a
+        # row inherits node_idle_w / node_max_w from power_rates.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS power_host_profiles (
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    idle_w REAL NOT NULL,
+                    max_w REAL NOT NULL,
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT '',
+                    PRIMARY KEY (cluster_id, node)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating power_host_profiles table: {e}")
+
         # MK May 2026 — Cost dashboard rates (global default + optional per-cluster overrides)
         try:
             cursor.execute('''

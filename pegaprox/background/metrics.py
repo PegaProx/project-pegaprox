@@ -585,6 +585,8 @@ def collect_metrics_snapshot():
                     cluster_data['vms'][vmid] = {
                         't': rtype, 'r': running, 'cpu': cpu_pct, 'mem': mem_pct,
                         'maxmem': maxmem, 'maxcpu': maxcpu,
+                        # #965 - the host it ran on, so power history follows a migration
+                        'n': r.get('node') or '',
                     }
             except Exception:
                 pass

@@ -320,7 +320,8 @@ SYNC_TABLES = (
     'cross_cluster_replications', 'efficient_snapshots', 'site_recovery_plans',
     'site_recovery_vms', 'snapshot_policies', 'drift_baselines', 'multi_cluster_vnets',
     'siem_targets', 'push_subscriptions', 'plugin_state', 'status_incidents',
-    'custom_cloud_templates', 'power_rates', 'cost_rates', 'auto_install_profiles',
+    'custom_cloud_templates', 'power_rates', 'power_host_profiles', 'cost_rates',
+    'auto_install_profiles',
     'pegaprox_kv',
     # Proxmox HA rules a rolling update switched off: whoever acts next switches them on (#954)
     'suspended_ha_rules',

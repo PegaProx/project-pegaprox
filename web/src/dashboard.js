@@ -4862,6 +4862,9 @@
             const [showRates, setShowRates] = React.useState(false);
             const [rateForm, setRateForm] = React.useState(null);
             const [savingRates, setSavingRates] = React.useState(false);
+            // #965 - a power profile per host (whole-system idle / full-load watts)
+            const [hostForm, setHostForm] = React.useState(null);
+            const [savingHosts, setSavingHosts] = React.useState(false);
 
             const refresh = async () => {
                 if (!clusterId) return;
@@ -4907,11 +4910,65 @@
                 } finally { setSavingRates(false); }
             };
 
+            const openHosts = async () => {
+                const r = await authFetch(`${API_URL}/clusters/${clusterId}/power/hosts`).then(x => x?.json()).catch(() => null);
+                if (!r || !Array.isArray(r.hosts)) {
+                    addToast(t('powerHostLoadFailed') || 'Could not load the hosts', 'error');
+                    return;
+                }
+                setHostForm(r.hosts.map(h => ({
+                    ...h, own: h.profile === 'host', wasOwn: h.profile === 'host',
+                    idle: String(h.idle_w), max: String(h.max_w),
+                    was: `${h.idle_w}|${h.max_w}|${h.notes || ''}`,
+                })));
+            };
+            const saveHosts = async () => {
+                setSavingHosts(true);
+                let failed = 0;
+                try {
+                    for (const h of hostForm) {
+                        let r = null;
+                        if (h.own && h.wasOwn && h.was === `${parseFloat(h.idle)}|${parseFloat(h.max)}|${h.notes || ''}`) {
+                            continue;  // unchanged - keep who set it and when
+                        } else if (h.own) {
+                            if (!Number.isFinite(parseFloat(h.idle)) || !Number.isFinite(parseFloat(h.max))) {
+                                failed++;
+                                addToast(`${h.node}: ${t('powerHostWattsMissing') || 'Enter idle and full-load watts'}`, 'error');
+                                continue;
+                            }
+                            r = await authFetch(`${API_URL}/clusters/${clusterId}/power/hosts/${encodeURIComponent(h.node)}`, {
+                                method: 'PUT',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ idle_w: parseFloat(h.idle), max_w: parseFloat(h.max), notes: h.notes || '' }),
+                            });
+                        } else if (h.wasOwn) {
+                            r = await authFetch(`${API_URL}/clusters/${clusterId}/power/hosts/${encodeURIComponent(h.node)}`, { method: 'DELETE' });
+                        } else {
+                            continue;
+                        }
+                        if (!r?.ok) {
+                            failed++;
+                            const body = await r?.json().catch(() => null);
+                            addToast(`${h.node}: ${body?.error || t('powerHostSaveFailed') || 'Could not save the host profile'}`, 'error');
+                        }
+                    }
+                    if (!failed) {
+                        addToast(t('powerHostsSaved') || 'Host profiles saved', 'success');
+                        setHostForm(null);
+                    }
+                    await refresh();
+                } finally { setSavingHosts(false); }
+            };
+            const setHost = (node, patch) => setHostForm(hostForm.map(h => h.node === node ? { ...h, ...patch } : h));
+
             const cur = summary?.rates?.currency || 'EUR';
             const sym = ({ EUR: '€', USD: '$', GBP: '£' }[cur] || cur);
             const fmtCost = (n) => `${sym} ${(n || 0).toFixed(2)}`;
             const fmtKwh = (n) => `${(n || 0).toFixed(1)} kWh`;
             const fmtCo2 = (n) => `${(n || 0).toFixed(1)} kg`;
+            const coverageText = () => (t('powerCoverage') || 'Estimate from {covered} of {window} h of history. Monthly figures are extrapolated from the covered hours.')
+                .replace('{covered}', () => summary?.coverage?.covered_h ?? 0)
+                .replace('{window}', () => summary?.coverage?.window_h ?? 0);
 
             // ── Export helpers (same WinAnsi-safe pattern as Cost / Insights) ──
             const safe = (s) => {
@@ -4933,7 +4990,7 @@
                     'avg_cpu_pct', 'avg_mem_pct', 'cores', 'memory_gb', 'running_h',
                     'kwh', 'monthly_kwh',
                     `cost_${cur}`, `monthly_cost_${cur}`,
-                    'kg_co2', 'monthly_kg_co2',
+                    'kg_co2', 'monthly_kg_co2', 'kwh_by_host',
                 ];
                 const esc = (v) => {
                     const s = String(v ?? '');
@@ -4947,6 +5004,7 @@
                         r.kwh, r.monthly_kwh,
                         r.cost, r.monthly_cost,
                         r.kg_co2, r.monthly_co2,
+                        Object.entries(r.by_node || {}).map(([n, k]) => `${n}=${k}`).join(' '),
                     ].map(esc).join(','));
                 }
                 const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -4992,8 +5050,35 @@
                                 + `${summary.rates.kwh_price.toFixed(2)} ${cur}/kWh, `
                                 + `${summary.rates.kg_co2_per_kwh.toFixed(2)} kg CO2/kWh`),
                 });
+                if (summary.coverage?.missing_h > 0) {
+                    blocks.push({ type: 'text', value: safe(coverageText()) });
+                }
 
-                if (summary.by_node && Object.keys(summary.by_node).length) {
+                if (summary.hosts?.length) {
+                    blocks.push({ type: 'spacer', height: 4 });
+                    blocks.push({
+                        type: 'table',
+                        title: safe(t('powerPerHost') || 'Per host'),
+                        columns: [
+                            safe(t('node') || 'Node'),
+                            safe(t('powerProfile') || 'Profile'),
+                            'W idle / max',
+                            safe(t('powerAvgW') || 'Avg W (est.)'),
+                            safe(t('powerMonthlyKwh') || 'Monthly kWh'),
+                            safe(t('powerMonthlyCost') || 'Monthly cost'),
+                            safe(t('powerUnallocated') || 'Unallocated'),
+                        ],
+                        rows: summary.hosts.map(h => [
+                            safe(h.node),
+                            safe(h.profile === 'host' ? (t('powerProfileHost') || 'Own profile') : (t('powerProfileCluster') || 'Cluster default')),
+                            `${h.idle_w} / ${h.max_w}`,
+                            String(h.avg_w),
+                            kwh(h.monthly.kwh),
+                            pf(h.monthly.cost),
+                            `${kwh(h.monthly_unallocated.kwh)} * ${pf(h.monthly_unallocated.cost)}`,
+                        ]),
+                    });
+                } else if (summary.by_node && Object.keys(summary.by_node).length) {
                     blocks.push({ type: 'spacer', height: 4 });
                     blocks.push({
                         type: 'table',
@@ -5079,6 +5164,13 @@
                                     {t('powerRates') || 'Rates'}
                                 </button>
                             )}
+                            {canAct && (
+                                <button onClick={openHosts}
+                                    className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5">
+                                    <Icons.Server className="w-3.5 h-3.5" />
+                                    {t('powerHostProfiles') || 'Host profiles'}
+                                </button>
+                            )}
                             <button onClick={exportCsv} disabled={!rows.length}
                                 className="px-3 py-1.5 bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white rounded-lg text-sm flex items-center gap-1.5 disabled:opacity-50">
                                 <Icons.Download className="w-3.5 h-3.5" />
@@ -5124,7 +5216,66 @@
                                 </div>
                             </div>
 
-                            {summary.by_node && Object.keys(summary.by_node).length > 0 && (
+                            {/* #965 - what is an estimate, and what no guest accounts for */}
+                            {(summary.coverage?.missing_h > 0 || summary.coverage?.node_estimated_vms > 0 || summary.unallocated || summary.scoped) && (
+                                <div className="text-xs text-gray-400 bg-proxmox-card border border-proxmox-border rounded-xl p-3 space-y-1" data-power-notes>
+                                    {summary.unallocated && (
+                                        <div title={t('powerUnallocatedHint') || 'Host power no guest accounts for: the baseline of a host without running guests, and host CPU above what its guests use.'}>
+                                            {t('powerGuests') || 'Guests'}: <span className="text-white">{fmtKwh(summary.allocated?.monthly?.kwh)} · {fmtCost(summary.allocated?.monthly?.cost)}</span>
+                                            <span className="mx-2 text-gray-600">|</span>
+                                            {t('powerUnallocated') || 'Unallocated'}: <span className="text-yellow-400">{fmtKwh(summary.unallocated.monthly?.kwh)} · {fmtCost(summary.unallocated.monthly?.cost)}</span>
+                                        </div>
+                                    )}
+                                    {summary.coverage?.missing_h > 0 && <div className="text-yellow-400">{coverageText()}</div>}
+                                    {summary.coverage?.node_estimated_vms > 0 && (
+                                        <div>{(t('powerNodeEstimated') || 'For {count} guests the host is taken from where they run today, for history recorded before hosts were tracked.')
+                                            .replace('{count}', () => summary.coverage.node_estimated_vms)}</div>
+                                    )}
+                                    {summary.scoped && <div>{t('powerScopedNote') || 'Showing the share of your guests only.'}</div>}
+                                </div>
+                            )}
+
+                            {summary.hosts?.length > 0 && (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 overflow-x-auto" data-power-hosts>
+                                    <h3 className="text-sm font-semibold text-white mb-2">{t('powerPerHost') || 'Per host'}</h3>
+                                    <table className="w-full text-xs">
+                                        <thead className="text-gray-400 uppercase text-[10px]">
+                                            <tr className="border-b border-proxmox-border">
+                                                <th className="text-left py-2">{t('node') || 'Node'}</th>
+                                                <th className="text-left">{t('powerProfile') || 'Profile'}</th>
+                                                <th className="text-right">W idle / max</th>
+                                                <th className="text-right">{t('powerOnlineH') || 'Online h'}</th>
+                                                <th className="text-right">{t('powerAvgW') || 'Avg W (est.)'}</th>
+                                                <th className="text-right">{t('powerMonthlyKwh') || 'Monthly kWh'}</th>
+                                                <th className="text-right">{t('powerMonthlyCost') || 'Monthly cost'}</th>
+                                                <th className="text-right">{t('powerMonthlyCo2') || 'Monthly CO₂'}</th>
+                                                <th className="text-right">{t('powerUnallocated') || 'Unallocated'}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {summary.hosts.map(h => (
+                                                <tr key={h.node} className="border-b border-proxmox-border hover:bg-proxmox-dark">
+                                                    <td className="py-1.5 text-white">{h.node}{h.status !== 'online' && <span className="ml-1 text-gray-500">({h.status})</span>}</td>
+                                                    <td className={h.profile === 'host' ? 'text-green-400' : 'text-gray-500'}>
+                                                        {h.profile === 'host' ? (t('powerProfileHost') || 'Own profile') : (t('powerProfileCluster') || 'Cluster default')}
+                                                    </td>
+                                                    <td className="text-right text-gray-400">{h.idle_w} / {h.max_w}</td>
+                                                    <td className="text-right text-gray-400">{h.online_h}</td>
+                                                    <td className="text-right text-gray-300">{h.avg_w}</td>
+                                                    <td className="text-right text-yellow-400">{fmtKwh(h.monthly.kwh)}</td>
+                                                    <td className="text-right font-semibold text-green-400">{fmtCost(h.monthly.cost)}</td>
+                                                    <td className="text-right text-emerald-400">{fmtCo2(h.monthly.kg_co2)}</td>
+                                                    <td className="text-right text-gray-400" title={t('powerUnallocatedHint') || 'Host power no guest accounts for: the baseline of a host without running guests, and host CPU above what its guests use.'}>
+                                                        {fmtKwh(h.monthly_unallocated.kwh)} · {fmtCost(h.monthly_unallocated.cost)}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+
+                            {!summary.hosts?.length && summary.by_node && Object.keys(summary.by_node).length > 0 && (
                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                     <h3 className="text-sm font-semibold text-white mb-2">{t('powerByNode') || 'Per node'}</h3>
                                     <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
@@ -5161,7 +5312,13 @@
                                             <tr key={r.vmid} className="border-b border-proxmox-border/30 hover:bg-proxmox-dark/40">
                                                 <td className="py-1.5 text-white">{r.name}{r.low_data && <span className="ml-1 text-yellow-500" title={t('lowDataWarning') || 'limited samples'}>⚠</span>}</td>
                                                 <td className="text-gray-400">{r.vmid}</td>
-                                                <td className="text-gray-400">{r.node}</td>
+                                                <td className="text-gray-400">
+                                                    {r.node}
+                                                    {Object.keys(r.by_node || {}).length > 1 && (
+                                                        <span className="ml-1 text-blue-400" title={`${t('powerMigrated') || 'Ran on several hosts in this window'}: ${Object.entries(r.by_node).map(([n, k]) => `${n} ${k} kWh`).join(', ')}`}>+{Object.keys(r.by_node).length - 1}</span>
+                                                    )}
+                                                    {r.node_estimated && <span className="ml-1 text-yellow-500" title={t('powerNodeGuessed') || 'Host partly taken from where it runs today'}>~</span>}
+                                                </td>
                                                 <td className="text-right text-gray-300">{r.avg_cpu_pct}%</td>
                                                 <td className="text-right text-gray-300">{r.avg_mem_pct}%</td>
                                                 <td className="text-right text-gray-400">{r.running_h}</td>
@@ -5220,6 +5377,70 @@
                                     <button onClick={saveRates} disabled={savingRates}
                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
                                         {savingRates ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {t('save') || 'Save'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {hostForm && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !savingHosts && setHostForm(null)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-3xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()} data-power-host-profiles>
+                                <h3 className="text-base font-semibold text-white mb-1">{t('powerHostProfiles') || 'Host profiles'}</h3>
+                                <p className="text-xs text-gray-500 mb-3">
+                                    {t('powerHostProfilesHint') || 'Whole-system watts at the wall, idle and at full CPU load, ideally read off a power meter. A host without its own profile uses the cluster rates. RAM watts are not added on top of a host profile, they are part of it.'}
+                                </p>
+                                <table className="w-full text-xs">
+                                    <thead className="text-gray-400 uppercase text-[10px]">
+                                        <tr className="border-b border-proxmox-border">
+                                            <th className="text-left py-2">{t('node') || 'Node'}</th>
+                                            <th className="text-left">{t('powerProfileHost') || 'Own profile'}</th>
+                                            <th className="text-left">{t('powerHostIdleW') || 'Idle (W)'}</th>
+                                            <th className="text-left">{t('powerHostMaxW') || 'Full load (W)'}</th>
+                                            <th className="text-left">{t('notes') || 'Notes'}</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {hostForm.map(h => (
+                                            <tr key={h.node} className="border-b border-proxmox-border">
+                                                <td className="py-1.5 text-white">
+                                                    {h.node}
+                                                    <div className="text-[10px] text-gray-500">
+                                                        {h.in_cluster ? `${h.cores} CPU · ${h.memory_gb} GB · ${h.status}` : (t('powerHostGone') || 'no longer in the cluster')}
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <input type="checkbox" checked={h.own} disabled={savingHosts || (!h.in_cluster && !h.own)}
+                                                        onChange={e => setHost(h.node, { own: e.target.checked })} />
+                                                </td>
+                                                <td className="pr-2">
+                                                    <input type="number" min="0" step="1" value={h.idle} disabled={savingHosts || !h.own || !h.in_cluster}
+                                                        onChange={e => setHost(h.node, { idle: e.target.value })}
+                                                        className="w-20 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
+                                                </td>
+                                                <td className="pr-2">
+                                                    <input type="number" min="0" step="1" value={h.max} disabled={savingHosts || !h.own || !h.in_cluster}
+                                                        onChange={e => setHost(h.node, { max: e.target.value })}
+                                                        className="w-20 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
+                                                </td>
+                                                <td>
+                                                    <input type="text" maxLength={500} value={h.notes || ''} disabled={savingHosts || !h.own || !h.in_cluster}
+                                                        onChange={e => setHost(h.node, { notes: e.target.value })}
+                                                        className="w-full px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm disabled:opacity-50" />
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                                <div className="flex justify-end gap-2 mt-4">
+                                    <button onClick={() => setHostForm(null)} disabled={savingHosts}
+                                        className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button onClick={saveHosts} disabled={savingHosts}
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        {savingHosts ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
                                         {t('save') || 'Save'}
                                     </button>
                                 </div>
