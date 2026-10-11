@@ -460,7 +460,8 @@ def guest_hit(term, g):
         return guest_index.find(g['entry'], g['live_ips'], value)
     if field == 'tag':
         # every part of the list on one of the tags
-        if all(any(p in tag for tag in g['tags']) for p in term.parts):
+        parts = [p for p in term.parts if p]
+        if parts and all(any(p in tag for tag in g['tags']) for p in parts):
             return 'tag', None, None
         return None
     if field == 'node':

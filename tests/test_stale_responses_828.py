@@ -378,7 +378,10 @@ def _jobs(cid):
 def _cloud_backups(open_slow, hold):
     app = open_slow(layout='cloud', clusters=[CLUSTER, C2], resources=[VM], hold=hold,
                     answers={'/api/clusters/c1/datacenter/backup': (200, _jobs('c1')),
-                             '/api/clusters/c2/datacenter/backup': (200, _jobs('c2'))})
+                             '/api/clusters/c2/datacenter/backup': (200, _jobs('c2')),
+                             # the restore test card of the same page (core/recovery.py)
+                             '/api/clusters/c1/recovery-report': (200, {'guests': [], 'summary': {}}),
+                             '/api/clusters/c2/recovery-report': (200, {'guests': [], 'summary': {}})})
     app.page.get_by_text('Backups').first.click()
     return app
 

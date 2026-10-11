@@ -976,3 +976,21 @@ def test_re_configure_at_the_same_endpoint_keeps_them(reconfigure, db, body):
     assert r.status_code == 200, r.data
     assert 'node_passwords_cleared' not in r.get_json()
     assert db.node_credential_secrets(CID) == {'pve2': PW_B}
+
+
+def test_a_failed_read_of_the_passwords_is_not_kept(monkeypatch):
+    """A read that failed is no answer: the next call asks again instead of serving 'none'
+    for the length of the cache."""
+    import pegaprox.core.db as dbmod
+    calls = []
+
+    class _Db:
+        def node_credential_secrets(self, cluster_id, with_addresses=False):
+            calls.append(cluster_id)
+            if len(calls) == 1:
+                raise RuntimeError('database is locked')
+            return {'pve2': 'own-pw'}, {'pve2': '10.0.0.2'}
+    monkeypatch.setattr(dbmod, 'get_db', lambda: _Db())
+    assert node_creds._loaded(CID) == ({}, {})
+    assert node_creds._loaded(CID) == ({'pve2': 'own-pw'}, {'pve2': '10.0.0.2'})
+    assert len(calls) == 2

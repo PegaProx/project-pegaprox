@@ -95,7 +95,8 @@ def _loaded(cluster_id):
         found, where = get_db().node_credential_secrets(cluster_id, with_addresses=True)
     except Exception as e:
         log.debug(f"[NodeCreds] could not read the node passwords of {cluster_id}: {type(e).__name__}")
-        found, where = {}, {}
+        # not kept: a read that failed is no answer, the next call asks again
+        return {}, {}
     with _lock:
         # a clear that landed while this read ran must not be undone by caching the read
         if gen == (_generation.get(None, 0), _generation.get(cluster_id, 0)):

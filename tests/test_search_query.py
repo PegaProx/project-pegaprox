@@ -529,3 +529,10 @@ def test_ten_thousand_guests_one_expression(api, seed):
     m.get_vm_resources.reset_mock()
     assert _get(client, 'nothing here')[1]['count'] == 0
     assert m.get_vm_resources.call_count == 1
+
+
+def test_a_tag_list_of_empty_parts_finds_nothing(estate, seed):
+    """tag:, has only empty parts; each of them is in every tag, so it found every tagged guest"""
+    admin = _admin(estate, seed)
+    assert _found(admin, 'tag:,') == []
+    assert _found(admin, 'tag:web,') == _found(admin, 'tag:web')

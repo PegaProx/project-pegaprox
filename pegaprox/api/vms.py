@@ -14197,18 +14197,13 @@ def cross_cluster_migrate_api():
     source_manager = cluster_managers[source_cluster_id]
     target_manager = cluster_managers[target_cluster_id]
 
-    # MK Oct 2026 - the preflight first: what it blocks does not start (override as on the bulk
-    # migration), and a dry run answers with it and the steps instead of starting anything
-    pf, refusal = _cross_preflight_for(data, source_cluster_id, target_cluster_id, [vmid], vm_type, target_node,
-                                       storage_map, target_storage, bridge_map, target_bridge, target_vmid,
-                                       online, force_online, delete_source, _xu)
-    if refusal:
-        return refusal
-
-    # MK Oct 2026 - the guest lands as a new one on the target; kept at the source too it is
+    _dry = str((data or {}).get('dry_run', '')).lower() in ('1', 'true', 'yes')
+    # MK Oct 2026 - the quota before the preflight (a refused preflight answers 409 and lets the
+    # hold go again); a dry run takes no hold, its preflight weighs the quota itself.
+    # The guest lands as a new one on the target; kept at the source too it is
     # one more for the tenant quota, moved between two of the tenant's clusters it is not
     from pegaprox.utils.rbac import landing_adds, quota_tenant
-    _qerr, _qwarn = tenant_quota_gate(
+    _qerr, _qwarn = (None, None) if _dry else tenant_quota_gate(
         _xu, f'cross-cluster migration of {vm_type} {vmid}',
         lambda: landing_adds(quota_tenant(_xu), target_cluster_id,
                              guest_size(source_manager, source_node, vm_type, vmid),
@@ -14217,6 +14212,15 @@ def cross_cluster_migrate_api():
         hold={'cluster_id': target_cluster_id, 'vmid': target_vmid or vmid})
     if _qerr:
         return _qerr
+
+    # what the preflight blocks does not start (override as on the bulk
+    # migration), and a dry run answers with it and the steps instead of starting anything
+    pf, refusal = _cross_preflight_for(data, source_cluster_id, target_cluster_id, [vmid], vm_type, target_node,
+                                       storage_map, target_storage, bridge_map, target_bridge, target_vmid,
+                                       online, force_online, delete_source, _xu)
+    if refusal:
+        return refusal
+
     
     # MK: Check VM disk size and warn about potential issues with online migration
     warnings = []

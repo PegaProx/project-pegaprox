@@ -848,7 +848,7 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     _set(cancel_report=undone + rolling_guests_left_moved(mgr), rebooting_nodes=[],
                          log="Scheduled rolling update cancelled")
                 else:
-                    _set(status='completed', log="Scheduled rolling update completed")
+                    _set(status='completed', rebooting_nodes=[], log="Scheduled rolling update completed")
                 
                 # Log audit
                 log_audit('scheduler', 'scheduled.rolling_update', 
@@ -856,8 +856,14 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                 
             except Exception as e:
                 logging.error(f"[SCHEDULER] Rolling update error: {e}")
+                # MK Oct 2026 - the nodes this run put into maintenance come out again, as after a
+                # cancel; the manual run does the same in its own error path
+                try:
+                    rolling_wind_down(mgr, 'scheduler', settle=15, sleep=time.sleep)
+                except Exception as wd:
+                    logging.error(f"[SCHEDULER] Rolling update cleanup after the error failed: {wd}")
                 rolling_rules_back_on(mgr, 'scheduler')   # #954, before the status says the run is over
-                _set(status='failed', error=str(e), log=f"ERROR: {e}")
+                _set(status='failed', error=str(e), rebooting_nodes=[], log=f"ERROR: {e}")
 
         run_id = state.get('run_id')
 
