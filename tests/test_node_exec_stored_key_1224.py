@@ -178,6 +178,15 @@ def test_the_configured_ssh_user_is_the_login_for_the_key_too(monkeypatch):
     assert m.connects[0][1]['login'] == 'pegaprox'
 
 
+def test_the_key_leg_names_the_node_so_a_port_of_its_own_is_dialled(monkeypatch):
+    """node_endpoints: several nodes can sit behind one address on different ports, so
+    _ssh_connect needs the node name to pick the port."""
+    _no_password_leg(monkeypatch)
+    m = _Mgr(answers=[_Client(out=b'ok')])
+    ssh_mod._pve_node_exec(m, 'pve2', 'true')
+    assert m.connects[0][1]['node'] == 'pve2'
+
+
 def test_the_exit_status_and_stderr_come_back_as_the_node_said_them(monkeypatch):
     _no_password_leg(monkeypatch)
     m = _Mgr(answers=[_Client(out=b'', err=b'pvesm: storage does not exist\n', rc=2)])

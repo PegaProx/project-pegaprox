@@ -1642,6 +1642,13 @@
         // into it dial its nodes in (core/transfer_net.py). Each node's address comes from the
         // server's cache, nodes it still reads come back pending and are asked for again.
         const XFER_NET_V4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
+        // The port a node's own web UI answers on: its entry, else the cluster's, else
+        // the Proxmox default. Only the "Open in Proxmox" links use this.
+        function nodeApiPortOf(cluster, node) {
+            const entry = ((cluster && cluster.node_endpoints) || {})[node] || {};
+            return entry.api_port || (cluster && cluster.api_port) || 8006;
+        }
+
         function xferNetValid(value) {
             const v = (value || '').trim();
             if (!v) return true;
@@ -2101,6 +2108,160 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            );
+        }
+
+        // Per-node address and port overrides. A cluster reached through one forward per
+        // node has no single ssh_port and no node at the address it reports for itself, so
+        // the deviating nodes are named here. Empty fields mean "as the cluster", which is
+        // every node until someone fills one in.
+        function NodeEndpointsSection({ cluster, nodes, authFetch, addToast, t, canEdit, haReadOnly, onSaved }) {
+            const saved = cluster.node_endpoints || {};
+            const [draft, setDraft] = React.useState(saved);
+            const [secret, setSecret] = React.useState('');
+            const [needsSecret, setNeedsSecret] = React.useState(false);
+            const [saving, setSaving] = React.useState(false);
+
+            React.useEffect(() => { setDraft(saved); setSecret(''); setNeedsSecret(false); }, [cluster.id, saved]);
+
+            const clusterSsh = cluster.ssh_port || 22;
+            const clusterApi = cluster.api_port || 8006;
+            const names = (nodes || []).map(n => typeof n === 'string' ? n : (n && (n.node || n.name)))
+                .filter(Boolean).sort();
+            // a node that has an entry but is not in the list any more still has to be editable
+            const rows = Array.from(new Set(names.concat(Object.keys(saved)))).sort();
+
+            const field = (node, key) => {
+                const v = (draft[node] || {})[key];
+                return v === undefined || v === null ? '' : String(v);
+            };
+
+            const setField = (node, key, raw) => {
+                const value = raw.trim();
+                setDraft(prev => {
+                    const entry = { ...(prev[node] || {}) };
+                    if (!value) delete entry[key];
+                    else entry[key] = key === 'host' ? value : (parseInt(value, 10) || '');
+                    const next = { ...prev };
+                    if (Object.keys(entry).length) next[node] = entry; else delete next[node];
+                    return next;
+                });
+            };
+
+            const clean = React.useMemo(() => {
+                const out = {};
+                Object.entries(draft).forEach(([node, entry]) => {
+                    const e = {};
+                    if (entry.host) e.host = String(entry.host).trim();
+                    ['ssh_port', 'api_port'].forEach(k => {
+                        const n = parseInt(entry[k], 10);
+                        if (n >= 1 && n <= 65535) e[k] = n;
+                    });
+                    if (Object.keys(e).length) out[node] = e;
+                });
+                return out;
+            }, [draft]);
+
+            const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
+            const portsOk = Object.values(draft).every(e =>
+                ['ssh_port', 'api_port'].every(k => {
+                    const raw = e[k];
+                    if (raw === undefined || raw === '' || raw === null) return true;
+                    const n = parseInt(raw, 10);
+                    return n >= 1 && n <= 65535;
+                }));
+
+            const save = async () => {
+                if (!dirty || !portsOk) return;
+                setSaving(true);
+                try {
+                    const body = { node_endpoints: clean };
+                    if (secret) body.pass = secret;
+                    const r = await authFetch(`${API_URL}/clusters/${cluster.id}/config`, {
+                        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    if (!r || !r.ok) {
+                        const d = r ? await r.json().catch(() => null) : null;
+                        // pointing a node somewhere new sends the cluster's credential there,
+                        // so the server asks for it to be typed again (same rule as the host)
+                        if (d && d.code === 'CREDENTIAL_REQUIRED') {
+                            setNeedsSecret(true);
+                            addToast(t('nodeEpCredNeeded'), 'error');
+                            return;
+                        }
+                        addToast(await PegaProxApiErrors.message(r, t('saveError')), 'error');
+                        return;
+                    }
+                    setSecret('');
+                    setNeedsSecret(false);
+                    onSaved(clean);
+                    addToast(t('nodeEpSaved'));
+                } finally {
+                    setSaving(false);
+                }
+            };
+
+            const inputCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300 disabled:opacity-50';
+
+            return (
+                <div className="space-y-3 min-w-0" data-node-endpoints>
+                    <div>
+                        <h4 className="text-sm font-medium text-gray-400 mb-1 flex items-center gap-2">
+                            <Icons.Server className="w-4 h-4" />
+                            {t('nodeEpTitle')}
+                        </h4>
+                        <p className="text-xs text-gray-500">{t('nodeEpDesc')}</p>
+                    </div>
+                    <fieldset disabled={haReadOnly || !canEdit} className="min-w-0 space-y-2"
+                        data-ha-locked={haReadOnly ? '' : undefined} data-node-ep-edit>
+                        {rows.length === 0 && <div className="text-xs text-gray-500" data-node-ep-empty>{t('nodeEpNoNodes')}</div>}
+                        {rows.length > 0 && (
+                            <div className="space-y-1 max-h-80 overflow-y-auto">
+                                <div className="flex items-center gap-2 text-xs text-gray-500 px-2">
+                                    <span className="w-28 shrink-0">{t('nodeEpNode')}</span>
+                                    <span className="flex-1 min-w-0">{t('nodeEpHost')}</span>
+                                    <span className="w-20 shrink-0">{t('nodeEpSsh')}</span>
+                                    <span className="w-20 shrink-0">{t('nodeEpGui')}</span>
+                                </div>
+                                {rows.map(node => (
+                                    <div key={node} data-node-ep-row={node}
+                                        className="flex items-center gap-2 bg-proxmox-dark rounded px-2 py-1 min-w-0">
+                                        <span className="w-28 shrink-0 font-mono text-xs text-gray-300 truncate" title={node}>{node}</span>
+                                        <input type="text" value={field(node, 'host')} spellCheck={false} maxLength={255}
+                                            onChange={e => setField(node, 'host', e.target.value)}
+                                            placeholder={t('nodeEpHostAuto')} aria-label={`${node} ${t('nodeEpHost')}`}
+                                            className={`${inputCls} font-mono flex-1 min-w-0`} />
+                                        <input type="number" min="1" max="65535" value={field(node, 'ssh_port')}
+                                            onChange={e => setField(node, 'ssh_port', e.target.value)}
+                                            placeholder={String(clusterSsh)} aria-label={`${node} ${t('nodeEpSsh')}`}
+                                            className={`${inputCls} w-20 shrink-0 font-mono`} />
+                                        <input type="number" min="1" max="65535" value={field(node, 'api_port')}
+                                            onChange={e => setField(node, 'api_port', e.target.value)}
+                                            placeholder={String(clusterApi)} aria-label={`${node} ${t('nodeEpGui')}`}
+                                            className={`${inputCls} w-20 shrink-0 font-mono`} />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        {!portsOk && <div className="text-xs text-red-400" data-node-ep-invalid>{t('nodeEpBadPort')}</div>}
+                        {needsSecret && (
+                            <div className="space-y-1" data-node-ep-secret>
+                                <div className="text-xs text-yellow-400">{t('nodeEpCredNeeded')}</div>
+                                <input type="password" value={secret} autoComplete="off"
+                                    onChange={e => setSecret(e.target.value)} placeholder={t('nodeEpCredPlaceholder')}
+                                    aria-label={t('nodeEpCredPlaceholder')} className={`${inputCls} w-full`} />
+                            </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                            <button type="button" onClick={save} disabled={!dirty || !portsOk || saving} data-node-ep-save
+                                className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50 disabled:cursor-not-allowed">
+                                {t('save')}
+                            </button>
+                            {dirty && <span className="text-xs text-gray-500">{t('nodeEpUnsaved')}</span>}
+                        </div>
+                    </fieldset>
                 </div>
             );
         }
@@ -7889,7 +8050,7 @@
                                 </div>
 
                                 {/* Inbox */}
-                                <div className="max-h-72 overflow-y-auto">
+                                <div className="max-h-80 overflow-y-auto">
                                     {leaderAway && (
                                         <div data-ha-leader-away="inbox" className="px-3 py-6 text-center text-xs text-gray-400">
                                             {t('pgHaLeaderAwayView')}
@@ -22816,6 +22977,7 @@
                                                                     metrics={metrics}
                                                                     clusterId={selectedCluster.id}
                                                                     nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
+                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, node)}
                                                                     onOpenNodeConfig={(nodeName) => setConfigNode(nodeName)}
                                                                     onMaintenanceToggle={handleMaintenanceToggle}
                                                                     onStartUpdate={handleStartUpdate}
@@ -22828,12 +22990,14 @@
                                                             {Object.entries(knownNodes)
                                                                 .filter(([nodeName, nodeData]) => nodeData.status === 'offline' && !clusterMetrics[nodeName])
                                                                 .map(([nodeName]) => (
-                                                                <NodeCompactRow key={`offline-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''} />
+                                                                <NodeCompactRow key={`offline-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
+                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, nodeName)} />
                                                             ))}
                                                             {Object.entries(nodeAlerts)
                                                                 .filter(([nodeName, alert]) => alert.cluster_id === selectedCluster.id && !clusterMetrics[nodeName] && !knownNodes[nodeName]?.status)
                                                                 .map(([nodeName]) => (
-                                                                <NodeCompactRow key={`alert-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''} />
+                                                                <NodeCompactRow key={`alert-${nodeName}`} name={nodeName} metrics={null} clusterId={selectedCluster.id} nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
+                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, nodeName)} />
                                                             ))}
                                                         </div>
                                                         ) : (
@@ -22849,6 +23013,7 @@
                                                                     index={idx}
                                                                     clusterId={selectedCluster.id}
                                                                     nodeUiSuffix={selectedCluster.node_ui_suffix || ''}
+                                                                    nodeApiPort={nodeApiPortOf(selectedCluster, node)}
                                                                     onMaintenanceToggle={handleMaintenanceToggle}
                                                                     onStartUpdate={handleStartUpdate}
                                                                     onOpenNodeConfig={(nodeName) => setConfigNode(nodeName)}
@@ -26474,6 +26639,18 @@
                                                                 authFetch={authFetch} addToast={addToast} t={t}
                                                                 canEdit={can('cluster.config')} haReadOnly={haReadOnly}
                                                                 onSaved={v => setSelectedCluster(prev => prev ? {...prev, transfer_network: v} : prev)} />
+                                                        </div>
+                                                    )}
+
+                                                    {/* where a node deviates from the cluster: its own address and ports,
+                                                        for a cluster reached through one forward per node */}
+                                                    {(selectedCluster.cluster_type || 'proxmox') === 'proxmox' && can('cluster.view') && (
+                                                        <div className="pt-4 border-t border-proxmox-border">
+                                                            <NodeEndpointsSection key={selectedCluster.id} cluster={selectedCluster}
+                                                                nodes={Object.keys(clusterMetrics)}
+                                                                authFetch={authFetch} addToast={addToast} t={t}
+                                                                canEdit={can('cluster.config')} haReadOnly={haReadOnly}
+                                                                onSaved={v => setSelectedCluster(prev => prev ? {...prev, node_endpoints: v} : prev)} />
                                                         </div>
                                                     )}
 

@@ -443,7 +443,7 @@ def _run_deploy(dep_id, cluster_id, node, template_id, storage, vmid, vm_name):
 
     ssh = None
     try:
-        ssh = mgr._ssh_connect(target_host)
+        ssh = mgr._ssh_connect(target_host, node=node if node_ip else None)
         if not ssh:
             _update_dep(dep_id, status='failed', error='SSH connect failed',
                         finished_at=_now_iso())

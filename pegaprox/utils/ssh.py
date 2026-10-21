@@ -652,7 +652,7 @@ def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback, stdin_da
     try:
         client = pve_mgr._ssh_connect(host, retries=1, connect_timeout=8, failure=failure,
                                       login=user, quiet=True, guard_asked=True,
-                                      queue_wait=min(120, max(10, int(timeout))))
+                                      queue_wait=min(120, max(10, int(timeout))), node=node)
     except Exception as e:
         client, failure = None, {'kind': 'error', 'detail': str(e)}
     if client is not None:

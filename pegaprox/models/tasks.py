@@ -26,6 +26,101 @@ def balancer_cooldown(value):
     return min(max(secs, BALANCER_COOLDOWN_MIN), BALANCER_COOLDOWN_MAX)
 
 
+def endpoint_port(value):
+    """A port as a plain int inside 1..65535, or None when it is unset or unusable."""
+    # bool is an int in Python and True would become port 1. A fractional number is not
+    # a port either, and int() would quietly make 2201.5 into 2201.
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    if port != value and str(value).strip() != str(port):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def endpoint_host(value):
+    """An address as a bare host, or None.
+
+    Only the shape is judged here, not whether it resolves. A scheme, a path or a
+    port glued to the address are all rejected rather than cleaned up: an endpoint
+    is dialled by several call paths that each build their own URL, and one of them
+    would end up with "https://host:2201:8006".
+    """
+    if not isinstance(value, str):
+        return None
+    host = value.strip().strip("[]")
+    if not host or len(host) > 255:
+        return None
+    if any(c in host for c in " \t/\\@?#"):
+        return None
+    # "host:2201" is a host and a port, and the port has its own field. One colon is
+    # that; an IPv6 address has at least two and keeps them.
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        return None
+    return host
+
+
+def normalize_node_endpoints(raw):
+    """{node: {host, ssh_port, api_port}} with everything unusable dropped.
+
+    An entry that overrides nothing is dropped too, so the stored map only ever holds
+    nodes that actually deviate. Never raises: a malformed map costs the override, not
+    the cluster.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    endpoints = {}
+    for node, spec in raw.items():
+        if not isinstance(node, str) or not node.strip():
+            continue
+        if not isinstance(spec, dict):
+            continue
+        entry = {}
+        host = endpoint_host(spec.get("host"))
+        if host:
+            entry["host"] = host
+        for key in ("ssh_port", "api_port"):
+            port = endpoint_port(spec.get(key))
+            if port is not None:
+                entry[key] = port
+        if entry:
+            endpoints[node.strip()] = entry
+    return endpoints
+
+
+def node_endpoint_of(config, node_name) -> dict:
+    """What a cluster overrides for one node: {host?, ssh_port?, api_port?}.
+
+    Empty for every node of an ordinary cluster, which is all of them until an operator
+    fills the map in, so the lookup stays off the hot paths by being a dict miss rather
+    than a probe.
+    """
+    if not node_name:
+        return {}
+    endpoints = getattr(config, 'node_endpoints', None) or {}
+    entry = endpoints.get(node_name)
+    return entry if isinstance(entry, dict) else {}
+
+
+def ssh_port_of(config, node_name=None) -> int:
+    """The SSH port to dial one node at, its own or the cluster's."""
+    port = node_endpoint_of(config, node_name).get('ssh_port')
+    if port:
+        return int(port)
+    return getattr(config, 'ssh_port', 22) or 22
+
+
+def api_port_of(config, node_name=None) -> int:
+    """The API port to dial one node at, its own or the cluster's."""
+    port = node_endpoint_of(config, node_name).get('api_port')
+    if port:
+        return int(port)
+    return getattr(config, 'api_port', 8006) or 8006
+
+
 class MaintenanceTask:
     """Tracks a node evacuation/maintenance task"""
 
@@ -169,6 +264,11 @@ class PegaProxConfig:
                 self.api_port = 8006
         except (TypeError, ValueError):
             self.api_port = 8006
+        # A node is normally reached at the address it reports for itself and at the
+        # cluster's ssh_port/api_port. Where that is not true -- a NAT forward per node
+        # in front of one public address, a node behind its own firewall -- the node
+        # gets an entry here and that entry wins over discovery for it.
+        self.node_endpoints = normalize_node_endpoints(cluster_data.get('node_endpoints', {}))
         self.ha_settings = cluster_data.get('ha_settings', {})
         self.excluded_nodes = cluster_data.get('excluded_nodes', [])
         self.smbios_autoconfig = cluster_data.get('smbios_autoconfig', {})

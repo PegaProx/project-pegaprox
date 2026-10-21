@@ -13,7 +13,8 @@ from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
 from pegaprox.models.tasks import (PegaProxConfig, balancer_cooldown, BALANCER_COOLDOWN_MIN,
-                                   BALANCER_COOLDOWN_MAX)
+                                   BALANCER_COOLDOWN_MAX, normalize_node_endpoints,
+                                   endpoint_host, endpoint_port)
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
 from pegaprox.core.cache import StorageDataCache
@@ -155,6 +156,9 @@ def get_clusters():
                 'ha_enabled': mgr.config.ha_enabled,
                 'fallback_hosts': mgr.config.fallback_hosts,
                 'excluded_nodes': getattr(mgr.config, 'excluded_nodes', []),
+                'node_endpoints': getattr(mgr.config, 'node_endpoints', {}) or {},
+                'ssh_port': getattr(mgr.config, 'ssh_port', 22) or 22,
+                'api_port': getattr(mgr.config, 'api_port', 8006) or 8006,
                 'current_host': getattr(mgr, '_original_host', None) or getattr(mgr, 'current_host', None),
                 'last_run': mgr.last_run.isoformat() if mgr.last_run else None,
                 'api_token_active': bool(getattr(mgr, '_using_api_token', False)),
@@ -208,6 +212,9 @@ def add_cluster():
     _sfx_err = _node_ui_suffix_error(data)
     if _sfx_err:
         return _sfx_err
+    _ne_err = _node_endpoints_error(data)
+    if _ne_err:
+        return _ne_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -465,6 +472,9 @@ def reconfigure_cluster(cluster_id):
     if _xn_err:
         return _xn_err
     data.setdefault('transfer_network', getattr(old_mgr.config, 'transfer_network', '') or '')
+    _ne_err = _node_endpoints_error(data)
+    if _ne_err:
+        return _ne_err
     _sfx_err = _node_ui_suffix_error(data)
     if _sfx_err:
         return _sfx_err
@@ -534,7 +544,7 @@ _KEPT_BY_RECONFIGURE = (
     'ssh_user', 'ssh_port', 'ssh_disabled', 'api_port', 'excluded_nodes', 'smbios_autoconfig',
     'vnc_tunnel', 'latitude', 'longitude', 'location_label', 'node_ui_suffix',
     'predictive_balancing', 'predictive_threshold', 'balance_cpu_weight', 'balance_mem_weight',
-    'balance_io_weight', 'cpu_baseline', 'backup_sla_max_age_hours',
+    'balance_io_weight', 'cpu_baseline', 'backup_sla_max_age_hours', 'node_endpoints',
 )
 
 
@@ -2089,6 +2099,7 @@ ALLOWED_CONFIG_FIELDS = {
     'proxlb_pins_auto_migrate',  # opt-in: migrate guests back onto their plb_pin_ node
     'proxlb_pins_strict',  # opt-in: a pin also vetoes a maintenance evacuation
     'node_ui_suffix',  # MK Aug 2026 (#689) — FQDN suffix for "Open in Proxmox" node links
+    'node_endpoints',  # per-node address/port overrides, see docs/node-endpoints.md
     'transfer_network',  # MK Oct 2026 - CIDR for remote migrations into this cluster
 }
 
@@ -2155,6 +2166,44 @@ def _node_ui_suffix_error(data):
     return None
 
 
+def _node_endpoints_error(data):
+    """A 400 when the body sets node_endpoints to anything but {node: {host?, ssh_port?,
+    api_port?}}. Normalises it in place.
+
+    Rejected rather than quietly dropped: an operator who mistypes a port here would
+    otherwise be told the cluster saved fine and find PegaProx still dialling the old
+    one, which is the failure this map exists to end.
+    """
+    if 'node_endpoints' not in data:
+        return None
+    raw = data['node_endpoints']
+    if raw is None:
+        data['node_endpoints'] = {}
+        return None
+    if not isinstance(raw, dict):
+        return jsonify({'error': 'node_endpoints must be an object keyed by node name'}), 400
+    for node, spec in raw.items():
+        if not isinstance(node, str) or not node.strip():
+            return jsonify({'error': 'node_endpoints keys must be node names'}), 400
+        if not isinstance(spec, dict):
+            return jsonify({'error': f"node_endpoints[{node}] must be an object"}), 400
+        unknown = set(spec) - {'host', 'ssh_port', 'api_port'}
+        if unknown:
+            return jsonify({'error': f"node_endpoints[{node}]: unknown field "
+                                     f"{sorted(unknown)[0]!r}"}), 400
+        host = spec.get('host')
+        if host not in (None, '') and not endpoint_host(host):
+            return jsonify({'error': f"node_endpoints[{node}]: host must be a bare host name "
+                                     f"or address, without scheme, path or port"}), 400
+        for key in ('ssh_port', 'api_port'):
+            port = spec.get(key)
+            if port not in (None, '') and endpoint_port(port) is None:
+                return jsonify({'error': f"node_endpoints[{node}]: {key} must be a port "
+                                         f"between 1 and 65535"}), 400
+    data['node_endpoints'] = normalize_node_endpoints(raw)
+    return None
+
+
 def _ssh_user_error(data):
     """A 400 when the body names an ssh_user that is no login name. Normalises it in
     place; empty means the default user."""
@@ -2192,8 +2241,10 @@ def _config_edit_checks(mgr, data):
         return (jsonify({'error': msg}), 400), None
 
     known = set()
-    if 'host' in data or 'fallback_hosts' in data:
+    if 'host' in data or 'fallback_hosts' in data or 'node_endpoints' in data:
         known = {_host_key(cfg.host)} | {_host_key(h) for h in (getattr(cfg, 'fallback_hosts', None) or [])}
+        known |= {_host_key(e.get('host')) for e in (getattr(cfg, 'node_endpoints', None) or {}).values()
+                  if e.get('host')}
     moved = []
     if 'host' in data:
         host = data.get('host')
@@ -2229,6 +2280,26 @@ def _config_edit_checks(mgr, data):
             old_port = 22
         if data['ssh_port'] != old_port:
             moved.append('ssh_port')
+    # An endpoint map moves the credential exactly as host and ssh_port do: the cluster
+    # password or token secret is offered at every address PegaProx dials a node at, and
+    # the port decides which listener receives it. New address or changed port, so the
+    # same rule -- type the credential again. _node_endpoints_error has already
+    # normalised the map by the time this runs.
+    if 'node_endpoints' in data:
+        current = getattr(cfg, 'node_endpoints', None) or {}
+        for node, spec in (data.get('node_endpoints') or {}).items():
+            host = spec.get('host')
+            if host and _host_key(host) not in known:
+                if not validate_host_address(host):
+                    return bad(f"node_endpoints[{node}]: host must be a host name or an IP address")
+                moved.append('node_endpoints')
+                break
+            if spec.get('ssh_port') and spec['ssh_port'] != current.get(node, {}).get('ssh_port'):
+                moved.append('node_endpoints')
+                break
+            if spec.get('api_port') and spec['api_port'] != current.get(node, {}).get('api_port'):
+                moved.append('node_endpoints')
+                break
     if 'ssl_verification' in data and getattr(cfg, 'ssl_verification', False) \
             and not data.get('ssl_verification'):
         moved.append('ssl_verification')
@@ -2323,6 +2394,9 @@ def update_cluster_config(cluster_id):
     _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
+    _ne_err = _node_endpoints_error(data)
+    if _ne_err:
+        return _ne_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err
@@ -2378,6 +2452,9 @@ def update_cluster_config_live(cluster_id):
     _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
+    _ne_err = _node_endpoints_error(data)
+    if _ne_err:
+        return _ne_err
     _err, rebind = _config_edit_checks(mgr, data)
     if _err:
         return _err

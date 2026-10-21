@@ -553,7 +553,7 @@ def _sync_manager(addresses):
     m._own_password_at = lambda host: ''
     sent = []
 
-    def connect(ip):
+    def connect(ip, **kw):
         client = MagicMock()
 
         def exec_command(cmd, timeout=None):

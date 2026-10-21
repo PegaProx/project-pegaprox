@@ -10,6 +10,7 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from pegaprox.models.permissions import ROLE_ADMIN
+from pegaprox.models.tasks import node_endpoint_of
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, require_unconfined
@@ -125,6 +126,11 @@ def _get_any_online_node(manager):
 def _resolve_node_ip(manager, node_name):
     """MK: resolve node name to IP via cluster/status API
     We need the actual IP for SSH, not the node name."""
+    # An address configured for the node wins over the one it reports for itself,
+    # the same way manager._get_node_ip treats it.
+    configured = node_endpoint_of(getattr(manager, 'config', None), node_name).get('host')
+    if configured:
+        return configured
     try:
         session = manager._create_session()
         resp = session.get(f"https://{manager.host}:{manager.api_port}/api2/json/cluster/status", timeout=8)
@@ -138,7 +144,7 @@ def _resolve_node_ip(manager, node_name):
     return manager.raw_host
 
 
-def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
+def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True, node=None):
     """MK: Mar 2026 - Execute rbd command over SSH
     Returns (data, None) on success or (None, error_response) on failure.
 
@@ -147,7 +153,7 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
     """
     ssh = None
     try:
-        ssh = manager._ssh_connect(node_ip)
+        ssh = manager._ssh_connect(node_ip, node=node)
         if not ssh:
             return None, (jsonify({'error': 'SSH connection failed - check SSH credentials in cluster settings'}), 503)
 
@@ -193,7 +199,7 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
                 pass
 
 
-def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True):
+def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True, node=None):
     """MK Jul 2026 — run several rbd commands over ONE SSH connection.
 
     _rbd_cmd opens+auths+tears-down a fresh SSH session per call, so the mirror
@@ -205,7 +211,7 @@ def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True):
     """
     ssh = None
     try:
-        ssh = manager._ssh_connect(node_ip)
+        ssh = manager._ssh_connect(node_ip, node=node)
         if not ssh:
             err = (jsonify({'error': 'SSH connection failed - check SSH credentials in cluster settings'}), 503)
             return [(None, err) for _ in arg_list]
@@ -1191,7 +1197,7 @@ def get_mirror_overview(cluster_id):
     # MK Jul 2026 — was 1-2 fresh SSH connects PER pool; now one connection for
     # all `mirror pool info` calls, then one more for the enabled pools' status.
     entries = {}
-    infos = _rbd_batch(manager, node_ip, [f'mirror pool info {p}' for p in pnames])
+    infos = _rbd_batch(manager, node_ip, [f'mirror pool info {p}' for p in pnames], node=node)
     for pname, (info, info_err) in zip(pnames, infos):
         entry = {'name': pname, 'mode': 'disabled', 'peers': [], 'health': None, 'image_count': 0}
         if not info_err and isinstance(info, dict):
@@ -1203,7 +1209,7 @@ def get_mirror_overview(cluster_id):
 
     enabled = [p for p in pnames if entries[p]['mode'] != 'disabled']
     if enabled:
-        statuses = _rbd_batch(manager, node_ip, [f'mirror pool status {p}' for p in enabled])
+        statuses = _rbd_batch(manager, node_ip, [f'mirror pool status {p}' for p in enabled], node=node)
         for pname, (status, st_err) in zip(enabled, statuses):
             if not st_err and isinstance(status, dict):
                 summary = status.get('summary', {})
@@ -1232,7 +1238,7 @@ def get_mirror_pool_status(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool status {pool}')
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool status {pool}', node=node)
     if cmd_err: return cmd_err
     return jsonify(data)
 
@@ -1260,7 +1266,7 @@ def enable_mirror_pool(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool enable {pool} {mode}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool enable {pool} {mode}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1286,7 +1292,7 @@ def disable_mirror_pool(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool disable {pool}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool disable {pool}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1335,7 +1341,7 @@ def add_mirror_peer(cluster_id, pool):
             return jsonify({'error': 'Invalid monitor host format'}), 400
         cmd += f' --mon-host {mon_host}'
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1364,7 +1370,7 @@ def remove_mirror_peer(cluster_id, pool, uuid):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool peer remove {pool} {uuid}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool peer remove {pool} {uuid}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1397,7 +1403,7 @@ def list_mirror_images(cluster_id, pool):
     # ONE connection: `ls` for the full image list (so non-mirrored images still
     # show) + a single `mirror pool status --verbose` that carries every image's
     # mirror state. Two SSH round-trips regardless of image count.
-    both = _rbd_batch(manager, node_ip, [f'ls {pool}', f'mirror pool status {pool} --verbose'])
+    both = _rbd_batch(manager, node_ip, [f'ls {pool}', f'mirror pool status {pool} --verbose'], node=node)
     images_data, img_err = both[0]
     if img_err: return img_err
     status_data, _st_err = both[1]
@@ -1476,7 +1482,7 @@ def get_mirror_image_status(cluster_id, pool, image):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image status {pool}/{image}')
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image status {pool}/{image}', node=node)
     if cmd_err: return cmd_err
     return jsonify(data)
 
@@ -1504,7 +1510,7 @@ def enable_mirror_image(cluster_id, pool, image):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image enable {pool}/{image} {mode}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image enable {pool}/{image} {mode}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1530,7 +1536,7 @@ def disable_mirror_image(cluster_id, pool, image):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image disable {pool}/{image}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image disable {pool}/{image}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1563,7 +1569,7 @@ def promote_mirror_image(cluster_id, pool, image):
     if force:
         cmd += ' --force'
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1589,7 +1595,7 @@ def demote_mirror_image(cluster_id, pool, image):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image demote {pool}/{image}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image demote {pool}/{image}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1615,7 +1621,7 @@ def resync_mirror_image(cluster_id, pool, image):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image resync {pool}/{image}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image resync {pool}/{image}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1642,7 +1648,7 @@ def get_mirror_schedules(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule list --pool {pool}')
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule list --pool {pool}', node=node)
     # NS 2026-07-17: `rbd mirror snapshot schedule list` exits non-zero on a pool
     # that has no mirroring configured — that's "no schedules", not a failure, so
     # return an empty list for that benign case. But _rbd_cmd also returns errors
@@ -1680,7 +1686,7 @@ def add_mirror_schedule(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule add --pool {pool} {interval}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule add --pool {pool} {interval}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')
@@ -1711,7 +1717,7 @@ def remove_mirror_schedule(cluster_id, pool):
     if node_err: return node_err
     node_ip = _resolve_node_ip(manager, node)
 
-    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule remove --pool {pool} {interval}', expect_json=False)
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule remove --pool {pool} {interval}', expect_json=False, node=node)
     if cmd_err: return cmd_err
 
     usr = getattr(request, 'session', {}).get('user', 'system')

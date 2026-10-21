@@ -2212,7 +2212,7 @@ def restore_backup_file(cluster_id, node, vm_type, vmid):
                                         f'Guest agent file-write failed: {parse_pve_error(agent_resp.text)}')
         else:
             ssh_failure = {}
-            ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, failure=ssh_failure)
+            ssh = manager._ssh_connect(node_ip, retries=2, retry_delay=1.0, failure=ssh_failure, node=node)
             if not ssh:
                 why = ssh_failure.get('kind') or 'error'
                 return jsonify({'error': f'SSH to node {node} failed ({why})', 'code': 'SSH_FAILED'}), 502
@@ -4379,7 +4379,7 @@ def node_action_api(cluster_id, node_name, action):
         if not node_ip:
             return jsonify({'error': f'Could not determine IP for {node_name}'}), 500
         
-        ssh = mgr._ssh_connect(node_ip)
+        ssh = mgr._ssh_connect(node_ip, node=node_name)
         if not ssh:
             if not getattr(mgr.config, 'ssh_key', ''):
                 return jsonify({'error': 'SSH connection failed'}), 500
@@ -9615,6 +9615,9 @@ def _xcincr_ssh(mgr, node, job_id):
     via = transfer_ssh_address(mgr, node, mgmt_ip)
     if via:
         failure = {}
+        # No `node` here on purpose: a transfer address is the node's own address on the
+        # transfer network and is dialled directly, so it answers on the cluster's SSH
+        # port, not on whatever forwards the node's management address.
         client = mgr._ssh_connect(via, retries=1, connect_timeout=10, failure=failure,
                                   pinned_as=mgmt_ip)
         if client:
@@ -9624,7 +9627,7 @@ def _xcincr_ssh(mgr, node, job_id):
         logging.warning(f"[XCINCR] Job {job_id}: transfer address {via} of {node} not used "
                         f"({failure.get('kind') or 'error'}: {failure.get('detail') or 'no connection'}) - "
                         f"relaying over its management address {mgmt_ip}")
-    return mgr._ssh_connect(mgmt_ip)
+    return mgr._ssh_connect(mgmt_ip, node=node)
 
 
 def _xcincr_rbd_pool(ssh, storage):
@@ -12785,6 +12788,8 @@ async def ssh_handler(websocket):
     node_ip = None
     cluster_host = None
     node_ips = {}
+    node_ports = {}
+    ssh_port = 22
     known_only = False
     try:
         if ws_token:
@@ -12837,6 +12842,8 @@ async def ssh_handler(websocket):
                 ctx = payload.get('cluster_context') or {}
                 cluster_host = ctx.get('host')
                 node_ips = ctx.get('node_ips') or {}
+                node_ports = ctx.get('node_ports') or {}
+                ssh_port = int(ctx.get('ssh_port') or 22)
                 print(f"validate→ host={cluster_host} node_ips={node_ips}")
             except Exception as e:
                 print(f"Could not parse validate payload: {e}")
@@ -12854,6 +12861,8 @@ async def ssh_handler(websocket):
                     creds = rc.json()
                     cluster_host = creds.get('host')
                     node_ips = creds.get('node_ips', {})
+                    node_ports = creds.get('node_ports') or {}
+                    ssh_port = int(creds.get('ssh_port') or 22)
             except Exception as e:
                 print(f"Could not get node IP from API: {e}")
 
@@ -12884,7 +12893,8 @@ async def ssh_handler(websocket):
         await websocket.send(json.dumps({'status': 'error', 'message': f'Could not find the address of node {node}'}))
         await websocket.close(1008, "node address unknown")
         return
-    print(f"Final node IP for {node}: {node_ip}")
+    node_ssh_port = int(node_ports.get(node) or node_ports.get(node.lower()) or ssh_port or 22)
+    print(f"Final node IP for {node}: {node_ip}:{node_ssh_port}")
 
     # Send need_credentials status - frontend will show login dialog
     await websocket.send(json.dumps({
@@ -13017,7 +13027,7 @@ async def ssh_handler(websocket):
                 
                 if pkey:
                     print(f"Using SSH key authentication")
-                    ssh.connect(_ssh_host, port=22, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
+                    ssh.connect(_ssh_host, port=node_ssh_port, username=ssh_user, pkey=pkey, timeout=10, look_for_keys=False, allow_agent=False)
                     _persist_ssh_hostkeys()
                 else:
                     raise Exception("Could not parse SSH key - unsupported format")
@@ -13028,7 +13038,7 @@ async def ssh_handler(websocket):
                 return
         else:
             # Password authentication
-            ssh.connect(_ssh_host, port=22, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
+            ssh.connect(_ssh_host, port=node_ssh_port, username=ssh_user, password=ssh_pass, timeout=10, look_for_keys=False, allow_agent=False)
             _persist_ssh_hostkeys()
 
         channel = ssh.invoke_shell(term='xterm-256color', width=120, height=40)

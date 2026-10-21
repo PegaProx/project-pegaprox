@@ -98,7 +98,8 @@ from pegaprox.globals import (
     _ssh_connection_lock, task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_cooldown,
-                                   BALANCER_COOLDOWN_DEFAULT)
+                                   BALANCER_COOLDOWN_DEFAULT, node_endpoint_of,
+                                   ssh_port_of, api_port_of)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
 from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
@@ -988,6 +989,9 @@ class PegaProxManager:
         self._using_api_token = False
         self._last_ssh_block_logged = None  # #941 — say it once, not once per probe
         self.current_host = None  # Track which host we're connected to (resolved IP after #279)
+        # The API port of the host currently connected to. Equals the cluster's port
+        # until a failover lands on a node that has its own.
+        self._connected_api_port = None
         self._original_host = None  # original hostname before DNS resolution
         self._ssl_verify = False
         
@@ -1216,8 +1220,34 @@ class PegaProxManager:
         MK May 2026 — added so deployments with non-standard PVE listen ports
         (firewall constraints, jumpbox setups) can use PegaProx without
         forcing a reverse-proxy in front of PVE (which would terminate TLS
-        and create a MitM-able intermediate hop)."""
-        return getattr(self.config, 'api_port', 8006)
+        and create a MitM-able intermediate hop).
+
+        After a failover this is the port of the node answering, not the cluster's:
+        self.host moved with the failover, and every URL built from it afterwards has
+        to go to the same place."""
+        return getattr(self, '_connected_api_port', None) or self.cluster_api_port
+
+    @property
+    def cluster_api_port(self) -> int:
+        """The cluster's configured API port, whatever a failover is connected on."""
+        return getattr(self.config, 'api_port', 8006) or 8006
+
+    def node_endpoint(self, node_name) -> dict:
+        """What this cluster overrides for one node: {host?, ssh_port?, api_port?}."""
+        return node_endpoint_of(self.config, node_name)
+
+    def ssh_port_for(self, node_name=None) -> int:
+        """The SSH port to dial one node at, its own or the cluster's."""
+        return ssh_port_of(self.config, node_name)
+
+    def api_port_for(self, node_name=None) -> int:
+        """The API port to dial one node at, its own or the cluster's.
+
+        Only for a leg that goes straight to that node (a failover onto it, the
+        reachability probe, the link the UI offers). Everything routed through the
+        cluster host keeps using `api_port`: Proxmox answers for every node there.
+        """
+        return api_port_of(self.config, node_name)
 
     @property
     def nodes(self) -> dict:
@@ -1600,7 +1630,21 @@ class PegaProxManager:
             self._tasks_cache = {}
 
             # Build list of hosts to try: primary first, then fallbacks
-            hosts_to_try = [self.config.host] + (self.config.fallback_hosts or [])
+            # (address, API port) rather than bare addresses: a node with its own API
+            # port is only reachable at that port, and several nodes can share one
+            # address behind per-node forwards, so the address alone is not a candidate.
+            self._connected_api_port = None
+            hosts_to_try = [(self.config.host, self.cluster_api_port)]
+            hosts_to_try += [(h, self.cluster_api_port) for h in (self.config.fallback_hosts or [])]
+            # Capped like fallback_hosts: on a cluster of hundreds of nodes a full map
+            # would otherwise turn one connect attempt into hundreds of timeouts, and
+            # any node that answers gets us the whole cluster anyway.
+            for _node, _ep in sorted((getattr(self.config, 'node_endpoints', None) or {}).items()):
+                if len(hosts_to_try) >= 32:
+                    break
+                _cand = (_ep.get('host'), self.api_port_for(_node))
+                if _cand[0] and _cand not in hosts_to_try:
+                    hosts_to_try.append(_cand)
             
             self._ssl_verify = self.config.ssl_verification
             if not self._ssl_verify and not getattr(self, '_ssl_warn_shown', False):
@@ -1634,14 +1678,14 @@ class PegaProxManager:
             # UI polls) wastes 10s on the dead primary before reaching the
             # working fallback. If ALL hosts are recently-cold we still try
             # them so the breaker eventually self-clears.
-            warm_hosts = [h for h in hosts_to_try if not self._host_recently_failed(h)]
+            warm_hosts = [c for c in hosts_to_try if not self._host_recently_failed(c[0])]
             if warm_hosts:
                 if len(warm_hosts) < len(hosts_to_try):
-                    cold = [h for h in hosts_to_try if h not in warm_hosts]
+                    cold = [c[0] for c in hosts_to_try if c not in warm_hosts]
                     self.logger.debug(f"[connect] skipping recently-cold hosts: {cold}")
                 hosts_to_try = warm_hosts
 
-            for host in hosts_to_try:
+            for host, host_api_port in hosts_to_try:
                 login_password = None
                 if not self._using_api_token:
                     login_password = self.api_password_for(host)
@@ -1670,7 +1714,7 @@ class PegaProxManager:
                         self._csrf_token = None
 
                         # Test the token by making a simple API call
-                        test_url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/version"
+                        test_url = f"https://{self._bracket_ipv6(host)}:{host_api_port}/api2/json/version"
                         headers = {'Authorization': f'PVEAPIToken={self._api_token}'}
                         resp = session.get(test_url, headers=headers, timeout=10)
 
@@ -1681,8 +1725,10 @@ class PegaProxManager:
                                 resolved = self._resolve_host(host)
                                 if resolved != host:
                                     self.logger.info(f"Resolved {host} → {resolved} (caching IP)")
+                                self._connected_api_port = host_api_port
                                 self.current_host = resolved
                             else:
+                                self._connected_api_port = host_api_port
                                 self.current_host = host
                             self._original_host = host
                             if hasattr(self, "_cached_mgmt_iface"):
@@ -1723,7 +1769,7 @@ class PegaProxManager:
                         }
                         # print(f"DEBUG: trying {host}")  # dont commit this
 
-                        login_url = f"https://{self._bracket_ipv6(host)}:{self.api_port}/api2/json/access/ticket"
+                        login_url = f"https://{self._bracket_ipv6(host)}:{host_api_port}/api2/json/access/ticket"
                         resp = session.post(login_url, data=login_data, timeout=10)
 
                         if resp.status_code == 200:
@@ -1759,8 +1805,10 @@ class PegaProxManager:
                                 resolved = self._resolve_host(host)
                                 if resolved != host:
                                     self.logger.info(f"Resolved {host} → {resolved} (caching IP)")
+                                self._connected_api_port = host_api_port
                                 self.current_host = resolved
                             else:
+                                self._connected_api_port = host_api_port
                                 self.current_host = host
                             self._original_host = host
                             if hasattr(self, "_cached_mgmt_iface"):
@@ -13022,6 +13070,18 @@ echo "AGENT_INSTALLED_OK"
         circuit breaker (skip lookups for known-dead nodes) and feeds the
         breaker on the result (None → register failure, IP → reset).
         """
+        # An address the operator configured for this node is the answer, before the
+        # breaker and before any probing: discovery reads the addresses the node
+        # reports for itself, which in the setups this map exists for are precisely
+        # the ones PegaProx cannot reach. Nothing here can fail, so there is also no
+        # failure to count against the node.
+        configured = node_endpoint_of(self.config, node_name).get('host')
+        if configured:
+            self.logger.debug(f"[NodeIP] {node_name} -> {configured} (configured endpoint)")
+            self._reset_node_failures(node_name)
+            node_creds.note_address(getattr(self, 'id', None), node_name, configured, primary=True)
+            return configured
+
         blocked, remaining = self._is_node_blocked(node_name)
         if blocked:
             self.logger.debug(
@@ -13150,9 +13210,9 @@ echo "AGENT_INSTALLED_OK"
             # knock on the SSH port of a hardened node is only noise in its log -
             # the API port tells whether the address answers
             if getattr(self.config, 'ssh_disabled', False):
-                probe_port = self.api_port or 8006
+                probe_port = api_port_of(self.config, node_name) or 8006
             else:
-                probe_port = getattr(self.config, 'ssh_port', 22) or 22
+                probe_port = ssh_port_of(self.config, node_name)
 
             # ================================================================
             # STEP 1: Find which interface the PRIMARY node uses for management
@@ -13572,7 +13632,7 @@ echo "AGENT_INSTALLED_OK"
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0,
                      connect_timeout: int = 30, failure: dict = None, pinned_as: str = None,
                      login: str = None, quiet: bool = False, queue_wait: float = 120,
-                     guard_asked: bool = False):
+                     guard_asked: bool = False, node: str = None):
         """SSH connect with retry logic and connection rate limiting
 
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
@@ -13597,6 +13657,12 @@ echo "AGENT_INSTALLED_OK"
         `quiet` its connect lines at debug (a polled path), `queue_wait` how long it waits
         for a connection slot, `guard_asked` it asked guard_ssh for its one command before
         connecting.
+
+        `node`: whose address `host` is. Only needed to pick that node's own SSH port
+        out of the cluster's endpoint map -- several nodes can sit behind one address
+        on different ports, so the address alone does not say which port to dial.
+        Without it the cluster's ssh_port is used, which is what every node of an
+        ordinary cluster gets anyway.
         """
         # #941 — decide before we open a socket. Every SSH path to a PVE node comes
         # through here, so refusing here is what stops the traffic AND stops the token
@@ -13629,7 +13695,7 @@ echo "AGENT_INSTALLED_OK"
         
         # Get connection parameters
         username = login or node_login(self.config)
-        ssh_port = getattr(self.config, 'ssh_port', 22) or 22
+        ssh_port = ssh_port_of(self.config, node)
         ssh_key = getattr(self.config, 'ssh_key', '')
         _said = self.logger.debug if quiet else self.logger.info
         
@@ -13893,11 +13959,11 @@ echo "AGENT_INSTALLED_OK"
             
             # Connect via SSH
             failure = {}
-            ssh = self._ssh_connect(node_ip, failure=failure)
+            ssh = self._ssh_connect(node_ip, failure=failure, node=node_name)
             if not ssh:
                 # Check why SSH failed - get username for hint
                 username = node_login(self.config)
-                ssh_port = getattr(self.config, 'ssh_port', 22) or 22
+                ssh_port = ssh_port_of(self.config, node_name)
                 
                 if failure.get('kind') == 'auth' and not self.config.ssh_key:
                     # MK Oct 2026 (#1136) - most often a node with a root password of its own
@@ -13977,7 +14043,7 @@ echo "AGENT_INSTALLED_OK"
                 # Reconnect for reboot command
                 reboot_asked_at = time.monotonic()
                 failure = {}
-                ssh = self._ssh_connect(node_ip, failure=failure)
+                ssh = self._ssh_connect(node_ip, failure=failure, node=node_name)
                 # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
                 # a kernel update ended as success without its reboot
                 if not ssh:
@@ -15562,7 +15628,7 @@ echo "AGENT_INSTALLED_OK"
         if not node_ip:
             return -1, '', f'Cannot resolve IP for node {node}'
 
-        ssh = self._ssh_connect(node_ip)
+        ssh = self._ssh_connect(node_ip, node=node)
         if not ssh:
             return -1, '', f'SSH connection to {node} ({node_ip}) failed'
 
@@ -17912,7 +17978,7 @@ echo "AGENT_INSTALLED_OK"
 
             # check if file already exists
             try:
-                ssh_chk = self._ssh_connect(tgt_ip)
+                ssh_chk = self._ssh_connect(tgt_ip, node=tgt_node)
                 _, out, _ = ssh_chk.exec_command(f"test -f '{tgt_path}/{filename}' && echo EXISTS", timeout=10)
                 out.channel.recv_exit_status()
                 if 'EXISTS' in out.read().decode(errors='replace'):
@@ -17925,7 +17991,7 @@ echo "AGENT_INSTALLED_OK"
 
             # ensure target directory exists
             try:
-                ssh_mk = self._ssh_connect(tgt_ip)
+                ssh_mk = self._ssh_connect(tgt_ip, node=tgt_node)
                 ssh_mk.exec_command(f"mkdir -p '{tgt_path}'", timeout=10)
                 ssh_mk.close()
             except:
@@ -17944,7 +18010,7 @@ echo "AGENT_INSTALLED_OK"
                 # the login name lands in a root shell on the source node
                 if not validate_ssh_user(ssh_user):
                     raise ValueError(f'SSH user {ssh_user!r} is not a valid user name')
-                ssh_src = self._ssh_connect(src_ip)
+                ssh_src = self._ssh_connect(src_ip, node=source_node)
                 # try with sshpass if password available
                 # NOTE: this scp runs node->node (executed ON the source PVE node), so
                 # it uses that node's own ~/.ssh/known_hosts, not the hub's. Just harden
@@ -17994,8 +18060,8 @@ echo "AGENT_INSTALLED_OK"
             if not synced:
                 try:
                     self.logger.info(f"[SYNC] SFTP relay: {src_ip}:{src_file} → {tgt_ip}:{tgt_path}/{filename}")
-                    ssh_s = self._ssh_connect(src_ip)
-                    ssh_t = self._ssh_connect(tgt_ip)
+                    ssh_s = self._ssh_connect(src_ip, node=source_node)
+                    ssh_t = self._ssh_connect(tgt_ip, node=tgt_node)
                     sftp_s = ssh_s.open_sftp()
                     sftp_t = ssh_t.open_sftp()
                     # ensure dir on target via sftp
@@ -18041,7 +18107,7 @@ echo "AGENT_INSTALLED_OK"
             node_ip = self.member_node_ip(node)
             if not node_ip:
                 return None
-            ssh = self._ssh_connect(node_ip)
+            ssh = self._ssh_connect(node_ip, node=node)
             # use pvesm to get the base path
             subdir = 'template/iso' if content_type == 'iso' else 'template/cache'
             # MK May 2026 (#481 port) — shlex.quote on storage to block shell injection

@@ -16,6 +16,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
+from pegaprox.models.tasks import node_endpoint_of, ssh_port_of
 from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal, node_login
 from pegaprox.utils.sanitization import validate_ssh_user
 from pegaprox.utils.realtime import broadcast_sse
@@ -726,7 +727,7 @@ def _run_xcpng_to_pve(task):
                 pve_user = node_login(tgt_mgr.config)
                 pve_pass = ssh_password_to(tgt_mgr, pve_host)
                 pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
-                pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
+                pve_port = ssh_port_of(tgt_mgr.config, task.target_node)
 
                 ssh = _connect_ssh(pve_host, pve_user, pve_pass,
                                    key_path=pve_key, port=pve_port)
@@ -1242,7 +1243,7 @@ def _run_pve_to_xcpng(task):
                 pve_user = node_login(src_mgr.config)
                 pve_pass = ssh_password_to(src_mgr, pve_host)
                 pve_key = getattr(src_mgr.config, 'ssh_key', '')
-                pve_port = int(getattr(src_mgr.config, 'ssh_port', 22))
+                pve_port = ssh_port_of(src_mgr.config, task.source_node)
 
                 ssh = _connect_ssh(pve_host, pve_user, pve_pass,
                                    key_path=pve_key, port=pve_port)
@@ -1643,6 +1644,10 @@ def _resolve_pve_node_ip(pve_mgr, node_name):
     Always the plain address, never '[addr]': it goes to paramiko and the host-key pin."""
     # the node's own addresses go into the manager's address book, for its password (#1136)
     from pegaprox.core import node_creds
+    configured = node_endpoint_of(getattr(pve_mgr, 'config', None), node_name).get('host')
+    if configured:
+        node_creds.note_address(getattr(pve_mgr, 'id', None), node_name, configured, primary=True)
+        return configured
     try:
         nr = pve_mgr._api_get(
             f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node_name}/network")
@@ -2038,7 +2043,7 @@ def _run_esxi_to_pve(task):
         pve_user = node_login(tgt_mgr.config)
         pve_pass = ssh_password_to(tgt_mgr, pve_host)
         pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
-        pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
+        pve_port = ssh_port_of(tgt_mgr.config, task.target_node)
 
         imported_volumes = []
         mount_base = f"{task.scratch}/mnt"

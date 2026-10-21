@@ -7,6 +7,7 @@ import time
 import logging
 from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117 tainted-log sanitiser
 from pegaprox.utils.sanitization import redact_url, redact_secrets
+from pegaprox.models.tasks import ssh_port_of
 import threading
 import uuid
 import hashlib
@@ -2184,7 +2185,7 @@ def rescan_storage(cluster_id, storage_id):
                             
                             # Get SSH config from cluster
                             ssh_user = node_login(manager.config)
-                            ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
+                            ssh_port = ssh_port_of(manager.config, node)
                             ssh_key = getattr(manager.config, 'ssh_key', '')
 
                             # Determine node hostname. MK Oct 2026 (#1136): the node's own
