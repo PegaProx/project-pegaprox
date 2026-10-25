@@ -21261,15 +21261,17 @@
                                                     const totalMem = metrics.reduce((s, m) => s + (m.mem_total || (m.memory && m.memory.total) || 0), 0);
                                                     const usedMem = metrics.reduce((s, m) => s + (m.mem_used || (m.memory && m.memory.used) || 0), 0);
                                                     const memPct = totalMem > 0 ? (usedMem / totalMem) * 100 : 0;
-                                                    // NS: sum ALL datastores (shared + local per node), not just shared
+                                                    // Sum guest-capable datastores (shared + local per node), excluding backup/ISO-only storage (#1159).
                                                     const allDs = [...((clusterDatastores && clusterDatastores.shared) || [])];
                                                     Object.values((clusterDatastores && clusterDatastores.local) || {}).forEach(nodeDs => {
                                                         (nodeDs || []).forEach(d => allDs.push(d));
                                                     });
-                                                    let totalStorage = allDs.reduce((s, d) => s + (d.total || 0), 0);
-                                                    let usedStorage = allDs.reduce((s, d) => s + (d.used || 0), 0);
+                                                    const guestDs = selectedCluster.cluster_type === 'xcpng' ? allDs : allDs.filter(d =>
+                                                        (d.content || '').split(',').some(content => content === 'images' || content === 'rootdir'));
+                                                    let totalStorage = guestDs.reduce((s, d) => s + (d.total || 0), 0);
+                                                    let usedStorage = guestDs.reduce((s, d) => s + (d.used || 0), 0);
                                                     // fallback to node disk metrics if datastores haven't loaded
-                                                    if (totalStorage === 0 && metrics.length > 0) {
+                                                    if (allDs.length === 0 && metrics.length > 0) {
                                                         totalStorage = metrics.reduce((s, m) => s + (m.disk_total || 0), 0);
                                                         usedStorage = metrics.reduce((s, m) => s + (m.disk_used || 0), 0);
                                                     }

@@ -250,8 +250,11 @@ def get_datacenter_status(cluster_id):
         used_cpu = sum(r.get('cpu', 0) * r.get('maxcpu', 0) for r in resources_data if r.get('type') == 'node')
         total_mem = sum(r.get('maxmem', 0) for r in resources_data if r.get('type') == 'node')
         used_mem = sum(r.get('mem', 0) for r in resources_data if r.get('type') == 'node')
-        total_disk = sum(r.get('maxdisk', 0) for r in resources_data if r.get('type') == 'storage')
-        used_disk = sum(r.get('disk', 0) for r in resources_data if r.get('type') == 'storage')
+        # #1159: backup/ISO-only storage cannot hold VM or container disks.
+        guest_storages = [r for r in resources_data if r.get('type') == 'storage'
+                          and {'images', 'rootdir'}.intersection((r.get('content') or '').split(','))]
+        total_disk = sum(r.get('maxdisk', 0) for r in guest_storages)
+        used_disk = sum(r.get('disk', 0) for r in guest_storages)
 
         # NS: single-node Proxmox doesn't return a cluster entry, was showing red X for no reason (#90)
         if is_standalone:
