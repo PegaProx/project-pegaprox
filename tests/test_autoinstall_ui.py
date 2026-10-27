@@ -208,10 +208,10 @@ def test_the_landing_empty_states_render_the_cta_only_when_given():
 # -- cloud.js ------------------------------------------------------------------
 
 def test_the_cloud_nav_item_is_gated_and_sits_after_hosts(cloud):
-    item = ("...(canAutoInstall ? [{ id: 'autoinstall', label: 'Automated Installs', "
+    item = ("...(canAutoInstall ? [{ id: 'autoinstall', label: t('cloudNavAutoInstall'), "
             "icon: 'Disc' }] : []),")
     assert item in cloud
-    hosts = cloud.index("{ id: 'nodes', label: 'Hosts', icon: 'Cpu' },")
+    hosts = cloud.index("{ id: 'nodes', label: t('hosts'), icon: 'Cpu' },")
     assert cloud.index(item) > hosts
     assert cloud[hosts:cloud.index(item)].count('{ id:') == 1, 'something slipped in between'
     assert 'function CloudSideNav({ active, onSelect, isAdmin, canAutoInstall,' in cloud
