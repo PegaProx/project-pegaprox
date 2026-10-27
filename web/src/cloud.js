@@ -386,59 +386,59 @@
         function CloudSideNav({ active, onSelect, isAdmin, canAutoInstall, canChanges, collapsed, onToggle }) {
             const { t } = useTranslation();
             const groups = [
-                { label: 'DASHBOARD', items: [{ id: 'overview', label: 'Overview', icon: 'Grid' }] },
-                { label: 'COMPUTE', items: [
-                    { id: 'vms', label: 'Virtual Machines', icon: 'Server' },
-                    { id: 'containers', label: 'Containers', icon: 'Box' },
+                { label: t('cloudNavDashboard'), items: [{ id: 'overview', label: t('overview'), icon: 'Grid' }] },
+                { label: t('cloudNavCompute'), items: [
+                    { id: 'vms', label: t('virtualMachines'), icon: 'Server' },
+                    { id: 'containers', label: t('containers'), icon: 'Box' },
                     // LW Oct 2026 - containers from OCI images
                     { id: 'apps', label: t('ociTabLabel'), icon: 'Container' },
                 ] },
-                { label: 'STORAGE', items: [
-                    { id: 'datastores', label: 'Datastores', icon: 'Database' },
-                    { id: 'storage', label: 'Storage Config', icon: 'HardDrive' },
-                    { id: 'pools', label: 'Resource Pools', icon: 'Layers' },
-                    { id: 'ceph', label: 'Ceph', icon: 'Database' },
+                { label: t('storage'), items: [
+                    { id: 'datastores', label: t('datastores'), icon: 'Database' },
+                    { id: 'storage', label: t('cloudNavStorageConfig'), icon: 'HardDrive' },
+                    { id: 'pools', label: t('cloudNavResourcePools'), icon: 'Layers' },
+                    { id: 'ceph', label: t('ceph'), icon: 'Database' },
                 ] },
-                { label: 'NETWORK', items: [
-                    { id: 'networks', label: 'Networks', icon: 'Network' },
-                    { id: 'sdn', label: 'SDN', icon: 'Globe' },
-                    { id: 'firewall', label: 'Firewall', icon: 'Lock' },
-                    { id: 'topology', label: 'Topology', icon: 'Share2' },
+                { label: t('network'), items: [
+                    { id: 'networks', label: t('cloudNavNetworks'), icon: 'Network' },
+                    { id: 'sdn', label: t('sdn'), icon: 'Globe' },
+                    { id: 'firewall', label: t('firewall'), icon: 'Lock' },
+                    { id: 'topology', label: t('topologyView'), icon: 'Share2' },
                 ] },
-                { label: 'DATA PROTECTION', items: [
-                    { id: 'backups', label: 'Backups', icon: 'Archive' },
-                    { id: 'replication', label: 'Replication', icon: 'Copy' },
-                    { id: 'pbs', label: 'Backup Servers', icon: 'Server' },
-                    { id: 'siterecovery', label: 'Site Recovery', icon: 'LifeBuoy' },
+                { label: t('cloudNavDataProtection'), items: [
+                    { id: 'backups', label: t('backups'), icon: 'Archive' },
+                    { id: 'replication', label: t('replication'), icon: 'Copy' },
+                    { id: 'pbs', label: t('backupServers'), icon: 'Server' },
+                    { id: 'siterecovery', label: t('siteRecovery'), icon: 'LifeBuoy' },
                 ] },
-                { label: 'AUTOMATION', items: [
-                    { id: 'schedules', label: 'Schedules', icon: 'Clock' },
-                    { id: 'scripts', label: 'Scripts', icon: 'Terminal' },
-                    { id: 'snapshotpolicies', label: 'Snapshot Policies', icon: 'Camera' },
-                    { id: 'templates', label: 'Templates', icon: 'Copy' },
-                    { id: 'alerts', label: 'Alert Channels', icon: 'Bell' },
+                { label: t('automation'), items: [
+                    { id: 'schedules', label: t('schedules'), icon: 'Clock' },
+                    { id: 'scripts', label: t('cloudNavScripts'), icon: 'Terminal' },
+                    { id: 'snapshotpolicies', label: t('cloudNavSnapshotPolicies'), icon: 'Camera' },
+                    { id: 'templates', label: t('cloudNavTemplates'), icon: 'Copy' },
+                    { id: 'alerts', label: t('alertChannels'), icon: 'Bell' },
                 ] },
-                { label: 'INFRASTRUCTURE', items: [
-                    { id: 'clusters', label: 'Clusters', icon: 'Cloud' },
-                    { id: 'nodes', label: 'Hosts', icon: 'Cpu' },
-                    ...(canAutoInstall ? [{ id: 'autoinstall', label: 'Automated Installs', icon: 'Disc' }] : []),
+                { label: t('cloudNavInfrastructure'), items: [
+                    { id: 'clusters', label: t('cloudNavClusters'), icon: 'Cloud' },
+                    { id: 'nodes', label: t('hosts'), icon: 'Cpu' },
+                    ...(canAutoInstall ? [{ id: 'autoinstall', label: t('cloudNavAutoInstall'), icon: 'Disc' }] : []),
                     // LW Oct 2026 - directory, PCI and USB mappings of the selected cluster
                     { id: 'mappings', label: t('rmTitle'), icon: 'Link' },
-                    { id: 'ha', label: 'High Availability', icon: 'Shield' },
-                    { id: 'updates', label: 'Update Manager', icon: 'Download' },
+                    { id: 'ha', label: t('cloudNavHa'), icon: 'Shield' },
+                    { id: 'updates', label: t('updateManager'), icon: 'Download' },
                 ] },
-                { label: 'MONITORING', items: [{ id: 'monitoring', label: 'Monitoring', icon: 'Activity' }] },
-                { label: 'REPORTS', items: [
-                    { id: 'insights', label: 'Insights', icon: 'Zap' },
-                    { id: 'costs', label: 'Costs', icon: 'DollarSign' },
-                    { id: 'power', label: 'Power & Carbon', icon: 'Zap' },
+                { label: t('cloudNavMonitoring'), items: [{ id: 'monitoring', label: t('cloudNavMonitoring'), icon: 'Activity' }] },
+                { label: t('reports'), items: [
+                    { id: 'insights', label: t('insights'), icon: 'Zap' },
+                    { id: 'costs', label: t('cloudNavCosts'), icon: 'DollarSign' },
+                    { id: 'power', label: t('powerTitle'), icon: 'Zap' },
                     // LW Oct 2026 - what-if simulator of the selected cluster
                     { id: 'whatif', label: t('whatifTitle'), icon: 'Scale' },
-                    { id: 'apihealth', label: 'API Health', icon: 'Activity' },
-                    { id: 'cve', label: 'CVE Scanner', icon: 'Shield' },
+                    { id: 'apihealth', label: t('apiHealth'), icon: 'Activity' },
+                    { id: 'cve', label: t('cveScanner'), icon: 'Shield' },
                 ] },
-                { label: 'ACTIVITY', items: [
-                    { id: 'tasks', label: 'Tasks', icon: 'ClipboardList' },
+                { label: t('cloudNavActivity'), items: [
+                    { id: 'tasks', label: t('tasks'), icon: 'ClipboardList' },
                     // LW Oct 2026 - the flight recorder of the selected cluster
                     { id: 'timeline', label: t('tlTab'), icon: 'Clock' },
                     // NS Oct 2026 - change plans of the selected cluster, for whoever may see them
@@ -446,15 +446,15 @@
                 ] },
             ];
             if (isAdmin) {
-                groups.push({ label: 'GOVERNANCE', items: [
-                    { id: 'compliance', label: 'Compliance', icon: 'Shield' },
-                    { id: 'drift', label: 'Config Drift', icon: 'Activity' },
+                groups.push({ label: t('cloudNavGovernance'), items: [
+                    { id: 'compliance', label: t('compliance'), icon: 'Shield' },
+                    { id: 'drift', label: t('cloudNavConfigDrift'), icon: 'Activity' },
                     { id: 'siem', label: 'SIEM', icon: 'AlertTriangle' },
                 ] });
-                groups.push({ label: 'SYSTEM', items: [
-                    { id: 'plugins', label: 'Plugins', icon: 'Box' },
-                    { id: 'users', label: 'Users', icon: 'Users' },
-                    { id: 'settings', label: 'Settings', icon: 'Settings' },
+                groups.push({ label: t('cloudNavSystem'), items: [
+                    { id: 'plugins', label: t('plugins'), icon: 'Box' },
+                    { id: 'users', label: t('users'), icon: 'Users' },
+                    { id: 'settings', label: t('settings'), icon: 'Settings' },
                 ] });
             }
             return (
