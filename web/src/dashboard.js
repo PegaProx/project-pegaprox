@@ -13041,7 +13041,7 @@
             // not can(): the auto-install routes also refuse tenant/cluster-confined callers
             // (capped admins included), the server folds that into this flag for us
             const canAutoInstall = !!user?.autoinstall_access;
-            const { isCorporate, isCloud } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
+            const { isCorporate, isCloud, layoutLocked } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
             const [clusters, setClusters] = useState([]);
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
@@ -19722,7 +19722,9 @@
                             t={t}
                             authFetch={authFetch}
                             addToast={addToast}
-                            onExitCloud={() => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
+                            /* #1189 - no way out of a pinned Cloud: the Exit Cloud item only
+                               shows with a handler */
+                            onExitCloud={layoutLocked ? undefined : () => updatePreferences({ ui_layout: 'modern', theme: 'proxmoxDark' })}
                             onOpenSettings={() => setShowSettings(true)}
                             onOpenProfile={() => setShowProfile(true)}
                             onOpenApiReference={() => setShowApiReference(true)}
@@ -20117,6 +20119,11 @@
                                                 // F5 doesn't apply a stale user.theme that mismatches the local
                                                 // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
                                                 // light-on-dark when toggle and server preference drifted).
+                                                // LW Oct 2026 (#1189) - not while an admin pins Corporate over the
+                                                // user's own layout: the stored theme is that layout's and would
+                                                // paint it in a Corporate palette once the lock is lifted. The
+                                                // pinned Corporate goes by corp-theme in this browser anyway.
+                                                if (layoutLocked && user?.ui_layout !== 'corporate') return;
                                                 fetch(`${API_URL}/user/preferences`, {
                                                     method: 'PUT', credentials: 'include',
                                                     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
@@ -31756,14 +31763,18 @@
             const { t } = useTranslation();
             const { user, updatePreferences } = useAuth();
             const [saving, setSaving] = useState(false);
+            const [locked, setLocked] = useState(false);
 
             const pickLayout = async (layout) => {
                 setSaving(true);
                 try {
                     // Cloud brings its own theme, as when it is picked under My Profile
-                    await updatePreferences(layout === 'cloud'
+                    const result = await updatePreferences(layout === 'cloud'
                         ? { ui_layout: 'cloud', theme: 'cloud', layout_chosen: true }
                         : { ui_layout: layout, layout_chosen: true });
+                    // #1189 - pinned by the admin. The refusal brings the lock along and the
+                    // pinned layout takes over, until then say why nothing happened
+                    setLocked(result?.code === 'UI_LOCKED');
                 } catch(e) {
                     console.error('layout pick failed', e);
                 }
@@ -31874,6 +31885,11 @@
                                 </button>
                             </div>
 
+                            {locked && (
+                                <p className="text-xs text-yellow-400 text-center mb-2" data-ui-lock="layout">
+                                    {t('uiLayoutLockedHint') || 'Layout set by your administrator'}
+                                </p>
+                            )}
                             <p className="text-xs text-gray-500 text-center">
                                 {t('layoutSelectionHint') || 'You can change this anytime under My Profile \u2192 Layout Style'}
                             </p>
@@ -32014,7 +32030,7 @@
         }
 
         function App() {
-            const { user, loading, requires2FASetup, needsSetup } = useAuth();
+            const { user, loading, requires2FASetup, needsSetup, layoutLock } = useAuth();
             // #767 — read once; a popup must not re-evaluate this on every render
             const consoleKey = useMemo(() => {
                 try { return new URLSearchParams(window.location.search).get('console'); }
@@ -32063,6 +32079,11 @@
             // layout picker: that is a first-login choice for the main window, not for this.
             if (consoleKey) {
                 return <StandaloneConsole consoleKey={consoleKey} />;
+            }
+
+            // LW Oct 2026 (#1189) - an admin pinned the layout, there is no choice to make
+            if (layoutLock) {
+                return <PegaProxDashboard />;
             }
 
             // LW: Show layout picker on first login (before dashboard)

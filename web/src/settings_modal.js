@@ -2695,7 +2695,7 @@
         // ═══════════════════════════════════════════════
         // PegaProx Settings Modal with User Management and Audit Log
         function PegaProxSettingsModal({ isOpen, onClose, addToast, onGroupsChanged }) {
-            const { t } = useTranslation();
+            const { t, loadUiLock } = useTranslation();
             // haStandby: the saves below that no standby carries out, forwarding or not (#625)
             const { getAuthHeaders, user: currentUser, isAdmin, haStandby } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - Corporate styling
@@ -2859,6 +2859,10 @@
                 logo_url: '',
                 app_name: 'PegaProx',
                 default_theme: 'proxmoxDark',  // NS: Default theme for new users - Jan 2026
+                // LW Oct 2026 (#1189, #1167) - '' = users choose
+                ui_layout_lock: '',
+                ui_language_lock: '',
+                ui_lock_admins: false,
                 login_background: '',
                 // NS: SMTP Settings - Dec 2025
                 smtp_enabled: false,
@@ -3702,6 +3706,9 @@
                             trusted_proxies: data.trusted_proxies || '',
                             proxy_bind_address: data.proxy_bind_address || '',
                             default_theme: data.default_theme || 'proxmoxDark',
+                            ui_layout_lock: data.ui_layout_lock || '',
+                            ui_language_lock: data.ui_language_lock || '',
+                            ui_lock_admins: data.ui_lock_admins === true,
                             login_background: data.login_background || '',
                             // SMTP settings
                             smtp_enabled: data.smtp_enabled || false,
@@ -3942,6 +3949,9 @@
                     formData.append('trusted_proxies', serverSettings.trusted_proxies || '');
                     formData.append('proxy_bind_address', serverSettings.proxy_bind_address || '');
                     formData.append('default_theme', serverSettings.default_theme || 'proxmoxDark');
+                    formData.append('ui_layout_lock', serverSettings.ui_layout_lock || '');
+                    formData.append('ui_language_lock', serverSettings.ui_language_lock || '');
+                    formData.append('ui_lock_admins', serverSettings.ui_lock_admins ? 'true' : 'false');
                     // NS: alert recipients live in the same tab - must send them too (#131)
                     formData.append('alert_email_recipients', JSON.stringify(serverSettings.alert_email_recipients || []));
                     if (serverSettings.alert_cooldown) {
@@ -3976,6 +3986,8 @@
                         }
                         setLoginBgFile(null);
                         fetchServerSettings();
+                        // this page follows a lock that now holds admins too, and the login page shows it
+                        loadUiLock(true);
                     } else {
                         const err = await response.json();
                         addToast(err.error || t('errorSavingSettings'), 'error');
@@ -7987,6 +7999,60 @@
                                         <p className="text-xs text-gray-500">
                                             {t('currentDefault') || 'Current default'}: {PEGAPROX_THEMES[serverSettings.default_theme || 'proxmoxDark']?.name || 'Proxmox Dark'}
                                         </p>
+                                    </div>
+
+                                    {/* LW Oct 2026 (#1189, #1167) - pin layout and language for everyone.
+                                        Saved with the button at the bottom like the rest of this tab. */}
+                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-xl p-4 space-y-4" data-ui-lock-card>
+                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                            <Icons.Lock />
+                                            {t('uiLockTitle') || 'Interface defaults'}
+                                        </h4>
+                                        <p className="text-sm text-gray-400">
+                                            {t('uiLockDesc') || 'Pin the layout or the language for every user. Their own choice stays saved and comes back once this is set to Users choose again.'}
+                                        </p>
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div>
+                                                <label htmlFor="ui-layout-lock" className="block text-sm text-gray-400 mb-1">{t('uiLockLayout') || 'Layout for everyone'}</label>
+                                                <select
+                                                    id="ui-layout-lock"
+                                                    value={serverSettings.ui_layout_lock || ''}
+                                                    onChange={e => setServerSettings({...serverSettings, ui_layout_lock: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                >
+                                                    <option value="">{t('uiLockUsersChoose') || 'Users choose'}</option>
+                                                    <option value="modern">{t('layoutModern') || 'Modern'}</option>
+                                                    <option value="corporate">{t('layoutCorporate') || 'Corporate'}</option>
+                                                    <option value="cloud">Cloud ({t('preview') || 'Preview'})</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label htmlFor="ui-language-lock" className="block text-sm text-gray-400 mb-1">{t('uiLockLanguage') || 'Language for everyone'}</label>
+                                                <select
+                                                    id="ui-language-lock"
+                                                    value={serverSettings.ui_language_lock || ''}
+                                                    onChange={e => setServerSettings({...serverSettings, ui_language_lock: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                >
+                                                    <option value="">{t('uiLockUsersChoose') || 'Users choose'}</option>
+                                                    {languageChoices(t).map(l => (
+                                                        <option key={l.code} value={l.code}>{l.title}</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <label className="flex items-start gap-2 cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!serverSettings.ui_lock_admins}
+                                                onChange={e => setServerSettings({...serverSettings, ui_lock_admins: e.target.checked})}
+                                                className="mt-0.5 rounded border-proxmox-border bg-proxmox-darker"
+                                            />
+                                            <span>
+                                                <span className="block text-sm text-gray-300">{t('uiLockAdmins') || 'Also apply to administrators'}</span>
+                                                <span className="block text-xs text-gray-500">{t('uiLockAdminsHint') || 'Administrators are exempt unless this is on.'}</span>
+                                            </span>
+                                        </label>
                                     </div>
 
                                     {/* Login Background - NS Mar 2026 */}

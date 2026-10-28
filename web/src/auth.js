@@ -6,7 +6,7 @@
         // Login Screen Component
         // LW: Keep this simple - first thing users see!
         function LoginScreen() {
-            const { t } = useTranslation();
+            const { t, languageLocked } = useTranslation();
             const { login, error, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground } = useAuth();
             const [username, setUsername] = useState('');
             const [password, setPassword] = useState('');
@@ -362,10 +362,12 @@
                             )}
                         </div>
                         
-                        {/* Language Switcher */}
-                        <div className="flex justify-center mt-6">
-                            <LanguageSwitcher />
-                        </div>
+                        {/* Language Switcher, gone while an admin pinned the language (#1167) */}
+                        {!languageLocked && (
+                            <div className="flex justify-center mt-6">
+                                <LanguageSwitcher />
+                            </div>
+                        )}
                         
                         {/* Footer */}
                         <p className="text-center text-gray-500 text-sm mt-6">

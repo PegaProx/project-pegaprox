@@ -6676,6 +6676,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Serverzertifikat prüfen',
                 smtpVerifyTlsWarning: 'Das Zertifikat des Mailservers wird nicht geprüft. Jeder im Netzwerkpfad kann sich als Server ausgeben und das SMTP-Passwort und jede Mail mitlesen. Nur für ein Relay mit selbst-signiertem Zertifikat in einem vertrauenswürdigen Netz abschalten.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Oberflächen-Vorgaben',
+                uiLockDesc: 'Layout oder Sprache für alle Benutzer festlegen. Die eigene Auswahl bleibt gespeichert und gilt wieder, sobald hier Benutzer wählen eingestellt wird.',
+                uiLockLayout: 'Layout für alle',
+                uiLockLanguage: 'Sprache für alle',
+                uiLockUsersChoose: 'Benutzer wählen',
+                uiLockAdmins: 'Auch für Administratoren anwenden',
+                uiLockAdminsHint: 'Administratoren sind ausgenommen, solange dies nicht aktiviert ist.',
+                uiLayoutLockedHint: 'Layout vom Administrator festgelegt',
+                uiLanguageLockedHint: 'Vom Administrator festgelegt',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Zurzeit kein Leader - Änderungen und Automatisierung pausieren. Konsolen funktionieren weiter.',
                 haTakeover: 'Leader {leader} übernimmt - Änderungen gehen in {n} s weiter.',
@@ -13837,6 +13847,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Verify the server certificate',
                 smtpVerifyTlsWarning: 'The certificate of the mail server is not checked. Anyone on the network path can pose as the server and read the SMTP password and every mail. Turn this off only for a relay with a self-signed certificate in a trusted network.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Interface defaults',
+                uiLockDesc: 'Pin the layout or the language for every user. Their own choice stays saved and comes back once this is set to Users choose again.',
+                uiLockLayout: 'Layout for everyone',
+                uiLockLanguage: 'Language for everyone',
+                uiLockUsersChoose: 'Users choose',
+                uiLockAdmins: 'Also apply to administrators',
+                uiLockAdminsHint: 'Administrators are exempt unless this is on.',
+                uiLayoutLockedHint: 'Layout set by your administrator',
+                uiLanguageLockedHint: 'Set by your administrator',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'No leader at the moment - changes and automation are paused. Consoles keep working.',
                 haTakeover: 'Leader {leader} is taking over - changes resume in {n} s.',
@@ -20546,6 +20566,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: '验证服务器证书',
                 smtpVerifyTlsWarning: '不检查邮件服务器的证书。网络路径上的任何人都可以冒充该服务器，读取 SMTP 密码和每一封邮件。仅在受信任网络中使用自签名证书的中继时才关闭此项。',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: '界面默认设置',
+                uiLockDesc: '为所有用户固定布局或语言。用户自己的选择会保留，重新设为用户自选后即可恢复。',
+                uiLockLayout: '所有人的布局',
+                uiLockLanguage: '所有人的语言',
+                uiLockUsersChoose: '用户自选',
+                uiLockAdmins: '同时应用于管理员',
+                uiLockAdminsHint: '未开启时，管理员不受影响。',
+                uiLayoutLockedHint: '布局由管理员设定',
+                uiLanguageLockedHint: '由管理员设定',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '当前没有主实例 - 更改和自动化已暂停。控制台仍可继续使用。',
                 haTakeover: '主实例 {leader} 正在接管 - 更改将在 {n} 秒后恢复。',
@@ -27245,6 +27275,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Weryfikuj certyfikat serwera',
                 smtpVerifyTlsWarning: 'Certyfikat serwera poczty nie jest sprawdzany. Każdy na trasie połączenia może podszyć się pod serwer i odczytać hasło SMTP oraz każdą wiadomość. Wyłączaj tylko dla przekaźnika z certyfikatem samopodpisanym w zaufanej sieci.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Domyślne ustawienia interfejsu',
+                uiLockDesc: 'Narzuć układ lub język wszystkim użytkownikom. Ich własny wybór pozostaje zapisany i wraca po ponownym ustawieniu opcji Użytkownicy wybierają.',
+                uiLockLayout: 'Układ dla wszystkich',
+                uiLockLanguage: 'Język dla wszystkich',
+                uiLockUsersChoose: 'Użytkownicy wybierają',
+                uiLockAdmins: 'Zastosuj także do administratorów',
+                uiLockAdminsHint: 'Administratorzy są wyłączeni, dopóki ta opcja nie jest włączona.',
+                uiLayoutLockedHint: 'Układ ustawiony przez administratora',
+                uiLanguageLockedHint: 'Ustawione przez administratora',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Obecnie brak lidera - zmiany i automatyzacja są wstrzymane. Konsole działają dalej.',
                 haTakeover: 'Lider {leader} przejmuje - zmiany wrócą za {n} s.',
@@ -34374,6 +34414,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Vérifier le certificat du serveur',
                 smtpVerifyTlsWarning: 'Le certificat du serveur de messagerie n\'est pas vérifié. N\'importe qui sur le trajet réseau peut se faire passer pour le serveur et lire le mot de passe SMTP et chaque e-mail. À désactiver uniquement pour un relais avec un certificat auto-signé dans un réseau de confiance.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Paramètres par défaut de l\'interface',
+                uiLockDesc: 'Imposez la disposition ou la langue à tous les utilisateurs. Leur choix reste enregistré et revient dès que Les utilisateurs choisissent est de nouveau sélectionné.',
+                uiLockLayout: 'Disposition pour tous',
+                uiLockLanguage: 'Langue pour tous',
+                uiLockUsersChoose: 'Les utilisateurs choisissent',
+                uiLockAdmins: 'Appliquer aussi aux administrateurs',
+                uiLockAdminsHint: 'Les administrateurs sont exemptés tant que cette option est désactivée.',
+                uiLayoutLockedHint: 'Disposition définie par votre administrateur',
+                uiLanguageLockedHint: 'Défini par votre administrateur',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Aucun leader pour le moment - les modifications et l\'automatisation sont en pause. Les consoles continuent de fonctionner.',
                 haTakeover: 'Le leader {leader} prend le relais - les modifications reprennent dans {n} s.',
@@ -41517,6 +41567,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Verificar el certificado del servidor',
                 smtpVerifyTlsWarning: 'No se comprueba el certificado del servidor de correo. Cualquiera en la ruta de red puede hacerse pasar por el servidor y leer la contraseña SMTP y cada correo. Desactívelo solo para un relay con certificado autofirmado en una red de confianza.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Valores predeterminados de la interfaz',
+                uiLockDesc: 'Fije el diseño o el idioma para todos los usuarios. Su elección personal se conserva y vuelve a aplicarse cuando se seleccione de nuevo Los usuarios eligen.',
+                uiLockLayout: 'Diseño para todos',
+                uiLockLanguage: 'Idioma para todos',
+                uiLockUsersChoose: 'Los usuarios eligen',
+                uiLockAdmins: 'Aplicar también a los administradores',
+                uiLockAdminsHint: 'Los administradores quedan exentos si esto no está activado.',
+                uiLayoutLockedHint: 'Diseño definido por su administrador',
+                uiLanguageLockedHint: 'Definido por su administrador',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Ahora mismo no hay líder - los cambios y la automatización están en pausa. Las consolas siguen funcionando.',
                 haTakeover: 'El líder {leader} está tomando el relevo - los cambios se reanudan en {n} s.',
@@ -48505,6 +48565,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Verificar o certificado do servidor',
                 smtpVerifyTlsWarning: 'O certificado do servidor de e-mail não é verificado. Qualquer um no caminho da rede pode se passar pelo servidor e ler a senha SMTP e cada e-mail. Desative apenas para um relay com certificado auto-assinado em uma rede confiável.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Padrões da interface',
+                uiLockDesc: 'Defina o layout ou o idioma para todos os usuários. A escolha pessoal de cada um continua salva e volta a valer quando Os usuários escolhem for selecionado novamente.',
+                uiLockLayout: 'Layout para todos',
+                uiLockLanguage: 'Idioma para todos',
+                uiLockUsersChoose: 'Os usuários escolhem',
+                uiLockAdmins: 'Aplicar também aos administradores',
+                uiLockAdminsHint: 'Os administradores ficam isentos enquanto esta opção estiver desativada.',
+                uiLayoutLockedHint: 'Layout definido pelo administrador',
+                uiLanguageLockedHint: 'Definido pelo administrador',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Sem líder no momento - alterações e automação estão pausadas. Os consoles continuam funcionando.',
                 haTakeover: 'O líder {leader} está assumindo - as alterações voltam em {n} s.',
@@ -55722,6 +55792,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: '서버 인증서 확인',
                 smtpVerifyTlsWarning: '메일 서버 인증서를 확인하지 않습니다. 네트워크 경로상의 누구든 서버로 위장하여 SMTP 비밀번호와 모든 메일을 읽을 수 있습니다. 신뢰할 수 있는 네트워크에서 자체 서명 인증서를 쓰는 릴레이에만 끄세요.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: '인터페이스 기본값',
+                uiLockDesc: '모든 사용자에게 레이아웃 또는 언어를 고정합니다. 개인 선택은 저장된 채로 남아 있으며, 다시 사용자 선택으로 설정하면 복원됩니다.',
+                uiLockLayout: '모두에게 적용할 레이아웃',
+                uiLockLanguage: '모두에게 적용할 언어',
+                uiLockUsersChoose: '사용자 선택',
+                uiLockAdmins: '관리자에게도 적용',
+                uiLockAdminsHint: '이 옵션을 켜지 않으면 관리자는 제외됩니다.',
+                uiLayoutLockedHint: '관리자가 설정한 레이아웃',
+                uiLanguageLockedHint: '관리자가 설정함',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: '현재 리더 없음 - 변경과 자동화가 일시 중지됨. 콘솔은 계속 작동합니다.',
                 haTakeover: '리더 {leader}이(가) 넘겨받는 중 - {n}초 후 변경이 재개됩니다.',
@@ -62826,6 +62906,16 @@
                 // LW Oct 2026 - SMTP: check the mail server certificate
                 smtpVerifyTls: 'Verifica il certificato del server',
                 smtpVerifyTlsWarning: 'Il certificato del server di posta non viene verificato. Chiunque sul percorso di rete può spacciarsi per il server e leggere la password SMTP e ogni e-mail. Disattivare solo per un relay con certificato auto-firmato in una rete fidata.',
+                // LW Oct 2026 (#1189) - interface defaults (layout and language lock)
+                uiLockTitle: 'Impostazioni predefinite dell\'interfaccia',
+                uiLockDesc: 'Imposta layout o lingua per tutti gli utenti. La scelta personale resta salvata e torna valida quando qui si seleziona di nuovo Gli utenti scelgono.',
+                uiLockLayout: 'Layout per tutti',
+                uiLockLanguage: 'Lingua per tutti',
+                uiLockUsersChoose: 'Gli utenti scelgono',
+                uiLockAdmins: 'Applica anche agli amministratori',
+                uiLockAdminsHint: 'Gli amministratori sono esclusi se questa opzione è disattivata.',
+                uiLayoutLockedHint: 'Layout impostato dall\'amministratore',
+                uiLanguageLockedHint: 'Impostato dall\'amministratore',
                 // LW Oct 2026 (#625) - the banners of a group that fails over automatically, for every user
                 haNoLeader: 'Al momento nessun leader - modifiche e automazione sono in pausa. Le console continuano a funzionare.',
                 haTakeover: 'Il leader {leader} sta subentrando - le modifiche riprendono tra {n} s.',

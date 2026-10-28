@@ -519,6 +519,8 @@
             };
             const uname = (currentUser && (currentUser.username || currentUser.name)) || 'User';
             const initial = (uname[0] || 'U').toUpperCase();
+            // the switcher draws nothing while the language is pinned, and an empty box would still take a gap
+            const { languageLocked } = useTranslation();
             const userMenu = [
                 { label: t('cloud.profile') || 'Profile & preferences', icon: 'User', onClick: () => onOpenProfile && onOpenProfile() },
                 isAdmin && { label: t('cloud.settings') || 'Settings', icon: 'Settings', onClick: () => onOpenSettings && onOpenSettings() },
@@ -550,7 +552,7 @@
                                 </select>
                             </div>
                         )}
-                        <div className="cloud-lang"><LanguageSwitcher /></div>
+                        {!languageLocked && <div className="cloud-lang"><LanguageSwitcher /></div>}
                         <CloudIconBtn icon={theme === 'light' ? 'Moon' : 'Sun'} title={theme === 'light' ? 'Dark theme' : 'Light theme'} onClick={onToggleTheme} />
                         <CloudIconBtn icon="RefreshCw" title={t('cloud.refresh') || 'Refresh'} onClick={onRefresh} />
                         {isAdmin && <CloudIconBtn icon="Settings" title={t('cloud.settings') || 'Settings'} onClick={() => onOpenSettings && onOpenSettings()} />}

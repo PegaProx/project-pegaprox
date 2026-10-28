@@ -2860,8 +2860,8 @@
 
         // User Profile Modal with Password Change and 2FA Setup
         function UserProfileModal({ isOpen, onClose, addToast }) {
-            const { t } = useTranslation();
-            const { getAuthHeaders, user, updatePreferences, updateCurrentUser } = useAuth();
+            const { t, languageLocked } = useTranslation();
+            const { getAuthHeaders, user, updatePreferences, updateCurrentUser, layoutLock } = useAuth();
             const { isCorporate } = useLayout();
             const [activeTab, setActiveTab] = useState('appearance');
             const [loading, setLoading] = useState(false);
@@ -3350,8 +3350,9 @@
 
                                     {/* #742: the theme grid is hidden in the Corporate layout — corporate
                                         light/dark is driven by the toggle in the top bar, so the personal
-                                        themes here don't apply there and would look "ignored". */}
-                                    {(user?.ui_layout !== 'corporate') && (<>
+                                        themes here don't apply there and would look "ignored".
+                                        isCorporate is the layout in use, a pinned one included (#1189) */}
+                                    {!isCorporate && (<>
                                     <div>
                                         <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
                                             <Icons.Palette />
@@ -3426,6 +3427,12 @@
                                             <Icons.Grid className="w-4 h-4" />
                                             {t('layoutStyle') || 'Layout Style'}
                                         </h3>
+                                        {/* LW Oct 2026 (#1189) - pinned for everyone, so no cards to pick from */}
+                                        {layoutLock ? (
+                                            <p className="text-xs text-gray-400" data-ui-lock="layout">
+                                                {t('uiLayoutLockedHint') || 'Layout set by your administrator'}
+                                            </p>
+                                        ) : (<>
                                         <p className="text-xs text-gray-400 mb-3">
                                             {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
                                         </p>
@@ -3537,6 +3544,7 @@
                                                 </div>
                                             </button>
                                         </div>
+                                        </>)}
                                     </div>
 
                                     {/* NS: TaskBar Auto-Expand Setting - Feb 2026 */}
@@ -3601,7 +3609,8 @@
                                     )}
 
                                     {/* NS Jun 2026 — language moved from corporate header into profile prefs */}
-                                    {isCorporate && (
+                                    {/* #1167: a pinned language says so here in every layout, no header has a switcher then */}
+                                    {(isCorporate || languageLocked) && (
                                         <div className="pt-4 border-t border-proxmox-border">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex items-center gap-3">
@@ -3611,7 +3620,9 @@
                                                         <p className="text-xs text-gray-500">{t('languagePreferenceDesc') || 'Interface language for your account'}</p>
                                                     </div>
                                                 </div>
-                                                <LanguageSwitcher />
+                                                {languageLocked
+                                                    ? <span className="text-xs text-gray-400" data-ui-lock="language">{t('uiLanguageLockedHint') || 'Set by your administrator'}</span>
+                                                    : <LanguageSwitcher />}
                                             </div>
                                         </div>
                                     )}

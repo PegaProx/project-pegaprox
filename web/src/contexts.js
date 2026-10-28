@@ -36,6 +36,54 @@
             return null;
         }
 
+        // LW Oct 2026 (#1189, #1167) - the layout and language an admin pinned for everyone in
+        // Settings > Server. A public read, so the login page knows the language as well.
+        // Whatever goes wrong here counts as no lock, the server holds the line anyway.
+        const NO_UI_LOCK = { layout: '', language: '', admins: false };
+        const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'cloud'];
+
+        function cleanUiLock(d) {
+            if (!d || typeof d !== 'object') return null;
+            return {
+                layout: UI_LOCK_LAYOUTS.includes(d.layout) ? d.layout : '',
+                language: SUPPORTED_LANGS.includes(d.language) ? d.language : '',
+                admins: d.admins === true,
+            };
+        }
+
+        // null when the read fails
+        async function fetchUiLock() {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 5000);
+            try {
+                const r = await fetch(`${API_URL}/interface/lock`, {
+                    credentials: 'include', cache: 'no-store', signal: ctrl.signal
+                });
+                return r.ok ? cleanUiLock(await r.json()) : null;
+            } catch (_) {
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        // The last answer is kept in this browser. A console window (#767) is opened from
+        // the app, which has just read it, so it goes by that copy and asks the server for
+        // nothing but its console. Only a hint for the page: the server checks every save.
+        function cachedUiLock() {
+            try { return cleanUiLock(JSON.parse(localStorage.getItem('pegaprox-ui-lock') || 'null')) || NO_UI_LOCK; }
+            catch (_) { return NO_UI_LOCK; }
+        }
+        const UI_LOCK_FROM_CACHE = (() => {
+            try { return !!new URLSearchParams(window.location.search).get('console'); }
+            catch (_) { return false; }
+        })();
+
+        // nobody signed in (role null) is held too; admins only once the lock says so
+        function uiLockBinds(lock, role) {
+            return !!lock && (lock.admins || role !== 'admin');
+        }
+
         function LanguageProvider({ children }) {
             // Persist language preference in localStorage.
             // NS May 2026 (#389): validate stored value against allowlist
@@ -51,10 +99,54 @@
                 return 'de';
             });
 
+            // `language` above stays the user's own choice. A lock only covers it, so lifting
+            // the lock brings that choice back. lockRole is the signed-in account's role as
+            // AuthProvider reports it, null while nobody is signed in.
+            const [uiLock, setUiLock] = useState(cachedUiLock);
+            const [lockRole, setLockRole] = useState(null);
+            const uiLockLoad = useRef(null);
+            // what the page goes by right now, for the answers below
+            const uiLockNow = useRef(uiLock);
+            // a lock from the server (the public read, or a UI_LOCKED refusal that brings it)
+            const takeUiLock = useCallback((got) => {
+                const l = cleanUiLock(got);
+                if (!l) return uiLockNow.current;
+                try { localStorage.setItem('pegaprox-ui-lock', JSON.stringify(l)); } catch (_) {}
+                const prev = uiLockNow.current;
+                if (prev.layout !== l.layout || prev.language !== l.language || prev.admins !== l.admins) {
+                    uiLockNow.current = l;
+                    setUiLock(l);
+                }
+                return uiLockNow.current;
+            }, []);
+            // one fetch shared by everyone asking; fresh = ask the server again. Only the
+            // newest answer is kept, an older one landing late must not undo it. A read that
+            // fails keeps what the page has: the last answer, or no lock when there is none.
+            const loadUiLock = useCallback((fresh) => {
+                if (fresh || !uiLockLoad.current) {
+                    const read = (UI_LOCK_FROM_CACHE && !fresh) ? Promise.resolve(cachedUiLock()) : fetchUiLock();
+                    const p = read.then(got => (got && uiLockLoad.current === p) ? takeUiLock(got) : uiLockNow.current);
+                    uiLockLoad.current = p;
+                }
+                return uiLockLoad.current;
+            }, [takeUiLock]);
+            // the refusal of a save carries the lock, so there is no second read to fail
+            const takeRefusedLock = useCallback((body) => {
+                if (body && body.lock) {
+                    uiLockLoad.current = Promise.resolve(takeUiLock(body.lock));
+                } else {
+                    loadUiLock(true);
+                }
+            }, [takeUiLock, loadUiLock]);
+            useEffect(() => { loadUiLock(); }, [loadUiLock]);
+
+            const lockedLanguage = (uiLock.language && uiLockBinds(uiLock, lockRole)) ? uiLock.language : '';
+            const shown = lockedLanguage || language;
+
             // Translation function with English fallback
             const t = useCallback((key) => {
-                return translations[language]?.[key] || translations['en']?.[key] || key;
-            }, [language]);
+                return translations[shown]?.[key] || translations['en']?.[key] || key;
+            }, [shown]);
 
             // Internal: validate + persist locally. Used by both code paths.
             const _setAndPersist = useCallback((lang) => {
@@ -69,22 +161,33 @@
             // NS May 2026 (#389) — caller is responsible for only invoking this when
             // authenticated; the switcher uses applyLanguage on the login page.
             const changeLanguage = useCallback((lang) => {
+                // nothing to switch while the admin pinned it, and nothing to send:
+                // the server would refuse it with UI_LOCKED anyway
+                if (lockedLanguage) return;
                 if (!_setAndPersist(lang)) return;
                 fetch(`${API_URL}/user/preferences`, {
                     method: 'PUT', credentials: 'include',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ language: lang })
+                }).then(async r => {
+                    // pinned after this page loaded: catch up so the switcher goes away
+                    if (r && r.status === 403) {
+                        const body = await r.json().catch(() => null);
+                        if (body && body.code === 'UI_LOCKED') takeRefusedLock(body);
+                    }
                 }).catch(() => {}); // fire and forget
-            }, [_setAndPersist]);
+            }, [_setAndPersist, lockedLanguage, takeRefusedLock]);
 
             // applyLanguage just sets state+localStorage without API call.
             // Used on login/session restore AND on the unauth login page.
+            // Under a lock this only records the user's own choice, what shows stays the lock.
             const applyLanguage = useCallback((lang) => {
                 _setAndPersist(lang);
             }, [_setAndPersist]);
 
             return(
-                <LanguageContext.Provider value={{ language, t, changeLanguage, applyLanguage, supportedLangs: SUPPORTED_LANGS }}>
+                <LanguageContext.Provider value={{ language: shown, t, changeLanguage, applyLanguage, supportedLangs: SUPPORTED_LANGS,
+                                                   languageLocked: !!lockedLanguage, uiLock, loadUiLock, takeRefusedLock, setLockRole }}>
                     {children}
                 </LanguageContext.Provider>
             );
@@ -94,17 +197,9 @@
             return useContext(LanguageContext);
         }
 
-        // Language Switcher Component
-        function LanguageSwitcher() {
-            const { language, t, changeLanguage, applyLanguage } = useTranslation();
-            const { isCorporate } = useLayout();
-            // NS May 2026 (#389): On the login page (unauthenticated) we must NOT
-            // hit /api/user/preferences — it would always 401 and spam the console.
-            // useAuth() reads cleanly here because LanguageSwitcher is rendered
-            // inside both providers in the tree.
-            const auth = useContext(AuthContext);
-            const switchLang = (auth && auth.isAuthenticated) ? changeLanguage : applyLanguage;
-            const langs = [
+        // the switcher's list, also what Settings > Server offers to pin
+        function languageChoices(t) {
+            return [
                 { code: 'de', flag: '🇦🇹', label: 'DE', title: 'Deutsch' },  // NS: AT flag is intentional (German is spoken in Austria too) — do NOT swap it for the German flag
                 { code: 'en', flag: '🇬🇧', label: 'EN', title: 'English' },
                 { code: 'it', flag: '🇮🇹', label: 'IT', title: 'Italiano' },
@@ -115,6 +210,21 @@
                 { code: 'zh', flag: '🇨🇳', label: 'ZH', title: t('languageSimplifiedChinese') },
                 { code: 'pl', flag: '🇵🇱', label: 'PL', title: 'Polski' },
             ];
+        }
+
+        // Language Switcher Component
+        function LanguageSwitcher() {
+            const { language, t, changeLanguage, applyLanguage, languageLocked } = useTranslation();
+            const { isCorporate } = useLayout();
+            // NS May 2026 (#389): On the login page (unauthenticated) we must NOT
+            // hit /api/user/preferences - it would always 401 and spam the console.
+            // useAuth() reads cleanly here because LanguageSwitcher is rendered
+            // inside both providers in the tree.
+            const auth = useContext(AuthContext);
+            const switchLang = (auth && auth.isAuthenticated) ? changeLanguage : applyLanguage;
+            // pinned by the admin, there is nothing to pick
+            if (languageLocked) return null;
+            const langs = languageChoices(t);
             const activeLanguage = langs.find(l => l.code === language) || langs[0];
 
             if (isCorporate) {
@@ -166,9 +276,35 @@
         // ============================================
         
         const AuthContext = createContext();
-        
+
+        // the layout a lock pins for this account, '' when it keeps its own
+        function lockedLayoutFor(lock, u) {
+            return (u && lock && lock.layout && uiLockBinds(lock, u.role)) ? lock.layout : '';
+        }
+
+        // the palettes that belong to a layout rather than to the theme grid
+        const LAYOUT_PALETTES = ['corporateDark', 'corporateLight', 'cloud'];
+
+        // The theme to paint once a lock decides the layout instead of
+        // the user. u carries ui_layout as the server sends it (their own choice).
+        // Corporate goes by the top bar toggle as it does for its own users (#743: a
+        // 'system' choice stays), Cloud wears its palette, and Modern drops the palette of
+        // the user's own Corporate or Cloud layout for the server default.
+        function lockedTheme(theme, u, lockedLayout, defaultTheme) {
+            if (lockedLayout === 'cloud') return 'cloud';
+            if (lockedLayout === 'corporate' && theme !== 'system') {
+                let light = false;
+                try { light = localStorage.getItem('corp-theme') === 'light'; } catch (_) {}
+                return light ? 'corporateLight' : 'corporateDark';
+            }
+            if (lockedLayout === 'modern' && (u?.ui_layout || 'modern') !== 'modern' && LAYOUT_PALETTES.includes(theme)) {
+                return (PEGAPROX_THEMES[defaultTheme] && !LAYOUT_PALETTES.includes(defaultTheme)) ? defaultTheme : 'proxmoxDark';
+            }
+            return theme;
+        }
+
         function AuthProvider({ children }) {
-            const { t, applyLanguage } = useTranslation();
+            const { t, applyLanguage, uiLock, loadUiLock, takeRefusedLock, setLockRole } = useTranslation();
             const [user, setUser] = useState(null);
             // NS: Security fix - session cookie is HttpOnly (can't be stolen by XSS)
             // But we also keep sessionId in memory for WebSocket auth (not in localStorage!)
@@ -193,11 +329,32 @@
             // changes to the active. serving: true on a member that serves users as an
             // active instance, leader_reachable: false once the leader stops answering.
             const [ha, setHa] = useState({ role: 'standalone' });
+            // LW Oct 2026 (#1189) - the layout an admin pinned for this account, '' when it
+            // picks its own. The server default theme is kept for lockedTheme().
+            const layoutLock = lockedLayoutFor(uiLock, user);
+            const defaultThemeRef = useRef('');
             
             // Check session on mount
             useEffect(() => {
                 checkSession();
             }, []);
+
+            // the lock changed while signed in (an admin saved it for admins too, or a refused
+            // save read it again). The first run is the session start, which painted already.
+            // Corporate and Cloud repaint in useLayout; Modern takes the user's own theme
+            // back, or the default when that belongs to their own other layout.
+            const paintedLock = useRef(null);
+            useEffect(() => {
+                if (!user) { paintedLock.current = null; return; }
+                if (paintedLock.current === null || paintedLock.current === layoutLock) {
+                    paintedLock.current = layoutLock;
+                    return;
+                }
+                paintedLock.current = layoutLock;
+                if ((layoutLock || user.ui_layout || 'modern') !== 'modern') return;
+                const own = user.theme || defaultThemeRef.current || 'proxmoxDark';
+                applyTheme(lockedTheme(own, user, layoutLock, defaultThemeRef.current));
+            }, [user, layoutLock]);
 
             // keeps the old object when nothing changed, so a poll does not re-render
             // every useAuth() consumer for nothing
@@ -257,6 +414,9 @@
                         return;
                     }
                 } catch (_) {}
+                // the lock is read alongside the session and loading waits
+                // for both, so a pinned user never sees their own layout for a moment first
+                const lockLoad = loadUiLock();
                 try {
                     // Add cache-busting to prevent stale data
                     const r = await fetch(`${API_URL}/auth/check?t=${Date.now()}`, {
@@ -284,6 +444,10 @@
                                 window.location.replace('/portal');
                                 return;
                             }
+                            const lock = await lockLoad;
+                            // before setUser: an exempt admin's dashboard opens in their own language
+                            setLockRole(d.user?.role || '');
+                            defaultThemeRef.current = d.default_theme || '';
                             setUser(d.user);
                             setIsAuthenticated(true);
                             // NS: Get session_id from response for WebSocket auth
@@ -319,6 +483,7 @@
                                     userTheme = isLight ? 'corporateLight' : 'corporateDark';
                                 }
                             } catch (_) {}
+                            userTheme = lockedTheme(userTheme, d.user, lockedLayoutFor(lock, d.user), d.default_theme);
                             console.log('[Theme] checkSession - Server theme:', d.user?.theme, 'Default:', d.default_theme, 'Using:', userTheme);
                             if (userTheme && PEGAPROX_THEMES[userTheme]) {
                                 applyTheme(userTheme);
@@ -350,12 +515,15 @@
                     console.error('Session check failed');
                     logout();
                 }
+                await lockLoad;  // never rejects, see fetchUiLock
                 setLoading(false);
             };
             
             // -lw: Main login handler - supports 2FA flow + remember me
             const login = async (username, password, totpCode = '', remember = false, webauthnProof = '') => {
                 setError(null);
+                // a login page can stay open for days, the session starts on the lock as it is now
+                const lockLoad = loadUiLock(true);
                 try {
                     const resp = await fetch(`${API_URL}/auth/login`, {
                         method: 'POST',
@@ -401,6 +569,9 @@
                             window.location.replace('/portal');
                             return { success: false, portal_only: true };
                         }
+                        const lock = await lockLoad;
+                        setLockRole(data.user?.role || '');
+                        defaultThemeRef.current = data.default_theme || '';
                         setUser(data.user);
                         setIsAuthenticated(true);
                         // NS: Keep session_id in memory for WebSocket auth
@@ -423,6 +594,7 @@
                                 userTheme = isLight ? 'corporateLight' : 'corporateDark';
                             }
                         } catch (_) {}
+                        userTheme = lockedTheme(userTheme, data.user, lockedLayoutFor(lock, data.user), data.default_theme);
                         console.log('[Theme] Login - Server theme:', data.user?.theme, 'Default:', data.default_theme, 'Using:', userTheme);
                         if (userTheme && PEGAPROX_THEMES[userTheme]) {
                             applyTheme(userTheme);
@@ -484,15 +656,23 @@
                         });
                         
                         // Apply theme immediately AND save to localStorage
+                        // under a pinned layout the stored theme can belong to the
+                        // user's own one; only a theme picked just now is painted as it is
                         if (data.theme && PEGAPROX_THEMES[data.theme]) {
-                            applyTheme(data.theme);
+                            const theme = (layoutLock && !('theme' in prefs))
+                                ? lockedTheme(data.theme, data, layoutLock, defaultThemeRef.current)
+                                : data.theme;
+                            applyTheme(theme);
                         }
                         return { success: true, data };
                     }
                     
                     const errorData = await r.json().catch(() => ({}));
                     console.error('updatePreferences: Request failed:', errorData);
-                    return { success: false, error: errorData.error };
+                    // pinned after this page loaded (or the lock read failed): follow the lock
+                    // the refusal brings
+                    if (r.status === 403 && errorData.code === 'UI_LOCKED') takeRefusedLock(errorData);
+                    return { success: false, error: errorData.error, code: errorData.code };
                 } catch (e) {
                     console.error('Failed to update preferences:', e);
                     return { success: false, error: e.message };
@@ -512,6 +692,7 @@
                 } catch (err) {
                     console.error('Logout request failed:', err);
                 }
+                setLockRole(null);
                 setUser(null);
                 setSessionId(null);
                 setIsAuthenticated(false);
@@ -553,7 +734,7 @@
             const haServing = haStandby && ha.serving === true;
 
             return(
-                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup, ha, refreshHa, haReadOnly, haStandby, haConsolesElsewhere, haServing }}>
+                <AuthContext.Provider value={{ user, sessionId, isAuthenticated, loading, error, login, logout, getAuthHeaders, isAdmin: user?.role === 'admin', passwordExpiry, requires2FASetup, setRequires2FASetup, updatePreferences, updateCurrentUser, ldapEnabled, oidcEnabled, oidcButtonText, loginBackground, reverseProxyEnabled, needsSetup, setNeedsSetup, ha, refreshHa, haReadOnly, haStandby, haConsolesElsewhere, haServing, layoutLock }}>
                     {children}
                 </AuthContext.Provider>
             );
@@ -634,8 +815,9 @@
         // LW: Feb 2026 - layout hook (reads from user preferences)
         // returns layout type and convenience boolean for corporate mode
         function useLayout() {
-            const { user } = useAuth();
-            const layout = user?.ui_layout || 'modern';
+            const { user, layoutLock } = useAuth();
+            // a pinned layout (#1189) wins over the user's own, which stays stored
+            const layout = layoutLock || user?.ui_layout || 'modern';
             const isCorporate = layout === 'corporate';
             // NS 2026-06-05 — Cloud skin (Preview). Third layout alongside modern/corporate.
             const isCloud = layout === 'cloud';
@@ -682,5 +864,5 @@
                 }
             }, [isCorporate, user?.sidebar_show_vmid]);
 
-            return { layout, isCorporate, isCloud };
+            return { layout, isCorporate, isCloud, layoutLocked: !!layoutLock };
         }
