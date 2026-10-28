@@ -33921,6 +33921,25 @@
         "x-pegaprox-auth": "public"
       }
     },
+    "/api/interface/lock": {
+      "get": {
+        "operationId": "settings.get_interface_lock_get",
+        "tags": [
+          "settings"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          }
+        },
+        "summary": "Layout and language an administrator pinned for everyone (public)",
+        "description": "The login page needs the language before anybody has signed in, so this takes no\ncredential and answers everyone the same three values: layout and language ('' when\nusers choose) and admins (false: administrators are exempt). Whether the lock binds an\naccount is decided by PUT /api/user/preferences, which refuses a change with UI_LOCKED.",
+        "x-pegaprox-auth": "public"
+      }
+    },
     "/api/settings/login-background": {
       "delete": {
         "operationId": "settings.delete_login_background_delete",

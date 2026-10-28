@@ -17,6 +17,7 @@ from pegaprox.globals import (
     task_pegaprox_users_cache, task_pegaprox_users_lock,
 )
 from pegaprox.core.db import get_db
+from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.rbac import acts_as_admin
 
 def effective_reverse_proxy(settings=None):
@@ -189,6 +190,11 @@ def load_server_settings():
         # NS May 2026 (PVE 9.2 parity) — extra audiences (comma-separated)
         # accepted on the JWT verify alongside the client_id.
         'oidc_audiences': '',
+        # MK Oct 2026 (#1189, #1167) - layout and language pinned for everyone, '' = users choose.
+        # Admins are exempt unless ui_lock_admins is on (see ui_lock below)
+        'ui_layout_lock': '',
+        'ui_language_lock': '',
+        'ui_lock_admins': False,
     }
     
     try:
@@ -272,6 +278,89 @@ def save_server_settings(settings):
     except Exception as e:
         logging.error(f"Error saving server settings: {e}")
         return False
+
+
+# The layouts and languages an admin can pin for everyone (#1189, #1167). The languages are
+# the ones the UI ships, SUPPORTED_LANGS in web/src/contexts.js.
+UI_LAYOUT_LOCKS = ('modern', 'corporate', 'cloud')
+UI_LANGUAGE_LOCKS = ('de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl')
+UI_LOCKED = 'UI_LOCKED'
+
+
+def _checkbox(value):
+    """True or False for a checkbox sent as JSON or as a form field, None for anything else.
+    bool('false') is True, so a string is read and never cast."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ('true', '1', 'yes', 'on'):
+            return True
+        if word in ('false', '0', 'no', 'off', ''):
+            return False
+    return None
+
+
+def apply_ui_lock(source, settings):
+    """Check the lock keys a server settings save carries (the JSON body or request.form)
+    and write them into settings. Returns (audit line or '', error or None); on an error
+    settings is left as it was. A key the save does not carry stays as stored."""
+    # MK Oct 2026 - a value outside the lists is refused, not stored as ''. A typo would
+    # lift the lock the admin meant to set, and nobody would see it
+    changes = {}
+    for key, allowed in (('ui_layout_lock', UI_LAYOUT_LOCKS), ('ui_language_lock', UI_LANGUAGE_LOCKS)):
+        if key not in source:
+            continue
+        value = source.get(key)
+        if not isinstance(value, str) or value.strip() not in ('',) + allowed:
+            return '', f"{key} is empty or one of {', '.join(allowed)}"
+        changes[key] = value.strip()
+    if 'ui_lock_admins' in source:
+        flag = _checkbox(source.get('ui_lock_admins'))
+        if flag is None:
+            return '', 'ui_lock_admins is true or false'
+        changes['ui_lock_admins'] = flag
+
+    # the audit line goes by what was in effect, so a stored value ui_lock() reads as no
+    # lock is not reported as a lock that was lifted
+    was = ui_lock(settings)
+    said = []
+    for key, label in (('ui_layout_lock', 'layout'), ('ui_language_lock', 'language')):
+        before = was[label]
+        if key in changes and changes[key] != before:
+            said.append(f"{label} {before or 'users choose'} -> {changes[key] or 'users choose'}")
+    if 'ui_lock_admins' in changes and changes['ui_lock_admins'] != was['admins']:
+        said.append('administrators ' + ('included' if changes['ui_lock_admins'] else 'exempt'))
+    settings.update(changes)
+    return ('Interface lock: ' + ', '.join(said)) if said else '', None
+
+
+def ui_lock(settings=None):
+    """The lock as GET /api/interface/lock hands it out: {'layout', 'language', 'admins'}.
+
+    A stored value outside the lists counts as no lock, as a restored or hand-edited
+    config can bring one."""
+    if settings is None:
+        settings = load_server_settings()
+    layout = settings.get('ui_layout_lock')
+    language = settings.get('ui_language_lock')
+    layout = layout if isinstance(layout, str) and layout in UI_LAYOUT_LOCKS else ''
+    language = language if isinstance(language, str) and language in UI_LANGUAGE_LOCKS else ''
+    return {'layout': layout, 'language': language, 'admins': settings.get('ui_lock_admins') is True}
+
+
+def ui_lock_holds(role, lock):
+    """Whether the lock binds an account of this role.
+
+    role is the stored one, what auth_login and auth_check report as user.role (fresh_role
+    there) and what the browser goes by, so the UI and the server agree on who is held.
+    So an admin a tenant mapping lowers is exempt as well, and so is an admin's API token
+    bound to a lower role: the preferences are the account's, not the token's."""
+    if not (lock['layout'] or lock['language']):
+        return False
+    return lock['admins'] or role != ROLE_ADMIN
 
 
 def get_session_timeout():

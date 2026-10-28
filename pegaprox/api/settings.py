@@ -29,7 +29,7 @@ from pegaprox.utils.audit import log_audit, get_client_ip
 from pegaprox.api.helpers import (
     load_server_settings, save_server_settings, check_cluster_access,
     get_login_settings, get_session_timeout, safe_error,
-    acme_dns_config_from_settings, require_unconfined,
+    acme_dns_config_from_settings, require_unconfined, apply_ui_lock, ui_lock,
     evacuation_options, evacuation_options_said, rolling_options_intro, rolling_node_templates,
     rolling_moved_templates, rolling_rules_give_way, rolling_rules_back_on, rolling_in_maintenance,
     rolling_moved_guests, rolling_wind_down, rolling_guests_left_moved,
@@ -1469,6 +1469,11 @@ def get_server_settings():
     # limited to a tenant (api/banners.py)
     from pegaprox.api.banners import BANNERS_KEY
     settings.pop(BANNERS_KEY, None)
+    # MK Oct 2026 (#1189) - the lock as it is in effect. The form sends these back with every
+    # save of the tab, and a stored value outside the lists would turn each one into a 400
+    lock = ui_lock(settings)
+    settings.update(ui_layout_lock=lock['layout'], ui_language_lock=lock['language'],
+                    ui_lock_admins=lock['admins'])
     return jsonify(settings)
 
 
@@ -1487,6 +1492,40 @@ def get_password_policy():
         'require_special': settings.get('password_require_special', False),
         'expiry_days': settings.get('password_expiry_days', 0)
     })
+
+
+@bp.route('/api/interface/lock', methods=['GET'])
+def get_interface_lock():
+    """Layout and language an administrator pinned for everyone (public)
+
+    The login page needs the language before anybody has signed in, so this takes no
+    credential and answers everyone the same three values: layout and language ('' when
+    users choose) and admins (false: administrators are exempt). Whether the lock binds an
+    account is decided by PUT /api/user/preferences, which refuses a change with UI_LOCKED.
+    """
+    # MK Oct 2026 (#1189, #1167) - in PORTAL_ONLY_UNREAD, not PORTAL_ONLY_ENDPOINTS: it reads
+    # no credential and says the same to anyone. A portal account opens / too before the
+    # page sends it on to /portal, and asks for this on the way, cookie included
+    resp = jsonify(ui_lock())
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+def _refuse_confined_lock():
+    """403 unless the caller sees every cluster and no tenant override lowers them where
+    they live. The interface lock is one for the whole installation, like the banners, and
+    takes their bar (api/banners.py). Fails closed."""
+    try:
+        from pegaprox.api.ha import _unconfined
+        from pegaprox.utils.auth import build_authz_user
+        session = getattr(request, 'session', None) or {}
+        if _unconfined(build_authz_user(session.get('user', ''), session)):
+            return None
+    except Exception as e:
+        logging.warning(f"[Settings] could not resolve the caller's cluster scope: {e}")
+    return jsonify({'error': 'The interface lock is set by administrators who are not limited '
+                             'to a tenant or to specific clusters'}), 403
+
 
 @bp.route('/api/settings/server', methods=['POST'])
 @require_auth(perms=['admin.settings'])
@@ -1523,6 +1562,15 @@ def update_server_settings():
                     return jsonify({'error': 'email cannot name Entra accounts: it is the mail '
                                              'attribute, which Entra does not verify. Pick '
                                              'preferred_username or upn.'}), 400
+            
+            # MK Oct 2026 (#1189, #1167) - the interface lock, checked before anything else lands
+            lock_note, lock_error = apply_ui_lock(data, settings)
+            if lock_error:
+                return jsonify({'error': lock_error}), 400
+            # a save that changes nothing of it goes through for anyone the route lets in
+            refused = _refuse_confined_lock() if lock_note else None
+            if refused:
+                return refused
             
             # server config
             if 'domain' in data:
@@ -1731,7 +1779,11 @@ def update_server_settings():
                 old_se = settings.get('syslog_enabled', True)
                 settings['syslog_enabled'] = bool(data['syslog_enabled'])
                 if old_se != settings['syslog_enabled']:
-                    save_server_settings(settings)  # persist before (re)start so the boot gate agrees
+                    # persist before (re)start so the boot gate agrees. The lock lands with this
+                    # save, whatever the rest of the request does, so its audit line goes now
+                    if save_server_settings(settings) and lock_note:
+                        log_audit(request.session.get('user', 'admin'), 'settings.interface_lock', lock_note)
+                        lock_note = ''
                     try:
                         from pegaprox.background.syslog_server import start_syslog_server, stop_syslog_server
                         start_syslog_server() if settings['syslog_enabled'] else stop_syslog_server()
@@ -1903,7 +1955,14 @@ def update_server_settings():
                          f"username_claim={_old_claim or 'auto'}->{settings.get('oidc_username_claim') or 'auto'})")
             
         else:
-            # form-data (for file uploads)
+            # form-data (for file uploads). The lock is checked first: further down this branch
+            # writes uploads and may save the settings for the syslog toggle
+            lock_note, lock_error = apply_ui_lock(request.form, settings)
+            if lock_error:
+                return jsonify({'error': lock_error}), 400
+            refused = _refuse_confined_lock() if lock_note else None
+            if refused:
+                return refused
             domain = request.form.get('domain', '')
             port = request.form.get('port', '5000')
             http_redirect_port = request.form.get('http_redirect_port', '0')
@@ -1997,7 +2056,10 @@ def update_server_settings():
                 old_syslog_enabled = settings.get('syslog_enabled', True)
                 settings['syslog_enabled'] = request.form['syslog_enabled'] in ('true', '1', 'on')
                 if old_syslog_enabled != settings['syslog_enabled']:
-                    save_server_settings(settings)  # persist before (re)starting so the boot-time gate agrees
+                    # persist before (re)starting so the boot-time gate agrees (#1189: with the lock)
+                    if save_server_settings(settings) and lock_note:
+                        log_audit(request.session.get('user', 'admin'), 'settings.interface_lock', lock_note)
+                        lock_note = ''
                     try:
                         from pegaprox.background.syslog_server import start_syslog_server, stop_syslog_server
                         if settings['syslog_enabled']:
@@ -2070,6 +2132,8 @@ def update_server_settings():
             logging.info("[Settings] Settings saved successfully")
             usr = getattr(request, 'session', {}).get('user', 'system')
             log_audit(usr, 'settings.server_updated', f"Settings updated (restart_required={restart_required})")
+            if lock_note:
+                log_audit(usr, 'settings.interface_lock', lock_note)
             
             # NS: Feb 2026 - Warn if LDAP enabled but critical fields missing
             warnings = []

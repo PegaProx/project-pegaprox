@@ -33,7 +33,7 @@ from pegaprox.utils.rbac import (
     get_pool_membership_cache, invalidate_pool_cache, get_vm_pool_cached,
     DEFAULT_TENANT_ID, ROLE_TEMPLATES, acts_as_admin,
 )
-from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key
+from pegaprox.api.helpers import load_server_settings, save_server_settings, get_login_settings, check_cluster_access, safe_error, caller_acts_as_admin, find_user_key, ui_lock, ui_lock_holds, UI_LOCKED
 
 bp = Blueprint('users', __name__)
 
@@ -302,6 +302,8 @@ def update_user_preferences():
     
     username = request.session['user']
     data = request.get_json() or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
     
     logging.info(f"update_user_preferences: user={_sl(username)}, data={_sl(data)}")
     
@@ -313,6 +315,18 @@ def update_user_preferences():
     user = users_db[username]
     
     logging.info(f"update_user_preferences: user before update: ui_layout={user.get('ui_layout')}")
+    
+    # MK Oct 2026 (#1189, #1167) - a layout or language the admin pinned for everyone. The
+    # whole request is refused before anything is saved; sending the pinned value is fine.
+    # What the user picked before stays stored, so lifting the lock gives it back. The lock
+    # goes along, so a page that could not read it follows it without asking again
+    lock = ui_lock()
+    if ui_lock_holds(user.get('role', request.session.get('role')), lock):
+        for field, pinned, what in (('ui_layout', lock['layout'], 'layout'),
+                                    ('language', lock['language'], 'language')):
+            if pinned and field in data and data[field] != pinned:
+                return jsonify({'error': f'The {what} is set by your administrator',
+                                'code': UI_LOCKED, 'field': field, 'lock': lock}), 403
     
     # Only allow specific fields to be updated
     allowed_themes = [

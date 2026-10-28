@@ -37,7 +37,7 @@ WS_HEADERS = {'Upgrade': 'websocket', 'Connection': 'Upgrade',
 REFUSED = (403, 'PORTAL_ONLY')
 # left alone by the hook (auth.PORTAL_ONLY_UNREAD), and the route outside the rate limit
 # that reads no API token, where the hook does not look one up
-UNREAD = {'auth.health_check'}
+UNREAD = {'auth.health_check', 'settings.get_interface_lock'}
 TOKENLESS_UNCOUNTED = {'realtime.sse_updates'}
 
 

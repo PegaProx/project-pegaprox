@@ -881,8 +881,9 @@ PORTAL_ONLY_ENDPOINTS = frozenset({
 PORTAL_ONLY_PLUGIN = 'client_portal'
 PORTAL_ONLY_ERROR = {'error': 'This account can only use the Client Portal', 'code': 'PORTAL_ONLY'}
 # routes the hook leaves alone: they read no credential and answer everyone the same, and
-# a probe hammers /api/health, which must not turn to a DB lookup or a 503 on a header
-PORTAL_ONLY_UNREAD = frozenset({'auth.health_check'})
+# a probe hammers /api/health, which must not turn to a DB lookup or a 503 on a header.
+# The interface lock (#1189) is read by every page load of /, a portal account's included
+PORTAL_ONLY_UNREAD = frozenset({'auth.health_check', 'settings.get_interface_lock'})
 
 
 def portal_only_may_serve() -> bool:
