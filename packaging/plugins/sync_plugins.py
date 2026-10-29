@@ -79,7 +79,8 @@ def _open_dir(name, parent_fd):
 
 def _is_our_tmp(tmp, names):
     """tmp is a temp name this script uses for one of names: .NAME.<12 hex>.sync-tmp, or
-    .NAME.sync-tmp from before (#1134). A file the plugin wrote itself never matches."""
+    .NAME.sync-tmp from before (#1134). A file the plugin wrote itself only matches when
+    it is named exactly like one of these."""
     if not (tmp.startswith('.') and tmp.endswith('.sync-tmp')):
         return False
     base = tmp[1:-len('.sync-tmp')]
@@ -99,7 +100,9 @@ def _drop_stale_tmps(dir_fd, names):
             st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
             if not stat.S_ISDIR(st.st_mode) and now - st.st_mtime > STALE_TMP_AGE:
                 os.unlink(name, dir_fd=dir_fd)
-        except FileNotFoundError:
+        except OSError:
+            # gone already, or not ours to remove: a leftover that stays is a hidden file,
+            # and the files the sync ships still go in
             pass
 
 

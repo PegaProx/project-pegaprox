@@ -9,6 +9,7 @@ truncated file, and the second run's rename found nothing and failed the plugin.
 The two runs are interleaved by hand at exactly that point, no timing involved: run A
 has written its temp file in full, run B has written half of its own, then A renames.
 """
+import errno
 import os
 import threading
 import types
@@ -119,3 +120,49 @@ def test_a_killed_runs_temp_file_goes_and_a_running_ones_stays(tmp_path):
     assert not any(path.exists() for path in dead), 'a dead run\'s temp file stayed'
     assert running.read_bytes() == b'in progress', 'a running sync\'s temp file was touched'
     assert own.exists() and own.read_bytes() == b'plugin data', 'a file the plugin wrote was removed'
+
+
+def test_a_leftover_that_cannot_be_removed_does_not_fail_the_plugin(tmp_path, monkeypatch):
+    # the cleanup is a side job: whatever keeps a dead run's temp file there, the files the
+    # sync ships still go in
+    source = tmp_path / 'share' / 'plugins'
+    (source / 'status_page').mkdir(parents=True)
+    (source / 'status_page' / 'plugin.py').write_bytes(b'code\n')
+    target = tmp_path / 'var-lib' / 'plugins'
+    (target / 'status_page').mkdir(parents=True)
+    stuck = target / 'status_page' / '.plugin.py.0123456789ab.sync-tmp'
+    stuck.write_bytes(b'half')
+    old = stuck.stat().st_mtime - 2 * 3600
+    os.utime(stuck, (old, old))
+
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == stuck.name:
+            raise PermissionError(errno.EPERM, 'Operation not permitted', path)
+        return real_unlink(path, *args, **kwargs)
+    mod = _sync_module()
+    monkeypatch.setattr(os, 'unlink', unlink)
+    said = []
+    assert mod.sync(str(source), str(target), say=said.append) == [], said
+    assert (target / 'status_page' / 'plugin.py').read_bytes() == b'code\n'
+    assert stuck.exists()
+
+
+def test_every_bundled_file_leaves_room_for_its_temp_name(tmp_path):
+    # the temp name is 23 bytes longer than the file's own. A bundled file whose temp name
+    # a 255-byte file system refuses would fail its plugin on every install, so it fails here
+    mod = _sync_module()
+    names = {n for _, _, files in os.walk(os.path.join(ROOT, 'plugins')) for n in files}
+    assert names
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for name in sorted(names):
+            try:
+                tmp, tfd = mod._new_tmp(fd, name, 0o600)
+            except OSError as e:
+                raise AssertionError(f'no temp file for the bundled {name!r}: {e}') from None
+            os.close(tfd)
+            os.unlink(tmp, dir_fd=fd)
+    finally:
+        os.close(fd)
