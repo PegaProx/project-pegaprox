@@ -796,6 +796,8 @@ AUTOMATIONS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._schedule_update_clear'): (2, 'read'),
     ('pegaprox/core/manager.py', 'PegaProxManager.start'): (2, 'confirm'),
     ('pegaprox/core/pbs.py', 'PBSManager.start_update'): (2, 'job'),
+    # a disconnected PBS logged in again, a login and GET /version (#1156)
+    ('pegaprox/core/pbs.py', 'start_reconnect_loop'): (1, 'read'),
     ('pegaprox/core/v2p.py', '_ssh_pipe_transfer'): (1, 'read'),
     ('pegaprox/core/vmware.py', 'load_vmware_servers'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start'): (1, 'confirm'),

@@ -167,6 +167,12 @@ class PBSManager:
         self.last_error = ''
         self.last_status = {}
         self._lock = threading.Lock()
+        # #1156 - what retry_disconnected() below goes by
+        self._connect_tried = 0.0      # time.monotonic() at the start of the last connect()
+        self._auth_refused = False     # that connect() got an answer, and it was a no
+        self._retry_delay = 0
+        self._retry_tries = 0
+        self._retry_said = ''
         
         # Disable SSL warnings if not verifying
         if not self.ssl_verify:
@@ -177,16 +183,24 @@ class PBSManager:
         # bare "2001:db8::10:8007" is no URL, requests could not even parse it
         return f"https://{_url_host(self.host)}:{self.port}/api2/json"
     
-    def connect(self) -> bool:
+    def connect(self, quiet=False) -> bool:
         """Authenticate with PBS server
         
         NS: Try API token first (stateless), fall back to ticket auth
+        `quiet` is for the background retry (#1156), which logs what changed itself
+        instead of the same failure every few minutes.
         """
+        self._connect_tried = time.monotonic()
+        self._auth_refused = False
+        info = logging.debug if quiet else logging.info
+        warn = logging.debug if quiet else logging.warning
+        error = logging.debug if quiet else logging.error
         try:
             if self._using_api_token:
                 if not self._token_secret:
                     self.last_error = "API token secret missing"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    self._auth_refused = True
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
                 # API Token auth - just verify it works
@@ -196,11 +210,12 @@ class PBSManager:
                     self.connected = True
                     self.last_error = ''
                     data = resp.json().get('data', {})
-                    logging.info(f"[PBS:{self.name}] Connected via API token (version {data.get('version', '?')})")
+                    info(f"[PBS:{self.name}] Connected via API token (version {data.get('version', '?')})")
                     return True
                 else:
                     self.last_error = f"API token auth failed: HTTP {resp.status_code}"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    self._auth_refused = resp.status_code in (401, 403)
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
             else:
@@ -222,25 +237,26 @@ class PBSManager:
                     
                     self.connected = True
                     self.last_error = ''
-                    logging.info(f"[PBS:{self.name}] Connected via ticket auth (user: {self.user})")
+                    info(f"[PBS:{self.name}] Connected via ticket auth (user: {self.user})")
                     return True
                 else:
                     self.last_error = f"Ticket auth failed: HTTP {resp.status_code}"
+                    self._auth_refused = resp.status_code in (401, 403)
                     if self.api_token_id:
                         # a token id without its secret falls back to the password login
                         self.last_error += " (API token ID set, but no token secret)"
-                    logging.warning(f"[PBS:{self.name}] {self.last_error}")
+                    warn(f"[PBS:{self.name}] {self.last_error}")
                     self.connected = False
                     return False
                     
         except requests.exceptions.ConnectionError as e:
             self.last_error = f"Connection failed: {_url_host(self.host)}:{self.port}"
-            logging.error(f"[PBS:{self.name}] {self.last_error}")
+            error(f"[PBS:{self.name}] {self.last_error}")
             self.connected = False
             return False
         except Exception as e:
             self.last_error = str(e)
-            logging.error(f"[PBS:{self.name}] Connect error: {e}")
+            error(f"[PBS:{self.name}] Connect error: {e}")
             self.connected = False
             return False
     
@@ -1215,6 +1231,107 @@ def load_pbs_servers(only=None):
         logging.info(f"[PBS] Loaded {len(rows)} PBS servers ({sum(1 for m in pbs_managers.values() if m.connected)} connected)")
     except Exception as e:
         logging.warning(f"[PBS] Failed to load PBS servers: {e}")
+
+
+# ── Reconnect (#1156) ──
+#
+# NS Oct 2026 - connect() ran at the start and on the add, edit and test routes, and the
+# API calls only log in again on a 401. A PBS that did not answer that one connect (its
+# VM still booting while PegaProx was already up) stayed "not connected" until PegaProx
+# was restarted. One loop for every server now tries a disconnected one again: 30 s after
+# the attempt that failed, then twice as long each time, 5 min at most. A PBS that did
+# answer and turned the login down waits the full 5 min every time, asking more often
+# does not fix a password. The loop runs wherever the managers run, a standby with the
+# live view too: a login and GET /version change nothing on the PBS.
+
+RETRY_FIRST = 30
+RETRY_MAX = 300
+RETRY_TICK = 10
+
+_retry_wake = threading.Event()
+_retry_thread = None
+
+
+def _retry_wait(mgr):
+    """Seconds after its last connect() before a disconnected manager is tried again."""
+    if getattr(mgr, '_auth_refused', False):
+        return RETRY_MAX
+    return getattr(mgr, '_retry_delay', 0) or RETRY_FIRST
+
+
+def retry_disconnected(now=None):
+    """One pass of the loop: every enabled manager that is not connected and has waited
+    long enough gets one connect(), one after the other, the longest waiting first. A
+    server deleted, disabled or rebuilt (edit route, standby reload) since the pass
+    started is left alone. Logs when something changed, not every attempt. Returns how
+    many it tried."""
+    now = time.monotonic() if now is None else now
+    due = []
+    for pbs_id, mgr in list(pbs_managers.items()):
+        if not getattr(mgr, 'enabled', True):
+            continue
+        if mgr.connected:
+            if getattr(mgr, '_retry_said', ''):
+                # back through the edit or test route, or a login after a 401
+                logging.warning(f"[PBS:{mgr.name}] connected again")
+            mgr._retry_delay, mgr._retry_tries, mgr._retry_said = 0, 0, ''
+            continue
+        if now - getattr(mgr, '_connect_tried', 0.0) >= _retry_wait(mgr):
+            due.append((getattr(mgr, '_connect_tried', 0.0), pbs_id, mgr))
+
+    tried = 0
+    for _at, pbs_id, mgr in sorted(due, key=lambda d: d[0]):
+        if pbs_managers.get(pbs_id) is not mgr or not mgr.enabled or mgr.connected:
+            continue
+        tried += 1
+        mgr._retry_tries = getattr(mgr, '_retry_tries', 0) + 1
+        ok = mgr.connect(quiet=True)
+        if pbs_managers.get(pbs_id) is not mgr:
+            continue
+        if ok:
+            n = mgr._retry_tries
+            logging.warning(f"[PBS:{mgr.name}] reconnected after {n} {'retry' if n == 1 else 'retries'}")
+            mgr._retry_delay, mgr._retry_tries, mgr._retry_said = 0, 0, ''
+            continue
+        mgr._retry_delay = min(RETRY_MAX, _retry_wait(mgr) * 2)
+        said = 'refused' if mgr._auth_refused else 'down'
+        if said == mgr._retry_said:
+            continue
+        mgr._retry_said = said
+        if said == 'refused':
+            logging.warning(f"[PBS:{mgr.name}] {mgr.last_error} - the PBS turns the login down, "
+                            f"trying again every {RETRY_MAX // 60} min. Check the user, password "
+                            f"or API token of this server")
+        else:
+            logging.warning(f"[PBS:{mgr.name}] still not connected ({mgr.last_error}), trying "
+                            f"again in the background, at most every {RETRY_MAX // 60} min")
+    return tried
+
+
+def reconnect_soon(mgr):
+    """A route found `mgr` not connected. Somebody is looking at it, so its next try comes
+    RETRY_FIRST after the last one instead of up to RETRY_MAX. Only wakes the loop, never
+    connects here and never waits; a refused login keeps its wait."""
+    if getattr(mgr, 'enabled', True) and not getattr(mgr, '_auth_refused', False):
+        mgr._retry_delay = RETRY_FIRST
+        _retry_wake.set()
+
+
+def _retry_loop():
+    while True:
+        _retry_wake.wait(RETRY_TICK)
+        _retry_wake.clear()
+        try:
+            retry_disconnected()
+        except Exception as e:
+            logging.warning(f"[PBS] reconnect pass failed: {e}")
+
+
+def start_reconnect_loop():
+    global _retry_thread
+    if _retry_thread is None or not _retry_thread.is_alive():
+        _retry_thread = threading.Thread(target=_retry_loop, daemon=True, name='pbs-reconnect')
+        _retry_thread.start()
 
 
 def save_pbs_server(pbs_id: str, config: dict):

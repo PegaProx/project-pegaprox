@@ -12,8 +12,9 @@ def test_publickey_only_means_add_a_key():
 
 
 def test_both_methods_offered_but_wrong_password():
-    # '(publickey,password)' => password IS an accepted method, the credential was wrong
-    h = _ssh_auth_hint("root@host: Permission denied (publickey,password).")
+    # '(publickey,password)' => password IS an accepted method, the credential was wrong.
+    # Only when a password went out (sshpass), see test_ssh_hint_says_what_was_sent_1156
+    h = _ssh_auth_hint("root@host: Permission denied (publickey,password).", tried='password')
     assert h and 'password rejected' in h.lower()
     assert 'without-password' not in h
 

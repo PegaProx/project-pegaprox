@@ -17,7 +17,8 @@ from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import safe_error, check_pbs_access, check_cluster_access, scope_vm_rows, require_unconfined, bounded_limit, acts_as_admin, caller_acts_as_admin
 from pegaprox.api.helpers import upstream_failure, tenant_quota_gate, caller_is_scoped
 from pegaprox.utils.sanitization import valid_pbs_upid
-from pegaprox.core.pbs import PBSManager, load_pbs_servers, save_pbs_server, pbs_config_from_row, pbs_target_refusal, _url_host
+from pegaprox.core.pbs import (PBSManager, load_pbs_servers, save_pbs_server, pbs_config_from_row,
+                                pbs_target_refusal, _url_host, reconnect_soon)
 
 bp = Blueprint('pbs', __name__)
 
@@ -433,6 +434,8 @@ def get_pbs_status(pbs_id):
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
     if not mgr.connected:
+        # the background retry tries it again soon, this request does not wait for it (#1156)
+        reconnect_soon(mgr)
         return jsonify({'error': 'Not connected', 'connected': False}), 503
     
     status = mgr.get_server_status()

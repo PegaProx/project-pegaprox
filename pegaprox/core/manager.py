@@ -318,7 +318,7 @@ def _ssh_stderr_excerpt(stderr, max_chars=240):
     return lines[-1][:max_chars]
 
 
-def _ssh_auth_hint(stderr):
+def _ssh_auth_hint(stderr, tried=None):
     """Translate an opaque SSH failure into an actionable one-liner, or None.
 
     #717: nodes running `PermitRootLogin without-password` refuse root PASSWORD
@@ -327,6 +327,11 @@ def _ssh_auth_hint(stderr):
     the DEBUG logs (and the compliance 502 that follows) read like a mystery.
     A host key that changed after CIS/reprovision surfaces as 'Host key
     verification failed'. Both have a concrete fix the operator can act on.
+
+    `tried` is what the failed attempt offered: 'key' (the cluster's key or the
+    keys ssh finds itself, never a password), 'password' (sshpass), None when the
+    caller cannot tell. The list in the parentheses is what the node would
+    accept, not what was sent (#1156).
     """
     if not stderr:
         return None
@@ -350,7 +355,16 @@ def _ssh_auth_hint(stderr):
             return ("node accepts SSH key auth only (e.g. PermitRootLogin without-password) "
                     "— add an authorized SSH key for this cluster; the password/token only "
                     "covers the PVE API, not SSH")
-        return "SSH password rejected — check the node credentials or add an SSH key"
+        # '(publickey,password)' reads the same whether a password went out or only a
+        # key did, so the wording goes by what was offered. A token cluster without a
+        # key used to be told its password was rejected when none had been sent.
+        if tried == 'password':
+            return "SSH password rejected - check the node credentials or add an SSH key"
+        if tried == 'key':
+            return ("SSH key login refused, no password was sent - add an SSH key for this "
+                    "cluster, or check that the node has its public key in authorized_keys")
+        return ("SSH login refused (key or password) - check the node credentials or add "
+                "an SSH key for this cluster")
     # MK Sep 2026 — sudo, not ssh. For a non-root cluster user every node command goes
     # through `sudo -n bash` (see _wrap_with_sudo), so a node that logs us in perfectly
     # still answers nothing when that user has no passwordless sudo. Without a branch
@@ -10684,11 +10698,12 @@ echo "AGENT_INSTALLED_OK"
         """
         return self.__dict__.get('_ssh_last_stderr', {}).get(host, '')
 
-    def _note_ssh_auth_hint(self, host, stderr):
+    def _note_ssh_auth_hint(self, host, stderr, tried=None):
         """#717: surface an actionable SSH-auth hint ONCE per host, at INFO level so it
         shows without DEBUG. The per-command sites only DEBUG the raw stderr; this lifts
         the conclusion ('add an SSH key' / 'host key changed') into normal logs where a
-        user staring at a compliance 502 will actually see it."""
+        user staring at a compliance 502 will actually see it. `tried` as for
+        _ssh_auth_hint."""
         # Keep the raw text around for _ssh_node_output_ex — the hint is deduplicated
         # per host below, but a caller asking "why did this command come back empty"
         # needs the reason every time, not only the first.
@@ -10696,7 +10711,7 @@ echo "AGENT_INSTALLED_OK"
         store[host] = (stderr or '')[-2000:]
         if len(store) > 512:          # estate-sized clusters: don't let this grow forever
             store.pop(next(iter(store)), None)
-        hint = _ssh_auth_hint(stderr)
+        hint = _ssh_auth_hint(stderr, tried=tried)
         if not hint:
             return
         seen = self.__dict__.setdefault('_ssh_auth_hint_seen', set())
@@ -10754,7 +10769,8 @@ echo "AGENT_INSTALLED_OK"
             if result.returncode == 0:
                 return result.stdout
             self.logger.debug(f"[SSH] Command failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-            self._note_ssh_auth_hint(host, result.stderr)
+            # BatchMode: the keys ssh finds itself, never a password
+            self._note_ssh_auth_hint(host, result.stderr, tried='key')
             return None
         except subprocess.TimeoutExpired:
             self.logger.debug(f"[SSH] Command timed out on {host}")
@@ -10818,7 +10834,7 @@ echo "AGENT_INSTALLED_OK"
                 if result.returncode == 0:
                     return result.stdout
                 self.logger.debug(f"[SSH] Key auth failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-                self._note_ssh_auth_hint(host, result.stderr)
+                self._note_ssh_auth_hint(host, result.stderr, tried='key')
                 return None
             finally:
                 os.unlink(key_file)
@@ -10878,7 +10894,7 @@ echo "AGENT_INSTALLED_OK"
             if result.returncode == 0:
                 return result.stdout
             self.logger.debug(f"[SSH] Password auth failed on {host}: {_ssh_stderr_excerpt(result.stderr)}")
-            self._note_ssh_auth_hint(host, result.stderr)
+            self._note_ssh_auth_hint(host, result.stderr, tried='password')
             return None
         except FileNotFoundError:
             self.logger.debug(f"[SSH] sshpass not installed - cannot use password auth")
@@ -20360,17 +20376,26 @@ echo "AGENT_INSTALLED_OK"
         if out is not None:
             return out, None
         last_err = self._last_ssh_stderr(node_ip) or last_err
+        tried = 'key'
 
         # MK Oct 2026 - a stored key gets past ssh_blocked_reason, so a refused key used to
         # land here with config.pass_ - the token secret on a token cluster.
         ssh_password = self.ssh_password_to_offer(node_ip)
         if ssh_password:
+            # what the key steps left must not be read as the password's answer when
+            # this step leaves none (a timeout, no sshpass) - #1156
+            self.__dict__.setdefault('_ssh_last_stderr', {}).pop(node_ip, None)
             out = self._ssh_run_command_with_password_output(node_ip, ssh_user, cmd, ssh_password, timeout=timeout)
             if out is not None:
                 return out, None
-            last_err = self._last_ssh_stderr(node_ip) or last_err
+            if self._last_ssh_stderr(node_ip):
+                last_err, tried = self._last_ssh_stderr(node_ip), 'password'
+            else:
+                # a password may have gone out without an answer (a timeout), so neither
+                # 'rejected' nor 'no password was sent' is known to be true
+                tried = None
 
-        hint = _ssh_auth_hint(last_err)
+        hint = _ssh_auth_hint(last_err, tried=tried)
         if hint:
             # _ssh_auth_hint has no idea who we connected as; name them here.
             hint = hint.replace('the cluster SSH user', f"'{ssh_user}'")

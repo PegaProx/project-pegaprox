@@ -1779,6 +1779,12 @@ def main(debug_mode=False):
     start_guest_index_thread()
     print("Started guest search index thread")
 
+    # a PBS that was not up when its manager connected is tried again (#1156). On a
+    # standby without the live view there is no PBS manager, and the loop idles
+    from pegaprox.core.pbs import start_reconnect_loop
+    start_reconnect_loop()
+    print("Started PBS reconnect thread")
+
     try:
         start_syslog_server()
         print("Started integrated syslog server")
