@@ -1368,7 +1368,7 @@ def test_the_node_modal_has_no_shell_and_locks_what_changes_on_a_standby():
 
     # what reads stays usable
     reads = [m.start() for m in re.finditer(re.escape("onClick={() => loadTabData('system')}"), tabs['system'])]
-    assert len(reads) == 4                      # Hosts retry, sensors, cluster health, syslog
+    assert len(reads) == 5                      # DNS retry (#1163), Hosts retry, sensors, cluster health, syslog
     for at in reads:
         assert not locked('system', tabs['system'][at:at + 60])
     assert not locked('disks', "onClick={() => loadTabData('disks')}")

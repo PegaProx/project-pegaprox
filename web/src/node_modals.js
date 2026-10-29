@@ -7,6 +7,17 @@
             return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
         }
 
+        // LW Oct 2026 (#1163) - the DNS read keeps why it failed. Mapped to {} like the other
+        // system reads, a refused read looked like a node without DNS, with a form that would
+        // have saved the blanks over the real servers. { dns: null } is a failed read, dnsError
+        // the server's reason ('' when the request got no answer at all).
+        async function readNodeDns(res) {
+            const body = res ? await res.json().catch(() => null) : null;
+            if (res && res.ok && body && typeof body === 'object' && !Array.isArray(body)) return { dns: body, dnsError: null };
+            const said = body && typeof body.error === 'string' ? body.error : '';
+            return { dns: null, dnsError: said || (res ? `HTTP ${res.status}` : '') };
+        }
+
         // Node Shell Terminal Component using xterm.js with SSH
         function NodeShellTerminal({ node, clusterId, addToast }) {
             const { t } = useTranslation();
@@ -1596,7 +1607,9 @@
                     };
                     const urls = endpoints[tab] || [];
                     // NS: Fixed - now using auth headers and credentials!
-                    const results = await Promise.all(urls.map(u => fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null).catch(() => null)));
+                    const results = await Promise.all(urls.map(u => u.endsWith('/dns')
+                        ? fetch(u, { credentials: 'include', headers: authHeaders }).catch(() => null).then(readNodeDns)
+                        : fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null).catch(() => null)));
 
                     const newData = { ...data };
                     if (tab === 'summary') newData.summary = results[0];
@@ -1606,7 +1619,8 @@
                         newData.netstats = (results[1] && results[1].interfaces) ? results[1].interfaces : null;
                     }
                     else if (tab === 'system') {
-                        newData.dns = results[0] || {};
+                        newData.dns = results[0].dns;
+                        newData.dnsError = results[0].dnsError;
                         newData.hosts = typeof results[1]?.data === 'string' ? results[1].data : null;
                         newData.time = results[2] || {};
                         newData.syslog = results[3] || [];
@@ -2887,28 +2901,29 @@
                                                     </>)}
                                                 </div>
                                             )}
+                                            {data.dns === null && <div role="alert" className="text-sm text-red-400">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                             {data.hosts === null && <div role="alert" className="text-sm text-red-400">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                             <fieldset {...haLock} className="space-y-6 min-w-0">
-                                            {/* DNS */}
+                                            {/* DNS - nothing to edit or save until a read came back (#1163) */}
                                             <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                 <div className="flex justify-between items-center mb-4">
                                                     <h4 className="font-medium text-white">DNS</h4>
-                                                    <button onClick={() => handleSave('dns', data.dns, t('dnsSaved') || 'DNS saved')} className="px-3 py-1 bg-proxmox-orange rounded text-white text-sm hover:bg-orange-600">{t('save')}</button>
+                                                    <button onClick={() => handleSave('dns', data.dns, t('dnsSaved') || 'DNS saved')} disabled={data.dns == null} className="px-3 py-1 bg-proxmox-orange rounded text-white text-sm hover:bg-orange-600 disabled:opacity-50">{t('save')}</button>
                                                 </div>
                                                 <div className="grid grid-cols-3 gap-4">
                                                     <div>
                                                         <label className="block text-xs text-gray-400 mb-1">{t('searchDomain') || 'Search Domain'}</label>
-                                                        <input type="text" value={data.dns?.search||''} onChange={(e) => setData({...data, dns: {...data.dns, search: e.target.value}})}
+                                                        <input type="text" value={data.dns?.search||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, search: e.target.value}})}
                                                             className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
                                                     </div>
                                                     <div>
                                                         <label className="block text-xs text-gray-400 mb-1">{t('dnsServer') || 'DNS Server'} 1</label>
-                                                        <input type="text" value={data.dns?.dns1||''} onChange={(e) => setData({...data, dns: {...data.dns, dns1: e.target.value}})}
+                                                        <input type="text" value={data.dns?.dns1||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, dns1: e.target.value}})}
                                                             className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
                                                     </div>
                                                     <div>
                                                         <label className="block text-xs text-gray-400 mb-1">{t('dnsServer') || 'DNS Server'} 2</label>
-                                                        <input type="text" value={data.dns?.dns2||''} onChange={(e) => setData({...data, dns: {...data.dns, dns2: e.target.value}})}
+                                                        <input type="text" value={data.dns?.dns2||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, dns2: e.target.value}})}
                                                             className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
                                                     </div>
                                                 </div>
@@ -5446,7 +5461,9 @@
                     };
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
-                    const results = await Promise.all(urls.map(u => authFetch(u).then(r => r && r.ok ? r.json() : null).catch(() => null)));
+                    const results = await Promise.all(urls.map(u => u.endsWith('/dns')
+                        ? authFetch(u).then(readNodeDns)
+                        : authFetch(u).then(r => r && r.ok ? r.json() : null).catch(() => null)));
                     if (gen !== navGenRef.current || navKeyRef.current !== navKey || slotSeqRef.current[tab] !== seq) return;
                     // NS: Feb 2026 - Use functional setData to avoid stale closure bugs
                     setData(prev => {
@@ -5456,7 +5473,9 @@
                         else if (tab === 'tasks') newData.tasks = results[0];
                         else if (tab === 'network') newData.network = results[0];
                         else if (tab === 'system') {
-                            newData.dns = results[0] || {};
+                            // a failed read stays null, so the next visit to the tab asks again
+                            newData.dns = results[0].dns;
+                            newData.dnsError = results[0].dnsError;
                             newData.hosts = typeof results[1]?.data === 'string' ? results[1].data : null;
                             newData.time = results[2] || {};
                             newData.syslog = results[3] || [];
@@ -5515,7 +5534,8 @@
                 }
                 else if (activeDetailTab === 'configure') {
                     if (configSubTab === 'network' && !data.network) loadTabData('network');
-                    else if (['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab) && !data.dns) loadTabData('system');
+                    // a failed DNS read (null) is asked again from its own tab only, the others wait for the first read
+                    else if (['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab) && (configSubTab === 'dns' ? !data.dns : data.dns === undefined)) loadTabData('system');
                     else if (['disks', 'lvm', 'lvmthin', 'zfs'].includes(configSubTab) && !data.disks) loadTabData('disks');
                     else if (configSubTab === 'repos' && !data.repos) loadTabData('repos');
                     else if (configSubTab === 'ceph' && !data.ceph) loadTabData('ceph');
@@ -5809,10 +5829,10 @@
                                     <button className={`corp-subnav-item ${configSubTab === 'network' ? 'active' : ''}`} onClick={() => setConfigSubTab('network')}>{t('network')}</button>
                                     <div className="corp-subnav-header">{t('systemInfo')}</div>
                                     <button className={`corp-subnav-item ${configSubTab === 'dns' ? 'active' : ''}`} onClick={() => { setConfigSubTab('dns'); if (!data.dns) loadTabData('system'); }}>{t('dns')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'hosts' ? 'active' : ''}`} onClick={() => { setConfigSubTab('hosts'); if (!data.dns) loadTabData('system'); }}>{t('hostsFile')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'time' ? 'active' : ''}`} onClick={() => { setConfigSubTab('time'); if (!data.dns) loadTabData('system'); }}>{t('timeConfig')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'certs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('certs'); if (!data.dns) loadTabData('system'); }}>{t('certificates')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'syslog' ? 'active' : ''}`} onClick={() => { setConfigSubTab('syslog'); if (!data.dns) loadTabData('system'); }}>{t('syslog')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'hosts' ? 'active' : ''}`} onClick={() => { setConfigSubTab('hosts'); if (data.dns === undefined) loadTabData('system'); }}>{t('hostsFile')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'time' ? 'active' : ''}`} onClick={() => { setConfigSubTab('time'); if (data.dns === undefined) loadTabData('system'); }}>{t('timeConfig')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'certs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('certs'); if (data.dns === undefined) loadTabData('system'); }}>{t('certificates')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'syslog' ? 'active' : ''}`} onClick={() => { setConfigSubTab('syslog'); if (data.dns === undefined) loadTabData('system'); }}>{t('syslog')}</button>
                                     <div className="corp-subnav-header">{t('storage')}</div>
                                     <button className={`corp-subnav-item ${configSubTab === 'disks' ? 'active' : ''}`} onClick={() => { setConfigSubTab('disks'); if (!data.disks) loadTabData('disks'); }}>{t('disks')}</button>
                                     <button className={`corp-subnav-item ${configSubTab === 'lvm' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvm'); if (!data.disks) loadTabData('disks'); }}>{t('lvmStorage')}</button>
@@ -5823,6 +5843,7 @@
                                     <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (!data.ceph) loadTabData('ceph'); }}>Ceph</button>
                                 </div>
                                 <div className="flex-1 pl-4">
+                                    {configSubTab === 'dns' && data.dns === null && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                     {configSubTab === 'hosts' && data.hosts === null && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                     <fieldset disabled={haReadOnly} className="contents">
                                     {loading && !data.network && !data.dns && !data.disks ? (
@@ -6066,24 +6087,25 @@
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('dns')}</span>
                                                         {!editingDns ? (
-                                                            <button onClick={() => { setEditingDns(true); setDnsForm({ search: data.dns?.search || '', dns1: data.dns?.dns1 || '', dns2: data.dns?.dns2 || '', dns3: data.dns?.dns3 || '' }); }}
+                                                            <button onClick={() => { setEditingDns(true); setDnsForm({ search: data.dns?.search || '', dns1: data.dns?.dns1 || '', dns2: data.dns?.dns2 || '', dns3: data.dns?.dns3 || '' }); }} disabled={data.dns == null}
                                                                 className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('edit')}</button>
                                                         ) : (
                                                             <div className="flex gap-1">
                                                                 <button onClick={() => setEditingDns(false)} className="px-2 py-1 text-[11px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
-                                                                <button onClick={() => { handleSave('dns', dnsForm, 'DNS saved'); setEditingDns(false); }} disabled={saving}
+                                                                <button onClick={() => { handleSave('dns', dnsForm, 'DNS saved'); setEditingDns(false); }} disabled={saving || data.dns == null}
                                                                     className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{saving ? '...' : t('save')}</button>
                                                             </div>
                                                         )}
                                                     </div>
-                                                    {editingDns ? (
+                                                    {/* a failed read shows the alert above, no '-' rows that look like a node without DNS (#1163) */}
+                                                    {editingDns && data.dns ? (
                                                         <div className="space-y-2">
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Search Domain</label><input value={dnsForm.search} onChange={e => setDnsForm({...dnsForm, search: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white" /></div>
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 1</label><input value={dnsForm.dns1} onChange={e => setDnsForm({...dnsForm, dns1: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 2</label><input value={dnsForm.dns2} onChange={e => setDnsForm({...dnsForm, dns2: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
                                                             <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 3</label><input value={dnsForm.dns3} onChange={e => setDnsForm({...dnsForm, dns3: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
                                                         </div>
-                                                    ) : (
+                                                    ) : data.dns !== null && (
                                                         <table className="corp-property-grid">
                                                             <tbody>
                                                                 <tr><td>Search Domain</td><td>{data.dns?.search || '-'}</td></tr>
