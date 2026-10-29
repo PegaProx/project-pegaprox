@@ -1365,6 +1365,9 @@
                 avgScore: 'Avg. Score',
                 avgCpu: 'Avg. CPU',
                 avgRam: 'Avg. RAM',
+                clusterHealthCephCap: 'Auf {cap} begrenzt, solange Ceph {status} meldet',
+                clusterHealthCephUnknown: 'Kein aktueller Ceph-Status, nicht gewertet',
+                clusterHealthCephSilent: 'Ceph antwortet seit Minuten nicht, auf {cap} begrenzt',
 
                 // Nodes
                 nodes: 'Nodes',
@@ -9144,6 +9147,9 @@
                 avgScore: 'Avg. Score',
                 avgCpu: 'Avg. CPU',
                 avgRam: 'Avg. RAM',
+                clusterHealthCephCap: 'Held at {cap} while Ceph reports {status}',
+                clusterHealthCephUnknown: 'No current Ceph status, not counted',
+                clusterHealthCephSilent: 'Ceph has not answered for minutes, held at {cap}',
 
                 // Nodes
                 nodes: 'Nodes',
@@ -16262,6 +16268,9 @@
                 avgScore: '平均分数',
                 avgCpu: '平均 CPU',
                 avgRam: '平均 RAM',
+                clusterHealthCephCap: 'Ceph 报告 {status} 期间最高为 {cap}',
+                clusterHealthCephUnknown: '暂无当前 Ceph 状态，未计入评分',
+                clusterHealthCephSilent: 'Ceph 已数分钟未响应，最高为 {cap}',
                 nodes: '节点',
                 loadingMetrics: '正在加载指标...',
                 connectionError: '连接错误',
@@ -22974,6 +22983,9 @@
                 avgScore: 'Śr. wynik',
                 avgCpu: 'Śr. CPU',
                 avgRam: 'Śr. RAM',
+                clusterHealthCephCap: 'Ograniczono do {cap}, dopóki Ceph zgłasza {status}',
+                clusterHealthCephUnknown: 'Brak aktualnego stanu Ceph, nie wliczono',
+                clusterHealthCephSilent: 'Ceph nie odpowiada od kilku minut, ograniczono do {cap}',
                 nodes: 'Węzły',
                 loadingMetrics: 'Ładowanie metryk...',
                 connectionError: 'Błąd połączenia',
@@ -29186,6 +29198,9 @@
                 avgScore: 'Moyenne des notes',
                 avgCpu: 'Moyenne CPU',
                 avgRam: 'Moyenne de la RAM',
+                clusterHealthCephCap: 'Limité à {cap} tant que Ceph signale {status}',
+                clusterHealthCephUnknown: 'Aucun statut Ceph actuel, non pris en compte',
+                clusterHealthCephSilent: 'Ceph ne répond plus depuis quelques minutes, limité à {cap}',
 
                 // Nodes
                 nodes: 'Nœuds',
@@ -36292,6 +36307,9 @@
                 avgScore: 'Puntos promedio',
                 avgCpu: 'CPU promedio',
                 avgRam: 'RAM promedio',
+                clusterHealthCephCap: 'Limitado a {cap} mientras Ceph informe {status}',
+                clusterHealthCephUnknown: 'Sin estado actual de Ceph, no se tiene en cuenta',
+                clusterHealthCephSilent: 'Ceph no responde desde hace minutos, limitado a {cap}',
 
                 // Nodes / Nodos
                 nodes: 'Nodos',
@@ -43489,6 +43507,9 @@
                 avgScore: 'Pontuação Média',
                 avgCpu: 'CPU Média',
                 avgRam: 'RAM Média',
+                clusterHealthCephCap: 'Limitado a {cap} enquanto o Ceph reportar {status}',
+                clusterHealthCephUnknown: 'Sem status atual do Ceph, não considerado',
+                clusterHealthCephSilent: 'O Ceph não responde há minutos, limitado a {cap}',
 
                 // Nodes
                 nodes: 'Nós',
@@ -50343,6 +50364,9 @@
                 avgScore: '평균 점수',
                 avgCpu: '평균 CPU',
                 avgRam: '평균 RAM',
+                clusterHealthCephCap: 'Ceph가 {status} 상태인 동안 최대 {cap}',
+                clusterHealthCephUnknown: '현재 Ceph 상태 없음, 점수에 반영되지 않음',
+                clusterHealthCephSilent: 'Ceph가 몇 분째 응답하지 않아 {cap}점으로 제한됨',
 
                 // Nodes
                 nodes: '노드',
@@ -57619,6 +57643,9 @@
                 avgScore: 'Punteggio medio',
                 avgCpu: 'CPU media',
                 avgRam: 'RAM media',
+                clusterHealthCephCap: 'Limitato a {cap} finché Ceph segnala {status}',
+                clusterHealthCephUnknown: 'Nessuno stato Ceph attuale, non conteggiato',
+                clusterHealthCephSilent: 'Ceph non risponde da alcuni minuti, limitato a {cap}',
 
                 // Nodi
                 nodes: 'Nodi',

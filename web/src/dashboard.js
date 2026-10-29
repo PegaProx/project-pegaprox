@@ -21666,8 +21666,9 @@
                                                 )}
 
                                                 <div className={isCorporate ? 'space-y-3' : 'space-y-6'}>
-                                                    {/* Cluster Health */}
-                                                    <ClusterHealth metrics={clusterMetrics} isCorporate={isCorporate} />
+                                                    {/* Cluster Health - with the Ceph status of a connected Proxmox cluster (#948) */}
+                                                    <ClusterHealth metrics={clusterMetrics} isCorporate={isCorporate} authFetch={authFetch}
+                                                        clusterId={selectedCluster && selectedCluster.connected && (selectedCluster.cluster_type || 'proxmox') === 'proxmox' ? selectedCluster.id : null} />
 
                                                     {/* Migration History */}
                                                     <div className={isCorporate

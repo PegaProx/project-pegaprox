@@ -1527,9 +1527,117 @@ def _health_storage_rows(cluster_id, mgr, ns):
     return rows
 
 
+# NS Oct 2026 - Ceph in the health score (#948). The status is the read the ceph_health alert
+# and the Ceph overview share (alert_events.ceph_status, one per cluster per CEPH_FRESH), and a
+# poll never waits for it: once it is older than that, a new read starts in the background and
+# the poll scores the last one while it is younger than _HEALTH_CEPH_SERVE_MAX. Only a cluster
+# with a Ceph storage, or whose Ceph answered before, is asked at all, so one without Ceph
+# scores and is read exactly as it was.
+_HEALTH_CEPH_SERVE_MAX = 300
+# status -> (points off, the most the score can be then). WARN keeps a cluster out of
+# 'excellent', ERR puts it in 'critical' however good the rest looks
+_HEALTH_CEPH_PENALTY = {'HEALTH_WARN': (15, 75), 'HEALTH_ERR': (50, 25)}
+_HEALTH_CEPH_SEVERITY = {'HEALTH_OK': 'ok', 'HEALTH_WARN': 'warning', 'HEALTH_ERR': 'critical'}
+_HEALTH_CEPH_STORAGE = ('rbd', 'cephfs')
+# a Ceph that answered before and whose reads have failed since for longer than the serve
+# window: monitors that lost quorum fail the status call itself, so silence counts as a
+# warning, not as nothing to report
+_HEALTH_CEPH_SILENT = 'silent'
+_health_ceph_reads = set()
+_health_ceph_lock = threading.Lock()
+
+
+def _health_ceph_spawn(fn):
+    threading.Thread(target=fn, daemon=True, name='health-ceph-read').start()
+
+
+def _health_ceph_refresh(cluster_id, mgr):
+    """Start a Ceph status read in the background unless one for this cluster runs already."""
+    from pegaprox.background import alert_events
+    with _health_ceph_lock:
+        if cluster_id in _health_ceph_reads:
+            return
+        _health_ceph_reads.add(cluster_id)
+
+    def run():
+        try:
+            alert_events.ceph_status(cluster_id, mgr, max_age=alert_events.CEPH_FRESH)
+        except Exception as e:
+            logging.debug(f"[health] ceph read of {_sl(cluster_id)} failed: {e}")
+        finally:
+            with _health_ceph_lock:
+                _health_ceph_reads.discard(cluster_id)
+    try:
+        _health_ceph_spawn(run)
+    except Exception as e:
+        logging.debug(f"[health] ceph read of {_sl(cluster_id)} not started: {e}")
+        with _health_ceph_lock:
+            _health_ceph_reads.discard(cluster_id)
+
+
+def _health_ceph_status(cluster_id, mgr):
+    """(Ceph status dict or None, whether the cluster has Ceph) for the health score. The
+    status is None while there is no recent read; a cluster whose Ceph never answered and
+    that has no Ceph storage counts as one without Ceph."""
+    import time as _t
+    from pegaprox.background import alert_events
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return None, False
+    if not alert_events.ceph_seen(cluster_id):
+        # the storage factor just read these (or took them from the cache); not read again here
+        rows, hit = _health_storage_cache.get(cluster_id, 'resources')
+        if not hit or not any(r.get('plugintype') in _HEALTH_CEPH_STORAGE for r in (rows or [])):
+            return None, False
+    now = _t.time()
+    last = alert_events.ceph_reading(cluster_id)
+    if (last is None or not 0 <= now - last[0] < alert_events.CEPH_FRESH) \
+            and not alert_events.ceph_absent(cluster_id, now):
+        _health_ceph_refresh(cluster_id, mgr)
+        last = alert_events.ceph_reading(cluster_id)
+    if last is not None and now - last[0] < _HEALTH_CEPH_SERVE_MAX:
+        return last[1], True
+    if alert_events.ceph_silent_since(cluster_id):
+        return _HEALTH_CEPH_SILENT, True
+    return None, alert_events.ceph_seen(cluster_id)
+
+
+def _health_ceph_factor(status, score):
+    """The Ceph factor for a score so far, and the issue line for it (None when there is none).
+    Without a status the factor shows as unknown and takes nothing off; a Ceph gone silent
+    counts as HEALTH_WARN does."""
+    from pegaprox.api.ceph import ceph_rollup
+    if status == _HEALTH_CEPH_SILENT:
+        off, cap = _HEALTH_CEPH_PENALTY['HEALTH_WARN']
+        return {'key': 'ceph', 'label': 'Ceph', 'value': 'not answering', 'delta': min(score - off, cap) - score,
+                'severity': 'warning', 'status': None, 'silent': True, 'checks': [], 'cap': cap}, \
+            'Ceph status unreadable for more than 5 minutes'
+    roll = ceph_rollup(status) if isinstance(status, dict) else None
+    state = roll['health'] if roll else None
+    if state not in _HEALTH_CEPH_SEVERITY:
+        return {'key': 'ceph', 'label': 'Ceph', 'value': 'unknown', 'delta': 0,
+                'severity': 'unknown', 'status': None, 'checks': [], 'cap': 100}, None
+    names = [c['name'] for c in roll['checks']]
+    count = len(names) + roll['checks_more']
+    off, cap = _HEALTH_CEPH_PENALTY.get(state, (0, 100))
+    delta = min(score - off, cap) - score
+    value = f"{state}: {count} check{'' if count == 1 else 's'}" if count else state
+    osds = roll['osds']
+    if osds['total'] and osds['up'] < osds['total']:
+        value += f", {osds['up']}/{osds['total']} OSDs up"
+    issue = None
+    if state != 'HEALTH_OK':
+        issue = f'Ceph reports {state}'
+        if names:
+            issue += ': ' + ', '.join(names[:5]) + (f' and {count - 5} more' if count > 5 else '')
+    return {'key': 'ceph', 'label': 'Ceph', 'value': value, 'delta': delta,
+            'severity': _HEALTH_CEPH_SEVERITY[state], 'status': state, 'checks': names,
+            'cap': cap}, issue
+
+
 # NS May 2026 — single-number cluster health score (0-100). Inputs are cheap-to-compute
 # stuff we already pull elsewhere: node status, per-node storages, replication, backup-SLA.
 # The drill-down list lets the user see what dragged the score down.
+# Where the cluster has Ceph, its health status counts as well (#948).
 @bp.route('/api/clusters/<cluster_id>/health', methods=['GET'])
 @require_auth(perms=['cluster.view'])
 def get_cluster_health(cluster_id):
@@ -1661,6 +1769,22 @@ def get_cluster_health(cluster_id):
                 issues.append(f'{stale} VMs past backup RPO of {max_age}h')
         except Exception as e:
             logging.debug(f"[health] backup-sla check failed: {e}")
+
+    # 5) Ceph - last, its cap holds whatever the factors above left. Not for a caller confined
+    # to a pool or to guests: Ceph is the cluster's storage, and the Ceph overview answers
+    # 'confined' to them as well
+    try:
+        from pegaprox.api.helpers import caller_is_scoped
+        scoped = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+        ceph, has_ceph = (None, False) if scoped else _health_ceph_status(cluster_id, mgr)
+        if has_ceph:
+            f, issue = _health_ceph_factor(ceph, score)
+            score += f['delta']
+            factors.append(f)
+            if issue:
+                issues.append(issue)
+    except Exception as e:
+        logging.debug(f"[health] ceph check failed: {e}")
 
     # Clamp & band
     score = max(0, min(100, score))

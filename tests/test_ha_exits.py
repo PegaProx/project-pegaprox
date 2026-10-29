@@ -705,6 +705,8 @@ AUTOMATIONS = {
     ('pegaprox/api/clusters.py', 'trigger_balance_now'): (1, 'confirm'),
     ('pegaprox/api/clusters.py', 'install_self_fence_agent'): (1, 'job'),
     ('pegaprox/api/clusters.py', 'uninstall_self_fence_agent'): (1, 'job'),
+    # the Ceph status behind the health score, API GETs only (alert_events.ceph_status)
+    ('pegaprox/api/clusters.py', '_health_ceph_spawn'): (1, 'read'),
     ('pegaprox/api/dr_drill.py', 'start_drill'): (1, 'job'),
     ('pegaprox/api/drift.py', 'start_scanner'): (1, 'read'),
     # the replication and backup reads behind the Prometheus series, API GETs only

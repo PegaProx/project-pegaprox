@@ -16,7 +16,8 @@ What it reads, per cluster that has such a rule:
   - one /cluster/tasks per tick, compared from a cursor on
   - one /cluster/ceph/status per tick where Ceph answers (a cluster without it is asked
     again after CEPH_RETRY), shared with the Ceph overview of all clusters (api/ceph.py)
-    for CEPH_FRESH seconds, whichever asked last
+    and the cluster health score (api/clusters.py) for CEPH_FRESH seconds, whichever
+    asked last
   - /cluster/replication plus one status read per source node every REPLICATION_EVERY
   - the snapshot list of each guest once after a start, SNAPSHOT_READS_PER_TICK per tick,
     then only for a guest whose snapshot task shows up in the task list
@@ -544,14 +545,36 @@ def ceph_status(cid, mgr, max_age=0, now=None):
             return hit
         state, data = _ceph_read(cid, mgr, st, now)
         if data is None:
+            if state == 'unreadable' and st['seen'] and not st.get('silent_since'):
+                st['silent_since'] = now
             return state, None, None
         st['last'] = (now, data)
+        st['silent_since'] = None
         return 'ok', data, now
 
 
 def ceph_seen(cid):
     """Whether the Ceph of a cluster has answered since this process started."""
     return bool((_ceph.get(cid) or {}).get('seen'))
+
+
+def ceph_reading(cid):
+    """The last Ceph status of a cluster as (read at, status dict), however old, or None.
+    Asks nothing."""
+    return (_ceph.get(cid) or {}).get('last')
+
+
+def ceph_silent_since(cid):
+    """Since when the Ceph of a cluster that answered before has not answered, None while
+    its last read worked. Asks nothing."""
+    return (_ceph.get(cid) or {}).get('silent_since')
+
+
+def ceph_absent(cid, now=None):
+    """Whether no node of a cluster had Ceph at the last look and CEPH_RETRY has not run
+    out since: ceph_status() answers 'none' then without asking."""
+    now = time.time() if now is None else now
+    return now < (_ceph.get(cid) or {}).get('absent_until', 0)
 
 
 def _ceph_read(cid, mgr, st, now):

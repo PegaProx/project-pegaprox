@@ -2558,9 +2558,32 @@
         }
         try { window.PegaProxStatTile = StatTile; } catch (_) {}
 
+        // NS Oct 2026 - the header pill and the Cluster Health card of the overview both poll
+        // /health of the selected cluster. One request serves both for 30s (#948); null when
+        // it failed, and a failed one is not kept. Kept per signed-in account: a logout does
+        // not reload the page, and the next account may be one that sees less of the cluster
+        const _clusterHealthReads = new Map();
+        function readClusterHealth(clusterId, authFetch, apiUrl, who) {
+            const key = `${apiUrl}|${clusterId}|${who || ''}`;
+            const hit = _clusterHealthReads.get(key);
+            if (hit && hit.authFetch === authFetch && Date.now() - hit.at < 30000) return hit.promise;
+            const promise = (async () => {
+                const res = await authFetch(`${apiUrl}/clusters/${clusterId}/health`);
+                if (res && res.ok) return await res.json();
+                if (res && res.status === 503) return { score: 0, band: 'critical', factors: [], issues: ['Offline'] };
+                return null;
+            })();
+            const forget = () => { if (_clusterHealthReads.get(key)?.promise === promise) _clusterHealthReads.delete(key); };
+            promise.then(d => { if (!d) forget(); }, forget);
+            _clusterHealthReads.set(key, { at: Date.now(), authFetch, promise });
+            return promise;
+        }
+
         // NS May 2026 — single-number cluster health pill. Polls /health every 60s.
         // Hover for factor breakdown, click for full modal.
         function ClusterHealthBadge({ clusterId, authFetch, apiUrl }) {
+            const { user } = useAuth();
+            const who = user?.username || '';
             const [data, setData] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [showDetails, setShowDetails] = React.useState(false);
@@ -2570,15 +2593,11 @@
                 if (!clusterId || !authFetch) return;
                 setLoading(true);
                 try {
-                    const res = await authFetch(`${apiUrl}/clusters/${clusterId}/health`);
-                    if (res && res.ok) {
-                        setData(await res.json());
-                    } else if (res && res.status === 503) {
-                        setData({ score: 0, band: 'critical', factors: [], issues: ['Offline'] });
-                    }
+                    const d = await readClusterHealth(clusterId, authFetch, apiUrl, who);
+                    if (d) setData(d);
                 } catch (_) { /* keep last */ }
                 finally { setLoading(false); }
-            }, [clusterId, authFetch, apiUrl]);
+            }, [clusterId, authFetch, apiUrl, who]);
 
             React.useEffect(() => {
                 fetchHealth();
@@ -2632,9 +2651,9 @@
                                     <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '2px 0' }}>
                                         <span style={{ opacity: 0.8 }}>{f.label}</span>
                                         <span style={{
-                                            color: f.delta < 0 ? '#f54f47' : '#60b515',
+                                            color: f.delta < 0 ? '#f54f47' : f.severity === 'unknown' ? '#999' : '#60b515',
                                             fontVariantNumeric: 'tabular-nums',
-                                        }}>{f.delta < 0 ? f.delta : 'ok'}</span>
+                                        }}>{f.delta < 0 ? f.delta : f.severity === 'unknown' ? '?' : 'ok'}</span>
                                     </div>
                                 ))}
                             </div>
@@ -2685,9 +2704,9 @@
                                             <span className="opacity-80 text-sm">{f.value}</span>
                                             <span style={{
                                                 fontVariantNumeric: 'tabular-nums', fontWeight: 600,
-                                                color: f.delta < 0 ? '#f54f47' : '#60b515',
+                                                color: f.delta < 0 ? '#f54f47' : f.severity === 'unknown' ? '#999' : '#60b515',
                                                 minWidth: '36px', textAlign: 'right',
-                                            }}>{f.delta < 0 ? f.delta : '0'}</span>
+                                            }}>{f.delta < 0 ? f.delta : f.severity === 'unknown' ? '?' : '0'}</span>
                                         </span>
                                     </div>
                                 ))}

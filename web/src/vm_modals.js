@@ -9683,8 +9683,28 @@
         }
 
         // Cluster Health Widget
-        function ClusterHealth({ metrics, isCorporate }) {
+        // NS Oct 2026 - the score is the load of the nodes, and it said 'excellent' with Ceph in
+        // HEALTH_ERR (#948). The Ceph factor of /health holds it down now and shows under it
+        function ClusterHealth({ metrics, isCorporate, clusterId, authFetch }) {
             const { t } = useTranslation();
+            const { user } = useAuth();
+            const who = user?.username || '';
+            const [ceph, setCeph] = useState(null);
+            useEffect(() => {
+                setCeph(null);
+                if (!clusterId || !authFetch) return;
+                let cancelled = false;
+                const load = async () => {
+                    try {
+                        const data = await readClusterHealth(clusterId, authFetch, API_URL, who);
+                        if (!cancelled && data) setCeph((data.factors || []).find(f => f && f.key === 'ceph') || null);
+                    } catch (_) { /* keep the last one */ }
+                };
+                load();
+                const id = setInterval(load, 60000);
+                return () => { cancelled = true; clearInterval(id); };
+            }, [clusterId, authFetch, who]);
+
             const nodes = Object.entries(metrics);
             if (nodes.length === 0) return null;
 
@@ -9694,7 +9714,18 @@
             const onlineNodes = nodes.filter(([, m]) => m.status === 'online' && !m.maintenance_mode).length;
             const maintenanceNodes = nodes.filter(([, m]) => m.maintenance_mode).length;
 
-            const healthScore = Math.max(0, 100 - (avgScore / 2));
+            const loadScore = Math.max(0, 100 - (avgScore / 2));
+            const cephCap = ceph && typeof ceph.cap === 'number' ? ceph.cap : 100;
+            const healthScore = Math.min(loadScore, cephCap);
+            const cephLevel = ceph ? (ceph.severity || 'unknown') : null;
+            const cephText = ceph ? (ceph.status || t('unknown')) : '';
+            const cephNote = !ceph ? ''
+                : ceph.silent ? t('clusterHealthCephSilent').replace('{cap}', () => String(cephCap))
+                : cephCap < loadScore ? t('clusterHealthCephCap').replace('{cap}', () => String(cephCap)).replace('{status}', () => cephText)
+                : cephLevel === 'unknown' ? t('clusterHealthCephUnknown') : '';
+            const cephChecks = ceph && Array.isArray(ceph.checks) ? ceph.checks.join(', ') : '';
+            const cephColor = { ok: '#22c55e', warning: '#eab308', critical: '#ef4444' }[cephLevel] || '#9ca3af';
+            const corpCephColor = { ok: '#60b515', warning: '#efc006', critical: '#f54f47' }[cephLevel] || 'var(--corp-text-muted)';
             const healthLabel = healthScore >= 80 ? t('excellent') : healthScore >= 60 ? t('good') : healthScore >= 40 ? t('warning') : t('critical');
             const healthColor = healthScore >= 80 ? '#22c55e' : healthScore >= 60 ? '#84cc16' : healthScore >= 40 ? '#eab308' : '#ef4444';
 
@@ -9702,7 +9733,7 @@
             const corpHealthColor = healthScore >= 80 ? '#60b515' : healthScore >= 60 ? '#60b515' : healthScore >= 40 ? '#efc006' : '#f54f47';
             if (isCorporate) {
                 return (
-                    <div className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                    <div data-cluster-health="" className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
                         <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{color: 'var(--corp-text-muted)'}}>{t('clusterHealth')}</h3>
                         <div className="flex items-center gap-4 flex-wrap">
                             <div className="flex items-center gap-2">
@@ -9715,6 +9746,12 @@
                             <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{t('nodesOnline')}: <span style={{color: 'var(--color-text)'}}>{onlineNodes}/{nodes.length}</span></span>
                             <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>CPU: <span style={{color: 'var(--color-text)'}}>{avgCpu.toFixed(1)}%</span></span>
                             <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>RAM: <span style={{color: 'var(--color-text)'}}>{avgMem.toFixed(1)}%</span></span>
+                            {ceph && (
+                                <span data-cluster-health-ceph={ceph.status || 'unknown'} className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}} title={cephChecks}>
+                                    Ceph: <span style={{color: corpCephColor}}>{cephText}</span>
+                                </span>
+                            )}
+                            {cephNote && <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{cephNote}</span>}
                             {maintenanceNodes > 0 && (
                                 <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-warning)'}}>
                                     <Icons.Wrench className="w-3 h-3" /> {maintenanceNodes} {t('maintenance')}
@@ -9726,7 +9763,7 @@
             }
 
             return (
-                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5">
+                <div data-cluster-health="" className="bg-proxmox-card border border-proxmox-border rounded-xl p-5">
                     <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('clusterHealth')}</h3>
 
                     <div className="flex items-center justify-center mb-6">
@@ -9771,6 +9808,17 @@
                             <div className="text-xs text-gray-500">{t('avgRam')}</div>
                         </div>
                     </div>
+
+                    {ceph && (
+                        <div data-cluster-health-ceph={ceph.status || 'unknown'} className="mt-4 pt-4 border-t border-proxmox-border text-center">
+                            <div className="flex items-center justify-center gap-2">
+                                <Icons.HardDrive className="w-4 h-4" style={{color: cephColor}} />
+                                <span className="text-sm font-medium" style={{color: cephColor}}>Ceph {cephText}</span>
+                            </div>
+                            {cephChecks && <div className="text-xs text-gray-400 mt-1" style={{overflowWrap: 'anywhere'}}>{cephChecks}</div>}
+                            {cephNote && <div className="text-xs text-gray-500 mt-1">{cephNote}</div>}
+                        </div>
+                    )}
 
                     {maintenanceNodes > 0 && (
                         <div className="mt-4 pt-4 border-t border-proxmox-border">
