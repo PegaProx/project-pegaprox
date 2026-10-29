@@ -5639,10 +5639,19 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             _still_in_maint = node_name in mgr.nodes_in_maintenance or (recheck and held)
             if node_rebooted and _still_in_maint:
                 time.sleep(30)
-            if _still_in_maint and not mgr.exit_maintenance_mode(node_name):
-                _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
-            else:
+            exited = not _still_in_maint or mgr.exit_maintenance_mode(node_name)
+            if not exited:
+                # the task mostly takes it out during the wait above, or while this exit runs, and
+                # then this one finds nothing to do. Only a node still in maintenance after it gets
+                # the warning and the retry at the end of the run. The manager's list is what counts
+                # for a Proxmox node (its node status is a cached copy of it); an XCP-ng host stays
+                # disabled through a restart of PegaProx, its list does not
+                exited = not (rolling_in_maintenance(mgr, node_name) if is_xcpng
+                              else node_name in mgr.nodes_in_maintenance)
+            if exited:
                 _set(node=(node_name, {'in_maintenance': False}))
+            else:
+                _log(f"⚠ {node_name} maintenance exit failed (will retry at end of run)")
             _log(f"  → Ceph (if present): noout + norebalance cleared for {node_name}")
 
         if todo('ceph'):
