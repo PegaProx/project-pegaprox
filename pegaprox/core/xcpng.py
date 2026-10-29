@@ -3279,10 +3279,12 @@ class XcpngManager:
     # ──────────────────────────────────────────
 
     def get_node_dns(self, node):
-        """Read DNS config from /etc/resolv.conf."""
+        """Read DNS config from /etc/resolv.conf. A failed read is {'error': ...} (#1163)."""
         rc, out, _ = self._ssh_exec(node, "cat /etc/resolv.conf 2>/dev/null")
         if rc != 0:
-            return {}
+            said = ('The host could not be reached over SSH' if rc == -1
+                    else f'/etc/resolv.conf could not be read (exit code {rc})')
+            return {'error': said, 'upstream_status': None}
         dns_servers = []
         search_domain = ''
         for line in out.splitlines():

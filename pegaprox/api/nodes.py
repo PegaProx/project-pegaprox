@@ -21,7 +21,8 @@ from pegaprox.core.db import get_db
 from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
-from pegaprox.api.helpers import check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined, bounded_limit
+from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES)
 
 bp = Blueprint('nodes', __name__)
 
@@ -885,7 +886,19 @@ def get_node_dns_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_dns(node))
+    read = getattr(manager, 'get_node_dns', None)
+    if not callable(read):
+        return jsonify({'error': 'DNS settings are not available for this cluster type'}), 501
+    # MK Oct 2026 (#1163) - a read that failed is not a node without DNS. It goes out as a
+    # 502, a 401/403 of Proxmox VE with the stored-credentials wording of #1142
+    result = read(node)
+    if isinstance(result, dict) and result.get('error'):
+        status = result.get('upstream_status')
+        if status in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(status, 'reading the DNS settings needs Sys.Audit on the node'
+                                    if status == 403 else '')
+        return jsonify({'error': result['error'], 'upstream_status': status}), 502
+    return jsonify(result)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['PUT'])

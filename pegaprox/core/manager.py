@@ -18930,21 +18930,33 @@ echo "AGENT_INSTALLED_OK"
             return {'success': False, 'error': str(e)}
     
     def get_node_dns(self, node: str) -> Dict[str, Any]:
-        
+        # MK Oct 2026 (#1163) - a failed read came back as {}, the same as a node without any
+        # DNS, and the UI showed blank servers (and offered to save them). A failure is
+        # {'error', 'upstream_status'} now, the status None when Proxmox VE gave no answer.
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return {'error': 'The cluster is not connected', 'upstream_status': None}
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/dns"
             response = self._api_get(url)
-            
-            if response.status_code == 200:
-                return response.json().get('data', {})
-            return {}
         except Exception as e:
             self.logger.error(f"Error getting DNS config: {e}")
-            return {}
+            return {'error': 'Proxmox VE did not answer', 'upstream_status': None}
+        
+        status = response.status_code
+        if status != 200:
+            self.logger.warning(f"DNS config of {node!r} not read: HTTP {status} {response.text[:200]!r}")
+            # 595 is pveproxy not reaching the node it forwards the read to
+            said = f'The node is unreachable (HTTP {status})' if status == 595 else f'Proxmox VE answered HTTP {status}'
+            return {'error': said, 'upstream_status': status}
+        try:
+            data = response.json().get('data')
+        except (ValueError, AttributeError):
+            data = None
+        if not isinstance(data, dict):
+            return {'error': 'Proxmox VE sent no DNS settings', 'upstream_status': None}
+        return data
     
     def update_node_dns(self, node: str, dns_config: Dict) -> Dict[str, Any]:
         
