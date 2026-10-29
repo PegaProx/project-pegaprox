@@ -25007,7 +25007,7 @@
 
                                                 {/* Update Manager Section */}
                                                 <div className="lg:col-span-2" data-update-manager>
-                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} addToast={addToast} />
+                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
                                                 </div>
                                                 
                                                 {/* SMBIOS Auto-Configurator Section */}

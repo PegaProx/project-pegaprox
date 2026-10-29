@@ -2530,7 +2530,7 @@
         }
 
         // update Manager Section Component (for Settings tab)
-        function UpdateManagerSection({ clusterId, addToast }) {
+        function UpdateManagerSection({ clusterId, clusterName, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, user, haReadOnly, haServing } = useAuth();
             // #644-class: gate the update-manager controls on the backend perms they
@@ -2619,6 +2619,87 @@
                     pkg.Origin?.includes('security') ||
                     pkg.Section?.includes('security')
                 );
+            };
+
+            // the Type column of a package row (the table and the copied text)
+            const pkgKind = (pkg) => {
+                if (pkg.Package?.includes('linux-image') || pkg.Package?.includes('kernel')) return 'Kernel';
+                if (pkg.Origin?.includes('security') || pkg.Section?.includes('security')) return 'Security';
+                return 'Update';
+            };
+
+            // LW Oct 2026 (#1192) - the update list as plain text for a change ticket. Every
+            // host of the last check, expanded or not, with the columns of the tables below;
+            // the versions in full where the table cuts them at 15 characters
+            const updateListText = () => {
+                const st = updateStatus || {};
+                const sum = st.summary || {};
+                const stamp = (d) => fmtDate(d, { timeZoneName: 'short' });
+                // aligned columns, so it reads the same in a ticket, a mail or a terminal
+                const table = (rows) => {
+                    rows = rows.map(r => r.map(String));
+                    const width = rows[0].map((_, i) => Math.max(...rows.map(r => r[i].length)));
+                    return rows.map(r => '  ' + r.map((c, i) => i < r.length - 1 ? c.padEnd(width[i]) : c).join('  '));
+                };
+                const head = (name, d, flags = []) => !d.success
+                    ? `${name} - ${t('checkFailed')}${d.error ? ': ' + d.error : ''}`
+                    : `${name} - ${d.count || 0} ${t('updates')}${flags.length ? ' - ' + flags.join(', ') : ''}`;
+                const nodes = Object.entries(st.nodes || {});
+                const pbs = Object.entries(st.pbs || {});
+                const total = sum.total_updates || 0;
+
+                const out = [t('updCopyHeading').replace('{cluster}', clusterName || clusterId)];
+                try {
+                    const cached = JSON.parse(localStorage.getItem(`updateCheck_${clusterId}`) || 'null');
+                    if (cached?.time) out.push(`${t('lastChecked')}: ${stamp(cached.time)}`);
+                } catch (e) {}
+                out.push(t('updCopyCopiedAt').replace('{time}', stamp(new Date())));
+                out.push(total > 0 || sum.nodes_failed > 0 ? `${total} ${t('updatesAvailable')}` : t('noUpdatesAvailable'));
+                const failed = [...nodes, ...pbs].filter(([, d]) => !d.success).length;
+                if (failed) out.push(t('updCopyFailedHosts').replace('{n}', failed));
+                // the browser's copy of the last check keeps the nodes, not the backup servers
+                if (!st.pbs && sum.total_pbs > 0) out.push(t('updCopyPbsMissing').replace('{n}', sum.total_pbs));
+
+                nodes.forEach(([name, d]) => {
+                    out.push('', head(name, d, [nodeHasKernelUpdates(d) && 'Kernel', nodeHasSecurityUpdates(d) && 'Security'].filter(Boolean)));
+                    if (d.success && (d.updates || []).length) {
+                        out.push(...table([[t('package'), t('currentVersion'), t('newVersion'), t('type')],
+                            ...d.updates.map(p => [p.Package || 'unknown', p.OldVersion || '-', p.Version || '-', pkgKind(p)])]));
+                    }
+                });
+                if (pbs.length) out.push('', 'Proxmox Backup Server');
+                pbs.forEach(([name, d]) => {
+                    out.push('', head(name, d));
+                    if (d.success && (d.updates || []).length) {
+                        out.push(...table([[t('package'), 'Version'],
+                            ...d.updates.map(p => [p.Package || p.package || '-', p.Version || p.version || '-'])]));
+                    }
+                });
+                return out.join('\n') + '\n';
+            };
+
+            const copyUpdateList = async () => {
+                const text = updateListText();
+                let ok = false;
+                try {
+                    if (navigator.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        ok = true;
+                    }
+                } catch (e) { /* refused, try the textarea */ }
+                if (!ok) {
+                    // plain http has no navigator.clipboard
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.opacity = '0';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                    document.body.removeChild(ta);
+                }
+                addToast(ok ? t('updCopyDone') : t('updCopyFailed'), ok ? 'success' : 'error');
             };
 
             // update single node
@@ -3147,6 +3228,19 @@
                                     {t('checkForUpdates')}
                                 </button>}
                                 
+                                {/* LW Oct 2026 (#1192) - the list as text, a standby included: it only reads */}
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); copyUpdateList(); }}
+                                    disabled={checking || !updateStatus || (Object.keys(updateStatus.nodes || {}).length + Object.keys(updateStatus.pbs || {}).length) === 0}
+                                    title={t('updCopyHint')}
+                                    aria-label={t('updCopyButton')}
+                                    data-testid="updates-copy-text"
+                                    className="px-4 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm hover:border-proxmox-orange transition-colors flex items-center gap-2 disabled:opacity-50"
+                                >
+                                    <Icons.ClipboardList />
+                                    <span className="hidden sm:inline">{t('updCopyButton')}</span>
+                                </button>
+
                                 {/* MK: Schedule button */}
                                 {hasPerm('backup.schedule') && (
                                     <button
@@ -3297,8 +3391,7 @@
                                                                         </thead>
                                                                         <tbody>
                                                                             {(nodeData.updates || []).map((pkg, idx) => {
-                                                                                const isKernelPkg = pkg.Package?.includes('linux-image') || pkg.Package?.includes('kernel');
-                                                                                const isSecurityPkg = pkg.Origin?.includes('security') || pkg.Section?.includes('security');
+                                                                                const kind = pkgKind(pkg);
                                                                                 
                                                                                 return (
                                                                                     <tr key={idx} className="border-t border-gray-700/50 hover:bg-proxmox-hover/20">
@@ -3312,9 +3405,9 @@
                                                                                             {pkg.Version?.substring(0, 15) || '-'}
                                                                                         </td>
                                                                                         <td className="p-2">
-                                                                                            {isKernelPkg ? (
+                                                                                            {kind === 'Kernel' ? (
                                                                                                 <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded">Kernel</span>
-                                                                                            ) : isSecurityPkg ? (
+                                                                                            ) : kind === 'Security' ? (
                                                                                                 <span className="px-1.5 py-0.5 bg-orange-500/20 text-orange-400 rounded">Security</span>
                                                                                             ) : (
                                                                                                 <span className="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded">Update</span>

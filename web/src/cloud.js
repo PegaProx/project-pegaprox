@@ -2682,7 +2682,7 @@
                             : <CloudDashboard clusters={safeClusters} resources={safeResources} metrics={clusterMetrics} dcStatus={dcStatus} tasks={tasks} onNav={selectSection} t={T} />;
                         break;
                     case 'updates':
-                        body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} addToast={addToast} /></div>;
+                        body = <div className="cloud-mounted"><UpdateManagerSection clusterId={cid} clusterName={selectedCluster && (selectedCluster.display_name || selectedCluster.name)} addToast={addToast} /></div>;
                         break;
                     case 'plugins':
                         body = <CloudPlugins clusterId={cid} t={T} />;
