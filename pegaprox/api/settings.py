@@ -5289,13 +5289,28 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
 
     def _pending(node_name):
         """How many updates the node has, None when that could not be read."""
-        # First refresh apt/yum cache
+        # First refresh apt/yum cache. MK Oct 2026 (#1135) - Proxmox answers with the UPID of its
+        # apt update and the list is read once that task is through. A fixed 3s was too short for
+        # a slow mirror: the read got the list of the apt update before, and a node with updates
+        # waiting was skipped as up-to-date. A refresh that fails or outlasts the wait does not
+        # stop the run, it goes on with the cached list
+        stale = None
         try:
-            mgr.refresh_node_apt(node_name)
-            # NS: yum makecache takes way longer than apt update
-            time.sleep(10 if is_xcpng else 3)
-        except Exception:
-            pass
+            refreshed = mgr.refresh_node_apt(node_name)
+            if isinstance(refreshed, dict) and refreshed.get('success') is False:
+                stale = refreshed.get('error') or 'the refresh failed'
+            elif isinstance(refreshed, dict) and refreshed.get('task'):
+                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180):
+                    stale = 'the apt update task failed or took longer than 180s'
+            else:
+                # NS: yum makecache takes way longer than apt update
+                time.sleep(10 if is_xcpng else 3)
+        except Exception as e:
+            stale = str(e) or type(e).__name__
+        if stale:
+            _log(f"⚠ Package lists of {node_name} not refreshed ({str(stale)[:200]}) - "
+                 f"reading the cached list, it may be stale")
+            logging.warning(f"[RollingUpdate] Package refresh on {node_name} failed, reading the cached list: {str(stale)[:200]}")
         try:
             available_updates = mgr.get_node_apt_updates(node_name)
         except Exception as e:
