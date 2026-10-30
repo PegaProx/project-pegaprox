@@ -9953,12 +9953,433 @@
             );
         }
 
+        // LW Oct 2026 - what the Harden PVE Node tab says about each control, by source. One
+        // place for the tab, its PDF and the custom profile editor
+        function hardeningControlInfo(t) {
+            // CIS Debian 12 Benchmark v1.1.0 item refs (Proxmox is Debian-based). NS 2026-06-15: web-verified + renumbered off the old Distribution-Independent/Debian-10 scheme.
+            const cisControls = {
+                fs_modules: { ref: '1.1.1.1-1.1.1.5', title: t('cisFs') || 'Disable Unused Filesystem Modules', desc: t('cisFsDesc') || 'Prevents loading of rarely-used filesystem kernel modules (cramfs, freevxfs, hfs, hfsplus, jffs2)', impact: t('cisFsImpact') || 'None - VMs and containers unaffected' },
+                core_dumps: { ref: '1.5.3', title: t('cisCoreDumps') || 'Disable Core Dumps', desc: t('cisCoreDumpsDesc') || 'Prevents the system from creating memory dumps when programs crash that can contain passwords and keys', impact: t('cisCoreDumpsImpact') || 'None - VM crashes still logged normally' },
+                mount_options: { ref: '1.1.2.1-1.1.2.5', title: t('cisMounts') || 'Mount Options Hardening', desc: t('cisMountsDesc') || 'Applies nodev, nosuid, noexec to /tmp, /var/tmp, /dev/shm to prevent privilege escalation', impact: t('cisMountsImpact') || 'No impact on cluster operations or VMs' },
+                cron_hardening: { ref: '2.4.1.2-2.4.2.1', title: t('cisCron') || 'Cron/At Access Hardening', desc: t('cisCronDesc') || 'Restricts job scheduler access to root only, preventing persistence attacks', impact: t('cisCronImpact') || 'None - PVE scheduled tasks run as root' },
+                net_protocols: { ref: '3.2.1-3.2.4', title: t('cisNet') || 'Disable Unused Network Protocols', desc: t('cisNetDesc') || 'Prevents loading of rarely-used network protocols (dccp, sctp, rds, tipc)', impact: t('cisNetImpact') || 'None - not used by Proxmox' },
+                journald: { ref: '6.2.1.1.5-6.2.1.1.6', title: t('cisJournald') || 'Journald Hardening', desc: t('cisJournaldDesc') || 'Configures persistent, compressed logging that survives reboots for forensic analysis', impact: t('cisJournaldImpact') || 'Better forensic capabilities' },
+                ssh_perms: { ref: '5.1.1-5.1.3', title: t('cisSshPerms') || 'SSH File Permissions', desc: t('cisSshPermsDesc') || 'Sets secure permissions (600) on SSH config and host keys', impact: t('cisSshPermsImpact') || 'None - SSH works normally' },
+                ssh_crypto: { ref: '5.1.6, 5.1.12, 5.1.15', title: t('cisSshCrypto') || 'SSH Cryptographic Hardening', desc: t('cisSshCryptoDesc') || 'Configures SSH to use only strong ciphers (AES-GCM/CTR), secure key exchange (Curve25519), and strong MACs (SHA2-ETM)', impact: t('cisSshCryptoImpact') || 'Very old SSH clients may not connect' },
+                sshd_hardening: { ref: '5.1.x (#433)', title: t('cisSshdHardening') || 'SSH Access Hardening', desc: t('cisSshdHardeningDesc') || 'Key-only root (PermitRootLogin prohibit-password), MaxAuthTries 4, X11Forwarding off, idle timeout, no empty passwords. PasswordAuthentication is left untouched so password users are not locked out.', impact: t('cisSshdHardeningImpact') || 'Root password login disabled (key login keeps working). Reversible via Rollback Selected.' },
+                pam_nullok_removal: { ref: '5.3.3.4.1 (#434)', title: t('cisPamNullok') || 'Remove PAM nullok (block empty passwords)', desc: t('cisPamNullokDesc') || 'Strips the nullok flag from every /etc/pam.d/* file so accounts with a blank password can no longer authenticate.', impact: t('cisPamNullokImpact') || 'Accounts with empty passwords can no longer log in. Reversible via Rollback Selected.' },
+                pam_faillock: { ref: '5.3.3.1.1-5.3.3.1.2', title: t('cisPam') || 'Account Lockout (pam_faillock)', desc: t('cisPamDesc') || 'Locks accounts after 5 failed login attempts, auto-unlocks after 10 minutes. Root excluded.', impact: t('cisPamImpact') || 'Works alongside Fail2Ban for defense in depth' },
+                shell_timeout: { ref: '5.4.3.2', title: t('cisTimeout') || 'Shell Timeout', desc: t('cisTimeoutDesc') || 'Automatically logs out inactive shell sessions after 15 minutes', impact: t('cisTimeoutImpact') || 'Only interactive SSH sessions affected' },
+                file_perms: { ref: '7.1.1-7.1.7', title: t('cisFilePerms') || 'System File Permissions', desc: t('cisFilePermsDesc') || 'Sets correct permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow', impact: t('cisFilePermsImpact') || 'No impact - standard Linux hardening' },
+            };
+            // Lynis recommendations
+            const lynisControls = {
+                backup_dns: { ref: 'NETW-2705', title: t('lynDns') || 'Backup Nameserver', desc: t('lynDnsDesc') || 'Ensures at least 2 DNS nameservers are configured for redundancy (configurable)', impact: t('lynDnsImpact') || 'Prevents DNS outages' },
+                postfix_banner: { ref: 'MAIL-8818', title: t('lynPostfix') || 'Postfix Banner Hardening', desc: t('lynPostfixDesc') || 'Removes software version information from mail server banner to prevent version disclosure', impact: t('lynPostfixImpact') || 'None - only hides version string' },
+                pw_hash_rounds: { ref: 'AUTH-9230', title: t('lynPwHash') || 'Password Hashing Rounds', desc: t('lynPwHashDesc') || 'Increases SHA password hashing iterations (5000-500000 rounds), making brute-force attacks significantly slower', impact: t('lynPwHashImpact') || 'Only affects new/changed passwords' },
+                pw_quality: { ref: 'AUTH-9262', title: t('lynPwQuality') || 'PAM Password Quality', desc: t('lynPwQualityDesc') || 'Enforces strong password policies: min 12 chars, uppercase, lowercase, digit, special char. Installs libpam-pwquality.', impact: t('lynPwQualityImpact') || 'Users must set stronger passwords' },
+                pw_aging: { ref: 'AUTH-9286', title: t('lynPwAging') || 'Password Aging', desc: t('lynPwAgingDesc') || 'Forces password changes every 365 days with 30-day warning period. Root excluded.', impact: t('lynPwAgingImpact') || 'Users must change passwords annually' },
+                pw_history: { ref: 'AUTH-9290', title: t('lynPwHistory') || 'Password History', desc: t('lynPwHistoryDesc') || 'Prevents reuse of the last 24 passwords via pam_pwhistory.', impact: t('lynPwHistoryImpact') || 'Users cannot reuse recent passwords' },
+                default_umask: { ref: 'AUTH-9328', title: t('lynUmask') || 'Default Umask (027)', desc: t('lynUmaskDesc') || 'Tightens default file permissions so new files are only readable by owner and group, not everyone', impact: t('lynUmaskImpact') || 'New files more restrictive by default' },
+                pkg_cleanup: { ref: 'PKGS-7346', title: t('lynPkgCleanup') || 'Old Package Cleanup', desc: t('lynPkgCleanupDesc') || 'Removes leftover configuration files from previously uninstalled packages', impact: t('lynPkgCleanupImpact') || 'None - removes unused config remnants' },
+                debsums: { ref: 'PKGS-7370', title: t('lynDebsums') || 'Package Verification (debsums)', desc: t('lynDebsumsDesc') || 'Installs debsums to verify package file integrity and detect corrupted or tampered system files', impact: t('lynDebsumsImpact') || 'None - read-only verification tool' },
+                login_banners: { ref: 'BANN-7126', title: t('lynBanners') || 'Login Banners', desc: t('lynBannersDesc') || 'Displays legal warning banner before login, required by compliance frameworks (PCI-DSS, HIPAA)', impact: t('lynBannersImpact') || 'None - cosmetic only' },
+                file_integrity: { ref: 'FINT-4350', title: t('lynAide') || 'File Integrity Monitoring (AIDE)', desc: t('lynAideDesc') || 'Creates database of file checksums to detect unauthorized changes to system binaries and configs', impact: t('lynAideImpact') || 'Initial DB build runs in background' },
+                process_acct: { ref: 'ACCT-9622', title: t('lynAcct') || 'Process Accounting', desc: t('lynAcctDesc') || 'Logs information about every process execution for forensic analysis (use lastcomm to view)', impact: t('lynAcctImpact') || 'Minimal overhead' },
+                sysstat: { ref: 'ACCT-9626', title: t('lynSysstat') || 'System Statistics (sysstat)', desc: t('lynSysstatDesc') || 'Collects CPU, memory, disk I/O and network statistics over time (use sar for historical data)', impact: t('lynSysstatImpact') || 'Minimal overhead - helps diagnose issues' },
+                usb_storage: { ref: 'USB-1000', title: t('lynUsb') || 'Disable USB/Firewire Storage', desc: t('lynUsbDesc') || 'Prevents loading of USB and Firewire storage drivers to block data theft. Keyboards/mice still work.', impact: t('lynUsbImpact') || 'USB drives will not be recognized' },
+                restrict_compilers: { ref: 'HRDN-7222', title: t('lynCompilers') || 'Restrict Compiler Access', desc: t('lynCompilersDesc') || 'Limits compiler (gcc, g++, make) usage to root only, preventing attackers from compiling exploit code', impact: t('lynCompilersImpact') || 'Non-root users cannot compile' },
+                apt_show_versions: { ref: 'PKGS-7394', title: t('lynAptShow') || 'Patch Management (apt-show-versions)', desc: t('lynAptShowDesc') || 'Installs apt-show-versions for quick overview of installed packages and their update status', impact: t('lynAptShowImpact') || 'None - read-only query tool' },
+                pam_tmpdir: { ref: 'DEB-0280', title: t('lynTmpdir') || 'Isolate /tmp per Session', desc: t('lynTmpdirDesc') || 'Creates isolated temporary directories for each user session, preventing /tmp race condition attacks', impact: t('lynTmpdirImpact') || 'None - only affects interactive sessions' },
+            };
+            // STIG (DoD) controls
+            const stigControls = {
+                session_limit: { ref: 'UBTU-24-200000', title: t('stigSession') || 'Concurrent Session Limit', desc: t('stigSessionDesc') || 'Limits each user to max 10 concurrent login sessions. Root excluded for cluster operations.', impact: t('stigSessionImpact') || 'No impact - root has unlimited sessions' },
+                inactive_accounts: { ref: 'UBTU-24-200260', title: t('stigInactive') || 'Disable Inactive Accounts', desc: t('stigInactiveDesc') || 'Automatically disables user accounts after 35 days without login. Root and service accounts excluded.', impact: t('stigInactiveImpact') || 'Unused accounts disabled after 35 days' },
+                remove_legacy_svcs: { ref: 'UBTU-24-100030', title: t('stigLegacy') || 'Remove Insecure Legacy Services', desc: t('stigLegacyDesc') || 'Removes telnet, rsh, talk, ntalk, nis packages that transmit data including passwords in cleartext', impact: t('stigLegacyImpact') || 'None - Proxmox uses SSH exclusively' },
+                audit_boot: { ref: 'UBTU-24-102010', title: t('stigAuditBoot') || 'Audit at Boot', desc: t('stigAuditBootDesc') || 'Adds audit=1 kernel parameter to enable auditing from the first moment of boot, closing the early-boot logging gap', impact: t('stigAuditBootImpact') || 'Minimal - ~1-2s longer boot time. Reboot required.', reboot: true },
+                audit_rules: { ref: 'Extended', title: t('stigAuditRules') || 'Privileged Command Logging', desc: t('stigAuditRulesDesc') || 'Comprehensive logging of sudo/su/passwd, permission changes, account modifications, kernel module loading, network config, and /etc/pve/ changes', impact: t('stigAuditRulesImpact') || 'Minimal - only audits human users (auid>=1000)' },
+                aide_audit_protect: { ref: 'AIDE+Audit', title: t('stigAideAudit') || 'Audit Tool Protection (AIDE)', desc: t('stigAideAuditDesc') || 'Adds audit binaries (auditd, ausearch, aureport) to AIDE file integrity monitoring with SHA512 checksums. Requires AIDE.', impact: t('stigAideAuditImpact') || 'None - only monitors audit tool binaries' },
+                mem_protection: { ref: 'Kernel', title: t('stigMemProt') || 'Memory Protection - Kernel Hardening', desc: t('stigMemProtDesc') || 'Kernel parameters: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Prevents info leaks and use-after-free attacks.', impact: t('stigMemProtImpact') || '~1-3% performance overhead. Reboot required.', reboot: true },
+                audit_immutable: { ref: 'V-270832', title: t('stigAuditLock') || 'Audit Rules Immutable', desc: t('stigAuditLockDesc') || 'Locks audit configuration with -e 2 flag. Rules cannot be modified without reboot, preventing attackers from disabling auditing.', impact: t('stigAuditLockImpact') || 'Audit rule changes require reboot' },
+            };
+            // PegaProx recommendations
+            const pegaControls = {
+                apparmor: { ref: 'MAC', title: t('pegaApparmor') || 'AppArmor (Mandatory Access Control)', desc: t('pegaApparmorDesc') || 'Enables AppArmor and enforces all profiles. Restricts what programs can access even if compromised - adds a security layer beyond standard file permissions.', impact: t('pegaApparmorImpact') || 'None for standard PVE - custom services may need profiles' },
+                disable_services: { ref: 'SVC', title: t('pegaDisableSvc') || 'Disable Unnecessary Services', desc: t('pegaDisableSvcDesc') || 'Stops and disables bluetooth, CUPS (printing), and Avahi (mDNS). Fewer running services means less attack surface.', impact: t('pegaDisableSvcImpact') || 'No local printing or Bluetooth - irrelevant for servers' },
+                sysctl_hardening: { ref: 'NET+Kernel', title: t('pegaSysctl') || 'Sysctl Network & Kernel Hardening', desc: t('pegaSysctlDesc') || 'Applies 20+ sysctl parameters: IP spoofing protection, ICMP redirect blocking, SYN flood defense, ASLR, dmesg restriction, ptrace scope, symlink protection.', impact: t('pegaSysctlImpact') || 'None - standard production server hardening' },
+                auditd_service: { ref: 'Audit', title: t('pegaAuditd') || 'Enable Audit Daemon (auditd)', desc: t('pegaAuditdDesc') || 'Installs and enables auditd for system event logging. Pair with STIG "Privileged Command Logging" for comprehensive audit rules.', impact: t('pegaAuditdImpact') || 'Minimal overhead - prerequisite for audit rules' },
+                // MK Apr 2026 - brute-force protection for SSH + PVE Web-UI
+                pve_fail2ban: { ref: 'Brute-Force', title: t('pegaFail2ban') || 'fail2ban - SSH + PVE Web-UI', desc: t('pegaFail2banDesc') || 'Installs fail2ban with jails for sshd and Proxmox Web-UI/API authentication. Policy: 5 failed logins in 10 minutes trigger a 24h IP ban. File-marker /etc/fail2ban/jail.d/pegaprox-pve.conf makes re-apply safe.', impact: t('pegaFail2banImpact') || 'Negligible - reads /var/log/daemon.log + /var/log/auth.log. Review banned IPs with `fail2ban-client status proxmox`.' },
+                // MK Apr 2026 - Recovery control. Detects + repairs the broken PAM stack
+                // (pam_pwhistory.so use_authtok without preceding pam_pwquality.so) that
+                // triggers "Authentication token manipulation error" on every passwd.
+                pam_password_repair: { ref: 'Recovery', title: t('cmPamPasswordRepair') || 'Repair PAM password stack (recovery)', desc: t('pegaPamRepairDesc') || 'Detects a broken /etc/pam.d/common-password where pam_pwhistory.so was inserted with use_authtok but no pam_pwquality.so is in front of it. Fix: inserts pam_pwquality.so BEFORE pwhistory if libpam-pwquality is installed, otherwise strips use_authtok so pwhistory prompts itself. A timestamped backup is saved as common-password.bak.repair-<ts>. Idempotent - re-running on a healthy system is a no-op.', impact: t('pegaPamRepairImpact') || 'No impact on healthy systems. Restores ability to change passwords on systems where it was broken.' },
+            };
+            // NS Apr 2026 - VS-NfD informational checks (audit-only, apply is no-op).
+            // BSI Grundschutz expects documented operator decision per environment.
+            const vsnfdControls = {
+                vsnfd_disk_encryption: { ref: 'BSI VS-NfD', title: t('vsnfdDiskEnc') || 'Disk encryption (LUKS / ZFS native)', desc: t('vsnfdDiskEncDesc') || 'Reports whether root/data volumes use LUKS or ZFS native encryption. Audit-only - must be configured at install time.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_audit_retention: { ref: 'BSI Grundschutz', title: t('vsnfdAuditRet') || 'journald retention ≥ 6 months', desc: t('vsnfdAuditRetDesc') || 'Checks journald MaxRetentionSec is set to at least 6 months. BSI requires audit log retention ≥ 180 days.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_journald_size: { ref: 'BSI Grundschutz', title: t('vsnfdJournaldSize') || 'journald SystemMaxUse ≥ 1G', desc: t('vsnfdJournaldSizeDesc') || 'Ensures journald can keep enough log volume to satisfy retention requirements.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_secure_boot: { ref: 'BSI VS-NfD', title: t('vsnfdSecureBoot') || 'UEFI Secure Boot enabled', desc: t('vsnfdSecureBootDesc') || 'Reports whether the firmware enforces signed boot loaders. Cannot be toggled live - must be enabled in firmware.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_kernel_lockdown: { ref: 'BSI VS-NfD', title: t('vsnfdLockdown') || 'Kernel lockdown (integrity / confidentiality)', desc: t('vsnfdLockdownDesc') || 'Checks /sys/kernel/security/lockdown. BSI recommends "integrity" or "confidentiality". Set via kernel cmdline lockdown=integrity at boot.', impact: t('vsnfdInformational') || 'Informational only - no auto-apply' },
+                vsnfd_password_min_12: { ref: 'BSI Grundschutz', title: t('vsnfdPwMin12') || 'Password minlen ≥ 12 (BSI)', desc: t('vsnfdPwMin12Desc') || 'BSI requires minimum 12-character passwords (stricter than CIS-L1\'s 8). Configure via pwquality minlen.', impact: t('vsnfdInformational') || 'Informational only - set via pw_quality CIS control' },
+            };
+            return {
+                cisControls, lynisControls, stigControls, pegaControls, vsnfdControls,
+                groups: [
+                    { src: 'cis', name: 'CIS Debian Linux 13 Benchmark', cls: 'text-blue-400', ctrls: cisControls },
+                    { src: 'lynis', name: 'Lynis Security Auditing', cls: 'text-purple-400', ctrls: lynisControls },
+                    { src: 'stig', name: 'STIG - DoD Security Technical Implementation Guide', cls: 'text-amber-400', ctrls: stigControls },
+                    { src: 'pega', name: 'PegaProx ' + (t('recommendations') || 'Recommendations'), cls: 'text-orange-400', ctrls: pegaControls },
+                    { src: 'vsnfd', name: 'VS-NfD / BSI Grundschutz', cls: 'text-emerald-400', ctrls: vsnfdControls },
+                ],
+            };
+        }
+
+        // what the templated controls take when nothing is typed in, as CIS_CHECKS has it
+        const HARDEN_PARAM_DEFAULTS = {
+            backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' },
+            pam_faillock: { service_user: '' },
+            pw_aging: { service_user: '' },
+            session_limit: { service_user: '' },
+            inactive_accounts: { service_user: '' },
+        };
+
+        // the built-in profiles a custom one can start from; cis-l2 runs what cis-l1 runs
+        const HARDEN_BUILTIN_NAMES = {
+            'cis-l1': 'CIS Level 1', bsi: 'BSI IT-Grundschutz', iso: 'ISO 27001 (Annex A)', nis2: 'NIS2 / KRITIS',
+            'vs-nfd': 'VS-NfD (BSI)', dr: 'Diffusion Restreinte (ANSSI II 901)', rgs: 'RGS (ANSSI-BP-028)',
+            cmmc1: 'CMMC L1 (FAR 52.204-21)', cmmc2: 'CMMC L2 / NIST 800-171', nist53: 'NIST 800-53 (Mod)', stig: 'DISA STIG',
+        };
+
+        // LW Oct 2026 - the param values of the Harden tab for a profile select value: the
+        // defaults, and over them what a custom profile saved
+        function hardenParamsFor(value, custom) {
+            const out = JSON.parse(JSON.stringify(HARDEN_PARAM_DEFAULTS));
+            const p = String(value || '').startsWith('custom:') && (custom || []).find(x => `custom:${x.id}` === value);
+            Object.entries((p && p.params) || {}).forEach(([cid, vals]) => { out[cid] = { ...(out[cid] || {}), ...vals }; });
+            return out;
+        }
+
+        // LW Oct 2026 - editor of one custom hardening profile. draft: {id?, name, description,
+        // controls, params, dropped_controls?, error?}; without an id it saves a new one. The server
+        // checks it all again, its sentence lands under the list as it comes
+        function HardeningProfileEditor({ draft, data, authFetch, t, onCancel, onSaved }) {
+            const catalog = data?.catalog || [];
+            const limits = data?.limits || {};
+            const byId = Object.fromEntries(catalog.map(c => [c.id, c]));
+            const [name, setName] = useState(draft.name || '');
+            const [description, setDescription] = useState(draft.description || '');
+            const [picked, setPicked] = useState(() =>
+                Object.fromEntries((draft.controls || []).filter(id => byId[id]).map(id => [id, true])));
+            const [params, setParams] = useState(() => JSON.parse(JSON.stringify(draft.params || {})));
+            const [search, setSearch] = useState('');
+            const [error, setError] = useState(draft.error || '');
+            const [saving, setSaving] = useState(false);
+            const unknown = [...new Set((draft.controls || []).filter(id => !byId[id]).concat(draft.dropped_controls || []))];
+
+            // grouped like the tab; a control the tab has no title for yet goes last
+            const info = hardeningControlInfo(t);
+            const grouped = new Set();
+            const groups = info.groups.map(g => {
+                const ids = Object.keys(g.ctrls).filter(id => byId[id]);
+                ids.forEach(id => grouped.add(id));
+                return { ...g, ids };
+            });
+            const rest = catalog.map(c => c.id).filter(id => !grouped.has(id));
+            if (rest.length) groups.push({ src: 'other', name: t('hpOther'), cls: 'text-gray-400', ctrls: {}, ids: rest });
+            const q = search.trim().toLowerCase();
+            const shown = groups.map(g => ({ ...g, ids: g.ids.filter(id => !q || [id, g.ctrls[id]?.title, g.ctrls[id]?.ref, g.ctrls[id]?.desc]
+                .some(s => String(s || '').toLowerCase().includes(q))) })).filter(g => g.ids.length);
+            const pickedCount = catalog.filter(c => picked[c.id]).length;
+            const pickShown = (on) => setPicked(prev => {
+                const next = { ...prev };
+                shown.forEach(g => g.ids.forEach(id => { next[id] = on; }));
+                return next;
+            });
+            const setParam = (id, key, value) => setParams(p => ({ ...p, [id]: { ...(p[id] || {}), [key]: value } }));
+
+            const save = async () => {
+                const body = { name: name.trim(), description, controls: catalog.map(c => c.id).filter(id => picked[id]), params: {} };
+                if (!body.name) { setError(t('hpNeedName')); return; }
+                if (!body.controls.length) { setError(t('hpNeedControl')); return; }
+                body.controls.forEach(id => (byId[id].param_keys || []).forEach(key => {
+                    const v = String(params[id]?.[key] ?? '').trim();
+                    if (v) body.params[id] = { ...(body.params[id] || {}), [key]: v };
+                }));
+                setSaving(true);
+                setError('');
+                const r = await authFetch(draft.id ? `${API_URL}/hardening/profiles/${draft.id}` : `${API_URL}/hardening/profiles`, {
+                    method: draft.id ? 'PUT' : 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const d = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok) { onSaved(d.profile); return; }
+                setSaving(false);
+                setError(d.error || (r ? `HTTP ${r.status}` : t('hpSaveFailed')));
+            };
+
+            const field = 'w-full bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm text-white';
+            return (
+                <div className="space-y-3" data-hp-editor>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label className="block text-xs text-gray-400">
+                            {t('name')}
+                            <input value={name} maxLength={limits.name || 64} onChange={e => setName(e.target.value)}
+                                className={`${field} mt-1`} data-hp-name />
+                        </label>
+                        <label className="block text-xs text-gray-400">
+                            {t('description')}
+                            <textarea value={description} rows={2} maxLength={limits.description || 500}
+                                onChange={e => setDescription(e.target.value)} className={`${field} mt-1`} data-hp-description />
+                        </label>
+                    </div>
+                    {unknown.length > 0 && (
+                        <p className="text-xs text-amber-400" data-hp-unknown>{fillText(t('hpStoredDropped'), { ids: unknown.join(', ') })}</p>
+                    )}
+                    <div className="flex items-center gap-3 flex-wrap">
+                        <div className="relative flex-1 min-w-0">
+                            <Icons.Search className="w-4 h-4 text-gray-500 absolute left-3 top-1/2 transform -translate-y-1/2" />
+                            <input value={search} onChange={e => setSearch(e.target.value)} placeholder={t('hpSearch')}
+                                className={`${field} pl-10`} data-hp-search />
+                        </div>
+                        <span className="text-xs text-gray-400" data-hp-count>{fillText(t('hpSelectedOf'), { n: pickedCount, total: catalog.length })}</span>
+                        <button type="button" onClick={() => pickShown(true)} className="text-xs text-blue-400 hover:text-blue-300">{t('hpSelectShown')}</button>
+                        <button type="button" onClick={() => pickShown(false)} className="text-xs text-gray-500 hover:text-gray-400">{t('hpClearShown')}</button>
+                    </div>
+                    <div className="max-h-[60vh] overflow-y-auto space-y-4 pr-1">
+                        {shown.length === 0 && <p className="text-xs text-gray-500">{t('hpNoMatch')}</p>}
+                        {shown.map(g => (
+                            <div key={g.src}>
+                                <h4 className={`text-xs font-semibold mb-1.5 ${g.cls}`}>{g.name}</h4>
+                                <div className="space-y-1">
+                                    {g.ids.map(id => {
+                                        const ctrl = g.ctrls[id] || {};
+                                        const keys = byId[id].param_keys || [];
+                                        const on = !!picked[id];
+                                        return (
+                                            <div key={id} className={`rounded-lg border px-3 py-2 ${on ? 'border-orange-500/40 bg-proxmox-dark' : 'border-proxmox-border'}`} data-hp-control={id}>
+                                                <label className="flex items-start gap-2 cursor-pointer">
+                                                    <input type="checkbox" checked={on} onChange={e => setPicked(p => ({ ...p, [id]: e.target.checked }))}
+                                                        className="mt-0.5 w-4 h-4 rounded border-gray-600 bg-proxmox-dark accent-proxmox-orange" />
+                                                    <span className="min-w-0">
+                                                        <span className="text-sm text-white">{ctrl.title || id}</span>
+                                                        {ctrl.ref && <span className="ml-2 text-[10px] font-mono text-gray-500">{ctrl.ref}</span>}
+                                                        <span className="block text-[11px] font-mono text-gray-600">{id}</span>
+                                                    </span>
+                                                </label>
+                                                {on && keys.length > 0 && (
+                                                    <div className="flex items-center gap-2 flex-wrap mt-2 ml-6">
+                                                        {keys.map(key => key === 'service_user' ? (
+                                                            <React.Fragment key={key}>
+                                                                <span className="text-xs text-gray-500">{t('exemptUsers')}:</span>
+                                                                {['root', 'pegaprox'].map(u => (
+                                                                    <span key={u} className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30" title={t('alwaysExempt')}>{u}</span>
+                                                                ))}
+                                                                <span className="text-xs text-gray-500">{t('plusOptional')}:</span>
+                                                                <input value={params[id]?.[key] ?? ''} maxLength={limits.value || 256} placeholder={t('extraServiceUsers')}
+                                                                    onChange={e => setParam(id, key, e.target.value)} data-hp-param={`${id}.${key}`}
+                                                                    className="w-44 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white" />
+                                                            </React.Fragment>
+                                                        ) : (
+                                                            <React.Fragment key={key}>
+                                                                <span className="text-xs text-gray-500">{key === 'dns1' ? 'DNS 1' : key === 'dns2' ? 'DNS 2' : key}:</span>
+                                                                <input value={params[id]?.[key] ?? ''} maxLength={limits.value || 256} placeholder={(byId[id].defaults || {})[key] || ''}
+                                                                    onChange={e => setParam(id, key, e.target.value)} data-hp-param={`${id}.${key}`}
+                                                                    className="w-28 px-2 py-0.5 text-xs bg-proxmox-dark border border-proxmox-border rounded text-white" />
+                                                            </React.Fragment>
+                                                        ))}
+                                                        <span className="text-[11px] text-gray-600">{t('hpParamDefault')}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    {error && <p role="alert" className="text-sm text-red-400" data-hp-error>{error}</p>}
+                    <div className="flex justify-end gap-2">
+                        <button type="button" onClick={onCancel} disabled={saving} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel')}</button>
+                        <button type="button" onClick={save} disabled={saving} data-hp-save
+                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                            {saving ? <Icons.RotateCw /> : <Icons.Check />}
+                            {t('save')}
+                        </button>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - Manage profiles: the custom hardening profiles with edit, duplicate, export
+        // and delete, a new one (empty or from a built-in profile) and the import of an exported
+        // file. Opened with a draft (Save selection as profile) it is the editor alone
+        function HardeningProfilesDialog({ data, draft, authFetch, addToast, t, onClose, onChanged }) {
+            const [editor, setEditor] = useState(draft || null);
+            const [startFrom, setStartFrom] = useState('');
+            const [deleting, setDeleting] = useState(null);
+            const [error, setError] = useState('');
+            const [busy, setBusy] = useState(false);
+            const custom = data?.custom || [];
+            const nameMax = data?.limits?.name || 64;
+            const max = data?.limits?.profiles || 100;
+            const full = custom.length >= max;
+
+            const open = (d) => { setError(''); setDeleting(null); setEditor(d); };
+            const closeEditor = () => { if (draft) onClose(); else setEditor(null); };
+            const saved = (profile) => {
+                addToast(t('hpSaved'), 'success');
+                onChanged(profile);
+                closeEditor();
+            };
+            const startNew = () => {
+                const b = (data?.builtin || []).find(x => x.id === startFrom);
+                open({ name: '', description: '', controls: b ? b.controls : [], params: {} });
+            };
+            // cut by code points like the server counts; a UTF-16 slice can split an emoji in two
+            const duplicate = (p) => open({ name: Array.from(fillText(t('hpCopyName'), { name: p.name })).slice(0, nameMax).join(''),
+                                            description: p.description, controls: p.controls, params: p.params });
+            const exportOne = (p) => {
+                const slug = p.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || p.id;
+                downloadJson(`pegaprox-hardening-profile-${slug}.json`, {
+                    format: data.format, version: data.format_version, name: p.name,
+                    description: p.description, controls: p.controls, params: p.params,
+                });
+            };
+            const answer = async (r) => (r ? await r.json().catch(() => ({})) : {});
+            const failed = (r, d) => setError(d.error || (r ? `HTTP ${r.status}` : t('hpSaveFailed')));
+            const remove = async (p) => {
+                setBusy(true);
+                setError('');
+                const r = await authFetch(`${API_URL}/hardening/profiles/${p.id}`, { method: 'DELETE' });
+                const d = await answer(r);
+                setBusy(false);
+                if (!(r && r.ok)) { failed(r, d); return; }
+                setDeleting(null);
+                addToast(t('hpDeleted'), 'success');
+                onChanged(null, p.id);
+            };
+            // the file goes to the server as it is, which checks the format marker and the rest.
+            // One that passed and only has a taken name opens in the editor to be renamed
+            const importFile = async (file) => {
+                if (!file) return;
+                setError('');
+                let body = null;
+                try { if (file.size <= 1024 * 1024) body = JSON.parse(await file.text()); } catch (_) { body = null; }
+                if (!body || typeof body !== 'object' || Array.isArray(body)) { setError(t('hpImportNotJson')); return; }
+                setBusy(true);
+                const r = await authFetch(`${API_URL}/hardening/profiles`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = await answer(r);
+                setBusy(false);
+                if (r && r.ok) { addToast(t('hpImported'), 'success'); onChanged(d.profile); return; }
+                if (r && r.status === 409 && !full) {
+                    open({ name: String(body.name || ''), description: typeof body.description === 'string' ? body.description : '',
+                           controls: Array.isArray(body.controls) ? body.controls : [],
+                           params: body.params && typeof body.params === 'object' ? body.params : {},
+                           error: t('hpImportNameTaken') });
+                    return;
+                }
+                failed(r, d);
+            };
+
+            const btn = 'flex items-center gap-1 px-2 py-1 text-xs text-gray-300 hover:text-white border border-proxmox-border rounded disabled:opacity-40';
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4" onClick={() => { if (!editor && !busy) onClose(); }}>
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-3xl max-h-[90vh] overflow-y-auto"
+                        onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" data-hp-dialog>
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                            <div className="min-w-0">
+                                <h3 className="text-base font-semibold text-white flex items-center gap-2">
+                                    <Icons.Shield /> {editor ? (editor.id ? t('hpEditTitle') : t('hpNew')) : t('hpDialogTitle')}
+                                </h3>
+                                {!editor && <p className="text-xs text-gray-500 mt-1">{t('hpDialogHint')}</p>}
+                            </div>
+                            <button type="button" onClick={onClose} className="text-gray-400 hover:text-white" title={t('close')} aria-label={t('close')}><Icons.X /></button>
+                        </div>
+                        {editor ? (
+                            <HardeningProfileEditor key={editor.id || 'new'} draft={editor} data={data} authFetch={authFetch} t={t}
+                                onCancel={closeEditor} onSaved={saved} />
+                        ) : (
+                            <>
+                                <div className="flex items-center gap-2 flex-wrap mb-3">
+                                    <select value={startFrom} onChange={e => setStartFrom(e.target.value)} disabled={full}
+                                        className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm" data-hp-start>
+                                        <option value="">{t('hpStartFrom')}: {t('hpStartEmpty')}</option>
+                                        {(data?.builtin || []).filter(b => HARDEN_BUILTIN_NAMES[b.id]).map(b => (
+                                            <option key={b.id} value={b.id}>{t('hpStartFrom')}: {HARDEN_BUILTIN_NAMES[b.id]}</option>
+                                        ))}
+                                    </select>
+                                    <button type="button" onClick={startNew} disabled={full} data-hp-new
+                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 text-white text-sm rounded flex items-center gap-1.5">
+                                        <Icons.Plus /> {t('hpNew')}
+                                    </button>
+                                    <label className={`${btn} py-1.5 ${full || busy ? 'opacity-50' : 'cursor-pointer'}`}>
+                                        <Icons.Upload /> {t('hpImport')}
+                                        <input type="file" accept="application/json,.json" className="hidden" disabled={full || busy} data-hp-import
+                                            onChange={e => { importFile(e.target.files && e.target.files[0]); e.target.value = ''; }} />
+                                    </label>
+                                    <span className="text-xs text-gray-500 ml-auto" data-hp-total>{fillText(t('hpCount'), { n: custom.length, max })}</span>
+                                </div>
+                                {error && <p role="alert" className="text-sm text-red-400 mb-3" data-hp-error>{error}</p>}
+                                {custom.length === 0 ? (
+                                    <p className="text-sm text-gray-500 py-6 text-center">{t('hpNone')}</p>
+                                ) : (
+                                    <div className="space-y-2" data-hp-list>
+                                        {custom.map(p => (
+                                            <div key={p.id} className="bg-proxmox-dark border border-proxmox-border rounded-lg p-3" data-hp-row={p.id}>
+                                                <div className="flex items-start justify-between gap-3 flex-wrap">
+                                                    <div className="min-w-0 flex-1">
+                                                        <p className="text-sm font-medium text-white break-all">{p.name}</p>
+                                                        {p.description && <p className="text-xs text-gray-400 mt-0.5 whitespace-pre-wrap">{p.description}</p>}
+                                                        <p className="text-[11px] text-gray-500 mt-1">
+                                                            {fillText(t('hpControlsCount'), { n: p.controls.length })}
+                                                            {p.updated_at && <> · {fillText(t('hpUpdated'), { when: new Date(p.updated_at).toLocaleString() })}</>}
+                                                            {p.updated_by && <> · {p.updated_by}</>}
+                                                        </p>
+                                                        {(p.dropped_controls || []).length > 0 && (
+                                                            <p className="text-[11px] text-amber-400 mt-1">{fillText(t('hpStoredDropped'), { ids: p.dropped_controls.join(', ') })}</p>
+                                                        )}
+                                                    </div>
+                                                    {deleting === p.id ? (
+                                                        <div className="flex items-center gap-2 flex-wrap" data-hp-confirm>
+                                                            <span className="text-xs text-red-300">{fillText(t('hpDeleteConfirm'), { name: p.name })}</span>
+                                                            <button type="button" onClick={() => remove(p)} disabled={busy}
+                                                                className="px-3 py-1 text-xs rounded bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white">{t('delete')}</button>
+                                                            <button type="button" onClick={() => setDeleting(null)} className={btn}>{t('cancel')}</button>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="flex items-center gap-1 flex-wrap">
+                                                            <button type="button" className={btn} onClick={() => open({ ...p })}><Icons.Edit /> {t('edit')}</button>
+                                                            <button type="button" className={btn} onClick={() => duplicate(p)} disabled={full}><Icons.Copy /> {t('hpDuplicate')}</button>
+                                                            <button type="button" className={btn} onClick={() => exportOne(p)}><Icons.Download /> {t('hpExport')}</button>
+                                                            <button type="button" className={`${btn} hover:text-red-400`} onClick={() => { setError(''); setDeleting(p.id); }}><Icons.Trash /> {t('delete')}</button>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
         function ComplianceDashboardTab({ clusters, selectedCluster, authFetch, addToast, t, isCorporate, user }) {
             const [profile, setProfile] = useState('cis-l1');
             const [results, setResults] = useState({});  // {clusterId: {nodeName: {controls, score}}}
             const [loadingCluster, setLoadingCluster] = useState(null);
             const [auditCounts, setAuditCounts] = useState(null);
             const [refreshTick, setRefreshTick] = useState(0);
+            // LW Oct 2026 - the custom hardening profiles, offered next to the built-in ones
+            const [customProfiles, setCustomProfiles] = useState(null);
 
             // #717 — the server answers with a machine code; the sentence the operator reads
             // is chosen here, so it lands in their language. The English error/hint the API
@@ -10049,6 +10470,20 @@
                 if (selectedCluster?.id) fetchCluster(selectedCluster);
                 fetchAuditCounts();
             }, [refreshTick, profile, selectedCluster?.id]);
+
+            useEffect(() => {
+                let gone = false;
+                authFetch(`${API_URL}/hardening/profiles`)
+                    .then(r => (r && r.ok ? r.json() : null))
+                    .then(d => { if (!gone) setCustomProfiles((d && d.custom) || []); })
+                    .catch(() => { if (!gone) setCustomProfiles([]); });
+                return () => { gone = true; };
+            }, [refreshTick]);
+            const customSel = profile.startsWith('custom:') ? (customProfiles || []).find(p => `custom:${p.id}` === profile) : null;
+            // a profile deleted meanwhile falls back to the default instead of failing on every node
+            useEffect(() => {
+                if (customProfiles && profile.startsWith('custom:') && !customSel) setProfile('cis-l1');
+            }, [customProfiles, profile]);
 
             const totalClusters = selectedCluster ? 1 : 0;
             // Aggregate only over the selected cluster's nodes
@@ -10323,7 +10758,7 @@
                 const now = new Date();
                 const isoTime = now.toISOString();
                 const reportingPeriod = `Snapshot at ${isoTime}`;
-                const profileLabel = profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase();
+                const profileLabel = customSel ? customSel.name : profile === 'vs-nfd' ? 'VS-NfD' : profile.toUpperCase();
 
                 // ──────────────────────────────────────────────────────────
                 // 1. Cover page metadata
@@ -10717,6 +11152,11 @@
                                 <option value="vs-nfd">VS-NfD (BSI Grundschutz)</option>
                                 <option value="dr">Diffusion Restreinte (ANSSI II 901)</option>
                                 <option value="rgs">RGS (ANSSI-BP-028)</option>
+                                {(customProfiles || []).length > 0 && (
+                                    <optgroup label={t('hpCustomProfiles')}>
+                                        {customProfiles.map(p => <option key={p.id} value={`custom:${p.id}`}>{p.name}</option>)}
+                                    </optgroup>
+                                )}
                             </select>
                             <button
                                 onClick={() => setRefreshTick(t => t + 1)}
@@ -10735,6 +11175,23 @@
                                 {selectedCluster ? clusterLabel(selectedCluster) : (t('noClusterSelected') || 'No cluster selected')}
                             </p>
                         </div>
+                        {/* LW Oct 2026 - the selected custom profile scored over its own controls */}
+                        {customSel && (() => {
+                            const s = frameworkScore(customSel);
+                            return (
+                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4" data-hp-score>
+                                    <p className="text-xs text-gray-500 mb-1 truncate" title={customSel.description || customSel.name}>
+                                        {t('hpCustomProfile')}: <span className="text-gray-300">{customSel.name}</span>
+                                    </p>
+                                    <p className={`text-3xl font-bold ${scoreColor(s.score)}`}>{s.score == null ? '-' : `${s.score}%`}</p>
+                                    {/* the cloud layout's t() gives nothing back where the English value is the key */}
+                                    <p className="text-xs text-gray-500 mt-1">{s.passed}/{s.total} {t('controls') || 'controls'}</p>
+                                    {s.notChecked > 0 && (
+                                        <p className="text-[11px] text-gray-400" title={t('hardenNotCheckedHint')}>{s.notChecked} {t('hardenNotChecked') || 'not checked'}</p>
+                                    )}
+                                </div>
+                            );
+                        })()}
                     </div>
 
                     {/* Framework cards — split by region. Each has a Download Report button. */}
@@ -10884,7 +11341,7 @@
                         </button>
                         <span className="text-gray-500">•</span>
                         <span className="text-gray-500">
-                            {t('complianceProfileNote') || 'Profile: '}<span className="text-gray-300">{profile === 'vs-nfd' ? 'VS-NfD (BSI Grundschutz)' : profile.toUpperCase()}</span>
+                            {t('complianceProfileNote') || 'Profile: '}<span className="text-gray-300">{customSel ? customSel.name : profile === 'vs-nfd' ? 'VS-NfD (BSI Grundschutz)' : profile.toUpperCase()}</span>
                         </span>
                     </div>
                 </div>
@@ -13699,13 +14156,7 @@
             // NS Apr 2026 — backend hardcodes `root` and `pegaprox` as always-exempted
             // for the 4 lockout/aging controls. service_user param is for ADDITIONAL
             // accounts only (e.g. monitoring agents) — empty by default.
-            const [hardenParams, setHardenParams] = useState({
-                backup_dns: { dns1: '1.1.1.1', dns2: '9.9.9.9' },
-                pam_faillock:      { service_user: '' },
-                pw_aging:          { service_user: '' },
-                session_limit:     { service_user: '' },
-                inactive_accounts: { service_user: '' },
-            });
+            const [hardenParams, setHardenParams] = useState(() => hardenParamsFor(''));
             const [hardenResults, setHardenResults] = useState(null);
             // NS Apr 2026 (#322): verbose audit output
             const [hardenVerbose, setHardenVerbose] = useState(false);
@@ -13721,6 +14172,10 @@
             const [hardenConfirm, setHardenConfirm] = useState(null); // {toApply, needsAccessAck, needsLockoutAck}
             const [hardenAccessAck, setHardenAccessAck] = useState(false);
             const [hardenLockoutAck, setHardenLockoutAck] = useState(false);
+            // LW Oct 2026 - custom hardening profiles (GET /api/hardening/profiles) and the manage
+            // dialog, {draft} while it is open
+            const [hardenProfiles, setHardenProfiles] = useState(null);
+            const [hardenProfilesDlg, setHardenProfilesDlg] = useState(null);
 
             // Custom Scripts state - MK Jan 2026
             const [customScripts, setCustomScripts] = useState([]);
@@ -15961,6 +16416,53 @@
                 } finally {
                     setHardenApplying(false);
                 }
+            };
+
+            // LW Oct 2026 - custom hardening profiles, read when the tab opens and after a change.
+            // Without node.maintenance the route answers 403 and the tab keeps the built-in ones
+            const loadHardenProfiles = async () => {
+                const r = await authFetch(`${API_URL}/hardening/profiles`);
+                const d = r && r.ok ? await r.json().catch(() => null) : null;
+                if (d) setHardenProfiles(d);
+                return d;
+            };
+            useEffect(() => {
+                if (activeTab === 'automation' && automationSubTab === 'hardening') loadHardenProfiles();
+            }, [activeTab, automationSubTab]);
+            // a selected profile that is gone (deleted here or elsewhere) falls back to all controls
+            useEffect(() => {
+                if (hardenProfiles && hardenProfile.startsWith('custom:')
+                    && !(hardenProfiles.custom || []).some(p => `custom:${p.id}` === hardenProfile)) {
+                    setHardenProfile('');
+                    setHardenStatus(null);
+                    setHardenSelected({});
+                    setHardenParams(hardenParamsFor(''));
+                }
+            }, [hardenProfiles]);
+            const canManageHardenProfiles = !!hardenProfiles?.can_manage && !haReadOnly;
+            // picking a custom profile brings its values into the param inputs, leaving one puts
+            // the defaults back; between built-in ones they stay as typed
+            const pickHardenProfile = (value) => {
+                if (value.startsWith('custom:') || hardenProfile.startsWith('custom:')) {
+                    setHardenParams(hardenParamsFor(value, hardenProfiles?.custom));
+                }
+                setHardenProfile(value);
+            };
+            const hardenProfilesChanged = async (profile) => {
+                const d = await loadHardenProfiles();
+                if (d && profile && hardenProfile === `custom:${profile.id}`) setHardenParams(hardenParamsFor(hardenProfile, d.custom));
+            };
+            // Save selection as profile: the ticked controls and what was typed in for them. A
+            // value that is the default stays out, so the profile keeps following the default
+            const saveHardenSelection = () => {
+                const catalog = Object.fromEntries((hardenProfiles?.catalog || []).map(c => [c.id, c]));
+                const controls = Object.keys(hardenSelected).filter(id => hardenSelected[id] && catalog[id]);
+                const params = {};
+                controls.forEach(id => (catalog[id].param_keys || []).forEach(key => {
+                    const v = String(hardenParams[id]?.[key] ?? '').trim();
+                    if (v && v !== String((catalog[id].defaults || {})[key] ?? '')) params[id] = { ...(params[id] || {}), [key]: v };
+                }));
+                setHardenProfilesDlg({ draft: { name: '', description: '', controls, params } });
             };
 
             // Load favorites and summary on mount
@@ -22926,7 +23428,7 @@
                                                         <div className="flex items-center gap-3 flex-wrap">
                                                             <select
                                                                 value={hardenNode}
-                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); setHardenProfile(''); }}
+                                                                onChange={e => { setHardenNode(e.target.value); setHardenStatus(null); setHardenResults(null); setHardenSelected({}); pickHardenProfile(''); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm flex-1 max-w-xs"
                                                             >
                                                                 <option value="">{t('selectNode') || 'Select a node...'}</option>
@@ -22947,7 +23449,7 @@
                                                                 Same profile list as the Compliance Dashboard so audits match. */}
                                                             <select
                                                                 value={hardenProfile}
-                                                                onChange={e => { setHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
+                                                                onChange={e => { pickHardenProfile(e.target.value); setHardenStatus(null); setHardenSelected({}); }}
                                                                 className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-2 text-sm"
                                                                 title={t('hardenProfileHint') || 'Filter controls by compliance framework. All controls = full CIS+Lynis+STIG+PegaProx set.'}>
                                                                 <option value="">{t('hardenProfileAll') || 'All controls'}</option>
@@ -22967,7 +23469,18 @@
                                                                     <option value="nist53">NIST 800-53 (Mod)</option>
                                                                     <option value="stig">DISA STIG</option>
                                                                 </optgroup>
+                                                                {(hardenProfiles?.custom || []).length > 0 && (
+                                                                    <optgroup label={t('hpCustomProfiles')}>
+                                                                        {hardenProfiles.custom.map(p => <option key={p.id} value={`custom:${p.id}`}>{p.name}</option>)}
+                                                                    </optgroup>
+                                                                )}
                                                             </select>
+                                                            {canManageHardenProfiles && (
+                                                                <button type="button" onClick={() => setHardenProfilesDlg({})} data-hp-manage
+                                                                    className="px-3 py-2 rounded-lg text-sm border border-proxmox-border text-gray-300 hover:text-white hover:bg-proxmox-hover flex items-center gap-2">
+                                                                    <Icons.Settings /> {t('hpManage')}
+                                                                </button>
+                                                            )}
                                                             {/* NS Apr 2026 (#322): verbose audit toggle */}
                                                             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer" title={t('verboseHint') || 'Include raw check output per control — useful for audit reports'}>
                                                                 <input type="checkbox" checked={hardenVerbose} onChange={e => setHardenVerbose(e.target.checked)}
@@ -22986,76 +23499,8 @@
                                                         )}
 
                                                         {hardenStatus && !hardenLoading && (() => {
-                                                            // CIS Debian 12 Benchmark v1.1.0 item refs (Proxmox is Debian-based). NS 2026-06-15: web-verified + renumbered off the old Distribution-Independent/Debian-10 scheme.
-                                                            const cisControls = {
-                                                                fs_modules: { ref: '1.1.1.1-1.1.1.5', title: t('cisFs') || 'Disable Unused Filesystem Modules', desc: t('cisFsDesc') || 'Prevents loading of rarely-used filesystem kernel modules (cramfs, freevxfs, hfs, hfsplus, jffs2)', impact: t('cisFsImpact') || 'None - VMs and containers unaffected' },
-                                                                core_dumps: { ref: '1.5.3', title: t('cisCoreDumps') || 'Disable Core Dumps', desc: t('cisCoreDumpsDesc') || 'Prevents the system from creating memory dumps when programs crash that can contain passwords and keys', impact: t('cisCoreDumpsImpact') || 'None - VM crashes still logged normally' },
-                                                                mount_options: { ref: '1.1.2.1-1.1.2.5', title: t('cisMounts') || 'Mount Options Hardening', desc: t('cisMountsDesc') || 'Applies nodev, nosuid, noexec to /tmp, /var/tmp, /dev/shm to prevent privilege escalation', impact: t('cisMountsImpact') || 'No impact on cluster operations or VMs' },
-                                                                cron_hardening: { ref: '2.4.1.2-2.4.2.1', title: t('cisCron') || 'Cron/At Access Hardening', desc: t('cisCronDesc') || 'Restricts job scheduler access to root only, preventing persistence attacks', impact: t('cisCronImpact') || 'None - PVE scheduled tasks run as root' },
-                                                                net_protocols: { ref: '3.2.1-3.2.4', title: t('cisNet') || 'Disable Unused Network Protocols', desc: t('cisNetDesc') || 'Prevents loading of rarely-used network protocols (dccp, sctp, rds, tipc)', impact: t('cisNetImpact') || 'None - not used by Proxmox' },
-                                                                journald: { ref: '6.2.1.1.5-6.2.1.1.6', title: t('cisJournald') || 'Journald Hardening', desc: t('cisJournaldDesc') || 'Configures persistent, compressed logging that survives reboots for forensic analysis', impact: t('cisJournaldImpact') || 'Better forensic capabilities' },
-                                                                ssh_perms: { ref: '5.1.1-5.1.3', title: t('cisSshPerms') || 'SSH File Permissions', desc: t('cisSshPermsDesc') || 'Sets secure permissions (600) on SSH config and host keys', impact: t('cisSshPermsImpact') || 'None - SSH works normally' },
-                                                                ssh_crypto: { ref: '5.1.6, 5.1.12, 5.1.15', title: t('cisSshCrypto') || 'SSH Cryptographic Hardening', desc: t('cisSshCryptoDesc') || 'Configures SSH to use only strong ciphers (AES-GCM/CTR), secure key exchange (Curve25519), and strong MACs (SHA2-ETM)', impact: t('cisSshCryptoImpact') || 'Very old SSH clients may not connect' },
-                                                                sshd_hardening: { ref: '5.1.x (#433)', title: t('cisSshdHardening') || 'SSH Access Hardening', desc: t('cisSshdHardeningDesc') || 'Key-only root (PermitRootLogin prohibit-password), MaxAuthTries 4, X11Forwarding off, idle timeout, no empty passwords. PasswordAuthentication is left untouched so password users are not locked out.', impact: t('cisSshdHardeningImpact') || 'Root password login disabled (key login keeps working). Reversible via Rollback Selected.' },
-                                                                pam_nullok_removal: { ref: '5.3.3.4.1 (#434)', title: t('cisPamNullok') || 'Remove PAM nullok (block empty passwords)', desc: t('cisPamNullokDesc') || 'Strips the nullok flag from every /etc/pam.d/* file so accounts with a blank password can no longer authenticate.', impact: t('cisPamNullokImpact') || 'Accounts with empty passwords can no longer log in. Reversible via Rollback Selected.' },
-                                                                pam_faillock: { ref: '5.3.3.1.1-5.3.3.1.2', title: t('cisPam') || 'Account Lockout (pam_faillock)', desc: t('cisPamDesc') || 'Locks accounts after 5 failed login attempts, auto-unlocks after 10 minutes. Root excluded.', impact: t('cisPamImpact') || 'Works alongside Fail2Ban for defense in depth' },
-                                                                shell_timeout: { ref: '5.4.3.2', title: t('cisTimeout') || 'Shell Timeout', desc: t('cisTimeoutDesc') || 'Automatically logs out inactive shell sessions after 15 minutes', impact: t('cisTimeoutImpact') || 'Only interactive SSH sessions affected' },
-                                                                file_perms: { ref: '7.1.1-7.1.7', title: t('cisFilePerms') || 'System File Permissions', desc: t('cisFilePermsDesc') || 'Sets correct permissions on /etc/passwd, /etc/shadow, /etc/group, /etc/gshadow', impact: t('cisFilePermsImpact') || 'No impact - standard Linux hardening' },
-                                                            };
-                                                            // Lynis recommendations
-                                                            const lynisControls = {
-                                                                backup_dns: { ref: 'NETW-2705', title: t('lynDns') || 'Backup Nameserver', desc: t('lynDnsDesc') || 'Ensures at least 2 DNS nameservers are configured for redundancy (configurable)', impact: t('lynDnsImpact') || 'Prevents DNS outages' },
-                                                                postfix_banner: { ref: 'MAIL-8818', title: t('lynPostfix') || 'Postfix Banner Hardening', desc: t('lynPostfixDesc') || 'Removes software version information from mail server banner to prevent version disclosure', impact: t('lynPostfixImpact') || 'None - only hides version string' },
-                                                                pw_hash_rounds: { ref: 'AUTH-9230', title: t('lynPwHash') || 'Password Hashing Rounds', desc: t('lynPwHashDesc') || 'Increases SHA password hashing iterations (5000-500000 rounds), making brute-force attacks significantly slower', impact: t('lynPwHashImpact') || 'Only affects new/changed passwords' },
-                                                                pw_quality: { ref: 'AUTH-9262', title: t('lynPwQuality') || 'PAM Password Quality', desc: t('lynPwQualityDesc') || 'Enforces strong password policies: min 12 chars, uppercase, lowercase, digit, special char. Installs libpam-pwquality.', impact: t('lynPwQualityImpact') || 'Users must set stronger passwords' },
-                                                                pw_aging: { ref: 'AUTH-9286', title: t('lynPwAging') || 'Password Aging', desc: t('lynPwAgingDesc') || 'Forces password changes every 365 days with 30-day warning period. Root excluded.', impact: t('lynPwAgingImpact') || 'Users must change passwords annually' },
-                                                                pw_history: { ref: 'AUTH-9290', title: t('lynPwHistory') || 'Password History', desc: t('lynPwHistoryDesc') || 'Prevents reuse of the last 24 passwords via pam_pwhistory.', impact: t('lynPwHistoryImpact') || 'Users cannot reuse recent passwords' },
-                                                                default_umask: { ref: 'AUTH-9328', title: t('lynUmask') || 'Default Umask (027)', desc: t('lynUmaskDesc') || 'Tightens default file permissions so new files are only readable by owner and group, not everyone', impact: t('lynUmaskImpact') || 'New files more restrictive by default' },
-                                                                pkg_cleanup: { ref: 'PKGS-7346', title: t('lynPkgCleanup') || 'Old Package Cleanup', desc: t('lynPkgCleanupDesc') || 'Removes leftover configuration files from previously uninstalled packages', impact: t('lynPkgCleanupImpact') || 'None - removes unused config remnants' },
-                                                                debsums: { ref: 'PKGS-7370', title: t('lynDebsums') || 'Package Verification (debsums)', desc: t('lynDebsumsDesc') || 'Installs debsums to verify package file integrity and detect corrupted or tampered system files', impact: t('lynDebsumsImpact') || 'None - read-only verification tool' },
-                                                                login_banners: { ref: 'BANN-7126', title: t('lynBanners') || 'Login Banners', desc: t('lynBannersDesc') || 'Displays legal warning banner before login, required by compliance frameworks (PCI-DSS, HIPAA)', impact: t('lynBannersImpact') || 'None - cosmetic only' },
-                                                                file_integrity: { ref: 'FINT-4350', title: t('lynAide') || 'File Integrity Monitoring (AIDE)', desc: t('lynAideDesc') || 'Creates database of file checksums to detect unauthorized changes to system binaries and configs', impact: t('lynAideImpact') || 'Initial DB build runs in background' },
-                                                                process_acct: { ref: 'ACCT-9622', title: t('lynAcct') || 'Process Accounting', desc: t('lynAcctDesc') || 'Logs information about every process execution for forensic analysis (use lastcomm to view)', impact: t('lynAcctImpact') || 'Minimal overhead' },
-                                                                sysstat: { ref: 'ACCT-9626', title: t('lynSysstat') || 'System Statistics (sysstat)', desc: t('lynSysstatDesc') || 'Collects CPU, memory, disk I/O and network statistics over time (use sar for historical data)', impact: t('lynSysstatImpact') || 'Minimal overhead - helps diagnose issues' },
-                                                                usb_storage: { ref: 'USB-1000', title: t('lynUsb') || 'Disable USB/Firewire Storage', desc: t('lynUsbDesc') || 'Prevents loading of USB and Firewire storage drivers to block data theft. Keyboards/mice still work.', impact: t('lynUsbImpact') || 'USB drives will not be recognized' },
-                                                                restrict_compilers: { ref: 'HRDN-7222', title: t('lynCompilers') || 'Restrict Compiler Access', desc: t('lynCompilersDesc') || 'Limits compiler (gcc, g++, make) usage to root only, preventing attackers from compiling exploit code', impact: t('lynCompilersImpact') || 'Non-root users cannot compile' },
-                                                                apt_show_versions: { ref: 'PKGS-7394', title: t('lynAptShow') || 'Patch Management (apt-show-versions)', desc: t('lynAptShowDesc') || 'Installs apt-show-versions for quick overview of installed packages and their update status', impact: t('lynAptShowImpact') || 'None - read-only query tool' },
-                                                                pam_tmpdir: { ref: 'DEB-0280', title: t('lynTmpdir') || 'Isolate /tmp per Session', desc: t('lynTmpdirDesc') || 'Creates isolated temporary directories for each user session, preventing /tmp race condition attacks', impact: t('lynTmpdirImpact') || 'None - only affects interactive sessions' },
-                                                            };
-                                                            // STIG (DoD) controls
-                                                            const stigControls = {
-                                                                session_limit: { ref: 'UBTU-24-200000', title: t('stigSession') || 'Concurrent Session Limit', desc: t('stigSessionDesc') || 'Limits each user to max 10 concurrent login sessions. Root excluded for cluster operations.', impact: t('stigSessionImpact') || 'No impact - root has unlimited sessions' },
-                                                                inactive_accounts: { ref: 'UBTU-24-200260', title: t('stigInactive') || 'Disable Inactive Accounts', desc: t('stigInactiveDesc') || 'Automatically disables user accounts after 35 days without login. Root and service accounts excluded.', impact: t('stigInactiveImpact') || 'Unused accounts disabled after 35 days' },
-                                                                remove_legacy_svcs: { ref: 'UBTU-24-100030', title: t('stigLegacy') || 'Remove Insecure Legacy Services', desc: t('stigLegacyDesc') || 'Removes telnet, rsh, talk, ntalk, nis packages that transmit data including passwords in cleartext', impact: t('stigLegacyImpact') || 'None - Proxmox uses SSH exclusively' },
-                                                                audit_boot: { ref: 'UBTU-24-102010', title: t('stigAuditBoot') || 'Audit at Boot', desc: t('stigAuditBootDesc') || 'Adds audit=1 kernel parameter to enable auditing from the first moment of boot, closing the early-boot logging gap', impact: t('stigAuditBootImpact') || 'Minimal - ~1-2s longer boot time. Reboot required.', reboot: true },
-                                                                audit_rules: { ref: 'Extended', title: t('stigAuditRules') || 'Privileged Command Logging', desc: t('stigAuditRulesDesc') || 'Comprehensive logging of sudo/su/passwd, permission changes, account modifications, kernel module loading, network config, and /etc/pve/ changes', impact: t('stigAuditRulesImpact') || 'Minimal - only audits human users (auid>=1000)' },
-                                                                aide_audit_protect: { ref: 'AIDE+Audit', title: t('stigAideAudit') || 'Audit Tool Protection (AIDE)', desc: t('stigAideAuditDesc') || 'Adds audit binaries (auditd, ausearch, aureport) to AIDE file integrity monitoring with SHA512 checksums. Requires AIDE.', impact: t('stigAideAuditImpact') || 'None - only monitors audit tool binaries' },
-                                                                mem_protection: { ref: 'Kernel', title: t('stigMemProt') || 'Memory Protection - Kernel Hardening', desc: t('stigMemProtDesc') || 'Kernel parameters: init_on_alloc=1, init_on_free=1, page_alloc.shuffle=1, slab_nomerge. Prevents info leaks and use-after-free attacks.', impact: t('stigMemProtImpact') || '~1-3% performance overhead. Reboot required.', reboot: true },
-                                                                audit_immutable: { ref: 'V-270832', title: t('stigAuditLock') || 'Audit Rules Immutable', desc: t('stigAuditLockDesc') || 'Locks audit configuration with -e 2 flag. Rules cannot be modified without reboot, preventing attackers from disabling auditing.', impact: t('stigAuditLockImpact') || 'Audit rule changes require reboot' },
-                                                            };
-                                                            // PegaProx recommendations
-                                                            const pegaControls = {
-                                                                apparmor: { ref: 'MAC', title: t('pegaApparmor') || 'AppArmor (Mandatory Access Control)', desc: t('pegaApparmorDesc') || 'Enables AppArmor and enforces all profiles. Restricts what programs can access even if compromised — adds a security layer beyond standard file permissions.', impact: t('pegaApparmorImpact') || 'None for standard PVE — custom services may need profiles' },
-                                                                disable_services: { ref: 'SVC', title: t('pegaDisableSvc') || 'Disable Unnecessary Services', desc: t('pegaDisableSvcDesc') || 'Stops and disables bluetooth, CUPS (printing), and Avahi (mDNS). Fewer running services means less attack surface.', impact: t('pegaDisableSvcImpact') || 'No local printing or Bluetooth — irrelevant for servers' },
-                                                                sysctl_hardening: { ref: 'NET+Kernel', title: t('pegaSysctl') || 'Sysctl Network & Kernel Hardening', desc: t('pegaSysctlDesc') || 'Applies 20+ sysctl parameters: IP spoofing protection, ICMP redirect blocking, SYN flood defense, ASLR, dmesg restriction, ptrace scope, symlink protection.', impact: t('pegaSysctlImpact') || 'None — standard production server hardening' },
-                                                                auditd_service: { ref: 'Audit', title: t('pegaAuditd') || 'Enable Audit Daemon (auditd)', desc: t('pegaAuditdDesc') || 'Installs and enables auditd for system event logging. Pair with STIG "Privileged Command Logging" for comprehensive audit rules.', impact: t('pegaAuditdImpact') || 'Minimal overhead — prerequisite for audit rules' },
-                                                                // MK Apr 2026 — brute-force protection for SSH + PVE Web-UI
-                                                                pve_fail2ban: { ref: 'Brute-Force', title: t('pegaFail2ban') || 'fail2ban — SSH + PVE Web-UI', desc: t('pegaFail2banDesc') || 'Installs fail2ban with jails for sshd and Proxmox Web-UI/API authentication. Policy: 5 failed logins in 10 minutes trigger a 24h IP ban. File-marker /etc/fail2ban/jail.d/pegaprox-pve.conf makes re-apply safe.', impact: t('pegaFail2banImpact') || 'Negligible — reads /var/log/daemon.log + /var/log/auth.log. Review banned IPs with `fail2ban-client status proxmox`.' },
-                                                                // MK Apr 2026 — Recovery control. Detects + repairs the broken PAM stack
-                                                                // (pam_pwhistory.so use_authtok without preceding pam_pwquality.so) that
-                                                                // triggers "Authentication token manipulation error" on every passwd.
-                                                                pam_password_repair: { ref: 'Recovery', title: t('cmPamPasswordRepair') || 'Repair PAM password stack (recovery)', desc: t('pegaPamRepairDesc') || 'Detects a broken /etc/pam.d/common-password where pam_pwhistory.so was inserted with use_authtok but no pam_pwquality.so is in front of it. Fix: inserts pam_pwquality.so BEFORE pwhistory if libpam-pwquality is installed, otherwise strips use_authtok so pwhistory prompts itself. A timestamped backup is saved as common-password.bak.repair-<ts>. Idempotent — re-running on a healthy system is a no-op.', impact: t('pegaPamRepairImpact') || 'No impact on healthy systems. Restores ability to change passwords on systems where it was broken.' },
-                                                            };
-                                                            // NS Apr 2026 — VS-NfD informational checks (audit-only, apply is no-op).
-                                                            // BSI Grundschutz expects documented operator decision per environment.
-                                                            const vsnfdControls = {
-                                                                vsnfd_disk_encryption: { ref: 'BSI VS-NfD', title: t('vsnfdDiskEnc') || 'Disk encryption (LUKS / ZFS native)', desc: t('vsnfdDiskEncDesc') || 'Reports whether root/data volumes use LUKS or ZFS native encryption. Audit-only — must be configured at install time.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_audit_retention: { ref: 'BSI Grundschutz', title: t('vsnfdAuditRet') || 'journald retention ≥ 6 months', desc: t('vsnfdAuditRetDesc') || 'Checks journald MaxRetentionSec is set to at least 6 months. BSI requires audit log retention ≥ 180 days.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_journald_size: { ref: 'BSI Grundschutz', title: t('vsnfdJournaldSize') || 'journald SystemMaxUse ≥ 1G', desc: t('vsnfdJournaldSizeDesc') || 'Ensures journald can keep enough log volume to satisfy retention requirements.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_secure_boot: { ref: 'BSI VS-NfD', title: t('vsnfdSecureBoot') || 'UEFI Secure Boot enabled', desc: t('vsnfdSecureBootDesc') || 'Reports whether the firmware enforces signed boot loaders. Cannot be toggled live — must be enabled in firmware.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_kernel_lockdown: { ref: 'BSI VS-NfD', title: t('vsnfdLockdown') || 'Kernel lockdown (integrity / confidentiality)', desc: t('vsnfdLockdownDesc') || 'Checks /sys/kernel/security/lockdown. BSI recommends "integrity" or "confidentiality". Set via kernel cmdline lockdown=integrity at boot.', impact: t('vsnfdInformational') || 'Informational only — no auto-apply' },
-                                                                vsnfd_password_min_12: { ref: 'BSI Grundschutz', title: t('vsnfdPwMin12') || 'Password minlen ≥ 12 (BSI)', desc: t('vsnfdPwMin12Desc') || 'BSI requires minimum 12-character passwords (stricter than CIS-L1\'s 8). Configure via pwquality minlen.', impact: t('vsnfdInformational') || 'Informational only — set via pw_quality CIS control' },
-                                                            };
+                                                            // LW Oct 2026 - the title maps live in hardeningControlInfo, the profile editor reads them too
+                                                            const { cisControls, lynisControls, stigControls, pegaControls, vsnfdControls } = hardeningControlInfo(t);
                                                             const controls = hardenStatus.controls || {};
                                                             // NS Apr 2026: verbose result is {status, evidence, command}, non-verbose is bool
                                                             const _isApplied = v => typeof v === 'object' ? v?.status === true : v === true;
@@ -23302,10 +23747,16 @@
                                                                                     · {notCheckedCount} {t('hardenNotChecked') || 'not checked'}
                                                                                 </span>
                                                                             )}
+                                                                            {hardenStatus.profile_name && (
+                                                                                <span className="text-xs px-2 py-0.5 rounded bg-orange-500/10 text-orange-300 border border-orange-500/30 truncate max-w-xs" data-hp-ran>{hardenStatus.profile_name}</span>
+                                                                            )}
                                                                         </div>
                                                                         <div className="w-full bg-gray-700 rounded-full h-2">
                                                                             <div className={`h-2 rounded-full transition-all ${appliedCount === totalCount ? 'bg-green-500' : appliedCount > totalCount / 2 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{width: `${totalCount > 0 ? (appliedCount / totalCount * 100) : 0}%`}} />
                                                                         </div>
+                                                                        {(hardenStatus.dropped_controls || []).length > 0 && (
+                                                                            <p className="text-xs text-amber-400 mt-2" data-hp-dropped>{fillText(t('hpDroppedNote'), { ids: hardenStatus.dropped_controls.join(', ') })}</p>
+                                                                        )}
                                                                     </div>
                                                                     {/* MK Apr 2026: export buttons */}
                                                                     <button onClick={exportHardenPng}
@@ -23316,6 +23767,13 @@
                                                                         className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap"
                                                                         title={t('exportPdf') || 'Export as PDF'}
                                                                     >PDF</button>
+                                                                    {canManageHardenProfiles && (
+                                                                        <button onClick={saveHardenSelection} disabled={hardenApplying} data-hp-save-selection
+                                                                            className="px-2.5 py-1 text-xs rounded border border-proxmox-border text-gray-400 hover:text-white hover:border-gray-500 whitespace-nowrap flex items-center gap-1"
+                                                                            title={t('hpSaveSelectionHint')}>
+                                                                            <Icons.Save /> {t('hpSaveSelection')}
+                                                                        </button>
+                                                                    )}
                                                                     {!haReadOnly && (<>
                                                                     <button
                                                                         onClick={applyHardening}
@@ -23471,6 +23929,12 @@
                                                                 <p className="text-gray-400 mb-2">{t('hardenEmpty') || 'Select a node and click "Check Status"'}</p>
                                                                 <p className="text-gray-600 text-sm">{t('hardenEmptyDesc') || 'PegaProx checks which CIS controls are already applied and lets you enable the remaining ones.'}</p>
                                                             </div>
+                                                        )}
+
+                                                        {hardenProfilesDlg && hardenProfiles && (
+                                                            <HardeningProfilesDialog data={hardenProfiles} draft={hardenProfilesDlg.draft}
+                                                                authFetch={authFetch} addToast={addToast} t={t}
+                                                                onClose={() => setHardenProfilesDlg(null)} onChanged={hardenProfilesChanged} />
                                                         )}
                                                     </div>
                                                 )}
