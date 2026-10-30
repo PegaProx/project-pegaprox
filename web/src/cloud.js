@@ -324,11 +324,11 @@
         }
 
         // simple horizontal bar chart (top consumers)
-        function CloudBarChart({ rows, color }) {
+        function CloudBarChart({ rows, color, t }) {
             const max = Math.max(1, ...rows.map(r => Number(r.value) || 0));
             return (
                 <div className="cloud-barchart">
-                    {rows.length === 0 && <div className="cloud-empty">No data.</div>}
+                    {rows.length === 0 && <div className="cloud-empty">{t('cloud.noData') || 'No data.'}</div>}
                     {rows.map((r, i) => (
                         <div className="cloud-bar-row" key={i}>
                             <span className="cloud-bar-label" title={r.label}>{r.label}</span>
@@ -606,19 +606,19 @@
             const recentTasks = (Array.isArray(tasks) ? tasks : []).slice(0, 6);
 
             const kpis = [
-                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${vms.filter(v => v.status === 'running').length} running`, nav: 'vms' },
-                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${cts.filter(v => v.status === 'running').length} running`, nav: 'containers' },
-                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${connected}/${safeClusters.length} clusters`, nav: 'nodes' },
-                { icon: 'Activity', value: running.length, label: t('cloud.running') || 'Running guests', accent: '#22c55e', sub: `${safeRes.length} total`, nav: null },
-                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpu') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
-                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ram') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
+                { icon: 'Server', value: vms.length, label: t('cloud.vms') || 'Virtual Machines', accent: '#6366f1', sub: `${vms.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'vms' },
+                { icon: 'Box', value: cts.length, label: t('cloud.containers') || 'Containers', accent: '#14b8a6', sub: `${cts.filter(v => v.status === 'running').length} ${t('cloud.runningUnit') || 'running'}`, nav: 'containers' },
+                { icon: 'Cpu', value: nodeNames.length, label: t('cloud.hosts') || 'Hosts', accent: '#a855f7', sub: `${connected}/${safeClusters.length} ${t('cloud.clustersUnit') || 'clusters'}`, nav: 'nodes' },
+                { icon: 'Activity', value: running.length, label: t('cloud.runningGuests') || 'Running guests', accent: '#22c55e', sub: `${safeRes.length} ${t('cloud.totalUnit') || 'total'}`, nav: null },
+                { icon: 'Cpu', value: vcpu, label: t('cloud.vcpuAllocated') || 'vCPU allocated', accent: '#0ea5e9', sub: null, nav: null },
+                { icon: 'MemoryStick', value: cloudBytesToGiB(ramAllocB).toFixed(1) + ' GiB', label: t('cloud.ramAllocated') || 'RAM allocated', accent: '#f59e0b', sub: null, nav: null },
             ];
 
             return (
                 <div className="cloud-body">
                     <CloudPageHeader
                         title={t('cloud.overview') || 'Overview'}
-                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsShort') || 'guests'}`}
+                        sub={`${connected} / ${safeClusters.length} ${t('cloud.clustersConnected') || 'clusters connected'} · ${safeRes.length} ${t('cloud.guestsUnit') || 'guests'}`}
                     />
                     <div className="cloud-kpi-grid">
                         {kpis.map((k, i) => (
@@ -632,15 +632,15 @@
                             <CloudSectionTitle>{t('cloud.utilization') || 'Cluster utilization'}</CloudSectionTitle>
                             <div className="cloud-util-body">
                                 <div className="cloud-util-gauges">
-                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${nodeNames.length} hosts`} />
+                                    <CloudGauge pct={cpuAvg} color="var(--cloud-accent)" label={t('cloud.avgCpu') || 'Avg CPU'} sub={`${nodeNames.length} ${t('cloud.hostsUnit') || 'hosts'}`} />
                                     <CloudGauge pct={memAvg} color="#a855f7" label={t('cloud.avgRam') || 'Avg RAM'} sub={dcStatus?.resources?.memory ? cloudFmtBytes(dcStatus.resources.memory.used) : null} />
                                 </div>
                                 <div className="cloud-util-breakdown">
                                     <div className="cloud-util-row"><span>{t('cloud.running') || 'Running'}</span><span>{running.length} / {safeRes.length}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.vcpu') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
-                                    <div className="cloud-util-row"><span>{t('cloud.ram') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.vcpuAllocated') || 'vCPU allocated'}</span><span>{vcpu}</span></div>
+                                    <div className="cloud-util-row"><span>{t('cloud.ramAllocated') || 'RAM allocated'}</span><span>{cloudBytesToGiB(ramAllocB).toFixed(1)} GiB</span></div>
                                     {dcStatus?.resources?.storage && (
-                                        <div className="cloud-util-row"><span>{t('cloud.storage') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
+                                        <div className="cloud-util-row"><span>{t('cloud.storageUsed') || 'Storage used'}</span><span>{cloudFmtBytes(dcStatus.resources.storage.used)} / {cloudFmtBytes(dcStatus.resources.storage.total)}</span></div>
                                     )}
                                 </div>
                             </div>
@@ -648,7 +648,7 @@
 
                         <div className="cloud-card">
                             <CloudSectionTitle>{t('cloud.topMem') || 'Top memory consumers'}</CloudSectionTitle>
-                            <CloudBarChart rows={topMem} color="#6366f1" />
+                            <CloudBarChart rows={topMem} color="#6366f1" t={t} />
                         </div>
                     </div>
 
@@ -657,7 +657,7 @@
                             {t('cloud.recentTasks') || 'Recent activity'}
                         </CloudSectionTitle>
                         {recentTasks.length === 0 ? (
-                            <div className="cloud-empty">{t('cloud.noTasks') || 'No recent tasks.'}</div>
+                            <div className="cloud-empty">{t('cloud.noRecentTasks') || 'No recent tasks.'}</div>
                         ) : (
                             <div className="cloud-tasklist">
                                 {recentTasks.map((tk, i) => (
@@ -743,7 +743,7 @@
 
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containers') || 'containers') : (t('cloud.vms') || 'virtual machines')}`}>
+                    <CloudPageHeader title={title} sub={`${safe.length} ${kind === 'lxc' ? (t('cloud.containersUnit') || 'containers') : (t('cloud.vmsUnit') || 'virtual machines')}`}>
                         {canCreate && (
                             <button type="button" className="cloud-btn cloud-btn-primary" onClick={() => onCreate(kind === 'lxc' ? 'lxc' : 'qemu')}>
                                 <Icons.Plus /> {kind === 'lxc' ? (t('newContainer') || 'New Container') : (t('newVm') || 'New VM')}
@@ -1161,7 +1161,7 @@
             const names = Object.keys(map).sort();
             return (
                 <div className="cloud-body">
-                    <CloudPageHeader title={t('cloud.hosts') || 'Hosts'} sub={`${names.length} ${t('cloud.hosts') || 'hosts'}`} />
+                    <CloudPageHeader title={t('cloud.hosts') || 'Hosts'} sub={`${names.length} ${t('cloud.hostsUnit') || 'hosts'}`} />
                     {names.length === 0 ? <div className="cloud-card"><CloudEmpty icon="Cpu" title={t('cloud.noNodes') || 'No host data'} text={t('cloud.selectCluster') || 'Select a connected cluster.'} /></div> : (
                         <div className="cloud-card-grid cloud-card-grid-wide">
                             {names.map(name => {
