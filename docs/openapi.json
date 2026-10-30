@@ -33066,6 +33066,188 @@
         ]
       }
     },
+    "/api/hardening/profiles": {
+      "get": {
+        "operationId": "reports.list_hardening_profiles_get",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The custom hardening profiles, the built-in ones and the controls both pick from.",
+        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults) and whether it can be rolled back. can_manage: whether the\ncaller may create, change and delete custom profiles.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance"
+        ]
+      },
+      "post": {
+        "operationId": "reports.create_hardening_profile_post",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Save a custom hardening profile.",
+        "description": "Body: name (1-64 characters), description (up to 500, may hold line breaks), controls\n(ids from the catalog), params ({control: {parameter: value}}, only for templated\ncontrols of the profile). A file exported from PegaProx (format\npegaprox-hardening-profile, version 1) is taken as it is. 201 with the profile; 400\nfor a body that does not pass, 409 for a name in use (in any case) or a full list.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
+        ]
+      }
+    },
+    "/api/hardening/profiles/{profile_id}": {
+      "put": {
+        "operationId": "reports.update_hardening_profile_put",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Change a custom hardening profile.",
+        "description": "The fields the body leaves out stay as they are; left out, params keeps the values of\nthe controls that stay in the profile. Checked like a new one; 404 for an unknown id,\n409 for a name another profile has. changed names the fields that changed.",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
+        ]
+      },
+      "delete": {
+        "operationId": "reports.delete_hardening_profile_delete",
+        "tags": [
+          "reports"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Delete a custom hardening profile. 404 for an unknown id.",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.maintenance",
+          "admin.settings"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/nodes/{node}/hardening": {
       "get": {
         "operationId": "reports.check_hardening_get",

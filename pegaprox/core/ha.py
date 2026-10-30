@@ -341,6 +341,8 @@ SYNC_TABLES = (
     'recovery_targets', 'restore_test_marks',
     # manual confirmations of a guest's recoverability, beside the automatic facts
     'recovery_confirmations',
+    # the custom node hardening profiles, picks of the built-in controls
+    'hardening_profiles',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

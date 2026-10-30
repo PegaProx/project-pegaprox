@@ -13,6 +13,7 @@ import threading
 import uuid
 import socket
 import hashlib
+import ipaddress
 import subprocess
 import re
 import shlex
@@ -693,6 +694,39 @@ def _rrd_share(point, used_key, total_key, no_total=None):
     if not total:
         return no_total
     return round(used / total * 100, 2)
+
+
+def _hardening_address(v):
+    # ASCII hex, dots and colons first: ip_address alone takes other digits and a %zone
+    if not re.fullmatch(r'[0-9a-fA-F.:]+', v, re.ASCII):
+        return False
+    try:
+        ipaddress.ip_address(v)
+    except ValueError:
+        return False
+    return True
+
+
+# The values a templated hardening control takes into its shell command, by parameter: an
+# IP address for the backup_dns servers, Linux usernames as a comma list for service_user.
+# A parameter without a rule here takes nothing.
+_HARDENING_PARAM_RULES = {
+    'dns1': _hardening_address,
+    'dns2': _hardening_address,
+    'service_user': re.compile(r'[a-zA-Z][a-zA-Z0-9._\-]{0,31}(?:,[a-zA-Z][a-zA-Z0-9._\-]{0,31})*',
+                               re.ASCII).fullmatch,
+}
+
+
+def hardening_param_value(key, value):
+    """The value of parameter `key` as a templated control would use it, '' for none given,
+    None when it may not go into the command. MK Oct 2026 - one rule for apply, which drops
+    such a value and keeps the default, and a saved custom profile, which refuses it."""
+    v = str(value).strip()
+    if not v:
+        return ''
+    rule = _HARDENING_PARAM_RULES.get(key)
+    return v if rule and rule(v) else None
 
 
 class PegaProxManager:
@@ -20868,10 +20902,12 @@ echo DONE""",
             'check': """ns_count=$(grep -c '^nameserver' /etc/resolv.conf 2>/dev/null); [ "$ns_count" -ge 2 ] && echo OK || echo FAIL""",
             # NS: configurable - dns1/dns2 get replaced by apply_node_hardening
             'apply_template': True,
-            'apply': """if ! grep -q '{dns1}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 2 ]; then
+            # MK Oct 2026 - the address is looked for as itself (-F) and whole (-w), not as a
+            # regex that 10.0.0.53 would find in 110.0.0.53
+            'apply': """if ! grep -qwF '{dns1}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 2 ]; then
 echo 'nameserver {dns1}' >> /etc/resolv.conf
 fi
-if ! grep -q '{dns2}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 3 ]; then
+if ! grep -qwF '{dns2}' /etc/resolv.conf && [ "$(grep -c '^nameserver' /etc/resolv.conf)" -lt 3 ]; then
 echo 'nameserver {dns2}' >> /etc/resolv.conf
 fi
 echo DONE""",
@@ -21705,13 +21741,14 @@ echo DONE""",
         """
         return 'cis-l1' if (profile or 'cis-l1') == 'cis-l2' else (profile or 'cis-l1')
 
-    def _all_hardening_controls(self):
+    @classmethod
+    def _all_hardening_controls(cls):
         """Merged dict of CIS_CHECKS + VS-NfD extras (id → control)."""
-        merged = dict(self.CIS_CHECKS)
-        merged.update(self._VSNFD_EXTRA_CHECKS)
+        merged = dict(cls.CIS_CHECKS)
+        merged.update(cls._VSNFD_EXTRA_CHECKS)
         return merged
 
-    def check_node_hardening(self, node_name, verbose=False, profile=None):
+    def check_node_hardening(self, node_name, verbose=False, profile=None, controls=None):
         """Check CIS hardening status for a node via SSH.
 
         verbose=False (default): returns {control_id: bool}
@@ -21720,13 +21757,17 @@ echo DONE""",
                       command if defined, otherwise falls back to the raw check output.
         profile=None / 'cis-l1' / 'cis-l2': all CIS controls (default).
         profile='vs-nfd': Proxmox-safe subset + BSI VS-NfD extras (NS Apr 2026).
+        controls=[ids]: exactly these, whatever profile says (a custom profile, MK Oct 2026).
+        Ids that are no control are left out.
         """
         all_checks = self._all_hardening_controls()
-        members = self._profile_control_set(profile)
+        members = set(controls) if controls is not None else self._profile_control_set(profile)
         if members is not None:
             checks = {cid: ctrl for cid, ctrl in all_checks.items() if cid in members}
         else:
             checks = self.CIS_CHECKS  # original behaviour
+        if not checks:
+            return {}   # nothing to run; an empty batch would be a shell syntax error
         parts = []
         for cid, ctrl in checks.items():
             if verbose and ctrl.get('verbose_check'):
@@ -21829,7 +21870,6 @@ echo DONE""",
 
         NS Apr 2026 — also accepts VS-NfD informational checks (apply is no-op).
         """
-        import re as _re
         all_checks = self._all_hardening_controls()
         out = {}
         for ctrl_id in controls:
@@ -21847,16 +21887,10 @@ echo DONE""",
                 vals = dict(check.get('defaults', {}))
                 if params and ctrl_id in params:
                     for k, v in params[ctrl_id].items():
-                        v = str(v).strip()
-                        if not v:
-                            continue
-                        # IP/IPv6/MAC-style for backup_dns
-                        if _re.match(r'^[\d\.:a-fA-F]+$', v):
+                        v = hardening_param_value(k, v)
+                        # empty or not allowed: silently dropped (defaults remain)
+                        if v:
                             vals[k] = v
-                        # Linux username — single or comma-separated list, no shell metas
-                        elif _re.match(r'^[a-zA-Z][a-zA-Z0-9._\-]{0,31}(?:,[a-zA-Z][a-zA-Z0-9._\-]{0,31})*$', v):
-                            vals[k] = v
-                        # else: silently dropped (defaults remain)
                 cmd = cmd.format(**vals)
             # NS #386: snapshot the files this control edits BEFORE applying, so the
             # change can be rolled back. Only the first apply backs up (preserves

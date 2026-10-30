@@ -3,12 +3,15 @@
 
 import time
 import os
+import json
 import logging
 import re
+import secrets
+import unicodedata
 import sqlite3  # kept for Row + type re-exports
 import threading
 from urllib.parse import urlparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request
 
 # MK May 2026 — direct DB connections must go through dbcrypto so SQLCipher
@@ -887,6 +890,477 @@ def _ssh_unavailable(mgr, node):
     }), status
 
 
+# MK Oct 2026 - custom hardening profiles. A profile is a named pick of the built-in
+# controls (CIS_CHECKS and the VS-NfD extras) plus values for the parameters of the
+# templated ones, never a command of its own: what runs on a node is still the shipped
+# check and apply text, and a value passes the rule apply uses (hardening_param_value).
+# One list for the whole installation, shared with the standbys (ha.SYNC_TABLES). Using
+# one takes node.maintenance like the check; writing one also takes admin.settings and an
+# account no tenant or cluster list limits, the bar of the banners (api/banners.py).
+HARDENING_PROFILE_FORMAT = 'pegaprox-hardening-profile'
+HARDENING_PROFILE_VERSION = 1
+HP_MAX = 100
+HP_NAME_MAX = 64
+HP_DESCRIPTION_MAX = 500
+HP_VALUE_MAX = 256
+_HP_CONTROLS_MAX = 500          # entries in a request, duplicates included
+_HP_ID_RE = re.compile(r'[0-9a-f]{16}')
+# C0 and C1 controls, and the bidi embeddings, overrides and isolates that make a name
+# read other than it is stored
+_HP_CONTROL_CHARS = re.compile('[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]')
+# letters that draw nothing; a name made of them reads as blank in the profile selects
+_HP_BLANK = frozenset('\u115f\u1160\u3164\uffa0\u2800')
+_HP_FIELDS = ('name', 'description', 'controls', 'params')
+_hp_write_lock = threading.Lock()
+
+
+class _ProfileRefused(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+def _hardening_catalog():
+    """{control id: control} of every built-in control, in the order the check runs them."""
+    from pegaprox.core.manager import PegaProxManager
+    return PegaProxManager._all_hardening_controls()
+
+
+def _hp_now():
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def _hp_user():
+    return (getattr(request, 'session', None) or {}).get('user', 'system')
+
+
+def _hp_rows(profile_id=None):
+    """The stored rows, or the one of `profile_id`. Raises when the table cannot be read:
+    a write must not take that for an empty list."""
+    from pegaprox.core.db import get_db
+    c = get_db().conn.cursor()
+    if profile_id is None:
+        c.execute('SELECT * FROM hardening_profiles ORDER BY name COLLATE NOCASE, id')
+    else:
+        c.execute('SELECT * FROM hardening_profiles WHERE id = ?', (profile_id,))
+    return [dict(r) for r in c.fetchall()]
+
+
+def _hp_public(row, catalog):
+    """A stored profile as the routes hand it out, or None when the row does not read as
+    one (rows come in with the sync too, from whatever version the active runs). Controls
+    this version does not know go to dropped_controls, their values are left out."""
+    if not isinstance(row.get('id'), str) or not _HP_ID_RE.fullmatch(row['id']):
+        return None
+    try:
+        controls = json.loads(row.get('controls') or '[]')
+        params = json.loads(row.get('params') or '{}')
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(controls, list) or not all(isinstance(c, str) for c in controls)
+            or not isinstance(params, dict) or not isinstance(row.get('name'), str)):
+        return None
+    known = [c for c in controls if c in catalog]
+    return {
+        'id': row['id'],
+        'name': row['name'],
+        'description': row['description'] if isinstance(row.get('description'), str) else '',
+        'controls': known,
+        'params': {cid: {k: v for k, v in vals.items() if isinstance(v, str)}
+                   for cid, vals in params.items() if cid in known and isinstance(vals, dict)},
+        'dropped_controls': [c for c in controls if c not in catalog],
+        'created_by': row.get('created_by') or '',
+        'created_at': row.get('created_at') or '',
+        'updated_by': row.get('updated_by') or '',
+        'updated_at': row.get('updated_at') or '',
+    }
+
+
+def custom_hardening_profile(profile_id):
+    """The custom profile of that id as _hp_public has it, None for none (or a malformed
+    id). Raises when the table cannot be read."""
+    if not isinstance(profile_id, str) or not _HP_ID_RE.fullmatch(profile_id):
+        return None
+    rows = _hp_rows(profile_id)
+    return _hp_public(rows[0], _hardening_catalog()) if rows else None
+
+
+def _hp_text(value, what, limit, newlines=False):
+    if value is None:
+        value = ''
+    if not isinstance(value, str):
+        raise _ProfileRefused(f'{what} is text')
+    try:
+        value.encode('utf-8')
+    except UnicodeEncodeError:
+        # a lone surrogate from a JSON escape; the database would refuse it at the INSERT
+        raise _ProfileRefused(f'The {what} is not valid text')
+    if newlines:
+        value = value.replace('\r\n', '\n')
+    value = value.strip()
+    if len(value) > limit:
+        raise _ProfileRefused(f'The {what} is longer than {limit} characters')
+    if _HP_CONTROL_CHARS.search(value.replace('\n', '') if newlines else value):
+        raise _ProfileRefused(f'The {what} holds a control character')
+    return value
+
+
+def _hp_validated(data, catalog):
+    """name, description, controls and params from a request body, checked. Raises
+    _ProfileRefused; nothing is written before this passed."""
+    if 'format' in data or 'version' in data:
+        version = data.get('version')
+        if (data.get('format') != HARDENING_PROFILE_FORMAT or isinstance(version, bool)
+                or version != HARDENING_PROFILE_VERSION):
+            raise _ProfileRefused(f'This is not a hardening profile exported by PegaProx '
+                                  f'({HARDENING_PROFILE_FORMAT}, version {HARDENING_PROFILE_VERSION})')
+    name = _hp_text(data.get('name'), 'name', HP_NAME_MAX)
+    if not name:
+        raise _ProfileRefused('Enter a name for the profile')
+    # format characters (zero width, direction marks, joiners) do not show and let two
+    # names look alike; and a name needs one character that draws something
+    if any(unicodedata.category(ch) == 'Cf' for ch in name):
+        raise _ProfileRefused('The name holds a character that does not show')
+    if not any(unicodedata.category(ch)[0] in 'LNPS' and ch not in _HP_BLANK for ch in name):
+        raise _ProfileRefused('The name has no visible character')
+    description = _hp_text(data.get('description'), 'description', HP_DESCRIPTION_MAX, newlines=True)
+
+    raw = data.get('controls')
+    if not isinstance(raw, list) or not raw:
+        raise _ProfileRefused('Pick at least one control')
+    if len(raw) > _HP_CONTROLS_MAX or not all(isinstance(c, str) for c in raw):
+        raise _ProfileRefused('controls is a list of control ids')
+    unknown = [c for c in dict.fromkeys(raw) if c not in catalog]
+    if unknown:
+        raise _ProfileRefused('Unknown control: ' + ', '.join(c[:64] for c in unknown[:5]))
+    picked = set(raw)
+    controls = [c for c in catalog if c in picked]
+
+    raw_params = data.get('params')
+    if raw_params is None:
+        raw_params = {}
+    if not isinstance(raw_params, dict):
+        raise _ProfileRefused('params is an object of control id to its values')
+    from pegaprox.core.manager import hardening_param_value
+    params = {}
+    for cid, values in raw_params.items():
+        if cid not in picked:
+            raise _ProfileRefused(f'{cid[:64]} has values but is not a control of this profile')
+        defaults = catalog[cid].get('defaults') or {}
+        if not catalog[cid].get('apply_template') or not defaults:
+            raise _ProfileRefused(f'{cid} takes no parameters')
+        if not isinstance(values, dict):
+            raise _ProfileRefused(f'The values of {cid} are an object of parameter to value')
+        for key, value in values.items():
+            if key not in defaults:
+                raise _ProfileRefused(f'{cid} has no parameter {key[:64]}')
+            if not isinstance(value, str) or len(value) > HP_VALUE_MAX:
+                raise _ProfileRefused(f'{cid} {key}: a value is text of at most {HP_VALUE_MAX} characters')
+            clean = hardening_param_value(key, value)
+            if clean is None:
+                takes = 'an IP address' if key in ('dns1', 'dns2') else 'user names separated by commas'
+                raise _ProfileRefused(f'{cid} {key}: not a value this control takes - {takes}')
+            if clean:
+                params.setdefault(cid, {})[key] = clean
+    return {'name': name, 'description': description, 'controls': controls, 'params': params}
+
+
+def _hp_name_taken(rows, name, but=None):
+    folded = name.casefold()
+    return any(r['id'] != but and isinstance(r.get('name'), str) and r['name'].casefold() == folded
+               for r in rows)
+
+
+def backup_hardening_profiles():
+    """The custom profiles for a config backup (api/settings.py): id, name, description,
+    controls and params of each. Raises when the table cannot be read."""
+    catalog = _hardening_catalog()
+    out = []
+    for row in _hp_rows():
+        p = _hp_public(row, catalog)
+        if p is not None and p['controls']:
+            out.append({k: p[k] for k in ('id',) + _HP_FIELDS})
+    return out
+
+
+def restore_hardening_profiles(entries, username, dry_run=False):
+    """Put the custom profiles of a config backup back (api/settings.py restore_config).
+
+    Each is checked like a new one and keeps its id: it replaces the profile of that id, or
+    joins the list while there is room. One whose name another profile has here is left
+    out. All of them are checked before the first is written, and a write that fails takes
+    the others back with it. Returns (restored, [why one was left out])."""
+    if not isinstance(entries, list):
+        return 0, ['Hardening profiles: not a list']
+    from pegaprox.core.db import get_db
+    catalog = _hardening_catalog()
+    db = get_db()
+    errors, todo = [], []
+    with _hp_write_lock:
+        rows = _hp_rows()
+        for entry in entries:
+            pid = entry.get('id') if isinstance(entry, dict) else None
+            if not isinstance(pid, str) or not _HP_ID_RE.fullmatch(pid):
+                errors.append('Hardening profile without a valid id left out')
+                continue
+            try:
+                fields = _hp_validated({k: entry.get(k) for k in _HP_FIELDS}, catalog)
+            except _ProfileRefused as e:
+                errors.append(f'Hardening profile {pid}: {e}')
+                continue
+            if _hp_name_taken(rows, fields['name'], but=pid):
+                errors.append(f"Hardening profile {pid}: another profile is named '{fields['name']}'")
+                continue
+            have = next((r for r in rows if r['id'] == pid), None)
+            if have is None and len(rows) >= HP_MAX:
+                errors.append(f'Hardening profile {pid}: there are already {HP_MAX} profiles')
+                continue
+            now = _hp_now()
+            row = {'id': pid, 'name': fields['name'], 'description': fields['description'],
+                   'controls': json.dumps(fields['controls']), 'params': json.dumps(fields['params']),
+                   'created_by': (have or {}).get('created_by') or username,
+                   'created_at': (have or {}).get('created_at') or now,
+                   'updated_by': username, 'updated_at': now}
+            rows = [r for r in rows if r['id'] != pid] + [row]
+            todo.append(row)
+        if todo and not dry_run:
+            try:
+                for row in todo:
+                    db.conn.execute('INSERT OR REPLACE INTO hardening_profiles (id, name, description, '
+                                    'controls, params, created_by, created_at, updated_by, updated_at) '
+                                    'VALUES (:id, :name, :description, :controls, :params, '
+                                    ':created_by, :created_at, :updated_by, :updated_at)', row)
+                db.conn.commit()
+            except Exception:
+                # the INSERTs before the failed one would go out with the next commit on
+                # this connection while the restore reports none
+                db.conn.rollback()
+                raise
+    return len(todo), errors
+
+
+def _hp_may_manage():
+    """Whether the caller may write the custom profiles: node.maintenance, admin.settings
+    and no tenant or cluster list limiting them. Fails closed."""
+    try:
+        from pegaprox.api.ha import _unconfined
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import has_permission
+        session = getattr(request, 'session', None) or {}
+        user = build_authz_user(session.get('user', ''), session)
+        return (has_permission(user, 'node.maintenance') and has_permission(user, 'admin.settings')
+                and _unconfined(user))
+    except Exception as e:
+        logging.warning(f"[hardening] could not resolve the caller's scope: {e}")
+        return False
+
+
+def _hp_refuse_confined():
+    if _hp_may_manage():
+        return None
+    return jsonify({'error': 'Custom hardening profiles are managed by administrators who are '
+                             'not limited to a tenant or to specific clusters'}), 403
+
+
+def _hp_body():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _hp_unreadable(e):
+    logging.warning(f"[hardening] could not read the custom profiles: {e}")
+    return jsonify({'error': 'The custom hardening profiles cannot be read right now'}), 503
+
+
+@bp.route('/api/hardening/profiles', methods=['GET'])
+@require_auth(perms=['node.maintenance'])
+def list_hardening_profiles():
+    """The custom hardening profiles, the built-in ones and the controls both pick from.
+
+    custom: id, name, description, controls, params ({control: {parameter: value}}),
+    dropped_controls (stored ids this version has no control for), created_at, updated_at,
+    and for those who may manage them created_by and updated_by. builtin: id and the
+    controls it runs. catalog: per control whether it takes parameters (templated,
+    param_keys, defaults) and whether it can be rolled back. can_manage: whether the
+    caller may create, change and delete custom profiles."""
+    catalog = _hardening_catalog()
+    try:
+        rows = _hp_rows()
+    except Exception as e:
+        return _hp_unreadable(e)
+    can_manage = _hp_may_manage()
+    custom = []
+    for row in rows:
+        p = _hp_public(row, catalog)
+        if p is None:
+            continue
+        if not can_manage:
+            p.pop('created_by')
+            p.pop('updated_by')
+        custom.append(p)
+
+    from pegaprox.core.manager import PegaProxManager
+    builtin = [{'id': pid, 'controls': list(PegaProxManager.CIS_CHECKS) if members is None
+                else [c for c in catalog if c in members]}
+               for pid, members in PegaProxManager._HARDENING_PROFILES.items()]
+    entries = []
+    for cid, ctrl in catalog.items():
+        templated = bool(ctrl.get('apply_template'))
+        defaults = dict(ctrl.get('defaults') or {}) if templated else {}
+        entries.append({'id': cid, 'templated': templated, 'param_keys': list(defaults),
+                        'defaults': defaults, 'rollback': bool(ctrl.get('backup_files'))})
+    return jsonify({
+        'custom': custom, 'builtin': builtin, 'catalog': entries, 'can_manage': can_manage,
+        'format': HARDENING_PROFILE_FORMAT, 'format_version': HARDENING_PROFILE_VERSION,
+        'limits': {'profiles': HP_MAX, 'name': HP_NAME_MAX, 'description': HP_DESCRIPTION_MAX,
+                   'value': HP_VALUE_MAX},
+    })
+
+
+@bp.route('/api/hardening/profiles', methods=['POST'])
+@require_auth(perms=['node.maintenance', 'admin.settings'])
+def create_hardening_profile():
+    """Save a custom hardening profile.
+
+    Body: name (1-64 characters), description (up to 500, may hold line breaks), controls
+    (ids from the catalog), params ({control: {parameter: value}}, only for templated
+    controls of the profile). A file exported from PegaProx (format
+    pegaprox-hardening-profile, version 1) is taken as it is. 201 with the profile; 400
+    for a body that does not pass, 409 for a name in use (in any case) or a full list."""
+    refusal = _hp_refuse_confined()
+    if refusal:
+        return refusal
+    catalog = _hardening_catalog()
+    try:
+        fields = _hp_validated(_hp_body(), catalog)
+    except _ProfileRefused as e:
+        return jsonify({'error': str(e)}), e.status
+    user, now = _hp_user(), _hp_now()
+    with _hp_write_lock:
+        try:
+            rows = _hp_rows()
+        except Exception as e:
+            return _hp_unreadable(e)
+        if len(rows) >= HP_MAX:
+            return jsonify({'error': f'There are already {HP_MAX} custom profiles - delete one first'}), 409
+        if _hp_name_taken(rows, fields['name']):
+            return jsonify({'error': f"A profile named '{fields['name']}' exists already"}), 409
+        row = {'id': secrets.token_hex(8), 'name': fields['name'], 'description': fields['description'],
+               'controls': json.dumps(fields['controls']), 'params': json.dumps(fields['params']),
+               'created_by': user, 'created_at': now, 'updated_by': user, 'updated_at': now}
+        try:
+            from pegaprox.core.db import get_db
+            db = get_db()
+            db.conn.execute('INSERT INTO hardening_profiles (id, name, description, controls, params, '
+                            'created_by, created_at, updated_by, updated_at) '
+                            'VALUES (:id, :name, :description, :controls, :params, '
+                            ':created_by, :created_at, :updated_by, :updated_at)', row)
+            db.conn.commit()
+        except Exception as e:
+            logging.error(f"[hardening] could not save a custom profile: {e}")
+            return jsonify({'error': 'The profile could not be saved'}), 500
+    from pegaprox.utils.audit import log_audit
+    log_audit(user, 'hardening.profile_created',
+              f"Hardening profile '{fields['name']}' ({row['id']}) created with "
+              f"{len(fields['controls'])} controls")
+    return jsonify({'success': True, 'profile': _hp_public(row, catalog)}), 201
+
+
+@bp.route('/api/hardening/profiles/<profile_id>', methods=['PUT'])
+@require_auth(perms=['node.maintenance', 'admin.settings'])
+def update_hardening_profile(profile_id):
+    """Change a custom hardening profile.
+
+    The fields the body leaves out stay as they are; left out, params keeps the values of
+    the controls that stay in the profile. Checked like a new one; 404 for an unknown id,
+    409 for a name another profile has. changed names the fields that changed."""
+    refusal = _hp_refuse_confined()
+    if refusal:
+        return refusal
+    if not _HP_ID_RE.fullmatch(profile_id or ''):
+        return jsonify({'error': 'Profile not found'}), 404
+    catalog = _hardening_catalog()
+    data = _hp_body()
+    user = _hp_user()
+    with _hp_write_lock:
+        try:
+            rows = _hp_rows()
+        except Exception as e:
+            return _hp_unreadable(e)
+        row = next((r for r in rows if r['id'] == profile_id), None)
+        if row is None:
+            return jsonify({'error': 'Profile not found'}), 404
+        # a row that does not read (synced from another version) can still be written over
+        current = _hp_public(row, catalog) or {'name': row.get('name') or '', 'description': '',
+                                                 'controls': [], 'params': {}}
+        merged = {k: current[k] for k in _HP_FIELDS}
+        merged.update({k: data[k] for k in _HP_FIELDS if k in data})
+        if 'params' not in data and isinstance(merged['controls'], list):
+            merged['params'] = {c: v for c, v in current['params'].items() if c in merged['controls']}
+        for k in ('format', 'version'):
+            if k in data:
+                merged[k] = data[k]
+        try:
+            fields = _hp_validated(merged, catalog)
+        except _ProfileRefused as e:
+            return jsonify({'error': str(e)}), e.status
+        if _hp_name_taken(rows, fields['name'], but=profile_id):
+            return jsonify({'error': f"A profile named '{fields['name']}' exists already"}), 409
+        changed = [k for k in _HP_FIELDS if fields[k] != current[k]]
+        if not changed and not current.get('dropped_controls'):
+            return jsonify({'success': True, 'profile': current, 'changed': []})
+        row = dict(row, name=fields['name'], description=fields['description'],
+                   controls=json.dumps(fields['controls']), params=json.dumps(fields['params']),
+                   updated_by=user, updated_at=_hp_now())
+        try:
+            from pegaprox.core.db import get_db
+            db = get_db()
+            db.conn.execute('UPDATE hardening_profiles SET name = ?, description = ?, controls = ?, '
+                            'params = ?, updated_by = ?, updated_at = ? WHERE id = ?',
+                            (row['name'], row['description'], row['controls'], row['params'],
+                             row['updated_by'], row['updated_at'], profile_id))
+            db.conn.commit()
+        except Exception as e:
+            logging.error(f"[hardening] could not save custom profile {profile_id}: {e}")
+            return jsonify({'error': 'The profile could not be saved'}), 500
+    from pegaprox.utils.audit import log_audit
+    log_audit(user, 'hardening.profile_updated',
+              f"Hardening profile '{fields['name']}' ({profile_id}) changed: "
+              + (', '.join(changed) or 'controls this version does not know dropped'))
+    return jsonify({'success': True, 'profile': _hp_public(row, catalog), 'changed': changed})
+
+
+@bp.route('/api/hardening/profiles/<profile_id>', methods=['DELETE'])
+@require_auth(perms=['node.maintenance', 'admin.settings'])
+def delete_hardening_profile(profile_id):
+    """Delete a custom hardening profile. 404 for an unknown id."""
+    refusal = _hp_refuse_confined()
+    if refusal:
+        return refusal
+    if not _HP_ID_RE.fullmatch(profile_id or ''):
+        return jsonify({'error': 'Profile not found'}), 404
+    user = _hp_user()
+    with _hp_write_lock:
+        try:
+            rows = _hp_rows(profile_id)
+        except Exception as e:
+            return _hp_unreadable(e)
+        if not rows:
+            return jsonify({'error': 'Profile not found'}), 404
+        try:
+            from pegaprox.core.db import get_db
+            db = get_db()
+            db.conn.execute('DELETE FROM hardening_profiles WHERE id = ?', (profile_id,))
+            db.conn.commit()
+        except Exception as e:
+            logging.error(f"[hardening] could not delete custom profile {profile_id}: {e}")
+            return jsonify({'error': 'The profile could not be deleted'}), 500
+    from pegaprox.utils.audit import log_audit
+    log_audit(user, 'hardening.profile_deleted',
+              f"Hardening profile '{rows[0].get('name')}' ({profile_id}) deleted")
+    return jsonify({'success': True, 'id': profile_id})
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening', methods=['GET'])
 @require_auth(perms=['node.maintenance'])
 def check_hardening(cluster_id, node):
@@ -908,10 +1382,27 @@ def check_hardening(cluster_id, node):
     verbose = str(request.args.get('verbose', '')).lower() in ('1', 'true', 'yes')
     # NS Apr 2026 — profile filter; Harden PVE Node UI + Compliance Dashboard share these.
     profile = (request.args.get('profile', '') or '').strip().lower() or None
-    if profile and profile not in {'cis-l1', 'cis-l2', 'vs-nfd', 'bsi', 'iso', 'nis2',
+    custom = None
+    if profile and profile.startswith('custom:'):
+        # MK Oct 2026 - a custom profile runs exactly its own controls
+        try:
+            custom = custom_hardening_profile(profile[len('custom:'):])
+        except Exception as e:
+            return _hp_unreadable(e)
+        if custom is None:
+            return jsonify({'error': f'unknown profile: {profile[:80]}'}), 400
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+            return jsonify({'error': 'Custom hardening profiles pick Proxmox VE controls, '
+                                     'this cluster has its own'}), 400
+        if not custom['controls']:
+            return jsonify({'error': 'None of the controls of this profile exist in this version',
+                            'dropped_controls': custom['dropped_controls']}), 400
+        result = mgr.check_node_hardening(node, verbose=verbose, controls=custom['controls'])
+    elif profile and profile not in {'cis-l1', 'cis-l2', 'vs-nfd', 'bsi', 'iso', 'nis2',
                                      'cmmc1', 'cmmc2', 'nist53', 'stig', 'dr', 'rgs'}:
         return jsonify({'error': f'unknown profile: {profile}'}), 400
-    result = mgr.check_node_hardening(node, verbose=verbose, profile=profile)
+    else:
+        result = mgr.check_node_hardening(node, verbose=verbose, profile=profile)
     if result is None:
         return _ssh_unavailable(mgr, node)
 
@@ -927,9 +1418,13 @@ def check_hardening(cluster_id, node):
                'failed': sum(1 for s in _st if s is False),
                'not_checked': sum(1 for s in _st if s is None)}
     summary['checked'] = summary['passed'] + summary['failed']
-    return jsonify({'node': node, 'controls': result, 'verbose': verbose,
-                    'profile': _eff, 'requested_profile': profile or 'cis-l1',
-                    'summary': summary})
+    out = {'node': node, 'controls': result, 'verbose': verbose,
+           'profile': _eff, 'requested_profile': profile or 'cis-l1',
+           'summary': summary}
+    if custom is not None:
+        out.update(profile=f"custom:{custom['id']}", requested_profile=f"custom:{custom['id']}",
+                   profile_name=custom['name'], dropped_controls=custom['dropped_controls'])
+    return jsonify(out)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening', methods=['POST'])

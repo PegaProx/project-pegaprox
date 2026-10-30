@@ -2631,6 +2631,14 @@ def backup_config():
             backup_data['custom_scripts'] = scripts
         except:
             backup_data['custom_scripts'] = []
+
+        # MK Oct 2026 - the custom node hardening profiles (api/reports.py)
+        try:
+            from pegaprox.api.reports import backup_hardening_profiles
+            backup_data['hardening_profiles'] = backup_hardening_profiles()
+        except Exception as e:
+            logging.warning(f"[Backup] could not read the hardening profiles: {e}")
+            backup_data['hardening_profiles'] = []
         
         # Audit Log (optional, can be large)
         if include_audit:
@@ -3102,6 +3110,17 @@ def restore_config():
             if not dry_run:
                 database.conn.commit()
             results['restored']['cluster_groups'] = group_count
+
+        # MK Oct 2026 - custom hardening profiles, each checked like a new one
+        if 'hardening_profiles' in data:
+            try:
+                from pegaprox.api.reports import restore_hardening_profiles
+                count, why = restore_hardening_profiles(data['hardening_profiles'], username, dry_run)
+                results['restored']['hardening_profiles'] = count
+                results['errors'].extend(why)
+            except Exception as e:
+                logging.warning(f"[Restore] hardening profiles not restored: {e}")
+                results['errors'].append('Hardening profiles: could not be restored')
         
         # Log the restore action
         if not dry_run:

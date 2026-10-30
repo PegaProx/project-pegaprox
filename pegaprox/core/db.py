@@ -2615,6 +2615,26 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating node_state_history and the timeline indexes: {e}")
 
+        # MK Oct 2026 - custom node hardening profiles: a named pick of the built-in controls
+        # and values for their parameters, never commands of their own (api/reports.py).
+        # controls and params are JSON. Shared with the standbys (core/ha.py SYNC_TABLES).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS hardening_profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    controls TEXT NOT NULL DEFAULT '[]',
+                    params TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating hardening_profiles table: {e}")
+
         conn.commit()
         logging.info("DB schema initialized")
     
