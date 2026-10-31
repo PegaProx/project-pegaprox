@@ -10,6 +10,7 @@ import threading
 import time
 
 import pegaprox.core.manager as mgrmod
+from pegaprox.core import rolling_runs
 from pegaprox.core.manager import PegaProxManager, UpdateTask
 
 NODE = 'blade1'
@@ -226,3 +227,76 @@ def test_scheduled_run_waits_for_apt_refresh_before_skipping(api, seed, monkeypa
     assert state['completed_nodes'] == [NODE]
     assert state['skipped_nodes'] == []
     fake.start_node_update.assert_called_once_with(NODE, reboot=False, force=True)
+
+
+def test_cancelling_scheduled_refresh_stops_before_maintenance(api, seed, monkeypatch):
+    """Cancellation during a slow apt task wait must not enter maintenance or update."""
+    import pegaprox.api.schedules as schedules_mod
+
+    clock = _Clock()
+    apt = _AptNode(clock, done_after=None, before=('pve-manager',))
+    fake = _manager(api, apt)
+    entered = threading.Event()
+    release = threading.Event()
+    original_get = apt.api_get
+
+    def hold_first_poll(url, *args, **kwargs):
+        """Hold the task-status request until the cancel route changes run state."""
+        entered.set()
+        assert release.wait(10), 'cancel route never released the apt poll'
+        return original_get(url, *args, **kwargs)
+
+    fake._api_get.side_effect = hold_first_poll
+    api.set_manager('cluster_1', fake)
+    monkeypatch.setattr(schedules_mod, 'time', clock)
+    monkeypatch.setattr(mgrmod, 'time', clock)
+
+    schedules_mod.execute_scheduled_rolling_update(fake, 'cluster_1', {
+        'config': {'include_reboot': False, 'skip_up_to_date': True, 'skip_evacuation': True}
+    })
+    try:
+        assert entered.wait(5), 'scheduled refresh did not reach task polling'
+        client = api.as_user(seed.user('scheduled_cancel', role='admin'))
+        response = client.delete('/api/clusters/cluster_1/updates/rolling')
+        assert response.status_code == 200, response.data
+        assert response.get_json()['cleanup'] == 'running'
+    finally:
+        release.set()
+
+    deadline = time.time() + 10
+    while time.time() < deadline and rolling_runs.worker_here('cluster_1', fake):
+        time.sleep(0.05)
+    assert not rolling_runs.worker_here('cluster_1', fake), 'scheduled worker did not finish'
+    assert fake._rolling_update['status'] == 'cancelled'
+    fake.enter_maintenance_mode.assert_not_called()
+    fake.start_node_update.assert_not_called()
+
+
+def test_scheduled_xcpng_refresh_reads_without_extra_delay(api, seed, monkeypatch):
+    """A completed synchronous yum refresh needs no further fixed wait."""
+    import pegaprox.api.schedules as schedules_mod
+
+    clock = _Clock()
+    apt = _AptNode(clock, done_after=0, before=(), after=('kernel',))
+    fake = _manager(api, apt, cluster_type='xcpng')
+
+    def refresh(_node):
+        """Model XCP-ng's SSH refresh completing before it returns."""
+        apt.started = clock.now
+        return {'success': True, 'task': None}
+
+    fake.refresh_node_apt.side_effect = refresh
+    api.set_manager('cluster_1', fake)
+    monkeypatch.setattr(schedules_mod, 'time', clock)
+    monkeypatch.setattr(mgrmod, 'time', clock)
+
+    schedules_mod.execute_scheduled_rolling_update(fake, 'cluster_1', {
+        'config': {'include_reboot': False, 'skip_up_to_date': True, 'skip_evacuation': True}
+    })
+    deadline = time.time() + 10
+    while time.time() < deadline and (fake._rolling_update or {}).get('status') == 'running':
+        time.sleep(0.05)
+
+    assert fake._rolling_update['status'] == 'completed', fake._rolling_update['logs']
+    assert apt.read_at == apt.started, 'scheduled yum refresh added an unnecessary delay'
+    fake._wait_for_task.assert_not_called()

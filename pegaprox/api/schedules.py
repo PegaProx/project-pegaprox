@@ -712,12 +712,15 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                             if isinstance(refreshed, dict) and refreshed.get('success') is False:
                                 stale = refreshed.get('error') or 'the refresh failed'
                             elif isinstance(refreshed, dict) and refreshed.get('task'):
-                                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180):
+                                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180,
+                                                          stop=lambda: _status() != 'running'):
                                     stale = 'the apt update task failed or took longer than 180s'
-                            else:
-                                time.sleep(10 if getattr(mgr, 'cluster_type', '') == 'xcpng' else 3)
+                            elif getattr(mgr, 'cluster_type', '') != 'xcpng':
+                                time.sleep(3)
                         except Exception as e:
                             stale = str(e) or type(e).__name__
+                        if _status() != 'running':
+                            break
                         if stale:
                             rolling_log(mgr, f"⚠ Package lists of {node_name} not refreshed "
                                              f"({str(stale)[:200]}) - reading the cached list, it may be stale")
@@ -731,6 +734,8 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                         except Exception as e:
                             rolling_log(mgr, f"⚠ Failed to check updates on {node_name}: {e} - proceeding with update")
                             logging.warning(f"[SCHEDULER] Check failed for {node_name}: {e}")
+                    if _status() != 'running':
+                        break
                     _set(current_step='maintenance', node=(node_name, {'phase': 'maintenance'}))
                     gate = _quorum_stop(idx, node_name, 'maintenance')
                     if gate == 'paused':
@@ -750,6 +755,8 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     # before each node's evacuation and its update (design 5.2)
                     if not ha.confirm_step(f'rolling update of {node_name}'):
                         rolling_log(mgr, "stopped: this instance does not hold the lease")
+                        break
+                    if _status() != 'running':
                         break
                     mgr.enter_maintenance_mode(node_name, skip_evacuation=skip_evacuation,
                                                allow_local_disks=allow_local_disks,
