@@ -47,7 +47,7 @@ def _settings_blocks():
     start = src.index('{/* LW Oct 2026 - the pause before the balancer moves the same guest again')
     slider = src[start:src.index('</fieldset>', start)]
     start = src.index('{/* LW Oct 2026 - the balancer\'s moves with why, under its settings */}')
-    card = src[start:src.index('{/* Update Manager Section */}', start)]
+    card = src[start:src.index('{/* SMBIOS Auto-Configurator Section */}', start)]
     return slider + card
 
 
