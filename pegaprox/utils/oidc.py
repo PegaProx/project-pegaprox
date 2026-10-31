@@ -90,6 +90,15 @@ OIDC_USERNAME_CLAIMS = ('preferred_username', 'email', 'upn')
 _OIDC_NAME_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789._-@+')
 
 
+def normalize_oidc_groups_claim(value) -> str:
+    """A literal, case-sensitive ID-token key; blank restores the default."""
+    if value is None:
+        return 'groups'
+    if not isinstance(value, str) or len(value) > 256 or any(not c.isprintable() for c in value):
+        raise ValueError('oidc_groups_claim must be a printable string of at most 256 characters')
+    return value.strip() or 'groups'
+
+
 def get_oidc_settings() -> dict:
     """Load OIDC/Entra ID configuration from server settings
 
@@ -98,6 +107,10 @@ def get_oidc_settings() -> dict:
     from pegaprox.api.helpers import load_server_settings
     settings = load_server_settings()  # MK: Must use load_server_settings() NOT get_server_settings() (that's the route handler!)
     provider = settings.get('oidc_provider', 'entra')
+    try:
+        groups_claim = normalize_oidc_groups_claim(settings.get('oidc_groups_claim'))
+    except ValueError:
+        groups_claim = 'groups'
     
     # NS: Entra needs User.Read + GroupMember.Read.All for Graph API
     # Default scopes differ by provider
@@ -124,6 +137,7 @@ def get_oidc_settings() -> dict:
         'auto_create_users': settings.get('oidc_auto_create_users', True),
         # Custom group mappings (same format as LDAP)
         'group_mappings': settings.get('oidc_group_mappings', []),
+        'groups_claim': groups_claim,
         # Display
         'button_text': settings.get('oidc_button_text', 'Sign in with Microsoft'),
         # NS: allow disabling JWT sig verification for broken JWKS environments
@@ -755,7 +769,7 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
     just to grant. It is true only when we know the full group set: either the Entra
     fetch completed (groups_complete=True), or the validated ID token actually carried a
-    `groups` claim. A provider that sends no groups claim at all is indistinguishable
+    configured groups claim. A provider that sends no groups claim at all is indistinguishable
     from a user who lost every group, so that case stays non-authoritative and
     provisioning leaves existing grants alone.
     """
@@ -767,9 +781,10 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         'groups': [],
         '_authoritative': False,
     }
+    claim_name = config.get('groups_claim') or 'groups'
     if groups_complete:
         result['_authoritative'] = True
-    elif id_token_claims is not None and 'groups' in id_token_claims:
+    elif id_token_claims is not None and claim_name in id_token_claims:
         # The ID token is signature-checked before it gets here, so a groups claim in it
         # is as good a source as the Graph call - including when it is an empty list.
         #
@@ -779,7 +794,7 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         # present but partial, and deciding a revocation on a partial list is the thing
         # this whole mechanism exists to avoid. Grant from it, never revoke.
         _names = id_token_claims.get('_claim_names')
-        if isinstance(_names, dict) and 'groups' in _names:
+        if isinstance(_names, dict) and claim_name in _names:
             logging.warning(
                 "[OIDC] the ID token signals a groups overage - the claim is truncated, "
                 "so this login can grant but not revoke. Give the app Graph group-read "
@@ -806,7 +821,7 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     
     # NS: Also check ID token 'groups' claim (Entra can embed group IDs in token)
     if id_token_claims:
-        for gid in id_token_claims.get('groups', []):
+        for gid in id_token_claims.get(claim_name, []):
             group_ids.add(str(gid).lower())
 
     # MK Oct 2026 (#940) - the groups oidc_build_user_row stores on the user, which is what
@@ -814,7 +829,7 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     # display name is the squattable identifier the name-match warning further down is
     # about, and a pool grant must not be claimable by creating a group of the right name.
     # A generic provider's groups claim is taken as the signed token carries it.
-    _claim = (id_token_claims or {}).get('groups') or []
+    _claim = (id_token_claims or {}).get(claim_name) or []
     if isinstance(_claim, str):
         _claim = [_claim]
     _seen = set()
