@@ -13603,11 +13603,14 @@
             const [pbsDatastores, setPbsDatastores] = useState([]);
             const [pbsSnapshots, setPbsSnapshots] = useState([]);
             const [pbsGroups, setPbsGroups] = useState([]);
-            const [pbsTasks, setPbsTasks] = useState([]);
+            const [pbsTasksResult, setPbsTasksResult] = useState({ id: null, data: [], error: false });
+            const pbsTasksSeq = React.useRef(0);
             const [pbsJobsResult, setPbsJobsResult] = useState({ id: null, data: {}, error: false });
             const pbsJobsSeq = React.useRef(0);
             const selectedPBSIdRef = React.useRef(null);
             selectedPBSIdRef.current = selectedPBS?.id ?? null;
+            const pbsTasks = pbsTasksResult.id === selectedPBS?.id ? pbsTasksResult.data : [];
+            const pbsTasksError = pbsTasksResult.id === selectedPBS?.id && pbsTasksResult.error;
             const pbsJobs = pbsJobsResult.id === selectedPBS?.id ? pbsJobsResult.data : {};
             const pbsJobsError = pbsJobsResult.id === selectedPBS?.id && pbsJobsResult.error;
             const [pbsActiveTab, setPbsActiveTab] = useState('dashboard');
@@ -13656,7 +13659,8 @@
             const [pbsActionLoading, setPbsActionLoading] = useState({});
             const [pbsPruneForm, setPbsPruneForm] = useState({ keep_last: 3, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 1, dry_run: true });
             const [pbsSelectedGroup, setPbsSelectedGroup] = useState(null);
-            const [pbsTaskLog, setPbsTaskLog] = useState(null);
+            const [pbsTaskLogResult, setPbsTaskLog] = useState(null);
+            const pbsTaskLog = pbsTaskLogResult?.pbsId === selectedPBS?.id ? pbsTaskLogResult : null;
             const [pbsNamespaces, setPbsNamespaces] = useState([]);
             const [pbsSelectedNs, setPbsSelectedNs] = useState('');  // LW: #301 selected namespace
             const [pbsDisks, setPbsDisks] = useState([]);
@@ -17350,11 +17354,31 @@
                 } catch (e) { console.warn('PBS groups error:', e); setPbsGroups([]); }
             };
             
+            /**
+             * Read task rows and preserve an error state for the selected PBS server.
+             * Ignore late responses after a newer task request starts.
+             * @param {string} pbsId - The PBS server whose tasks are requested.
+             * @returns {Promise<void>}
+             */
             const fetchPBSTasks = async (pbsId) => {
+                const seq = ++pbsTasksSeq.current;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}/tasks?limit=30`);
-                    if (resp && resp.ok) setPbsTasks(await resp.json());
-                } catch (e) { console.warn('PBS tasks error:', e); }
+                    if (resp && resp.ok) {
+                        const tasks = await resp.json();
+                        if (!Array.isArray(tasks)) throw new Error('Invalid PBS task list');
+                        if (seq === pbsTasksSeq.current) {
+                            setPbsTasksResult({ id: pbsId, data: tasks, error: false });
+                        }
+                    } else if (seq === pbsTasksSeq.current) {
+                        setPbsTasksResult({ id: pbsId, data: [], error: true });
+                    }
+                } catch (e) {
+                    console.warn('PBS tasks error:', e);
+                    if (seq === pbsTasksSeq.current) {
+                        setPbsTasksResult({ id: pbsId, data: [], error: true });
+                    }
+                }
             };
             
             /**
@@ -17814,15 +17838,31 @@
                 } catch (e) { addToast('Job error: ' + e.message, 'error'); }
             };
             
+            /**
+             * Load a PBS task's status and log, reporting refused reads to the operator.
+             * @param {string} upid - The PBS task identifier.
+             * @returns {Promise<void>}
+             */
             const viewPBSTaskLog = async (upid) => {
                 if (!selectedPBS) return;
+                const pbsId = selectedPBS.id;
                 try {
-                    const resp = await authFetch(`${API_URL}/pbs/${selectedPBS.id}/tasks/${encodeURIComponent(upid)}`);
+                    const resp = await authFetch(`${API_URL}/pbs/${pbsId}/tasks/${encodeURIComponent(upid)}`);
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        setPbsTaskLog({ upid, ...data });
+                        if (selectedPBSIdRef.current === pbsId) {
+                            setPbsTaskLog({ pbsId, upid, ...data });
+                        }
+                    } else if (selectedPBSIdRef.current === pbsId) {
+                        setPbsTaskLog(null);
+                        addToast('Failed to load task log', 'error');
                     }
-                } catch (e) { addToast('Failed to load task log', 'error'); }
+                } catch (e) {
+                    if (selectedPBSIdRef.current === pbsId) {
+                        setPbsTaskLog(null);
+                        addToast('Failed to load task log', 'error');
+                    }
+                }
             };
             
             
@@ -26278,6 +26318,9 @@
                                         {/* Tasks Tab */}
                                         {pbsActiveTab === 'tasks' && (
                                             <div className="space-y-4">
+                                                {pbsTasksError && <div role="alert" className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
+                                                    {t('pbsLoadAllDataError') || 'Could not load all data:'} {t('tasks') || 'Tasks'}
+                                                </div>}
                                                 <div className="flex items-center justify-between">
                                                     <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">{t('tasks') || 'Tasks'} ({pbsTasks.length})</h3>
                                                     <button onClick={() => fetchPBSTasks(selectedPBS.id)} className="text-xs text-gray-500 hover:text-white transition-colors flex items-center gap-1">
@@ -26310,7 +26353,7 @@
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                    {pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">{t('pbsNoTasksFound') || 'No tasks found'}</div>}
+                                                    {!pbsTasksError && pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">{t('pbsNoTasksFound') || 'No tasks found'}</div>}
                                                 </div>
 
                                                 {/* Task Log Viewer */}

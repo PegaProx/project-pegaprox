@@ -1190,7 +1190,7 @@ def pbs_delete_snapshot(pbs_id, store):
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
-    """List PBS tasks"""
+    """List PBS tasks, surfacing an upstream failure instead of an empty list."""
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1203,11 +1203,17 @@ def get_pbs_tasks(pbs_id):
     running = request.args.get('running', None)
     result = mgr.get_tasks(limit=limit, typefilter=typefilter,
                             running=bool(int(running)) if running is not None else None)
+    failed = pbs_upstream_error(result)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+        return jsonify({'error': 'PBS returned an invalid task list', 'code': 'PBS_UPSTREAM'}), 502
     # sec (audit) — the report path scopes these very rows; the raw list didn't, so a scoped
     # caller read every guest's backup history off the same server. Rows with no guest (gc,
     # prune, sync) carry no per-object question, so they go the same way as everywhere else:
     # kept for an unconfined caller, dropped for a confined one.
-    return jsonify(_scope_pbs_rows(mgr, result.get('data', []) or [],
+    return jsonify(_scope_pbs_rows(mgr, result['data'],
                                    key_fn=lambda t: _pbs_task_guest(t.get('worker_id') or t.get('id')),
                                    where_fn=lambda t: (_pbs_task_store(t.get('worker_id') or t.get('id')), '')))
 
@@ -1215,7 +1221,7 @@ def get_pbs_tasks(pbs_id):
 @bp.route('/api/pbs/<pbs_id>/tasks/<path:upid>', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_task_detail(pbs_id, upid):
-    """Get task status and log"""
+    """Get task status and log, failing if either PBS read failed."""
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1231,10 +1237,22 @@ def get_pbs_task_detail(pbs_id, upid):
     if not ok:
         return err
     status = mgr.get_task_status(upid)
+    failed = pbs_upstream_error(status)
+    if failed:
+        code, payload = failed
+        return jsonify(payload), code
+    if not isinstance(status, dict) or not isinstance(status.get('data'), dict):
+        return jsonify({'error': 'PBS returned an invalid task status', 'code': 'PBS_UPSTREAM'}), 502
     log = mgr.get_task_log(upid)
+    failed = pbs_upstream_error(log)
+    if failed:
+        code, payload = failed
+        return jsonify(payload), code
+    if not isinstance(log, dict) or not isinstance(log.get('data'), list):
+        return jsonify({'error': 'PBS returned an invalid task log', 'code': 'PBS_UPSTREAM'}), 502
     return jsonify({
-        'status': status.get('data', {}),
-        'log': log.get('data', []),
+        'status': status['data'],
+        'log': log['data'],
     })
 
 
