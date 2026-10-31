@@ -2011,7 +2011,7 @@ def test_the_vm_configuration_locks_on_a_standby():
 
 
 def test_the_update_check_does_not_run_from_a_standby():
-    """verify:frontend:2 - opening a cluster's Settings posted the check, which SSHes every
+    """verify:frontend:2 - opening a cluster's Update Manager posted the check, which SSHes every
     node and which the standby refuses."""
     sec = _read('web', 'src', 'security.js')
     comp = _function(sec, 'UpdateManagerSection')
@@ -2458,13 +2458,13 @@ def test_runtime_the_vm_configuration_changes_nothing_on_a_standby(open_app, rol
 
 
 @pytest.mark.parametrize('role', ['standby', 'active'])
-def test_runtime_the_settings_tab_checks_for_updates_only_on_the_active(open_app, role):
+def test_runtime_the_updates_tab_checks_for_updates_only_on_the_active(open_app, role):
     """verify:frontend:2"""
     app = open_app(role=role, layout='modern', clusters=[CLUSTER], resources=[VM], extra=SSE_TOKEN)
     page = app.page
     page.get_by_text('Testi').first.click()
     page.wait_for_timeout(800)
-    page.locator('button', has_text='Settings').last.click()
+    page.get_by_role('button', name='Update Manager', exact=True).click()
     check = ('POST', '/api/clusters/c1/updates/check')
     posted = _wait_for_call(app, check, 3)
     assert posted != (role == 'standby')

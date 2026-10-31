@@ -223,17 +223,17 @@ def _shot(app, name):
         app.page.screenshot(path=os.path.join(SHOTS, f'{name}.png'))
 
 
-def _to_updates(app, layout):
+def _to_updates(app, layout, cluster_name='Testi'):
     page = app.page
     if layout == 'cloud':
         page.locator('.cloud-nav-item', has_text='Update Manager').first.click()
     else:
         if layout == 'corporate':
-            page.locator('.corp-tree-item', has_text='Testi').first.click()
+            page.locator('.corp-tree-item', has_text=cluster_name).first.click()
         else:
-            page.get_by_text('Testi').first.click()
+            page.get_by_text(cluster_name).first.click()
         page.wait_for_timeout(500)
-        page.locator('button', has_text=re.compile(r'^\s*Settings\s*$')).last.click()
+        page.get_by_role('button', name='Update Manager', exact=True).click()
     head = page.get_by_text('Update Manager').last
     head.wait_for(timeout=8000)
     return head
@@ -322,7 +322,7 @@ def test_runtime_the_dialog_speaks_german(real_app):
     page = app.page
     page.get_by_text('Testi').first.click()
     page.wait_for_timeout(500)
-    page.locator('button', has_text=re.compile(r'^\s*Einstellungen\s*$')).last.click()
+    page.get_by_role('button', name='Update Manager', exact=True).click()
     start = page.locator('button', has_text='Rolling Update starten')
     if not start.count():
         page.get_by_text('Update Manager').last.click()

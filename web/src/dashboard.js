@@ -21661,6 +21661,7 @@
                                                     { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
                                                     { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
                                                     { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
+                                                    { id: 'updates', labelKey: 'updateManager', icon: Icons.Download },
                                                     { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
                                                     { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
                                                     { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
@@ -24895,6 +24896,13 @@
                                             );
                                         })()}
 
+                                        {/* Updates Tab */}
+                                        {activeTab === 'updates' && (
+                                            <div data-update-manager>
+                                                <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
+                                            </div>
+                                        )}
+
                                         {/* Settings Tab */}
                                         {activeTab === 'settings' && (
                                             <div className={`grid grid-cols-1 lg:grid-cols-2 ${isCorporate ? 'gap-3' : 'gap-6'}`}>
@@ -25469,11 +25477,6 @@
                                                     </div>
                                                 )}
 
-                                                {/* Update Manager Section */}
-                                                <div className="lg:col-span-2" data-update-manager>
-                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
-                                                </div>
-                                                
                                                 {/* SMBIOS Auto-Configurator Section */}
                                                 <div className={`lg:col-span-2 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
                                                     <SmbiosAutoConfigSection 
@@ -29421,11 +29424,6 @@
                                             setSelectedSidebarDatastore(null);
                                             setDatacenterSection(tab === 'datacenter' ? section : null);
                                             setActiveTab(tab);
-                                            // the update manager sits further down the settings tab
-                                            if (section === 'updates') setTimeout(() => {
-                                                const el = document.querySelector('[data-update-manager]');
-                                                if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
-                                            }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                         onOpenGuests={openGuests}

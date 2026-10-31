@@ -8003,7 +8003,7 @@
 
                         {!topologyOnly && clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
 
-                        {!topologyOnly && clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
+                        {!topologyOnly && clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('updates')} />}
 
                         {/* NS: Mar 2026 - Multi-cluster topology redesign (#142) */}
                         {clusters.filter(c => c.connected).length > 0 && (() => {
@@ -8455,7 +8455,7 @@
 
                     {clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
 
-                    {clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
+                    {clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('updates')} />}
 
                     {/* Empty State */}
                     {clusters.length === 0 && (

@@ -334,7 +334,7 @@ def test_runtime_it_speaks_german(ui):
     page = app.page
     page.get_by_text('Testi').first.click()
     page.wait_for_timeout(500)
-    page.locator('button', has_text=re.compile(r'^\s*Einstellungen\s*$')).last.click()
+    page.get_by_role('button', name='Update Manager', exact=True).click()
     banner = page.locator('[data-testid="rolling-paused"]')
     banner.wait_for(timeout=8000)
     text = banner.inner_text()
