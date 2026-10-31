@@ -661,18 +661,23 @@ def check_collaborators(ctx):
     if ctx.api.truncated:
         ctx.not_checked(f'more than {len(items)} collaborators, the rest not looked at')
     have = {login(c): str(c.get('role_name') or '') for c in items if isinstance(c, dict) and login(c)}
+    # NS Oct 2026 - the workflow token gets a 200 with an empty list here: access that comes
+    # through the organization needs Members read, which that token never has. So a name
+    # missing from the answer is not a removal. New names and changed roles still alarm.
+    gone = sorted(set(want) - set(have))
+    if gone:
+        ctx.not_checked(f'{len(gone)} of {len(want)} baseline collaborators not in the answer '
+                        f'({", ".join(v(n) for n in gone)}); this token may only see direct access', soft=True)
     diff = 0
     for name in sorted(set(have) | set(want)):
-        if have.get(name) != want.get(name):
+        if name in have and have.get(name) != want.get(name):
             diff += 1
-            if name not in have:
-                text = f'{v(name)} ({want[name]}) has no access any more'
-            elif name not in want:
+            if name not in want:
                 text = f'{v(name)} has access as {v(have[name])} and is not in the baseline'
             else:
                 text = f'{v(name)} is {v(have[name])} now, the baseline says {v(want[name])}'
             ctx.alarm(key('collaborator', name, fp(have.get(name))), text)
-    if not diff:
+    if not diff and not gone:
         ctx.ok(f'{len(have)} collaborators, as in the baseline')
 
 

@@ -1023,6 +1023,25 @@ def test_collaborators_the_token_may_not_list_are_soft():
     assert hits and all(f.soft for f in hits) and not rep.blind
 
 
+def test_the_workflow_token_sees_no_collaborators_and_that_is_no_removal():
+    # what the first run on GitHub got: 200 and an empty list, the team's access comes
+    # through the organization and that token cannot see it
+    w = healthy()
+    w.collaborators = {}
+    rep = run(w)
+    assert not [f for f in rep.alarms if f.check == 'collaborators']
+    hits = [f for f in rep.findings if f.check == 'collaborators' and f.level == wd.NOT_CHECKED]
+    assert hits and all(f.soft for f in hits) and not rep.blind
+    assert rep.status('collaborators') != 'ok'
+
+
+def test_an_outsider_still_alarms_when_the_team_is_invisible():
+    w = healthy()
+    w.collaborators = {'mallory': 'write'}
+    rep = run(w)
+    assert [f for f in rep.alarms if f.check == 'collaborators' and 'mallory' in f.text]
+
+
 def test_hidden_bypass_actors_are_not_checked_not_passed():
     # what a non-admin token gets: the rules, but no bypass_actors key at all
     w = healthy()

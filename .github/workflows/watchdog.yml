@@ -67,7 +67,7 @@ jobs:
         id: pin
         run: |
           if sha256sum --strict --quiet -c - <<'PINS'
-          b59a45e49d0ca9e6dfb3db388a3a055d1593b952a69f72a2f665a82ffa7ab6a8  .github/scripts/watchdog.py
+          d8878610622cdfc0ad1bad91378e4d1fbbaf2da3ef14aba3a85b21d89220fa22  .github/scripts/watchdog.py
           923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
           PINS
           then
@@ -115,7 +115,7 @@ jobs:
         id: pin
         run: |
           if sha256sum --strict --quiet -c - <<'PINS'
-          b59a45e49d0ca9e6dfb3db388a3a055d1593b952a69f72a2f665a82ffa7ab6a8  .github/scripts/watchdog.py
+          d8878610622cdfc0ad1bad91378e4d1fbbaf2da3ef14aba3a85b21d89220fa22  .github/scripts/watchdog.py
           923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
           PINS
           then
