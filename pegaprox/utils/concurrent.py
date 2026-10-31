@@ -88,7 +88,7 @@ class HubTurns:
 
 
 def run_concurrent(tasks: list, timeout: float = 30.0) -> list:
-    """Run tasks concurrently with gevent pool"""
+    """Run tasks through the shared pool within one submission and completion deadline."""
     # NS: chatgpt helped with this one, i was mass confused about greenlets
     # TODO: maybe add retry logic? - MK
     #
@@ -105,10 +105,14 @@ def run_concurrent(tasks: list, timeout: float = 30.0) -> list:
     if GEVENT_POOL is not None and GEVENT_AVAILABLE:
         # Use gevent pool for concurrent execution
         try:
-            greenlets = [GEVENT_POOL.spawn(task) for task in tasks]
-            # Wait for all with timeout
-            from gevent import joinall
-            joinall(greenlets, timeout=timeout)
+            from gevent import Timeout, joinall
+            greenlets = []
+            # Pool.spawn waits for a free slot. Include that wait in the deadline too,
+            # or a full pool can prevent us from ever reaching joinall and reaping it.
+            with Timeout(timeout, False):
+                for task in tasks:
+                    greenlets.append(GEVENT_POOL.spawn(task))
+                joinall(greenlets)
 
             # Capture whatever finished within `timeout` (an unfinished greenlet isn't
             # successful() → None) BEFORE reaping, so the result never depends on kill timing.
@@ -119,6 +123,7 @@ def run_concurrent(tasks: list, timeout: float = 30.0) -> list:
                 except Exception as e:
                     logging.error(f"Concurrent task failed: {e}")
                     results.append(None)
+            results.extend([None] * (len(tasks) - len(greenlets)))
 
             # #777 (Frisch12) — reap stragglers. joinall returns at `timeout` but leaves any
             # unfinished greenlets RUNNING in the shared GEVENT_POOL; their results are already
