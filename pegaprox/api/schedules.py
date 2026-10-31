@@ -668,6 +668,7 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                   cluster=getattr(mgr.config, 'name', cluster_id))
 
         def run_scheduled_update():
+            """Run each scheduled node update and record its progress and cleanup."""
             def _set(**kw):
                 return rolling_runs.change(mgr, **kw)
 
@@ -705,14 +706,30 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     _set(current_index=idx, current_node=node_name, current_step='checking',
                          node=(node_name, {'phase': 'checking'}), log=f"Processing {node_name}")
                     if skip_up_to_date:
+                        stale = None
                         try:
-                            mgr.refresh_node_apt(node_name); time.sleep(3)
+                            refreshed = mgr.refresh_node_apt(node_name)
+                            if isinstance(refreshed, dict) and refreshed.get('success') is False:
+                                stale = refreshed.get('error') or 'the refresh failed'
+                            elif isinstance(refreshed, dict) and refreshed.get('task'):
+                                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180):
+                                    stale = 'the apt update task failed or took longer than 180s'
+                            else:
+                                time.sleep(10 if getattr(mgr, 'cluster_type', '') == 'xcpng' else 3)
+                        except Exception as e:
+                            stale = str(e) or type(e).__name__
+                        if stale:
+                            rolling_log(mgr, f"⚠ Package lists of {node_name} not refreshed "
+                                             f"({str(stale)[:200]}) - reading the cached list, it may be stale")
+                            logging.warning(f"[SCHEDULER] Package refresh on {node_name} failed: {str(stale)[:200]}")
+                        try:
                             if not mgr.get_node_apt_updates(node_name):
                                 _set(add={'skipped_nodes': node_name},
                                      node=(node_name, {'phase': 'done', 'result': 'skipped'}),
                                      log=f"{node_name} up-to-date, skipping")
                                 continue
                         except Exception as e:
+                            rolling_log(mgr, f"⚠ Failed to check updates on {node_name}: {e} - proceeding with update")
                             logging.warning(f"[SCHEDULER] Check failed for {node_name}: {e}")
                     _set(current_step='maintenance', node=(node_name, {'phase': 'maintenance'}))
                     gate = _quorum_stop(idx, node_name, 'maintenance')

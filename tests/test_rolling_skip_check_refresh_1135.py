@@ -200,3 +200,29 @@ def test_an_xcpng_refresh_has_no_task_to_wait_on(api, seed, monkeypatch):
     fake._wait_for_task.assert_not_called()
     assert 'may be stale' not in logs, logs
     assert f'Found 2 updates available on {NODE}' in logs, logs
+
+
+def test_scheduled_run_waits_for_apt_refresh_before_skipping(api, seed, monkeypatch):
+    """A slow refresh must not make a scheduled run skip newly available updates."""
+    import pegaprox.api.schedules as schedules_mod
+
+    clock = _Clock()
+    apt = _AptNode(clock, done_after=45, before=(), after=('pve-manager',))
+    fake = _manager(api, apt)
+    api.set_manager('cluster_1', fake)
+    monkeypatch.setattr(schedules_mod, 'time', clock)
+    monkeypatch.setattr(mgrmod, 'time', clock)
+
+    schedules_mod.execute_scheduled_rolling_update(fake, 'cluster_1', {
+        'config': {'include_reboot': False, 'skip_up_to_date': True, 'skip_evacuation': True}
+    })
+    deadline = time.time() + 20
+    while time.time() < deadline and (fake._rolling_update or {}).get('status') == 'running':
+        time.sleep(0.05)
+
+    state = fake._rolling_update
+    assert state['status'] == 'completed', state['logs']
+    assert apt.read_at - apt.started >= 45, 'package list read before refresh completed'
+    assert state['completed_nodes'] == [NODE]
+    assert state['skipped_nodes'] == []
+    fake.start_node_update.assert_called_once_with(NODE, reboot=False, force=True)
