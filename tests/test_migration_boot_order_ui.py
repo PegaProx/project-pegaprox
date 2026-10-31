@@ -26,9 +26,13 @@ def _dialog(app, layout, dialog):
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
 @pytest.mark.parametrize('dialog', ['local', 'cross'])
-def test_missing_later_boot_devices_are_shown(xc_app, layout, dialog):
+@pytest.mark.parametrize('boot', [
+    'legacy=cdn,order=scsi0;ide2;net0;net1',
+    'legacy=cdn,order=scsi0 ; ide2 ; net0 ; net1',
+])
+def test_missing_later_boot_devices_are_shown(xc_app, layout, dialog, boot):
     """A missing disk or NIC after an existing first disk is still a boot issue."""
-    config = dict(SRC_CFG, boot='legacy=cdn,order=scsi0;ide2;net0;net1')
+    config = dict(SRC_CFG, boot=boot)
     app = xc_app(layout=layout, src_cfg=config)
     view = _dialog(app, layout, dialog)
     warning = view.get_by_text('Boot Order Issue', exact=True)
@@ -38,7 +42,8 @@ def test_missing_later_boot_devices_are_shown(xc_app, layout, dialog):
 
 
 @pytest.mark.parametrize('dialog', ['local', 'cross'])
-@pytest.mark.parametrize('boot', ['order=scsi0;net0', 'cdn'])
+@pytest.mark.parametrize('boot', ['order=scsi0;net0', 'order=scsi0; net0',
+                                  'order=scsi0 net0', 'cdn'])
 def test_existing_devices_and_legacy_order_have_no_warning(xc_app, dialog, boot):
     """Configured boot devices and the legacy BIOS order do not produce false warnings."""
     config = dict(SRC_CFG, boot=boot)

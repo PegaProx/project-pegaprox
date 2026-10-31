@@ -2902,11 +2902,11 @@
         // storages that keep a qcow2 file, which carries its snapshots along
         const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
 
-        /** Return missing devices from PVE's semicolon-separated boot order. */
+        /** Return missing devices from PVE's semicolon or whitespace-delimited boot order. */
         function migrationBootOrderIssues(config) {
             const boot = typeof config.boot === 'string' ? config.boot : '';
             const order = boot.split(',').find(part => part.startsWith('order='));
-            return order ? order.slice(6).split(';').filter(device => device && !config[device]) : [];
+            return order ? order.slice(6).split(/[;\s]+/).filter(device => device && !config[device]) : [];
         }
 
         /** Configure a migration to another node in the same cluster. */
