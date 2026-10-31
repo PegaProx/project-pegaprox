@@ -2767,6 +2767,7 @@
                 oidc_authority: '',
                 oidc_scopes: 'openid profile email',
                 oidc_username_claim: '',
+                oidc_groups_claim: 'groups',
                 oidc_redirect_uri: '',
                 oidc_admin_group_id: '',
                 oidc_user_group_id: '',
@@ -3786,6 +3787,7 @@
                             oidc_authority: data.oidc_authority || '',
                             oidc_scopes: data.oidc_scopes || 'openid profile email',
                             oidc_username_claim: data.oidc_username_claim || '',
+                            oidc_groups_claim: data.oidc_groups_claim || 'groups',
                             oidc_redirect_uri: data.oidc_redirect_uri || '',
                             oidc_admin_group_id: data.oidc_admin_group_id || '',
                             oidc_user_group_id: data.oidc_user_group_id || '',
@@ -7622,6 +7624,17 @@
                                             </select>
                                             <p className="text-xs text-gray-600 mt-1">{t('oidcUsernameClaimHint')}</p>
                                         </div>
+                                        <details className="space-y-3">
+                                            <summary className="text-sm text-gray-400 cursor-pointer">{t('advanced')}</summary>
+                                            <div>
+                                                <label htmlFor="oidc-groups-claim" className="block text-sm text-gray-400 mb-1">{t('oidcGroupsClaim')}</label>
+                                                <input id="oidc-groups-claim" data-oidc="groups-claim" type="text" maxLength={256}
+                                                    value={oidcConfig.oidc_groups_claim} placeholder="groups"
+                                                    onChange={e => setOidcConfig(prev => ({...prev, oidc_groups_claim: e.target.value}))}
+                                                    className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                                <p className="text-xs text-gray-600 mt-1">{t('oidcGroupsClaimHint')}</p>
+                                            </div>
+                                        </details>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">Login Button Text</label>
                                             <input type="text" value={oidcConfig.oidc_button_text} onChange={e => setOidcConfig(prev => ({...prev, oidc_button_text: e.target.value}))}

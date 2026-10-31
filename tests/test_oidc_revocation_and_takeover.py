@@ -98,14 +98,14 @@ def test_the_mapping_marks_a_complete_fetch_authoritative():
 def test_a_groups_claim_in_the_id_token_counts_even_when_empty():
     """The token is signature-checked, so an explicit empty groups claim means the user
     really is in no groups - that has to be able to revoke."""
-    m = O.oidc_map_groups_to_role({}, [], {'groups': []}, groups_complete=False)
+    m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims({'groups': []}), groups_complete=False)
     assert m['_authoritative'] is True
 
 
 def test_no_groups_claim_at_all_is_not_authoritative():
     """A provider that never sends groups is indistinguishable from one whose user lost
     them all."""
-    m = O.oidc_map_groups_to_role({}, [], {'sub': 'x'}, groups_complete=False)
+    m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims({'sub': 'x'}), groups_complete=False)
     assert m['_authoritative'] is False
 
 
@@ -326,17 +326,17 @@ def test_a_truncated_groups_claim_cannot_revoke():
     claims = {'groups': ['g1', 'g2'],
               '_claim_names': {'groups': 'src1'},
               '_claim_sources': {'src1': {'endpoint': 'https://graph/...'}}}
-    m = O.oidc_map_groups_to_role({}, [], claims, groups_complete=False)
+    m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims(claims), groups_complete=False)
     assert m['_authoritative'] is False
 
 
 def test_an_untruncated_groups_claim_still_counts():
-    m = O.oidc_map_groups_to_role({}, [], {'groups': ['g1']}, groups_complete=False)
+    m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims({'groups': ['g1']}), groups_complete=False)
     assert m['_authoritative'] is True
 
 
 def test_a_complete_graph_fetch_beats_an_overage_marker():
     """If Graph answered in full, the token's truncation is irrelevant."""
     claims = {'groups': ['g1'], '_claim_names': {'groups': 'src1'}}
-    m = O.oidc_map_groups_to_role({}, [], claims, groups_complete=True)
+    m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims(claims), groups_complete=True)
     assert m['_authoritative'] is True

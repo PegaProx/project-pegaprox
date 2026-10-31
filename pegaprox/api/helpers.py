@@ -179,6 +179,7 @@ def load_server_settings():
         'oidc_skip_jwt_verification': False,  # NS: disable JWT sig check for broken JWKS envs
         'oidc_skip_ssl_verify': False,        # NS Apr 2026 (#188): self-signed-cert escape hatch
         'oidc_username_claim': '',            # NS Oct 2026 (#1149): '' = preferred_username, then email
+        'oidc_groups_claim': 'groups',
         # MK May 2026 (#412 SeeJayEmm): SSRF guard's default behaviour rejects
         # any discovery URL that resolves to a private/loopback IP. Internal IdPs
         # (Keycloak/Authentik/Authentik-on-LAN at 10.x or 192.168.x) are the
