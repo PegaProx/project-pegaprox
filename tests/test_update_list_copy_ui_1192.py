@@ -205,9 +205,9 @@ def _shot(app, name):
         app.page.screenshot(path=os.path.join(SHOTS, f'{name}.png'))
 
 
-def _copy_button(app, layout='modern'):
+def _copy_button(app, layout='modern', cluster_name='Testi'):
     page = app.page
-    head = _to_updates(app, layout)
+    head = _to_updates(app, layout, cluster_name)
     button = page.locator('[data-testid="updates-copy-text"]')
     if not button.count():
         head.click()
@@ -404,7 +404,7 @@ def test_runtime_it_speaks_german(ui):
     page = app.page
     page.get_by_text('Testi').first.click()
     page.wait_for_timeout(500)
-    page.locator('button', has_text=re.compile(r'^\s*Einstellungen\s*$')).last.click()
+    page.get_by_role('button', name='Update Manager', exact=True).click()
     button = page.locator('[data-testid="updates-copy-text"]')
     if not button.count():
         page.get_by_text('Update Manager').last.click()

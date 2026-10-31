@@ -130,12 +130,12 @@ def test_both_only_read():
 def test_both_are_on_the_overview_in_both_layouts_and_open_their_place():
     vm = _read('web', 'src', 'vm_modals.js')
     body = _block(vm, 'function AllClustersOverview(', 'function GroupSettingsModal(')
-    assert body.count("<PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />") == 2
+    assert body.count("<PendingUpdatesOverview clusters={clusters} onOpen={openIn('updates')} />") == 2
     assert body.count("<CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />") == 2
     dash = _read('web', 'src', 'dashboard.js')
     wiring = _block(dash, 'onOpenClusterTab={(cluster, tab, section) => {', 'onAutoInstall=')
     assert "setDatacenterSection(tab === 'datacenter' ? section : null);" in wiring and 'setActiveTab(tab);' in wiring
-    assert '<div className="lg:col-span-2" data-update-manager>' in dash
+    assert '<div data-update-manager>' in dash
     assert 'initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)}' in dash
     dc = _read('web', 'src', 'datacenter.js')
     assert "useState(initialSection || 'summary')" in dc

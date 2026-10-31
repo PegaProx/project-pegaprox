@@ -21661,6 +21661,7 @@
                                                     { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
                                                     { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
                                                     { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
+                                                    { id: 'updates', labelKey: 'updateManager', icon: Icons.Download },
                                                     { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
                                                     { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
                                                     { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
@@ -24593,14 +24594,14 @@
                                                                                         </div>
                                                                                     ) : null}
 
-                                                                                    {/* link to update manager in settings tab */}
+                                                                                    {/* Link to the cluster update manager */}
                                                                                     {(node.cve_count > 0 || node.total_count > 0) && (
                                                                                         <div className="px-4 py-3 border-t border-proxmox-border flex items-center justify-between">
                                                                                             <span className="text-xs text-gray-500">
                                                                                                 {t('cveApplyHint') || 'Apply fixes via the Update Manager'}
                                                                                             </span>
                                                                                             <button
-                                                                                                onClick={() => setActiveTab('settings')}
+                                                                                                onClick={() => setActiveTab('updates')}
                                                                                                 className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg flex items-center gap-2"
                                                                                             >
                                                                                                 <Icons.Settings className="w-3.5 h-3.5" />
@@ -24894,6 +24895,13 @@
                                                 </div>
                                             );
                                         })()}
+
+                                        {/* Updates Tab */}
+                                        {activeTab === 'updates' && (
+                                            <div data-update-manager>
+                                                <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
+                                            </div>
+                                        )}
 
                                         {/* Settings Tab */}
                                         {activeTab === 'settings' && (
@@ -25469,11 +25477,6 @@
                                                     </div>
                                                 )}
 
-                                                {/* Update Manager Section */}
-                                                <div className="lg:col-span-2" data-update-manager>
-                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
-                                                </div>
-                                                
                                                 {/* SMBIOS Auto-Configurator Section */}
                                                 <div className={`lg:col-span-2 ${isCorporate ? 'border border-proxmox-border p-4' : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6'}`}>
                                                     <SmbiosAutoConfigSection 
@@ -29421,11 +29424,6 @@
                                             setSelectedSidebarDatastore(null);
                                             setDatacenterSection(tab === 'datacenter' ? section : null);
                                             setActiveTab(tab);
-                                            // the update manager sits further down the settings tab
-                                            if (section === 'updates') setTimeout(() => {
-                                                const el = document.querySelector('[data-update-manager]');
-                                                if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
-                                            }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                         onOpenGuests={openGuests}
