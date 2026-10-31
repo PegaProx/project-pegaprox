@@ -36,6 +36,31 @@ def test_default_claim_keeps_existing_behavior():
     assert mapping['_authoritative'] is True
 
 
+NON_ARRAY_GROUPS = [None, True, False, 17, 17.5, '', 'a', 'admins', {}, {'a': True}]
+
+
+@pytest.mark.parametrize('claim_name', ['groups', 'groups_proxmox'])
+@pytest.mark.parametrize('value', NON_ARRAY_GROUPS)
+def test_non_array_claim_is_incomplete_and_cannot_grant(claim_name, value):
+    config = _config(groups_claim=claim_name, admin_group_id='a')
+    if claim_name == 'groups':
+        config.pop('groups_claim')  # exercise the legacy default too
+    mapping = oidc.oidc_map_groups_to_role(config, [], {claim_name: value})
+    assert mapping['_authoritative'] is False
+    assert mapping['role'] == 'viewer'
+    assert mapping['groups'] == []
+
+
+@pytest.mark.parametrize('value', NON_ARRAY_GROUPS)
+def test_non_array_token_claim_does_not_change_complete_graph_groups(value):
+    mapping = oidc.oidc_map_groups_to_role(
+        _config(provider='entra'), [{'id': 'admins', 'name': 'Administrators'}],
+        {'groups_proxmox': value}, groups_complete=True)
+    assert mapping['_authoritative'] is True
+    assert mapping['role'] == 'admin'
+    assert mapping['groups'] == ['admins']
+
+
 @pytest.mark.parametrize('name', ['Groups_Proxmox', 'https://example.org/claims/groups', 'realm.groups'])
 def test_claim_names_are_literal_and_case_sensitive(name):
     mapping = oidc.oidc_map_groups_to_role(
@@ -130,6 +155,9 @@ def _okta_sign_in(api, monkeypatch, token):
     monkeypatch.setattr(auth, 'oidc_get_user_info', lambda *a, **kw: {
         'sub': SUB, 'preferred_username': 'wanda@corp.example'})
     # Keep the real generic-provider group fetch: it returns ([], False).
+    for key in list(auth.login_attempts_by_ip):
+        if str(key).startswith('oidc_cb_'):
+            auth.login_attempts_by_ip.pop(key, None)
     browser = api.app.test_client()
     browser.set_cookie('oidc_state', 'the-state:the-nonce:the-verifier', domain='localhost')
     response = browser.post('/api/auth/oidc/callback', json={'code': 'c', 'state': 'the-state'},
@@ -158,3 +186,26 @@ def test_custom_claim_removal_obeys_completeness_on_relogin(api, db, idp, signer
     assert _okta_sign_in(api, monkeypatch, _id_token(signer, **claims)) == username
     assert db.get_user(username)['role'] == role
     assert db.get_user_directory_groups(username) == groups
+
+
+@pytest.mark.parametrize('value', NON_ARRAY_GROUPS + [[]])
+def test_relogin_with_malformed_claim_preserves_access_but_empty_array_revokes(
+        api, db, idp, signer, monkeypatch, value):
+    username = _okta_sign_in(api, monkeypatch, _id_token(signer, groups_proxmox=['operators']))
+    held = db.get_user(username)
+    held.update(permissions=['vm.delete'], groups=['operators'],
+                tenant_permissions={'default': {'role': 'viewer', 'extra': ['vm.view']}})
+    db.save_user(username, held)
+
+    assert _okta_sign_in(api, monkeypatch, _id_token(signer, groups_proxmox=value)) == username
+    user = db.get_user(username)
+    if isinstance(value, list):
+        assert user['role'] == 'viewer'
+        assert user['permissions'] == []
+        assert user['tenant_permissions'] == {}
+        assert db.get_user_directory_groups(username) == []
+    else:
+        assert user['role'] == 'user'
+        assert user['permissions'] == ['vm.delete']
+        assert user['tenant_permissions'] == held['tenant_permissions']
+        assert db.get_user_directory_groups(username) == ['operators']

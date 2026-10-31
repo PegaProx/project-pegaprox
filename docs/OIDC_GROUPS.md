@@ -28,3 +28,6 @@ empty list can revoke group-derived access, while a missing claim or a claim
 marked as incomplete preserves the existing completeness rules. Test with a
 non-administrator account and retain a local administrator login while changing
 identity-provider mappings.
+
+A non-array token claim is ignored and cannot by itself authorize revocation of
+existing group-derived access. Complete Entra Graph results remain authoritative.

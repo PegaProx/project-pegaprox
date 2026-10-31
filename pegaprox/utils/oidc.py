@@ -769,7 +769,7 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
     just to grant. It is true only when we know the full group set: either the Entra
     fetch completed (groups_complete=True), or the validated ID token actually carried a
-    configured groups claim. A provider that sends no groups claim at all is indistinguishable
+    configured groups claim as an array. A missing or malformed claim is indistinguishable
     from a user who lost every group, so that case stays non-authoritative and
     provisioning leaves existing grants alone.
     """
@@ -782,11 +782,15 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         '_authoritative': False,
     }
     claim_name = config.get('groups_claim') or 'groups'
+    _claim = (id_token_claims or {}).get(claim_name)
+    _claim_is_list = isinstance(_claim, list)
+    if not _claim_is_list:
+        _claim = []
     if groups_complete:
         result['_authoritative'] = True
-    elif id_token_claims is not None and claim_name in id_token_claims:
-        # The ID token is signature-checked before it gets here, so a groups claim in it
-        # is as good a source as the Graph call - including when it is an empty list.
+    elif _claim_is_list:
+        # A signature-checked array is as good a source as Graph, including an empty
+        # array. Scalars and objects neither grant access nor authorize revocation.
         #
         # Except when the provider says it truncated it. Entra stops embedding the full
         # list once a user is in more groups than fit the token and emits _claim_names /
@@ -819,21 +823,17 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
             group_ids.add(g.lower())
             group_names.add(g.lower())
     
-    # NS: Also check ID token 'groups' claim (Entra can embed group IDs in token)
-    if id_token_claims:
-        for gid in id_token_claims.get(claim_name, []):
-            group_ids.add(str(gid).lower())
+    # Reuse the validated ID-token array for both roles and directory memberships.
+    for gid in _claim:
+        group_ids.add(str(gid).lower())
 
     # MK Oct 2026 (#940) - the groups oidc_build_user_row stores on the user, which is what
     # a pool grant on a group is matched against. Entra groups go in by object id only: the
     # display name is the squattable identifier the name-match warning further down is
     # about, and a pool grant must not be claimable by creating a group of the right name.
     # A generic provider's groups claim is taken as the signed token carries it.
-    _claim = (id_token_claims or {}).get(claim_name) or []
-    if isinstance(_claim, str):
-        _claim = [_claim]
     _seen = set()
-    for g in list(groups or []) + (list(_claim) if isinstance(_claim, (list, tuple)) else []):
+    for g in list(groups or []) + _claim:
         v = g.get('id') if isinstance(g, dict) else g
         if isinstance(v, int) and not isinstance(v, bool):
             v = str(v)
