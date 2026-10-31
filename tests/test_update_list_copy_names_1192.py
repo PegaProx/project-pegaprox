@@ -10,9 +10,12 @@ from test_update_list_copy_ui_1192 import (  # noqa: F401 - ui is a fixture
 @pytest.mark.parametrize('layout', ['modern', 'corporate', 'cloud'])
 @pytest.mark.parametrize('name', ['finance-$&', 'finance-$$', "finance-$'", 'finance-$`'])
 def test_runtime_cluster_names_are_copied_literally(ui, layout, name):
-    app = ui(layout=layout, clusters=[dict(CLUSTER, name=name, display_name=name)])
+    other = dict(CLUSTER, id='cluster_other', name='Other', display_name='Other')
+    app = ui(layout=layout, clusters=[other, dict(CLUSTER, name=name, display_name=name)])
     page = app.page
     button = _copy_button(app, layout, name)
+    if layout == 'cloud':
+        assert page.locator('.cloud-cluster-select').input_value() == CLUSTER['id']
     _wait_listed(app)
     page.evaluate(WATCH_COPY)
     button.click()

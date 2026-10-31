@@ -226,6 +226,7 @@ def _shot(app, name):
 def _to_updates(app, layout, cluster_name='Testi'):
     page = app.page
     if layout == 'cloud':
+        page.locator('.cloud-cluster-select').select_option(label=cluster_name)
         page.locator('.cloud-nav-item', has_text='Update Manager').first.click()
     else:
         if layout == 'corporate':
