@@ -20577,7 +20577,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "List datastores with detailed status",
+        "summary": "List datastores with detailed status, surfacing required PBS read failures.",
         "parameters": [
           {
             "name": "pbs_id",
