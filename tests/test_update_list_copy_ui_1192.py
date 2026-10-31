@@ -205,9 +205,9 @@ def _shot(app, name):
         app.page.screenshot(path=os.path.join(SHOTS, f'{name}.png'))
 
 
-def _copy_button(app, layout='modern'):
+def _copy_button(app, layout='modern', cluster_name='Testi'):
     page = app.page
-    head = _to_updates(app, layout)
+    head = _to_updates(app, layout, cluster_name)
     button = page.locator('[data-testid="updates-copy-text"]')
     if not button.count():
         head.click()
