@@ -3634,11 +3634,17 @@ class XcpngManager:
     # ──────────────────────────────────────────
 
     def start_node_update(self, node_name, reboot=True, force=False):
-        """Start async yum update on XCP-ng node."""
+        """Start an async yum update after maintenance completes, unless explicitly forced."""
         from pegaprox.models.tasks import UpdateTask
 
-        if not force and node_name in self.nodes_in_maintenance:
-            return None
+        if not force:
+            maintenance_task = self.nodes_in_maintenance.get(node_name)
+            if maintenance_task is None:
+                self.logger.error(f"Cannot update {node_name}: not in maintenance mode")
+                return None
+            if maintenance_task.status not in ('completed', 'completed_with_errors'):
+                self.logger.error(f"Cannot update {node_name}: evacuation not complete")
+                return None
 
         with self.update_lock:
             if node_name in self.nodes_updating:
