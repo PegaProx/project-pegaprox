@@ -2648,7 +2648,7 @@
                 const pbs = Object.entries(st.pbs || {});
                 const total = sum.total_updates || 0;
 
-                const out = [t('updCopyHeading').replace('{cluster}', clusterName || clusterId)];
+                const out = [t('updCopyHeading').replace('{cluster}', () => clusterName || clusterId)];
                 try {
                     const cached = JSON.parse(localStorage.getItem(`updateCheck_${clusterId}`) || 'null');
                     if (cached?.time) out.push(`${t('lastChecked')}: ${stamp(cached.time)}`);
