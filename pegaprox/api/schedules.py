@@ -668,6 +668,7 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                   cluster=getattr(mgr.config, 'name', cluster_id))
 
         def run_scheduled_update():
+            """Run each scheduled node update and record its progress and cleanup."""
             def _set(**kw):
                 return rolling_runs.change(mgr, **kw)
 
@@ -780,9 +781,18 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                             if update_task.status in ['completed', 'failed']: break
                             time.sleep(10); waited += 10
                         if update_task.status == 'completed':
-                            _set(add={'completed_nodes': node_name}, node=(node_name, {'updated': True}),
+                            node_rebooted = include_reboot and getattr(update_task, 'reboot_issued', False)
+                            back_online = bool(getattr(update_task, 'back_online', False))
+                            _set(add={'completed_nodes': node_name},
+                                 node=(node_name, {'updated': True, 'rebooted': bool(node_rebooted)}),
                                  log=f"✓ {node_name} updated")
-                            if include_reboot:
+                            if include_reboot and not node_rebooted:
+                                rolling_log(mgr, f"{node_name} did not require a reboot - skipping reboot wait")
+                            elif node_rebooted and back_online:
+                                rolling_log(mgr, f"✓ {node_name} rebooted during the update and is back online")
+                                if node_name in mgr.nodes_in_maintenance:
+                                    time.sleep(30)  # let HA services settle before maintenance exit
+                            elif node_rebooted:
                                 _set(current_step='rebooting', add={'rebooting_nodes': node_name},
                                      node=(node_name, {'phase': 'rebooting', 'rebooted': True}))
                                 if wait_for_reboot:
