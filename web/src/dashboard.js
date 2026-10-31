@@ -13650,6 +13650,10 @@
             const [pbsReportSearch, setPbsReportSearch] = useState('');
             const [pbsReportLoading, setPbsReportLoading] = useState(false);
             const [pbsSelectedStore, setPbsSelectedStore] = useState(null);
+            // Selected-store details come only from the current PBS's successful list.
+            const pbsVisibleStore = !pbsDatastoresError && pbsSelectedStore
+                ? pbsDatastores.find(ds => (ds.name || ds.store) === pbsSelectedStore) || null
+                : null;
             const [showAddPBS, setShowAddPBS] = useState(false);
             const [pbsLoading, setPbsLoading] = useState(false);
             const [editingPBS, setEditingPBS] = useState(null); // null = add mode, object = edit mode
@@ -26052,7 +26056,7 @@
 
                                                 {/* Datastore Detail */}
                                                 <div className="flex-1 min-w-0 space-y-6">
-                                                    {pbsSelectedStore ? (
+                                                    {pbsVisibleStore ? (
                                                         <>
                                                             {/* Datastore Actions */}
                                                             {isAdmin && (
@@ -26071,8 +26075,7 @@
 
                                                             {/* Namespace Selector + GC Status */}
                                                             {(() => {
-                                                                const currentDs = pbsDatastores.find(d => (d.name || d.store) === pbsSelectedStore);
-                                                                const gc = pbsGcView(currentDs);
+                                                                const gc = pbsGcView(pbsVisibleStore);
                                                                 const gcStatus = gc.status;
                                                                 const gcSecs = Number(gc.job.duration) || 0;
                                                                 // PBS writes the task state: "OK", "WARNINGS: n", or the error itself
@@ -26128,7 +26131,7 @@
 
                                                             <PbsDatastoreSchedules
                                                                 store={pbsSelectedStore}
-                                                                datastore={pbsDatastores.find(d => (d.name || d.store) === pbsSelectedStore)}
+                                                                datastore={pbsVisibleStore}
                                                                 jobs={pbsJobs}
                                                                 error={pbsJobsError}
                                                             />

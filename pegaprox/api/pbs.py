@@ -590,7 +590,14 @@ def _gc_jobs_by_store(mgr):
 @bp.route('/api/pbs/<pbs_id>/datastores', methods=['GET'])
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastores(pbs_id):
-    """List datastores with detailed status, surfacing required PBS read failures."""
+    """List datastores with detailed status, surfacing required PBS read failures.
+
+    A successful 200 with [] means the required PBS datastore configuration and usage
+    reads succeeded and there are no datastores. An upstream permission refusal is
+    403 with code PBS_FORBIDDEN; a transport failure is 502 with code
+    PBS_UNREACHABLE; other failed or malformed upstream reads are 502 with code
+    PBS_UPSTREAM. PegaProx permission checks may also return 403.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:

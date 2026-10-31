@@ -71,6 +71,21 @@ def test_it_is_the_document_the_repository_ships(api, seed, fresh):
     assert doc['components'] == committed['components']
 
 
+def test_pbs_datastore_read_contract_is_in_generated_and_shipped_reference(api):
+    """The datastore read documents failed upstream reads and valid empty lists."""
+    with open(SPEC, encoding='utf-8') as fh:
+        committed = json.load(fh)
+    path = '/api/pbs/{pbs_id}/datastores'
+    generated = build(api.app)[path]['get']
+    shipped = committed['paths'][path]['get']
+    for operation in (generated, shipped):
+        description = operation['description']
+        for expected in ('[]', '403', 'PBS_FORBIDDEN', '502',
+                         'PBS_UNREACHABLE', 'PBS_UPSTREAM'):
+            assert expected in description
+    assert generated['description'] == shipped['description']
+
+
 def test_an_api_token_reads_it_too(api, seed, fresh):
     from pegaprox.utils.auth import create_api_token
     seed.user('ci', role='viewer')

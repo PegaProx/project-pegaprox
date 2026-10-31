@@ -76,3 +76,36 @@ def test_malformed_successful_datastore_response_is_visible(browser):
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+def test_failed_refresh_hides_selected_datastore_actions_until_retry(browser, layout):
+    """A failed list hides selected-store controls, and a retry restores them."""
+    datastore_path = '/api/pbs/p1/datastores'
+    reads = {
+        ('GET', '/api/pbs'): (200, [PBS]),
+        ('GET', '/api/pbs/p1/status'): (200, {'version': {'version': '4.0'}}),
+        ('GET', datastore_path): (200, [{'name': 'alpha'}]),
+    }
+    app = _App(browser, _FakeServer(role='standalone', layout=layout, extra=reads))
+    try:
+        page = app.page
+        page.get_by_text('backup01').first.click()
+        page.get_by_role('button', name='Datastores').first.click()
+        page.get_by_role('button', name=re.compile(r'^alpha\b')).click()
+        page.get_by_role('button', name='Garbage Collection').wait_for(timeout=5000)
+
+        app.server.extra[('GET', datastore_path)] = (403, {'code': 'PBS_FORBIDDEN',
+                                                          'error': 'PBS denied the request'})
+        page.get_by_role('button', name='Refresh').first.click()
+        page.get_by_role('alert').filter(has_text='Could not load all data: Datastores').wait_for(timeout=5000)
+        assert page.get_by_role('button', name='Garbage Collection').count() == 0
+        assert page.get_by_text('Select a datastore to view details').count() == 1
+
+        app.server.extra[('GET', datastore_path)] = (200, [{'name': 'alpha'}])
+        page.get_by_role('button', name='Refresh').first.click()
+        page.get_by_role('button', name='Garbage Collection').wait_for(timeout=5000)
+        assert page.get_by_role('alert').filter(has_text='Could not load all data: Datastores').count() == 0
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()

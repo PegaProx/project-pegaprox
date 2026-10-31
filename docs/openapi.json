@@ -20578,6 +20578,7 @@
           }
         },
         "summary": "List datastores with detailed status, surfacing required PBS read failures.",
+        "description": "A successful 200 with [] means the required PBS datastore configuration and usage\nreads succeeded and there are no datastores. An upstream permission refusal is\n403 with code PBS_FORBIDDEN; a transport failure is 502 with code\nPBS_UNREACHABLE; other failed or malformed upstream reads are 502 with code\nPBS_UPSTREAM. PegaProx permission checks may also return 403.",
         "parameters": [
           {
             "name": "pbs_id",
