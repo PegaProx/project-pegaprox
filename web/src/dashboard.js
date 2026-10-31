@@ -13600,7 +13600,8 @@
             const [pbsServers, setPbsServers] = useState([]);
             const [selectedPBS, setSelectedPBS] = useState(null);
             const [pbsStatus, setPbsStatus] = useState(null);
-            const [pbsDatastores, setPbsDatastores] = useState([]);
+            const [pbsDatastoresResult, setPbsDatastoresResult] = useState({ id: null, data: [], error: false });
+            const pbsDatastoresSeq = React.useRef(0);
             const [pbsSnapshots, setPbsSnapshots] = useState([]);
             const [pbsGroups, setPbsGroups] = useState([]);
             const [pbsTasks, setPbsTasks] = useState([]);
@@ -13608,6 +13609,8 @@
             const pbsJobsSeq = React.useRef(0);
             const selectedPBSIdRef = React.useRef(null);
             selectedPBSIdRef.current = selectedPBS?.id ?? null;
+            const pbsDatastores = pbsDatastoresResult.id === selectedPBS?.id ? pbsDatastoresResult.data : [];
+            const pbsDatastoresError = pbsDatastoresResult.id === selectedPBS?.id && pbsDatastoresResult.error;
             const pbsJobs = pbsJobsResult.id === selectedPBS?.id ? pbsJobsResult.data : {};
             const pbsJobsError = pbsJobsResult.id === selectedPBS?.id && pbsJobsResult.error;
             const [pbsActiveTab, setPbsActiveTab] = useState('dashboard');
@@ -17304,11 +17307,30 @@
                 finally { setPbsLoading(false); }
             };
             
+            /**
+             * Read datastores with status, ignoring late replies from another PBS server.
+             * @param {string} pbsId - The PBS server whose datastores are requested.
+             * @returns {Promise<void>}
+             */
             const fetchPBSDatastores = async (pbsId) => {
+                const seq = ++pbsDatastoresSeq.current;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}/datastores`);
-                    if (resp && resp.ok) setPbsDatastores(await resp.json());
-                } catch (e) { console.warn('PBS datastores error:', e); }
+                    if (resp && resp.ok) {
+                        const datastores = await resp.json();
+                        if (!Array.isArray(datastores)) throw new Error('Invalid PBS datastore list');
+                        if (seq === pbsDatastoresSeq.current) {
+                            setPbsDatastoresResult({ id: pbsId, data: datastores, error: false });
+                        }
+                    } else if (seq === pbsDatastoresSeq.current) {
+                        setPbsDatastoresResult({ id: pbsId, data: [], error: true });
+                    }
+                } catch (e) {
+                    console.warn('PBS datastores error:', e);
+                    if (seq === pbsDatastoresSeq.current) {
+                        setPbsDatastoresResult({ id: pbsId, data: [], error: true });
+                    }
+                }
             };
             
             const fetchPBSSnapshots = async (pbsId, store, backupType, backupId, ns) => {
@@ -25603,6 +25625,12 @@
                                                 </button>
                                             ))}
                                         </div>
+
+                                        {(pbsActiveTab === 'dashboard' || pbsActiveTab === 'datastores') && pbsDatastoresError && (
+                                            <div role="alert" className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
+                                                {t('pbsLoadAllDataError') || 'Could not load all data:'} {t('datastores') || 'Datastores'}
+                                            </div>
+                                        )}
 
                                         {/* Dashboard Tab */}
                                         {pbsActiveTab === 'dashboard' && pbsStatus && (

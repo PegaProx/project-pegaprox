@@ -590,7 +590,7 @@ def _gc_jobs_by_store(mgr):
 @bp.route('/api/pbs/<pbs_id>/datastores', methods=['GET'])
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastores(pbs_id):
-    """List datastores with detailed status"""
+    """List datastores with detailed status, surfacing required PBS read failures."""
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -604,10 +604,23 @@ def get_pbs_datastores(pbs_id):
     
     # Get list of datastores
     config_resp = mgr.get_datastores()
+    failed = pbs_upstream_error(config_resp)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if not isinstance(config_resp, dict) or not isinstance(config_resp.get('data'), list):
+        return jsonify({'error': 'PBS returned an invalid datastore list', 'code': 'PBS_UPSTREAM'}), 502
+
     usage_resp = mgr.get_datastore_usage()
+    failed = pbs_upstream_error(usage_resp)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if not isinstance(usage_resp, dict) or not isinstance(usage_resp.get('data'), list):
+        return jsonify({'error': 'PBS returned an invalid datastore usage list', 'code': 'PBS_UPSTREAM'}), 502
     
-    datastores = config_resp.get('data', [])
-    usage_list = {u.get('store'): u for u in usage_resp.get('data', [])}
+    datastores = config_resp['data']
+    usage_list = {u.get('store'): u for u in usage_resp['data']}
     gc_jobs = _gc_jobs_by_store(mgr)
     
     # Merge config with usage
