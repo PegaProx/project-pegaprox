@@ -4324,6 +4324,7 @@
         // Cross-Cluster Migration Modal
         // NS: The big one - SSH tunnel based migration between clusters
         // Uses same ISO detection logic as MigrateModal (copy-paste, I know...)
+        /** Configure a cross-cluster migration and warn about source disk constraints. */
         function CrossClusterMigrateModal({ vm, sourceCluster, clusters, onMigrate, onClose }) {
             const { getAuthHeaders, haReadOnly } = useAuth();
             const { t } = useTranslation();
@@ -4385,6 +4386,7 @@
             // Check for CD/DVD and boot order issues
             // NS: Now uses SSE events for live updates
             useEffect(() => {
+                /** Refresh source disk estimates and migration warnings from its configuration. */
                 const processVmConfig = (config) => {
                     // Check for CD/DVD drives with ISO mounted
                     const cdDvdKeys = Object.keys(config).filter(k => 
@@ -4424,9 +4426,9 @@
                     let totalDiskGb = 0;
                     Object.keys(config).forEach(key => {
                         if(key.match(/^(scsi|virtio|sata|ide)\d+$/) && typeof config[key] === 'string') {
-                            const sizeMatch = config[key].match(/size=(\d+)([GMT])/);
+                            const sizeMatch = config[key].match(/(?:^|,)size=(\d+(?:\.\d+)?)([GMT])(?:,|$)/);
                             if(sizeMatch) {
-                                const sizeVal = parseInt(sizeMatch[1]);
+                                const sizeVal = Number(sizeMatch[1]);
                                 const sizeUnit = sizeMatch[2];
                                 if(sizeUnit === 'G') totalDiskGb += sizeVal;
                                 else if(sizeUnit === 'T') totalDiskGb += sizeVal * 1024;
