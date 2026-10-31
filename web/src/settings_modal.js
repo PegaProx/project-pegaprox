@@ -7612,15 +7612,15 @@
                                         </div>
                                         {/* NS Oct 2026 (#1149) - which claim names the account; AD FS sends its claims in the tokens only */}
                                         <div>
-                                            <label className="block text-sm text-gray-400 mb-1">Username claim</label>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('oidcUsernameClaim')}</label>
                                             <select data-oidc="username-claim" value={oidcConfig.oidc_username_claim || ''} onChange={e => setOidcConfig(prev => ({...prev, oidc_username_claim: e.target.value}))}
                                                 className="w-full px-3 py-2 bg-proxmox-secondary border border-proxmox-border rounded-lg text-white text-sm">
-                                                <option value="">Automatic (preferred_username, then email)</option>
+                                                <option value="">{t('oidcUsernameClaimAuto')}</option>
                                                 <option value="preferred_username">preferred_username</option>
                                                 <option value="email">email</option>
                                                 <option value="upn">upn (AD FS)</option>
                                             </select>
-                                            <p className="text-xs text-gray-600 mt-1">Pick a claim users cannot change themselves. With a claim picked here an account stays with the sign-in it was made for, and a sign-in without that claim is refused. For AD FS also add allatclaims to the scopes. For Entra pick preferred_username (the UPN): email there is the mail attribute, which Entra does not verify.</p>
+                                            <p className="text-xs text-gray-600 mt-1">{t('oidcUsernameClaimHint')}</p>
                                         </div>
                                         <div>
                                             <label className="block text-sm text-gray-400 mb-1">Login Button Text</label>

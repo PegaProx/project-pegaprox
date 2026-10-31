@@ -6216,7 +6216,7 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('disks')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>Device</th><th>{t('type')}</th><th>Size</th><th>{t('status')}</th></tr></thead>
+                                                        <thead><tr><th>{t('device')}</th><th>{t('type')}</th><th>{t('size')}</th><th>{t('status')}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.disks) ? data.disks : []).map((disk, i) => (
                                                                 <tr key={i}>
@@ -6235,7 +6235,7 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmStorage')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>VG</th><th>Size</th><th>Free</th></tr></thead>
+                                                        <thead><tr><th>VG</th><th>{t('size')}</th><th>{t('freeSpace')}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.lvm) ? data.lvm : []).map((vg, i) => (
                                                                 <tr key={i}><td>{vg.vg || '-'}</td><td>{formatBytes(vg.size)}</td><td>{formatBytes(vg.free)}</td></tr>
@@ -6249,7 +6249,7 @@
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmThinStorage')}</span>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>Pool</th><th>VG</th><th>Size</th><th>Used</th></tr></thead>
+                                                        <thead><tr><th>{t('pool')}</th><th>VG</th><th>{t('size')}</th><th>{t('usedSpace')}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.lvmthin) ? data.lvmthin : []).map((tp, i) => (
                                                                 <tr key={i}><td>{tp.lv || '-'}</td><td>{tp.vg || '-'}</td><td>{formatBytes(tp.lv_size)}</td><td>{tp.metadata_usage ? `${(tp.metadata_usage * 100).toFixed(1)}%` : '-'}</td></tr>
@@ -6300,7 +6300,7 @@
                                                             {data.ceph?.status && (
                                                                 <table className="corp-property-grid">
                                                                     <tbody>
-                                                                        <tr><td>Health</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
+                                                                        <tr><td>{t('health')}</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
                                                                         <tr><td>OSDs</td><td>{data.ceph.osd?.length || 0}</td></tr>
                                                                         <tr><td>MONs</td><td>{data.ceph.mon?.length || 0}</td></tr>
                                                                         <tr><td>Pools</td><td>{data.ceph.pools?.length || 0}</td></tr>
@@ -6319,7 +6319,7 @@
                                         <div>
                                             <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('zfsStorage')}</span>
                                             <table className="corp-datagrid">
-                                                <thead><tr><th>{t('name')}</th><th>Size</th><th>Free</th><th>Health</th><th></th></tr></thead>
+                                                <thead><tr><th>{t('name')}</th><th>{t('size')}</th><th>{t('freeSpace')}</th><th>{t('health')}</th><th></th></tr></thead>
                                                 <tbody>
                                                     {(Array.isArray(data.zfs) ? data.zfs : []).map((pool, i) => (
                                                         <tr key={i} className={pool.name && zfsPool === pool.name ? 'corp-row-selected' : ''}>
@@ -6331,7 +6331,7 @@
                                                             )}</td>
                                                         </tr>
                                                     ))}
-                                                    {(!data.zfs || data.zfs.length === 0) && <tr><td colSpan={5} className="text-center py-4" style={{color: '#728b9a'}}>No ZFS pools</td></tr>}
+                                                    {(!data.zfs || data.zfs.length === 0) && <tr><td colSpan={5} className="text-center py-4" style={{color: '#728b9a'}}>{t('noZfsPools')}</td></tr>}
                                                 </tbody>
                                             </table>
                                             {/* the pool picked above, in full */}
