@@ -415,6 +415,9 @@ def get_esxi_vms(cluster_id, host_id):
 # Format: { cluster_id: { 'clusters': [ { id, name, storages: [], threshold, enabled, auto_balance, max_concurrent } ] } }
 storage_clusters_config = {}
 STORAGE_CLUSTERS_FILE = 'storage_clusters.json'
+# MK Oct 2026 - save may only drop rows when memory holds what the table holds, so a load
+# that failed must not turn the next save into a delete of every group it did not read
+_storage_clusters_loaded = False
 
 # Thread safety locks - MK: learned this the hard way with concurrent migrations
 _storage_config_lock = threading.RLock()  # RLock allows same thread to acquire multiple times
@@ -439,12 +442,18 @@ def load_storage_clusters():
     NS: storage clusters = ceph/gluster/etc pooled across nodes
     MK: migrated to sqlite jan 2026
     """
-    global storage_clusters_config
+    global storage_clusters_config, _storage_clusters_loaded
     with _storage_config_lock:
+        # until this load went through, memory may not be what the table holds
+        _storage_clusters_loaded = False
         try:
             db = get_db()
             cursor = db.conn.cursor()
-            cursor.execute('SELECT * FROM storage_clusters WHERE enabled = 1')
+            # MK Oct 2026 - oldest row first: a rename before the fix left the old row next to
+            # the renamed one, both with the same group id. The renamed row is newer (every
+            # save re-inserts it), so it takes the old one's place and the next save drops the
+            # old row instead of a PUT or DELETE landing on it.
+            cursor.execute('SELECT * FROM storage_clusters WHERE enabled = 1 ORDER BY id')
             
             storage_clusters_config = {}
             for row in cursor.fetchall():
@@ -452,18 +461,44 @@ def load_storage_clusters():
                 if cluster_id not in storage_clusters_config:
                     storage_clusters_config[cluster_id] = {'clusters': []}
                 
-                storage_clusters_config[cluster_id]['clusters'].append({
+                sc = {
                     'name': row['name'],
                     'type': row['storage_type'],
                     'nodes': json.loads(row['nodes'] or '[]'),
                     **json.loads(row['config'] or '{}')
-                })
+                }
+                groups = storage_clusters_config[cluster_id]['clusters']
+                same = [i for i, o in enumerate(groups) if sc.get('id') and o.get('id') == sc['id']]
+                if same:
+                    groups[same[0]] = sc
+                else:
+                    groups.append(sc)
+            _storage_clusters_loaded = True
         except Exception as e:
-            logging.debug(f"Loading storage clusters from DB: {e}")
+            logging.warning(f"Loading storage clusters from DB: {e}")
             # NS May 2026 - plain-JSON STORAGE_CLUSTERS_FILE fallback removed (encrypted DB only).
 
+def _storage_cluster_name(value):
+    """A group name as the table can keep it, or None."""
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    try:
+        name.encode('utf-8')
+    except UnicodeEncodeError:
+        # a lone surrogate gets in through JSON and then fails every later save
+        return None
+    return name if 0 < len(name) <= 128 else None
+
+
 def save_storage_clusters():
-    """save storage cluster config to sqlite"""
+    """save storage cluster config to sqlite
+
+    MK Oct 2026 - the table now follows memory. This only ran INSERT OR REPLACE, so a deleted
+    group, and the old name of a renamed one, stayed in the table and came back on the next
+    load (restart, HA sync) with its auto_balance flag, and the worker moved disks again.
+    """
+    db = None
     with _storage_config_lock:
         try:
             db = get_db()
@@ -471,6 +506,15 @@ def save_storage_clusters():
             
             for cluster_id, config in storage_clusters_config.items():
                 clusters = config.get('clusters', [])
+                if _storage_clusters_loaded:
+                    names = [sc.get('name', '') for sc in clusters]
+                    if names:
+                        cursor.execute(
+                            'DELETE FROM storage_clusters WHERE cluster_id = ? AND enabled = 1 '
+                            f'AND name NOT IN ({",".join("?" * len(names))})', (cluster_id, *names))
+                    else:
+                        cursor.execute('DELETE FROM storage_clusters WHERE cluster_id = ? AND enabled = 1',
+                                       (cluster_id,))
                 for sc in clusters:
                     cursor.execute('''
                         INSERT OR REPLACE INTO storage_clusters 
@@ -486,6 +530,11 @@ def save_storage_clusters():
             
             db.conn.commit()
         except Exception as e:
+            if db is not None:
+                try:
+                    db.conn.rollback()
+                except Exception:
+                    pass
             logging.error(f"Error saving storage clusters to DB: {e}")
 
 # Load on startup
@@ -553,18 +602,22 @@ def create_storage_cluster(cluster_id):
         return jsonify({'error': 'Cluster not found'}), 404
     
     data = request.json or {}
-    name = data.get('name', '').strip()
+    name = _storage_cluster_name(data.get('name'))
     storages = data.get('storages', [])
     threshold = data.get('threshold', 20)
     
     if not name:
-        return jsonify({'error': 'Name is required'}), 400
+        return jsonify({'error': 'A name of up to 128 characters is required'}), 400
     if len(storages) < 2:
         return jsonify({'error': 'At least 2 storages required'}), 400
     
     with _storage_config_lock:
         if cluster_id not in storage_clusters_config:
             storage_clusters_config[cluster_id] = {'clusters': []}
+        # the table keeps one row per name, so a second group of the same name replaced the
+        # first one there and one of the two was gone after the next load
+        if any(sc.get('name') == name for sc in storage_clusters_config[cluster_id]['clusters']):
+            return jsonify({'error': 'A storage cluster with this name already exists'}), 409
         
         # Generate unique ID
         import uuid
@@ -631,9 +684,17 @@ def update_storage_cluster(cluster_id, sc_id):
         
         for i, sc in enumerate(clusters):
             if sc['id'] == sc_id:
+                # its own name sent back unchanged is no rename
+                renamed = 'name' in data and data['name'] != sc.get('name')
+                if renamed:
+                    new_name = _storage_cluster_name(data['name'])
+                    if not new_name:
+                        return jsonify({'error': 'A name of up to 128 characters is required'}), 400
+                    if any(o.get('name') == new_name and o is not sc for o in clusters):
+                        return jsonify({'error': 'A storage cluster with this name already exists'}), 409
                 # Update fields
-                if 'name' in data:
-                    sc['name'] = data['name']
+                if renamed:
+                    sc['name'] = new_name
                 if 'storages' in data:
                     sc['storages'] = data['storages']
                 if 'threshold' in data:
