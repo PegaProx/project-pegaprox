@@ -769,9 +769,9 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
     just to grant. It is true only when we know the full group set: either the Entra
     fetch completed (groups_complete=True), or the validated ID token actually carried a
-    configured groups claim as an array. A missing or malformed claim is indistinguishable
-    from a user who lost every group, so that case stays non-authoritative and
-    provisioning leaves existing grants alone.
+    configured groups claim as an array of usable IDs/names. A missing or malformed claim
+    does not establish that the user lost every group, so that case stays non-authoritative
+    and provisioning leaves existing grants alone.
     """
     result = {
         'role': config.get('default_role', ROLE_VIEWER),
@@ -782,15 +782,28 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         '_authoritative': False,
     }
     claim_name = config.get('groups_claim') or 'groups'
-    _claim = (id_token_claims or {}).get(claim_name)
-    _claim_is_list = isinstance(_claim, list)
-    if not _claim_is_list:
-        _claim = []
+    _claim = []
+    _claim_valid = False
+    if oidc_id_token_verified(id_token_claims):
+        raw_claim = id_token_claims.get(claim_name)
+        if isinstance(raw_claim, list):
+            for value in raw_claim:
+                if isinstance(value, str) and value.strip():
+                    _claim.append(value.strip())
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    _claim.append(str(value))
+                else:
+                    # Do not turn an invalid list into an authoritative empty/partial
+                    # one, or let its remaining entries grant access.
+                    _claim = []
+                    break
+            else:
+                _claim_valid = True
     if groups_complete:
         result['_authoritative'] = True
-    elif _claim_is_list:
-        # A signature-checked array is as good a source as Graph, including an empty
-        # array. Scalars and objects neither grant access nor authorize revocation.
+    elif _claim_valid:
+        # Only a signature-checked array of usable IDs/names can grant or revoke.
+        # An explicit empty array is valid; an unchecked or malformed claim is not.
         #
         # Except when the provider says it truncated it. Entra stops embedding the full
         # list once a user is in more groups than fit the token and emits _claim_names /
@@ -823,9 +836,9 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
             group_ids.add(g.lower())
             group_names.add(g.lower())
     
-    # Reuse the validated ID-token array for both roles and directory memberships.
+    # Reuse the verified, normalized array for both roles and directory memberships.
     for gid in _claim:
-        group_ids.add(str(gid).lower())
+        group_ids.add(gid.lower())
 
     # MK Oct 2026 (#940) - the groups oidc_build_user_row stores on the user, which is what
     # a pool grant on a group is matched against. Entra groups go in by object id only: the

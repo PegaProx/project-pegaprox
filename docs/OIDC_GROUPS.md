@@ -19,9 +19,11 @@ administrator can also save it as `oidc_groups_claim` through
 The name is an exact, case-sensitive top-level ID-token key, not a dotted path.
 Names containing dots or URI syntax are supported. Blank restores `groups`;
 names are limited to 256 printable characters. Configure your provider to include
-the claim as a JSON array of group values in the ID token, with the scopes required
-by that provider. This option
-does not read additional claims from UserInfo or change Entra Graph group fetching.
+the claim as a JSON array of nonblank strings or integer group IDs in the ID token,
+with the scopes required by that provider. Strings are trimmed and integer IDs
+are stored as strings, consistently for role mappings and directory memberships.
+This option does not read additional claims from UserInfo or change Entra Graph
+group fetching.
 
 When a custom name is set, PegaProx does not fall back to `groups`. An explicitly
 empty list can revoke group-derived access, while a missing claim or a claim
@@ -29,5 +31,9 @@ marked as incomplete preserves the existing completeness rules. Test with a
 non-administrator account and retain a local administrator login while changing
 identity-provider mappings.
 
-A non-array token claim is ignored and cannot by itself authorize revocation of
-existing group-derived access. Complete Entra Graph results remain authoritative.
+Only signature-verified ID tokens supply group memberships. If JWT signature
+verification is disabled or JWKS verification fails, token groups cannot grant
+or revoke access. A non-array claim, or an array containing an object, nested
+array, boolean, null, floating-point value or blank string, is ignored in full;
+valid entries alongside an invalid one are not used. Complete Entra Graph
+results remain authoritative independently of the token.

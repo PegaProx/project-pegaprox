@@ -30,6 +30,7 @@ import time
 import pytest
 
 import pegaprox.utils.rbac as rbac
+from pegaprox.utils import oidc
 from test_ha_api import ha_env  # noqa: F401  (a fixture)
 
 CID = 'cluster_1'
@@ -294,7 +295,8 @@ def _idp(monkeypatch, people):
     monkeypatch.setattr(auth_api, 'oidc_exchange_code',
                         lambda cfg, code, code_verifier=None: {'access_token': code, 'id_token': code})
     monkeypatch.setattr(auth_api, 'oidc_decode_id_token',
-                        lambda token, expected_nonce=None, config=None: copy.deepcopy(people[token]))
+                        lambda token, expected_nonce=None, config=None:
+                            oidc._VerifiedClaims(copy.deepcopy(people[token])))
     monkeypatch.setattr(auth_api, 'oidc_get_user_info', lambda cfg, token: {})
     monkeypatch.setattr(auth_api, 'oidc_get_user_groups_ex', lambda cfg, token: ([], False))
 
@@ -333,7 +335,7 @@ def test_an_entra_group_is_stored_by_id_never_by_display_name():
     from pegaprox.utils.oidc import oidc_map_groups_to_role
     out = oidc_map_groups_to_role({'provider': 'entra', 'default_role': 'viewer'},
                                   [{'id': '0b1c-guid', 'name': 'PVE-Admins'}],
-                                  {'groups': ['7d2e-guid']}, groups_complete=True)
+                                  oidc._VerifiedClaims({'groups': ['7d2e-guid']}), groups_complete=True)
     assert out.get('groups') == ['0b1c-guid', '7d2e-guid']
 
 
