@@ -1190,7 +1190,11 @@ def pbs_delete_snapshot(pbs_id, store):
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
-    """List PBS tasks, surfacing an upstream failure instead of an empty list."""
+    """List PBS tasks, surfacing an upstream failure instead of an empty list.
+
+    A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed
+    response returns HTTP 502. A successful empty task list still returns HTTP 200.
+    """
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1221,7 +1225,11 @@ def get_pbs_tasks(pbs_id):
 @bp.route('/api/pbs/<pbs_id>/tasks/<path:upid>', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_task_detail(pbs_id, upid):
-    """Get task status and log, failing if either PBS read failed."""
+    """Get task status and log, failing if either PBS read failed.
+
+    A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed
+    response returns HTTP 502. A successful empty log still returns HTTP 200.
+    """
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:

@@ -17858,12 +17858,12 @@
                         }
                     } else if (seq === pbsTaskLogSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTaskLog(null);
-                        addToast('Failed to load task log', 'error');
+                        addToast(t('errorLoadingLog'), 'error');
                     }
                 } catch (e) {
                     if (seq === pbsTaskLogSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTaskLog(null);
-                        addToast('Failed to load task log', 'error');
+                        addToast(t('errorLoadingLog'), 'error');
                     }
                 }
             };

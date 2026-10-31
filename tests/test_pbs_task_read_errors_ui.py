@@ -44,17 +44,20 @@ def test_task_list_refusal_is_not_presented_as_no_tasks(browser):
         app.ctx.close()
 
 
-def test_task_log_refusal_reports_error(browser):
-    """A task detail refusal is visible after the operator opens that task."""
+@pytest.mark.parametrize(('language', 'message'), [
+    ('en', 'Error loading log'), ('de', 'Fehler beim Laden des Logs'),
+])
+def test_task_log_refusal_reports_error(browser, language, message):
+    """A task detail refusal is visible in the operator's selected language."""
     detail_path = f'/api/pbs/p1/tasks/{quote(TASK["upid"], safe="")}'
     reads = {**READS,
              ('GET', '/api/pbs/p1/tasks'): (200, [TASK]),
              ('GET', detail_path): (403, {'error': 'forbidden'})}
-    app = _App(browser, _FakeServer(role='standalone', extra=reads))
+    app = _App(browser, _FakeServer(role='standalone', extra=reads, language=language))
     try:
         _open_tasks(app.page)
         app.page.get_by_text('alpha').first.click()
-        app.page.get_by_text('Failed to load task log').wait_for(timeout=5000)
+        app.page.get_by_text(message).wait_for(timeout=5000)
         assert ('GET', detail_path) in app.server.calls
         assert not app.errors, app.errors
     finally:
@@ -87,7 +90,8 @@ def test_old_server_action_refresh_cannot_cancel_new_server_tasks(browser):
              ('GET', '/api/pbs/p1/tasks'): (200, [TASK]),
              ('GET', '/api/pbs/p2/status'): (200, {'version': {'version': '4.0'}}),
              ('GET', '/api/pbs/p2/datastores'): (200, []),
-             ('POST', '/api/pbs/p1/datastores/alpha/gc'): (200, {'data': 'UPID:gc'})}
+             ('POST', '/api/pbs/p1/datastores/alpha/gc'): (200, {
+                 'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:garbage_collection:alpha:root@pam:'})}
     app = _App(browser, _FakeServer(role='standalone', extra=reads), clock=True)
     try:
         page = app.page
@@ -145,7 +149,7 @@ def test_latest_task_log_click_wins_over_older_response(browser, stale_status):
 
         assert page.get_by_text('B log').count() == 1
         assert page.get_by_text('A log').count() == 0
-        assert page.get_by_text('Failed to load task log').count() == 0
+        assert page.get_by_text('Error loading log').count() == 0
         assert not app.errors, app.errors
     finally:
         app.ctx.close()

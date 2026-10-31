@@ -21023,6 +21023,7 @@
           }
         },
         "summary": "List PBS tasks, surfacing an upstream failure instead of an empty list.",
+        "description": "A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed\nresponse returns HTTP 502. A successful empty task list still returns HTTP 200.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21068,6 +21069,7 @@
           }
         },
         "summary": "Get task status and log, failing if either PBS read failed.",
+        "description": "A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed\nresponse returns HTTP 502. A successful empty log still returns HTTP 200.",
         "parameters": [
           {
             "name": "pbs_id",
