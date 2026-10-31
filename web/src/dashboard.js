@@ -13660,6 +13660,7 @@
             const [pbsPruneForm, setPbsPruneForm] = useState({ keep_last: 3, keep_daily: 7, keep_weekly: 4, keep_monthly: 6, keep_yearly: 1, dry_run: true });
             const [pbsSelectedGroup, setPbsSelectedGroup] = useState(null);
             const [pbsTaskLogResult, setPbsTaskLog] = useState(null);
+            const pbsTaskLogSeq = React.useRef(0);
             const pbsTaskLog = pbsTaskLogResult?.pbsId === selectedPBS?.id ? pbsTaskLogResult : null;
             const [pbsNamespaces, setPbsNamespaces] = useState([]);
             const [pbsSelectedNs, setPbsSelectedNs] = useState('');  // LW: #301 selected namespace
@@ -17356,26 +17357,27 @@
             
             /**
              * Read task rows and preserve an error state for the selected PBS server.
-             * Ignore late responses after a newer task request starts.
+             * Ignore stale server refreshes and late responses after a newer request.
              * @param {string} pbsId - The PBS server whose tasks are requested.
              * @returns {Promise<void>}
              */
             const fetchPBSTasks = async (pbsId) => {
+                if (selectedPBSIdRef.current !== pbsId) return;
                 const seq = ++pbsTasksSeq.current;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}/tasks?limit=30`);
                     if (resp && resp.ok) {
                         const tasks = await resp.json();
                         if (!Array.isArray(tasks)) throw new Error('Invalid PBS task list');
-                        if (seq === pbsTasksSeq.current) {
+                        if (seq === pbsTasksSeq.current && selectedPBSIdRef.current === pbsId) {
                             setPbsTasksResult({ id: pbsId, data: tasks, error: false });
                         }
-                    } else if (seq === pbsTasksSeq.current) {
+                    } else if (seq === pbsTasksSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTasksResult({ id: pbsId, data: [], error: true });
                     }
                 } catch (e) {
                     console.warn('PBS tasks error:', e);
-                    if (seq === pbsTasksSeq.current) {
+                    if (seq === pbsTasksSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTasksResult({ id: pbsId, data: [], error: true });
                     }
                 }
@@ -17839,26 +17841,27 @@
             };
             
             /**
-             * Load a PBS task's status and log, reporting refused reads to the operator.
+             * Load a PBS task's status and log, ignoring older clicks, servers, and closes.
              * @param {string} upid - The PBS task identifier.
              * @returns {Promise<void>}
              */
             const viewPBSTaskLog = async (upid) => {
                 if (!selectedPBS) return;
                 const pbsId = selectedPBS.id;
+                const seq = ++pbsTaskLogSeq.current;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}/tasks/${encodeURIComponent(upid)}`);
                     if (resp && resp.ok) {
                         const data = await resp.json();
-                        if (selectedPBSIdRef.current === pbsId) {
+                        if (seq === pbsTaskLogSeq.current && selectedPBSIdRef.current === pbsId) {
                             setPbsTaskLog({ pbsId, upid, ...data });
                         }
-                    } else if (selectedPBSIdRef.current === pbsId) {
+                    } else if (seq === pbsTaskLogSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTaskLog(null);
                         addToast('Failed to load task log', 'error');
                     }
                 } catch (e) {
-                    if (selectedPBSIdRef.current === pbsId) {
+                    if (seq === pbsTaskLogSeq.current && selectedPBSIdRef.current === pbsId) {
                         setPbsTaskLog(null);
                         addToast('Failed to load task log', 'error');
                     }
@@ -26361,7 +26364,7 @@
                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                         <div className="flex items-center justify-between p-3 border-b border-proxmox-border">
                                                             <span className="text-sm font-medium text-white">{t('pbsTaskLog') || 'Task Log'}</span>
-                                                            <button onClick={() => setPbsTaskLog(null)} className="text-gray-500 hover:text-white"><Icons.X className="w-4 h-4" /></button>
+                                                            <button onClick={() => { ++pbsTaskLogSeq.current; setPbsTaskLog(null); }} className="text-gray-500 hover:text-white"><Icons.X className="w-4 h-4" /></button>
                                                         </div>
                                                         <div className="p-3">
                                                             <div className="text-xs text-gray-500 mb-2">

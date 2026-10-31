@@ -1,6 +1,10 @@
 """PBS task read failures must be visible in the deployed web interface."""
 
+import json
+import re
 from urllib.parse import quote
+
+import pytest
 
 from test_ha_ui import PBS, _App, _FakeServer, browser  # noqa: F401
 
@@ -8,6 +12,8 @@ from test_ha_ui import PBS, _App, _FakeServer, browser  # noqa: F401
 TASK = {'upid': 'UPID:pbs:0000:0000:0000:6A1B2C00:verify:alpha:root@pam:',
         'worker_type': 'verify', 'worker_id': 'alpha', 'status': 'OK',
         'starttime': 1780000000, 'endtime': 1780000100, 'user': 'root@pam'}
+TASK_B = {**TASK, 'upid': 'UPID:pbs:0000:0000:0000:6A1B2C01:verify:beta:root@pam:',
+          'worker_id': 'beta'}
 READS = {
     ('GET', '/api/pbs'): (200, [PBS]),
     ('GET', '/api/pbs/p1/status'): (200, {'version': {'version': '4.0'}}),
@@ -67,6 +73,113 @@ def test_task_log_success_still_displays_log(browser):
         _open_tasks(app.page)
         app.page.get_by_text('alpha').first.click()
         app.page.get_by_text('Verification finished').wait_for(timeout=5000)
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
+
+
+def test_old_server_action_refresh_cannot_cancel_new_server_tasks(browser):
+    """A delayed refresh from PBS A cannot invalidate PBS B's pending task read."""
+    other = dict(PBS, id='p2', name='backup02')
+    reads = {**READS,
+             ('GET', '/api/pbs'): (200, [PBS, other]),
+             ('GET', '/api/pbs/p1/datastores'): (200, [{'name': 'alpha'}]),
+             ('GET', '/api/pbs/p1/tasks'): (200, [TASK]),
+             ('GET', '/api/pbs/p2/status'): (200, {'version': {'version': '4.0'}}),
+             ('GET', '/api/pbs/p2/datastores'): (200, []),
+             ('POST', '/api/pbs/p1/datastores/alpha/gc'): (200, {'data': 'UPID:gc'})}
+    app = _App(browser, _FakeServer(role='standalone', extra=reads), clock=True)
+    try:
+        page = app.page
+        held = []
+        page.route('**/api/pbs/p2/tasks*', lambda route: held.append(route))
+        page.get_by_text('backup01').first.click()
+        page.get_by_role('button', name='Datastores').first.click()
+        page.get_by_role('button', name=re.compile(r'^alpha\b')).click()
+        page.get_by_role('button', name='Garbage Collection').click()
+        page.get_by_text('gc started on alpha').wait_for(timeout=5000)
+        old_reads = app.server.calls.count(('GET', '/api/pbs/p1/tasks'))
+
+        page.get_by_text('backup02').first.click()
+        page.get_by_role('button', name='Tasks', exact=True).click()
+        page.wait_for_timeout(200)
+        assert len(held) == 1
+        page.clock.run_for(1100)
+        page.wait_for_timeout(200)
+        held[0].fulfill(status=200, content_type='application/json', body=json.dumps([TASK_B]))
+
+        page.get_by_text('beta', exact=True).wait_for(timeout=5000)
+        assert app.server.calls.count(('GET', '/api/pbs/p1/tasks')) == old_reads
+        assert page.get_by_text('alpha', exact=True).count() == 0
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
+
+
+@pytest.mark.parametrize('stale_status', [200, 403])
+def test_latest_task_log_click_wins_over_older_response(browser, stale_status):
+    """A late success or refusal for task A cannot replace task B's log."""
+    path_a = f'/api/pbs/p1/tasks/{quote(TASK["upid"], safe="")}'
+    path_b = f'/api/pbs/p1/tasks/{quote(TASK_B["upid"], safe="")}'
+    reads = {**READS,
+             ('GET', '/api/pbs/p1/tasks'): (200, [TASK, TASK_B]),
+             ('GET', path_b): (200, {'status': {'status': 'stopped'},
+                                    'log': [{'t': 'B log'}]})}
+    app = _App(browser, _FakeServer(role='standalone', extra=reads))
+    try:
+        page = app.page
+        held = []
+        page.route(f'**{path_a}', lambda route: held.append(route))
+        _open_tasks(page)
+        page.get_by_text('alpha', exact=True).first.click()
+        page.wait_for_timeout(200)
+        assert len(held) == 1
+        page.get_by_text('beta', exact=True).first.click()
+        page.get_by_text('B log').wait_for(timeout=5000)
+
+        old_response = ({'status': {'status': 'stopped'}, 'log': [{'t': 'A log'}]}
+                        if stale_status == 200 else {'error': 'forbidden'})
+        held[0].fulfill(status=stale_status, content_type='application/json',
+                        body=json.dumps(old_response))
+        page.wait_for_timeout(500)
+
+        assert page.get_by_text('B log').count() == 1
+        assert page.get_by_text('A log').count() == 0
+        assert page.get_by_text('Failed to load task log').count() == 0
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
+
+
+def test_closing_task_log_cancels_pending_detail_read(browser):
+    """Closing the viewer prevents an older pending click from reopening it."""
+    path_a = f'/api/pbs/p1/tasks/{quote(TASK["upid"], safe="")}'
+    path_b = f'/api/pbs/p1/tasks/{quote(TASK_B["upid"], safe="")}'
+    reads = {**READS,
+             ('GET', '/api/pbs/p1/tasks'): (200, [TASK, TASK_B]),
+             ('GET', path_b): (200, {'status': {'status': 'stopped'},
+                                    'log': [{'t': 'B log'}]})}
+    app = _App(browser, _FakeServer(role='standalone', extra=reads))
+    try:
+        page = app.page
+        held = []
+        page.route(f'**{path_a}', lambda route: held.append(route))
+        _open_tasks(page)
+        page.get_by_text('beta', exact=True).first.click()
+        page.get_by_text('B log').wait_for(timeout=5000)
+        page.get_by_text('alpha', exact=True).first.click()
+        page.wait_for_timeout(200)
+        assert len(held) == 1
+
+        page.get_by_text('Task Log').locator('..').get_by_role('button').click()
+        assert page.get_by_text('B log').count() == 0
+        held[0].fulfill(status=200, content_type='application/json',
+                        body=json.dumps({'status': {'status': 'stopped'},
+                                         'log': [{'t': 'A log'}]}))
+        page.wait_for_timeout(500)
+
+        assert page.get_by_text('A log').count() == 0
+        assert page.get_by_text('Task Log').count() == 0
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
