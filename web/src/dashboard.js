@@ -24594,14 +24594,14 @@
                                                                                         </div>
                                                                                     ) : null}
 
-                                                                                    {/* link to update manager in settings tab */}
+                                                                                    {/* Link to the cluster update manager */}
                                                                                     {(node.cve_count > 0 || node.total_count > 0) && (
                                                                                         <div className="px-4 py-3 border-t border-proxmox-border flex items-center justify-between">
                                                                                             <span className="text-xs text-gray-500">
                                                                                                 {t('cveApplyHint') || 'Apply fixes via the Update Manager'}
                                                                                             </span>
                                                                                             <button
-                                                                                                onClick={() => setActiveTab('settings')}
+                                                                                                onClick={() => setActiveTab('updates')}
                                                                                                 className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg flex items-center gap-2"
                                                                                             >
                                                                                                 <Icons.Settings className="w-3.5 h-3.5" />

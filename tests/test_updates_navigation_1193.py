@@ -14,7 +14,8 @@ def ui(browser):
             extra[('GET', f'/api/clusters/{cid}/updates/status')] = (200, {'success': True})
             extra[('GET', f'/api/clusters/{cid}/updates/schedule')] = (200, {'enabled': False})
             extra[('POST', f'/api/clusters/{cid}/updates/check')] = (
-                200, {'success': True, 'nodes': {}, 'pbs': {}, 'summary': {'total_updates': 0}})
+                200, {'success': True, 'nodes': {'pve1': {'count': 1, 'updates': []}}, 'pbs': {},
+                      'summary': {'total_updates': 1, 'nodes_with_updates': 1, 'total_nodes': 1}})
         kw.setdefault('clusters', [CLUSTER])
         app = _App(browser, _FakeServer(layout=layout, role=role, extra=extra, **kw))
         apps.append(app)
@@ -56,14 +57,40 @@ def test_updates_open_directly_and_settings_no_longer_mounts_them(ui, layout, ro
 
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
-def test_read_only_users_can_still_open_the_update_manager(ui, layout):
-    app = ui(layout, admin=False, permissions=['cluster.view'])
+@pytest.mark.parametrize('can_update', [False, True])
+def test_update_actions_require_node_update_permission(ui, layout, can_update):
+    permissions = ['cluster.view'] + (['node.update'] if can_update else [])
+    app = ui(layout, admin=False, permissions=permissions)
     _cluster(app, layout)
     app.page.get_by_role('button', name='Update Manager', exact=True).click()
     manager = app.page.locator('[data-update-manager]')
     manager.wait_for(timeout=5000)
+    manager.get_by_text('1 Updates available', exact=True).wait_for(timeout=5000)
     manager.get_by_text('Update Manager', exact=True).click()
-    assert manager.get_by_role('button', name='Start Rolling Update', exact=True).count() == 0
+    rolling = manager.get_by_role('button', name='Start Rolling Update', exact=True)
+    if can_update:
+        rolling.wait_for(timeout=5000)
+    assert rolling.count() == int(can_update)
+    assert not app.errors, app.errors
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+def test_cve_report_opens_the_selected_clusters_update_manager(ui, layout):
+    app = ui(layout)
+    app.server.extra[('POST', '/api/clusters/c1/reports/cve-scan')] = (
+        200, {'summary': {'nodes_scanned': 1, 'total_updates': 1, 'total_cves': 0},
+              'nodes': [{'node': 'pve-cve', 'total_count': 1, 'cve_count': 0, 'packages': []}]})
+    page = app.page
+    _cluster(app, layout)
+    page.get_by_role('button', name='Reports', exact=True).first.click()
+    page.get_by_role('button', name='CVE Scanner', exact=True).click()
+    page.get_by_role('button', name='Scan All Nodes', exact=True).click()
+    page.get_by_role('button', name='pve-cve').click()
+    page.get_by_role('button', name='Open Update Manager', exact=True).click()
+    manager = page.locator('[data-update-manager]')
+    manager.wait_for(timeout=5000)
+    manager.get_by_text('1 Updates available', exact=True).wait_for(timeout=5000)
+    assert _wait_for_call(app, ('GET', '/api/clusters/c1/updates/status'))
     assert not app.errors, app.errors
 
 
