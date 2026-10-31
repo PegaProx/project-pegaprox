@@ -21022,7 +21022,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "List PBS tasks",
+        "summary": "List PBS tasks, surfacing an upstream failure instead of an empty list.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21067,7 +21067,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Get task status and log",
+        "summary": "Get task status and log, failing if either PBS read failed.",
         "parameters": [
           {
             "name": "pbs_id",
