@@ -668,6 +668,7 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                   cluster=getattr(mgr.config, 'name', cluster_id))
 
         def run_scheduled_update():
+            """Run scheduled node updates only after maintenance starts successfully."""
             def _set(**kw):
                 return rolling_runs.change(mgr, **kw)
 
@@ -734,9 +735,12 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     if not ha.confirm_step(f'rolling update of {node_name}'):
                         rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break
-                    mgr.enter_maintenance_mode(node_name, skip_evacuation=skip_evacuation,
-                                               allow_local_disks=allow_local_disks,
-                                               **({'migrate_templates': True} if migrate_templates else {}))  # #763
+                    maintenance_task = mgr.enter_maintenance_mode(
+                        node_name, skip_evacuation=skip_evacuation,
+                        allow_local_disks=allow_local_disks,
+                        **({'migrate_templates': True} if migrate_templates else {}))  # #763
+                    if not maintenance_task or getattr(maintenance_task, 'status', None) == 'failed':
+                        raise RuntimeError(f"Failed to start maintenance mode on {node_name}")
                     _set(node=(node_name, {'in_maintenance': True}))
                     if not skip_evacuation:
                         _set(current_step='evacuating', node=(node_name, {'phase': 'evacuating'}))
