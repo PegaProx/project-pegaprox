@@ -35,8 +35,8 @@ def _completed_task(rebooted, back_online):
     return task
 
 
-def _run(api, monkeypatch, task):
-    """Run one scheduled node update through the real scheduler worker."""
+def _run(api, monkeypatch, task, exit_race=False):
+    """Run one scheduled node update, optionally simulating a concurrent auto-exit."""
     import pegaprox.api.schedules as schedules_mod
 
     clock = _Clock()
@@ -48,7 +48,14 @@ def _run(api, monkeypatch, task):
     fake.get_ceph_health_summary.return_value = None
     fake.start_node_update.return_value = task
     fake.exit_maintenance_mode.return_value = False
-    fake.nodes_in_maintenance = {}
+    fake.nodes_in_maintenance = {NODE: object()} if exit_race else {}
+    if exit_race:
+        def auto_exit_just_before_result(node):
+            """Model the update task clearing maintenance before a false return is seen."""
+            fake.nodes_in_maintenance.pop(node, None)
+            return False
+
+        fake.exit_maintenance_mode.side_effect = auto_exit_just_before_result
     fake.maintenance_lock = threading.Lock()
     fake._rolling_update = None
     api.set_manager('cluster_1', fake)
@@ -91,3 +98,13 @@ def test_schedule_still_waits_if_the_task_cannot_confirm_recovery(api, monkeypat
     assert state['node_state'][NODE]['rebooted'] is True
     assert f'Waiting for {NODE} to reboot' in logs
     assert 5 in clock.slept
+
+
+def test_schedule_does_not_warn_when_update_task_autoexits_concurrently(api, monkeypatch):
+    """A false exit result is harmless if the node was cleared in the meantime."""
+    state, clock = _run(api, monkeypatch, _completed_task(True, True), exit_race=True)
+    logs = '\n'.join(state['logs'])
+    assert 30 in clock.slept
+    assert 'maintenance exit failed' not in logs
+    assert state['node_state'][NODE]['in_maintenance'] is False
+    assert state['failed_nodes'] == []

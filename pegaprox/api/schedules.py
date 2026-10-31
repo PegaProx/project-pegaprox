@@ -829,11 +829,15 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                         else:
                             _set(add={'failed_nodes': {'node': node_name, 'error': 'Update failed'}},
                                  node=(node_name, {'result': 'failed'}), log=f"✗ {node_name} update failed")
-                    # NS May 2026 — exit_maintenance_mode now retries internally;
-                    # if it still returns False the node is stuck and we log it
-                    # for the post-loop sweep below. One the update took out itself is no failed exit.
+                    # The update task may clear maintenance after announcing completion.
+                    # Check again after a False exit result so its concurrent auto-exit
+                    # does not become a false warning; a still-held node gets the final sweep.
                     _set(current_step='finishing', node=(node_name, {'phase': 'finishing'}))
-                    if node_name not in mgr.nodes_in_maintenance or mgr.exit_maintenance_mode(node_name):
+                    exited = (node_name not in mgr.nodes_in_maintenance
+                              or mgr.exit_maintenance_mode(node_name))
+                    if not exited:
+                        exited = node_name not in mgr.nodes_in_maintenance
+                    if exited:
                         _set(node=(node_name, {'in_maintenance': False}))
                     else:
                         rolling_log(mgr, f"⚠ {node_name} maintenance exit failed - will retry at end")
