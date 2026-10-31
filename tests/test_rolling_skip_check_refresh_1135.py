@@ -19,7 +19,7 @@ WAIT = 180
 
 
 class _Clock:
-    """Time as the run and the manager see it: a sleep moves it on at once."""
+    """Advance task time quickly while letting other scheduler threads run."""
     def __init__(self):
         self.now = 1_800_000_000.0
 
@@ -30,7 +30,9 @@ class _Clock:
         return self.now
 
     def sleep(self, s):
+        """Move virtual time forward and yield the CPU to background workers."""
         self.now += s
+        time.sleep(0.001)
 
 
 class _Response:
