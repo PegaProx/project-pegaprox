@@ -25,6 +25,7 @@ checks (api/dr_drill.py) take their volume, bridge and storage rules from here.
 """
 
 import logging
+import math
 import re
 import threading
 import time
@@ -1217,19 +1218,19 @@ def cross_online(config, online, force_online):
     total_gb = 0.0
     for key, value in (config or {}).items():
         if key.startswith(('scsi', 'virtio', 'sata', 'ide', 'efidisk', 'tpmstate')) and 'size' in str(value):
-            m = re.search(r'size=(\d+)([GMT])', str(value))
+            m = re.search(r'(?:^|,)size=(\d+(?:\.\d+)?)([GMT])(?:,|$)', str(value))
             if m:
-                total_gb += int(m.group(1)) * {'G': 1, 'T': 1024, 'M': 1 / 1024}[m.group(2)]
+                total_gb += float(m.group(1)) * {'G': 1, 'T': 1024, 'M': 1 / 1024}[m.group(2)]
     warning = None
     if total_gb > LARGE_DISK_GB and online:
         required_speed_mbps = (total_gb * 1024) / 300
         if not force_online:
-            warning = (f"VM has {total_gb:.0f}GB disk. Would need {required_speed_mbps:.0f} MB/s "
+            warning = (f"VM has {math.ceil(total_gb)}GB disk. Would need {required_speed_mbps:.0f} MB/s "
                        f"({required_speed_mbps * 8 / 1000:.1f} Gbit/s) to complete in 5 min. Automatically "
                        f"using offline migration.")
             online = False
         else:
-            warning = (f"VM has {total_gb:.0f}GB disk with forced online migration. Need "
+            warning = (f"VM has {math.ceil(total_gb)}GB disk with forced online migration. Need "
                        f"{required_speed_mbps:.0f} MB/s sustained to avoid timeout. Migration may fail with "
                        f"'401 Unauthorized'.")
     return online, total_gb, warning

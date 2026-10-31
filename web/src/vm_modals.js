@@ -4952,7 +4952,7 @@
                                                             {estimatedDiskGb > 100 && online && isQemu && (
                                                                 <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-2">
                                                                     <div className="text-sm text-yellow-400">
-                                                                        ⚠️ <strong>{t('largeDiskWarning') || 'Large Disk Detected'}</strong> ({estimatedDiskGb.toFixed(0)} GB)
+                                                                        ⚠️ <strong>{t('largeDiskWarning') || 'Large Disk Detected'}</strong> ({Math.ceil(estimatedDiskGb)} GB)
                                                                     </div>
                                                                     <div className="text-xs text-yellow-400/80">
                                                                         {t('largeDiskExplanation') || 'Live migration for disks >100GB may fail with "401 Unauthorized" due to Proxmox WebSocket ticket timeout. The server will automatically use offline migration unless forced.'}
