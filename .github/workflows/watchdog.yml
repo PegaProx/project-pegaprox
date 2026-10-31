@@ -1,0 +1,163 @@
+name: Release watchdog
+
+# NS Oct 2026 - .github/scripts/watchdog.py, see docs/release-watchdog.md. Every ten minutes it
+# reads the repository through the API and holds it against .github/watchdog/baseline.json:
+# main only takes trees from Testing, release tags stay put, the rulesets are on, version.json
+# sends the updater to our own archive, and so on. An alarm fails the run. GitHub mails a
+# failed scheduled run to whoever last changed the cron line below, nobody else, and nothing
+# about an alarm is ever posted to an issue or a PR.
+#
+# On main an alarm also freezes publishing: the act job disables the workflows the baseline
+# lists as publishers and cancels their queued and running runs. It stays frozen until a
+# manual run with "unfreeze" (and UNFREEZE typed into confirm) switches them back on.
+#
+# The script and the baseline are pinned below by sha256. Any write token can change those
+# two files, but changing this one needs the workflow scope. So after a change to either of
+# them, put the new sums into both "Pinned files" steps (sha256sum prints them); a test fails
+# until they match. A mismatch on main freezes without running the script at all.
+#
+# Two jobs on purpose. check reads everything, branch names, commit messages and event
+# payloads that anyone can shape, and its token cannot write. act gets actions: write and
+# reads none of that, it only switches the workflows named in the baseline.
+#
+# A push to main or Testing runs the checks too, report-only, so a change here is tried on
+# Testing first. Inputs reach the script through env, never as an expression inside run.
+
+on:
+  schedule:
+    - cron: '3-59/10 * * * *'   # :03, :13, :23 ... away from the full-hour rush
+  push:
+    branches: [main, Testing]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'check, freeze (stop all publishing now) or unfreeze'
+        type: choice
+        options: [check, freeze, unfreeze]
+        default: check
+      confirm:
+        description: 'unfreeze only: type UNFREEZE'
+        type: string
+        default: ''
+
+permissions: {}
+
+# no concurrency group: a run takes seconds and the checks only read, and a group would let
+# the next scheduled run cancel a manual unfreeze that is still waiting. A freeze and an
+# unfreeze at the same moment: the later one wins, and a remaining alarm freezes again.
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read   # branches, tags, releases, compare, version.json
+      actions: read    # workflow runs and states
+      pages: read      # the Pages settings behind apt.pegaprox.com
+    outputs:
+      alarm: ${{ steps.check.outputs.alarm }}
+      tampered: ${{ steps.pin.outputs.tampered }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - name: Pinned files
+        id: pin
+        run: |
+          if sha256sum --strict --quiet -c - <<'PINS'
+          b59a45e49d0ca9e6dfb3db388a3a055d1593b952a69f72a2f665a82ffa7ab6a8  .github/scripts/watchdog.py
+          923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
+          PINS
+          then
+            echo 'tampered=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'tampered=true' >> "$GITHUB_OUTPUT"
+            echo '::error title=release watchdog::watchdog.py or baseline.json is not the file this workflow pins'
+          fi
+
+      - name: Check
+        id: check
+        if: steps.pin.outputs.tampered == 'false'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # keys of alarms that were looked into and are fine, space separated; a repository
+          # variable, so it changes without a commit
+          WATCHDOG_ACK: ${{ vars.WATCHDOG_ACK }}
+          WATCHDOG_ACTION: ${{ inputs.action }}
+        run: python3 -I .github/scripts/watchdog.py check
+
+      - name: Not the pinned files
+        if: steps.pin.outputs.tampered != 'false'
+        run: exit 1
+
+  act:
+    needs: check
+    # main only, and only from the schedule or a manual run: a push never freezes anything
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && (needs.check.outputs.alarm == 'true' || needs.check.outputs.tampered == 'true'
+      || inputs.action == 'freeze' || inputs.action == 'unfreeze')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write   # disable and enable workflows, cancel runs
+      contents: read   # the checkout
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - name: Pinned files
+        id: pin
+        run: |
+          if sha256sum --strict --quiet -c - <<'PINS'
+          b59a45e49d0ca9e6dfb3db388a3a055d1593b952a69f72a2f665a82ffa7ab6a8  .github/scripts/watchdog.py
+          923460073469d8adef17dfc5204f709642667433a0738d45dbd1cdcdfce4421f  .github/watchdog/baseline.json
+          PINS
+          then
+            echo 'tampered=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'tampered=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Freeze or unfreeze
+        if: steps.pin.outputs.tampered == 'false'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PEGAPROX_WATCHDOG_ACT: '1'
+          WATCHDOG_ACTION: ${{ inputs.action }}
+          WATCHDOG_CONFIRM: ${{ inputs.confirm }}
+          WATCHDOG_ALARM: ${{ needs.check.outputs.alarm }}
+          # optional: a one-line note to a private push service when the freeze starts or ends
+          WATCHDOG_NOTIFY_URL: ${{ secrets.WATCHDOG_NOTIFY_URL }}
+        run: python3 -I .github/scripts/watchdog.py act
+
+      # The script or the baseline is not the pinned one, so neither is trusted, not even for
+      # an unfreeze: disable the publishers named here and cancel their runs, then fail.
+      # Keep the list equal to the baseline's publishers (a test checks it).
+      - name: Freeze without the script
+        if: steps.pin.outputs.tampered != 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          publishers='apt-repo.yml docker-testing.yml docker.yml release-images.yml sbom.yml'
+          rc=0
+          for wf in $publishers; do
+            gh api --method PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/disable" || rc=1
+          done
+          for wf in $publishers; do
+            for st in queued in_progress waiting requested pending; do
+              ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/runs?status=$st&per_page=100" \
+                    --jq '.workflow_runs[].id') || { rc=1; continue; }
+              for id in $ids; do
+                case "$id" in ''|*[!0-9]*) continue ;; esac
+                gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/cancel" >/dev/null || rc=1
+              done
+            done
+          done
+          echo "::error title=release watchdog::the pinned files do not match; publishers disabled without the script (errors: $rc)"
+          exit 1
