@@ -141,3 +141,35 @@ def test_invalid_json_cannot_turn_a_snapshot_read_error_into_http_200(admin, pbs
     result = admin.get(f'/api/pbs/{PBS}/datastores/store/snapshots')
 
     assert result.status_code == 502
+
+
+@pytest.mark.parametrize('method,key', [('get_datastores', 'name'),
+                                       ('get_datastore_usage', 'store')])
+@pytest.mark.parametrize('entry', [None, 1, 'bad', [], {}, {'value': None},
+                                  {'value': ''}, {'value': []}])
+def test_malformed_required_entry_is_an_upstream_error(admin, pbs, method, key, entry):
+    """Validate each required row before indexing, merging or fetching details."""
+    if isinstance(entry, dict) and 'value' in entry:
+        entry = {key: entry['value']}
+    getattr(pbs, method).return_value = {'data': [entry]}
+
+    response = admin.get(PATH)
+
+    assert response.status_code == 502
+    assert response.get_json()['code'] == 'PBS_UPSTREAM'
+    pbs.get_datastore_status.assert_not_called()
+
+
+def test_valid_required_entries_still_merge_usage_and_details(admin, pbs):
+    """Required row validation preserves nonempty datastore results."""
+    pbs.get_datastores.return_value = {'data': [{'name': 'backup', 'path': '/backup'}]}
+    pbs.get_datastore_usage.return_value = {'data': [{'store': 'backup', 'total': 1024}]}
+    pbs.get_datastore_status.return_value = {'data': {'used': 128}}
+
+    response = admin.get(PATH)
+
+    assert response.status_code == 200
+    assert response.get_json() == [{'name': 'backup', 'path': '/backup',
+                                   'store': 'backup', 'total': 1024,
+                                   'detail': {'used': 128}}]
+    pbs.get_datastore_status.assert_called_once_with('backup')

@@ -616,7 +616,10 @@ def get_pbs_datastores(pbs_id):
     if failed:
         status, payload = failed
         return jsonify(payload), status
-    if not isinstance(config_resp, dict) or not isinstance(config_resp.get('data'), list):
+    if (not isinstance(config_resp, dict)
+            or not isinstance(config_resp.get('data'), list)
+            or any(not isinstance(ds, dict) or not isinstance(ds.get('name'), str)
+                   or not ds['name'] for ds in config_resp['data'])):
         return jsonify({'error': 'PBS returned an invalid datastore list', 'code': 'PBS_UPSTREAM'}), 502
 
     usage_resp = mgr.get_datastore_usage()
@@ -624,7 +627,10 @@ def get_pbs_datastores(pbs_id):
     if failed:
         status, payload = failed
         return jsonify(payload), status
-    if not isinstance(usage_resp, dict) or not isinstance(usage_resp.get('data'), list):
+    if (not isinstance(usage_resp, dict)
+            or not isinstance(usage_resp.get('data'), list)
+            or any(not isinstance(usage, dict) or not isinstance(usage.get('store'), str)
+                   or not usage['store'] for usage in usage_resp['data'])):
         return jsonify({'error': 'PBS returned an invalid datastore usage list', 'code': 'PBS_UPSTREAM'}), 502
     
     datastores = config_resp['data']
