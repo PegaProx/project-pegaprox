@@ -208,6 +208,27 @@ def build(app):
                     op['x-pegaprox-permissions'] = auth['perms']
                 if auth['roles']:
                     op['x-pegaprox-roles'] = auth['roles']
+            if path == '/api/pbs/{pbs_id}/datastores' and method == 'GET':
+                op['responses']['403'] = {
+                    'description': 'Local permission denial or PBS refused the datastore read',
+                    'content': {'application/json': {'schema': {
+                        'type': 'object', 'required': ['error'],
+                        'properties': {'error': {'type': 'string'},
+                                       'code': {'type': 'string',
+                                                'description': 'PBS_FORBIDDEN for PBS denial; local authorization uses its own code',
+                                                'examples': ['PBS_FORBIDDEN', 'MISSING_PERMISSION',
+                                                             'INSUFFICIENT_PERMISSIONS']}},
+                    }}},
+                }
+                op['responses']['502'] = {
+                    'description': 'PBS is unreachable or returned an invalid upstream response',
+                    'content': {'application/json': {'schema': {
+                        'type': 'object', 'required': ['error', 'code'],
+                        'properties': {'error': {'type': 'string'},
+                                       'code': {'type': 'string',
+                                                'enum': ['PBS_UNREACHABLE', 'PBS_UPSTREAM']}},
+                    }}},
+                }
             _place(app, paths, path, method.lower(), op, rule.endpoint)
     _dedupe_operation_ids(paths)
     return paths
