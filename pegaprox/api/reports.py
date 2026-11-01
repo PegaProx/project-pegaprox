@@ -1532,12 +1532,17 @@ def apply_hardening(cluster_id, node):
     # one list per outcome: a reader of the log must not take a failed control for an applied one
     applied = [str(c) for c, v in results.items() if v.get('success')]
     held = [str(c) for c, v in results.items() if not v.get('success') and v.get('blocked')]
-    failed = [str(c) for c, v in results.items() if not v.get('success') and not v.get('blocked')]
+    # audit-only controls change nothing on apply, they are no failure either
+    noop = [str(c) for c, v in results.items() if not v.get('success') and v.get('noop')]
+    failed = [str(c) for c, v in results.items()
+              if not v.get('success') and not v.get('blocked') and not v.get('noop')]
     outcome = [f"applied: {', '.join(applied) or 'none'}"]
     if failed:
         outcome.append(f"failed: {', '.join(failed)}")
     if held:
         outcome.append(f"blocked: {', '.join(held)}")
+    if noop:
+        outcome.append(f"not applicable: {', '.join(noop)}")
     log_audit(_hp_user(), 'node.hardening_applied',
               f"Hardening on {node}: {ok_count} of {requested_count} controls applied "
               f"({'; '.join(outcome)})" + (', forced' if force else ''),

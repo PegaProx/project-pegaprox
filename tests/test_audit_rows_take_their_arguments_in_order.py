@@ -5,8 +5,8 @@ apply and rollback routes called it as log_audit('node.hardening_applied', {...}
 row said the action was the user and a dict was the action, with no cluster. The storage
 rescan passed the cluster id fourth, which is the IP slot, so the row lost the caller's
 address and its cluster. The source check at the end keeps the shape from coming back.
-The apply text sorts the controls by outcome (applied, failed, blocked), so a failed one
-does not read as applied; a rollback counts the controls only partly restored when the
+The apply text sorts the controls by outcome (applied, failed, blocked, not applicable), so
+a failed one does not read as applied; a rollback counts the controls only partly restored when the
 manager's result says so.
 NS Nov 2026
 """
@@ -81,6 +81,21 @@ def test_nothing_applied_says_none(api, seed):
     api.as_user(root).post('/api/clusters/cluster_1/nodes/pve1/hardening', json={'controls': ['pam_faillock']})
     row = _last_row('node.hardening_applied')
     assert row and '0 of 1 controls applied (applied: none; failed: pam_faillock)' in row['details'], row
+
+
+def test_an_audit_only_control_is_not_listed_as_failed(api, seed):
+    root = seed.user('root', role='admin', tenant_id='default')
+    fake = _hardening_mgr(api)
+    fake.apply_node_hardening = lambda node, controls, params=None: {
+        c: ({'success': False, 'noop': True, 'error': 'audit only'} if c == 'net_protocols'
+            else {'success': True}) for c in controls}
+    r = api.as_user(root).post('/api/clusters/cluster_1/nodes/pve1/hardening',
+                               json={'controls': ['default_umask', 'net_protocols']})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    row = _last_row('node.hardening_applied')
+    assert row and '1 of 2' in row['details'], row
+    assert '(applied: default_umask; not applicable: net_protocols)' in row['details'], row['details']
+    assert 'failed' not in row['details'], row['details']
 
 
 def test_a_forced_apply_says_so(api, seed):
