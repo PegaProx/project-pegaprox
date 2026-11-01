@@ -48,6 +48,23 @@
                 }
             };
             
+            // LW Nov 2026 - the cluster's own CPU models (its PVE version, its custom-* models), the
+            // list the VM config dialog offers too; the built-in list below stays the fallback
+            const [liveCpuTypes, setLiveCpuTypes] = useState(null);
+            useEffect(() => {
+                if (!isQemu || isXcpng) return;
+                let gone = false;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    if (!r || !r.ok) return;
+                    try {
+                        const d = await r.json();
+                        if (!gone && Array.isArray(d.cpu_types) && d.cpu_types.length) setLiveCpuTypes(d.cpu_types);
+                    } catch (e) { /* keep the built-in list */ }
+                })();
+                return () => { gone = true; };
+            }, [clusterId]);
+
             // Fetch nodes if not provided
             useEffect(() => {
                 const fetchNodes = async () => {
@@ -304,21 +321,34 @@
             // MK 2026-05-30 — host first, max second, then alphabetical (case-insensitive).
             // Matches the backend get_cpu_types() ordering; VM Config dropdown already gets
             // a sorted list from /api/hardware-options so the two surfaces look identical now.
-            const cpuTypes = (() => {
+            const cpuTypes = liveCpuTypes || (() => {
+                // qemu-server's own x86_64 list (CPUConfig.pm) with host and the x86-64-v* levels
                 const all = [
                     'host', 'max',
                     'kvm64', 'kvm32', 'qemu64', 'qemu32',
+                    'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+                    'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+                    'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
+                    'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
                     'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-                    'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Conroe', 'EPYC', 'EPYC-IBPB',
-                    'EPYC-Milan', 'EPYC-Rome', 'Haswell', 'Haswell-IBRS', 'Haswell-noTSX',
-                    'Haswell-noTSX-IBRS', 'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server',
-                    'Icelake-Server-noTSX', 'IvyBridge', 'IvyBridge-IBRS', 'KnightsMill', 'Nehalem',
-                    'Nehalem-IBRS', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-                    'Penryn', 'SandyBridge', 'SandyBridge-IBRS', 'Skylake-Client', 'Skylake-Client-IBRS',
-                    'Skylake-Client-noTSX-IBRS', 'Skylake-Server', 'Skylake-Server-IBRS',
-                    'Skylake-Server-noTSX-IBRS', 'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo',
-                    'coreduo', 'n270', 'pentium', 'pentium2', 'pentium3', 'phenom', 'x86-64-v2',
-                    'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+                    'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+                    'Skylake-Server-v5',
+                    'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+                    'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+                    'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
+                    'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
+                    'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+                    'Icelake-Server-v7',
+                    'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+                    'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+                    'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+                    'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+                    'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+                    'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+                    'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+                    'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
                 ];
                 const head = [];
                 const rest = [];
