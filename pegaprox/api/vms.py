@@ -5727,13 +5727,15 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
         else:
             # MK: Return not-locked instead of error for better UX
             # The VM config might not be accessible but that doesn't mean it's locked
+            # NS Nov 2026 - read:false says so, the views show the lock as unknown then
             logging.warning(f"Could not get lock status for {vm_type}/{vmid}: {result.get('error')}")
             return jsonify({
                 'locked': False,
                 'lock_reason': None,
                 'lock_description': None,
                 'unlock_command': None,
-                'note': 'Could not determine lock status'
+                'note': 'Could not determine lock status',
+                'read': False
             })
     except Exception as e:
         logging.error(f"Error getting lock status for {vm_type}/{vmid}: {e}")
@@ -5741,7 +5743,8 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
             'locked': False,
             'lock_reason': None,
             'lock_description': None,
-            'unlock_command': None
+            'unlock_command': None,
+            'read': False
         })
 
 

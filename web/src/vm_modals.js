@@ -15,6 +15,17 @@
         const _consoleShotCache = {};   // {cluster:vmid: {url, ts}}
         const SHOT_REUSE_MS = 60000;
 
+        // NS Nov 2026 - the guest-info lists come from the agent. Anything that is not a
+        // list (null, an object, a string) renders as no rows instead of throwing, which
+        // took the whole page down, and a row that is not an object is skipped
+        const guestRows = (v) => Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : [];
+        const guestIps = (info) => Array.isArray(info?.ip_addresses)
+            ? info.ip_addresses.filter(ip => typeof ip === 'string' && ip) : [];
+        // max_restart / max_relocate of a PVE HA resource: 0 is a real value. A resource that
+        // leaves the limit out runs on PVE's own default, which we have not read, so it says so
+        // (`unset`) instead of printing a number. datacenter.js shows the same
+        const haLimit = (v, unset) => (Number.isInteger(v) || /^\d+$/.test(v ?? '')) ? String(v) : unset;
+
         // Delete VM Modal Component
         // NS: Added confirmation input after someone accidentally deleted prod VM
         // Better safe than sorry...
@@ -644,14 +655,14 @@
                         {vm.status === 'running' && guestInfo && (
                             <div className="px-6 pb-2">
                                 <div className="bg-proxmox-dark rounded-lg p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-                                    {guestInfo.ip_addresses && guestInfo.ip_addresses.length > 0 && (
+                                    {guestIps(guestInfo).length > 0 && (
                                         <div className="flex items-center gap-3 min-w-0">
                                             <div className="p-2 rounded-lg bg-cyan-500/10">
                                                 <Icons.Globe className="w-4 h-4 text-cyan-400" />
                                             </div>
                                             <div className="min-w-0">
                                                 <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
-                                                <div className="text-sm font-semibold text-white font-mono truncate" title={guestInfo.ip_addresses.join(', ')}>{guestInfo.ip_addresses.join(', ')}</div>
+                                                <div className="text-sm font-semibold text-white font-mono truncate" title={guestIps(guestInfo).join(', ')}>{guestIps(guestInfo).join(', ')}</div>
                                             </div>
                                         </div>
                                     )}
@@ -828,7 +839,7 @@
 
         // VM Detail Panel Component (inline, not modal)
         // LW: this shows when you click a VM in detail view mode
-        function VmDetailPanel({ vm, clusterId, onAction, onOpenConsole, onOpenSpice, onOpenLxcShell, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
+        function VmDetailPanel({ vm, clusterId, clusterType = 'proxmox', onAction, onOpenConsole, onOpenSpice, onOpenLxcShell, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haConsolesElsewhere } = useAuth();
             const acts = !haReadOnly;  // #625: a standby shows this VM, the active acts on it
@@ -837,10 +848,12 @@
             // some quick helpers
             const isQemu = vm.type === 'qemu';
             const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+            // Proxmox HA only exists on a PVE cluster: an XCP-ng or ESXi guest gets no card and no read
+            const pveHa = (clusterType || 'proxmox') === 'proxmox';
             
             const [haEnabled, setHaEnabled] = useState(false);
             const [haLoading, setHaLoading] = useState(false);
-            const [haResources, setHaResources] = useState([]);
+            const [haResources, setHaResources] = useState(null);
             
             // NS: Lock status for VMs
             const [lockInfo, setLockInfo] = useState({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
@@ -898,27 +911,28 @@
             };
             
             // NS: Fetch lock status
-            const fetchLockStatus = async () => {
+            const fetchLockStatus = async (isStale = () => false) => {
+                // an API error says nothing about the lock, so it is not "not locked" either
+                let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null, unread: true };
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/lock`);
                     if (response && response.ok) {
                         const data = await response.json();
                         // NS: Ensure we have valid data structure
-                        setLockInfo({
+                        next = {
                             locked: data.locked || false,
                             lock_reason: data.lock_reason || null,
                             lock_description: data.lock_description || null,
-                            unlock_command: data.unlock_command || null
-                        });
-                    } else {
-                        // API error - assume not locked
-                        setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                            unlock_command: data.unlock_command || null,
+                            // read:false - the route could not read the config, "not locked" is a guess then
+                            unread: data.read === false
+                        };
                     }
                 } catch (error) {
                     console.error('Error fetching lock status:', error);
-                    // On error, assume not locked
-                    setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
                 }
+                // #828 - a slow answer for the guest shown before must not land on this one
+                if (!isStale()) setLockInfo(next);
             };
             
             // NS: Unlock VM
@@ -943,9 +957,13 @@
                 setUnlockLoading(false);
             };
             
-            // Fetch lock status on mount
+            // Fetch lock status on mount, and from a clean state for every guest: the previous
+            // one's lock or "unknown" stays off this one until its own answer is in
             useEffect(() => {
-                fetchLockStatus();
+                let stale = false;
+                setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                fetchLockStatus(() => stale);
+                return () => { stale = true; };
             }, [vm.vmid, clusterId]);
 
             // NS: Issue #50 - Fetch guest agent info
@@ -998,23 +1016,30 @@
             }, [vm.vmid, clusterId]);
 
             // Check HA status for this VM
-            useEffect(() => {
-                const checkHaStatus = async () => {
-                    try {
-                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`);
-                        if(response && response.ok) {
-                            const resources = await response.json();
-                            setHaResources(resources);
-                            const vmType = isQemu ? 'vm' : 'ct';
-                            const isInHa = resources.some(r => r.sid === `${vmType}:${vm.vmid}`);
-                            setHaEnabled(isInHa);
-                        }
-                    } catch (error) {
-                        console.error('checking HA status:', error);
+            // haResources stays null until the list was read: a failed read is
+            // "unknown", not "not in HA", and the card shows the resource's own limits
+            const haSid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
+            const checkHaStatus = async (isStale = () => false) => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`);
+                    if(response && response.ok) {
+                        const resources = await response.json();
+                        if (isStale() || !Array.isArray(resources)) return;
+                        setHaResources(resources);
+                        setHaEnabled(resources.some(r => r.sid === haSid));
                     }
-                };
-                checkHaStatus();
-            }, [vm.vmid, clusterId]);
+                } catch (error) {
+                    console.error('checking HA status:', error);
+                }
+            };
+            useEffect(() => {
+                let stale = false;
+                setHaResources(null);
+                setHaEnabled(false);
+                if (pveHa) checkHaStatus(() => stale);
+                return () => { stale = true; };
+            }, [vm.vmid, clusterId, pveHa]);
+            const haResource = haResources ? haResources.find(r => r.sid === haSid) : null;
 
             const toggleProxmoxHa = async () => {
                 setHaLoading(true);
@@ -1027,6 +1052,7 @@
                         });
                         if(response && response.ok) {
                             setHaEnabled(false);
+                            checkHaStatus();
                         }
                     }else{
                         // Add to HA
@@ -1042,6 +1068,8 @@
                         });
                         if(response && response.ok) {
                             setHaEnabled(true);
+                            // what PVE holds now, not the values sent above
+                            checkHaStatus();
                         }
                     }
                 } catch (error) {
@@ -1090,6 +1118,12 @@
                                     >
                                         <Icons.Lock />
                                         {lockInfo?.lock_reason || 'Locked'}
+                                    </span>
+                                )}
+                                {lockInfo?.unread && (
+                                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-500/20 text-gray-400 border border-gray-500/30 flex items-center gap-1">
+                                        <Icons.Lock />
+                                        {t('lockStatus')}: {t('unknown')}
                                     </span>
                                 )}
                                 {haEnabled && (
@@ -1287,14 +1321,14 @@
                                     </div>
                                 )}
                                 {/* #560 — IP address (QEMU guest-agent or LXC config/pct) */}
-                                {guestInfo.ip_addresses && guestInfo.ip_addresses.length > 0 && (
+                                {guestIps(guestInfo).length > 0 && (
                                     <div className="flex items-center gap-3">
                                         <div className="p-2 rounded-lg bg-blue-500/10">
                                             <Icons.Globe className="w-4 h-4 text-blue-400" />
                                         </div>
                                         <div className="min-w-0">
                                             <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
-                                            <div className="text-sm font-semibold text-white font-mono truncate" title={guestInfo.ip_addresses.join(', ')}>{guestInfo.ip_addresses.join(', ')}</div>
+                                            <div className="text-sm font-semibold text-white font-mono truncate" title={guestIps(guestInfo).join(', ')}>{guestIps(guestInfo).join(', ')}</div>
                                         </div>
                                     </div>
                                 )}
@@ -1309,7 +1343,7 @@
                     {/* MK #334 — guest filesystem usage (modern/compact variant).
                         Kept tight because the Resources panel can be narrow; full size/pct info
                         on a second line so the bar always has breathing room. */}
-                    {isQemu && vm.status === 'running' && fsInfo?.filesystems?.length > 0 && (
+                    {isQemu && vm.status === 'running' && guestRows(fsInfo?.filesystems).length > 0 && (
                         <div className="px-6 pb-2">
                             <div className="bg-proxmox-dark rounded-lg px-3 py-2">
                                 <div className="flex items-center justify-between mb-1.5">
@@ -1317,10 +1351,10 @@
                                         <Icons.HardDrive className="w-3.5 h-3.5 text-proxmox-orange" />
                                         <span className="text-[12px] font-medium text-white">{t('guestFilesystems') || 'Filesystem Usage'}</span>
                                     </div>
-                                    <span className="text-[10px] text-gray-500">{fsInfo.filesystems.length}</span>
+                                    <span className="text-[10px] text-gray-500">{guestRows(fsInfo.filesystems).length}</span>
                                 </div>
                                 <div className="space-y-1">
-                                    {fsInfo.filesystems.map((fs, i) => {
+                                    {guestRows(fsInfo.filesystems).map((fs, i) => {
                                         const pct = fs.used_pct == null ? 0 : fs.used_pct;
                                         const barColor = pct > 90 ? 'var(--corp-thresh-crit)' : pct > 75 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)';
                                         const sizes = fs.used_bytes != null && fs.total_bytes != null
@@ -1491,6 +1525,7 @@
                     </div>
 
                     {/* Proxmox HA Section */}
+                    {pveHa && (
                     <div className="px-6 pb-6">
                         <div className="text-xs text-gray-500 mb-3">{t('proxmoxHa')}</div>
                         <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
@@ -1501,19 +1536,21 @@
                                     </div>
                                     <div>
                                         <div className="text-sm font-medium text-white">
-                                            {t('proxmoxHa')} {haEnabled ? t('active') : t('haInactive').replace('Proxmox HA ', '')}
+                                            {t('proxmoxHa')} {!haResources ? t('unknown') : haEnabled ? t('active') : t('haInactive').replace('Proxmox HA ', '')}
                                         </div>
+                                        {haResources && (
                                         <div className="text-xs text-gray-500">
                                             {haEnabled 
                                                 ? t('haMonitorDesc').split('.')[0] 
                                                 : t('enableNativeHa')}
                                         </div>
+                                        )}
                                     </div>
                                 </div>
                                 {acts && (
                                 <button
                                     onClick={toggleProxmoxHa}
-                                    disabled={haLoading}
+                                    disabled={haLoading || !haResources}
                                     className={`px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 ${
                                         haEnabled
                                             ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30'
@@ -1530,20 +1567,21 @@
                                 </button>
                                 )}
                             </div>
-                            {haEnabled && (
+                            {haEnabled && haResources && (
                                 <div className="mt-3 pt-3 border-t border-gray-700/50 grid grid-cols-2 gap-4 text-xs">
                                     <div>
                                         <span className="text-gray-500">Max. Restarts:</span>
-                                        <span className="ml-2 text-white">3</span>
+                                        <span className="ml-2 text-white">{haLimit(haResource?.max_restart, t('default'))}</span>
                                     </div>
                                     <div>
                                         <span className="text-gray-500">Max. Relocate:</span>
-                                        <span className="ml-2 text-white">3</span>
+                                        <span className="ml-2 text-white">{haLimit(haResource?.max_relocate, t('default'))}</span>
                                     </div>
                                 </div>
                             )}
                         </div>
                     </div>
+                    )}
 
                     {/* Timeline of this guest and its host */}
                     <div className="px-6 pb-6" data-vm-timeline>
@@ -1576,7 +1614,7 @@
         }
 
         // LW: Feb 2026 - Corporate VM Detail View (experimental)
-        function CorporateVmDetailView({ vm, clusterId, onAction, onOpenConsole, onOpenSpice, onOpenConfig, onBack, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
+        function CorporateVmDetailView({ vm, clusterId, clusterType = 'proxmox', onAction, onOpenConsole, onOpenSpice, onOpenConfig, onBack, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haStandby, haConsolesElsewhere } = useAuth();
             // #625 v2 - on a standby: no power, console, SPICE, snapshot or HA changes, and no
@@ -1780,7 +1818,7 @@
             // State for fetched data
             const [haEnabled, setHaEnabled] = useState(false);
             const [haLoading, setHaLoading] = useState(false);
-            const [haResources, setHaResources] = useState([]);
+            const [haResources, setHaResources] = useState(null);  // null: not read (yet)
             const [lockInfo, setLockInfo] = useState({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
             const [unlockLoading, setUnlockLoading] = useState(false);
             const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
@@ -1802,12 +1840,13 @@
 
             // Fetch lock status
             const fetchLockStatus = async (isStale) => {
-                let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null };
+                // a read that failed (or read:false from the route) is "unknown", not "not locked"
+                let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null, unread: true };
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/lock`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        next = { locked: data.locked || false, lock_reason: data.lock_reason || null, lock_description: data.lock_description || null, unlock_command: data.unlock_command || null };
+                        next = { locked: data.locked || false, lock_reason: data.lock_reason || null, lock_description: data.lock_description || null, unlock_command: data.unlock_command || null, unread: data.read === false };
                     }
                 } catch (error) {}
                 // #828 - the lock of the VM shown before must not offer Unlock on this one
@@ -1903,21 +1942,30 @@
             }, [vm.vmid, vm.node, clusterId]);
 
             // Fetch HA status
-            useEffect(() => {
-                let stale = false;
+            // NS, Nov 2026: read again after a toggle too, so the card shows what PVE holds. Until a
+            // list arrives haResources stays null and the card says unknown, not disabled
+            const haSid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
+            const loadHa = (isStale = () => false) =>
                 authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(resources => {
                         // #828 - the HA switch acts on this VM, so it must not show another one's state
-                        if (resources && !stale) {
+                        if (Array.isArray(resources) && !isStale()) {
                             setHaResources(resources);
-                            const vmType = isQemu ? 'vm' : 'ct';
-                            setHaEnabled(resources.some(r => r.sid === `${vmType}:${vm.vmid}`));
+                            setHaEnabled(resources.some(r => r.sid === haSid));
                         }
                     })
                     .catch(() => {});
+            // XCP-ng and ESXi have no Proxmox HA, their guests get no card and no read
+            const pveHa = (clusterType || 'proxmox') === 'proxmox';
+            useEffect(() => {
+                let stale = false;
+                setHaResources(null);
+                setHaEnabled(false);
+                if (pveHa) loadHa(() => stale);
                 return () => { stale = true; };
-            }, [vm.vmid, clusterId]);
+            }, [vm.vmid, clusterId, pveHa]);
+            const haResource = haResources ? haResources.find(r => r.sid === haSid) : null;
 
             // NS: inline perf charts - only bother fetching when vm is actually up
             const [metricsRefreshTick, setMetricsRefreshTick] = useState(0);
@@ -1962,14 +2010,15 @@
                     const vmType = isQemu ? 'vm' : 'ct';
                     if (haEnabled) {
                         const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources/${vmType}:${vm.vmid}`, { method: 'DELETE' });
-                        if (response && response.ok) setHaEnabled(false);
+                        if (response && response.ok) { setHaEnabled(false); loadHa(); }
                     } else {
+                        // defaults for the new resource only; the card reads back what PVE stored
                         const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ vmid: vm.vmid, type: vmType, max_restart: 3, max_relocate: 3 })
                         });
-                        if (response && response.ok) setHaEnabled(true);
+                        if (response && response.ok) { setHaEnabled(true); loadHa(); }
                     }
                 } catch (error) { console.error('toggling HA:', error); }
                 finally { setHaLoading(false); }
@@ -2188,7 +2237,7 @@
                                             <tr><td>{t('guestOs') || 'Guest OS'}</td><td>{guestInfo?.os_pretty_name || vmHwInfo?.ostype || (isQemu ? 'QEMU Virtual Machine' : 'LXC Container')}</td></tr>
                                             <tr><td>{t('type')}</td><td>{isQemu ? 'QEMU/KVM' : 'LXC'} - {vmHwInfo ? `${vmHwInfo.machine} / ${vmHwInfo.bios === 'ovmf' ? 'UEFI' : 'SeaBIOS'}` : vm.vmid}</td></tr>
                                             <tr><td>{t('qemuAgent') || 'QEMU Agent'}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled') || 'Not installed'}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
-                                            <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestInfo?.ip_addresses?.join(', ') || '-'}</td></tr>
+                                            <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestIps(guestInfo).join(', ') || '-'}</td></tr>
                                             {guestInfo?.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
                                             {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
                                                 <span key={tag} className="px-1.5 py-0.5 text-[11px]" style={{background: 'rgba(73, 175, 217, 0.12)', color: '#49afd9', border: '1px solid rgba(73, 175, 217, 0.25)'}}>{tag}</span>
@@ -2247,6 +2296,12 @@
                                     )}
                                 </div>
                             )}
+                            {lockInfo.unread && (
+                                <div className="flex items-center gap-2 px-3 py-2" style={{background: 'rgba(114, 139, 154, 0.08)', borderLeft: '3px solid #728b9a'}}>
+                                    <Icons.Lock className="w-4 h-4 flex-shrink-0" style={{color: '#728b9a'}} />
+                                    <span className="text-[13px]" style={{color: '#adbbc4'}}>{t('lockStatus')}: {t('unknown')}</span>
+                                </div>
+                            )}
                             {isQemu && isRunning && !guestInfo && (
                                 <div className="flex items-center gap-2 px-3 py-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
                                     <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" style={{color: '#efc006'}} />
@@ -2257,15 +2312,15 @@
 
                             {/* MK #334 — Guest filesystem usage (qemu-agent). Rendered only when
                                 we actually got a list back, so VMs without agent stay uncluttered. */}
-                            {isQemu && isRunning && fsInfo?.filesystems?.length > 0 && (
+                            {isQemu && isRunning && guestRows(fsInfo?.filesystems).length > 0 && (
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2 flex items-center gap-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <Icons.HardDrive className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
                                         <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestFilesystems') || 'Filesystem Usage'}</span>
-                                        <span className="text-[11px] ml-auto" style={{color: '#728b9a'}}>{fsInfo.filesystems.length} {fsInfo.filesystems.length === 1 ? 'mount' : 'mounts'}</span>
+                                        <span className="text-[11px] ml-auto" style={{color: '#728b9a'}}>{guestRows(fsInfo.filesystems).length} {guestRows(fsInfo.filesystems).length === 1 ? 'mount' : 'mounts'}</span>
                                     </div>
                                     <div className="p-3 space-y-2">
-                                        {fsInfo.filesystems.map((fs, i) => {
+                                        {guestRows(fsInfo.filesystems).map((fs, i) => {
                                             const pct = fs.used_pct == null ? 0 : fs.used_pct;
                                             const barColor = pct > 90 ? 'var(--corp-thresh-crit)' : pct > 75 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)';
                                             return (
@@ -2398,29 +2453,29 @@
                                                     {guestInfo.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
                                                     {guestInfo.os_pretty_name && <tr><td>{t('osVersion')}</td><td>{guestInfo.os_pretty_name}</td></tr>}
                                                     {guestInfo.kernel_version && <tr><td>{t('kernel')}</td><td>{guestInfo.kernel_version}</td></tr>}
-                                                    {guestInfo.ip_addresses && guestInfo.ip_addresses.length > 0 && (
-                                                        <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '11px'}}>{guestInfo.ip_addresses.join(', ')}</td></tr>
+                                                    {guestIps(guestInfo).length > 0 && (
+                                                        <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '11px'}}>{guestIps(guestInfo).join(', ')}</td></tr>
                                                     )}
                                                 </tbody>
                                             </table>
                                             {/* MK + LW May 2026 — guest agent enrichment: real-FS fill, NIC detail,
                                                 logged-in users, clock drift. Hidden behind <details> so the summary
                                                 stays compact for users who don't care. */}
-                                            {((guestInfo.filesystems && guestInfo.filesystems.length > 0) ||
-                                              (guestInfo.interfaces && guestInfo.interfaces.length > 0) ||
-                                              (guestInfo.users && guestInfo.users.length > 0) ||
+                                            {(guestRows(guestInfo.filesystems).length > 0 ||
+                                              guestRows(guestInfo.interfaces).length > 0 ||
+                                              guestRows(guestInfo.users).length > 0 ||
                                               guestInfo.guest_time_ns) && (
                                                 <details className="px-3 py-2" style={{borderTop: '1px solid var(--corp-border-medium)'}}>
                                                     <summary className="text-[12px] cursor-pointer" style={{color: '#728b9a'}}>
                                                         {t('guestDetail') || 'Guest detail'} — {t('filesystems') || 'Filesystems'}, {t('interfaces') || 'Interfaces'}, {t('users') || 'Users'}
                                                     </summary>
                                                     <div className="mt-2 space-y-2">
-                                                        {guestInfo.filesystems && guestInfo.filesystems.length > 0 && (
+                                                        {guestRows(guestInfo.filesystems).length > 0 && (
                                                             <div>
                                                                 <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('filesystems') || 'Filesystems'}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
-                                                                        {guestInfo.filesystems.map((fs, idx) => (
+                                                                        {guestRows(guestInfo.filesystems).map((fs, idx) => (
                                                                             <tr key={fs.mountpoint || idx}>
                                                                                 <td style={{fontFamily: 'monospace'}}>{fs.mountpoint}</td>
                                                                                 <td>
@@ -2440,19 +2495,19 @@
                                                                 </table>
                                                             </div>
                                                         )}
-                                                        {guestInfo.interfaces && guestInfo.interfaces.length > 0 && (
+                                                        {guestRows(guestInfo.interfaces).length > 0 && (
                                                             <div>
                                                                 <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('interfaces') || 'Interfaces'}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
-                                                                        {guestInfo.interfaces.filter(n => n.name !== 'lo').map((nic, idx) => (
+                                                                        {guestRows(guestInfo.interfaces).filter(n => n.name !== 'lo').map((nic, idx) => (
                                                                             <tr key={nic.name || idx}>
                                                                                 <td style={{fontFamily: 'monospace'}}>{nic.name}</td>
                                                                                 <td>
                                                                                     {nic.mac && <span style={{color: '#728b9a', fontFamily: 'monospace'}}>{nic.mac}</span>}
-                                                                                    {nic.ips && nic.ips.length > 0 && (
+                                                                                    {guestRows(nic.ips).length > 0 && (
                                                                                         <span style={{marginLeft: nic.mac ? '8px' : '0', fontFamily: 'monospace'}}>
-                                                                                            {nic.ips.map(ip => `${ip.address}${ip.prefix ? '/' + ip.prefix : ''}`).join(', ')}
+                                                                                            {guestRows(nic.ips).map(ip => `${ip.address}${ip.prefix ? '/' + ip.prefix : ''}`).join(', ')}
                                                                                         </span>
                                                                                     )}
                                                                                 </td>
@@ -2462,12 +2517,12 @@
                                                                 </table>
                                                             </div>
                                                         )}
-                                                        {guestInfo.users && guestInfo.users.length > 0 && (
+                                                        {guestRows(guestInfo.users).length > 0 && (
                                                             <div>
                                                                 <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('loggedInUsers') || 'Logged-in users'}</div>
                                                                 <table className="corp-property-grid" style={{fontSize: '11px'}}>
                                                                     <tbody>
-                                                                        {guestInfo.users.map((u, idx) => (
+                                                                        {guestRows(guestInfo.users).map((u, idx) => (
                                                                             <tr key={idx}>
                                                                                 <td style={{fontFamily: 'monospace'}}>{u.domain ? `${u.domain}\\${u.user}` : u.user}</td>
                                                                                 <td style={{color: '#728b9a'}}>{u.login_time ? new Date(u.login_time * 1000).toLocaleString() : '-'}</td>
@@ -2495,13 +2550,14 @@
                                     )}
 
                                     {/* HA config */}
+                                    {pveHa && (
                                     <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                         <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                             <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('proxmoxHa') || 'Proxmox HA'}</span>
                                             {acts && (
                                             <button
                                                 onClick={toggleProxmoxHa}
-                                                disabled={haLoading}
+                                                disabled={haLoading || !haResources}
                                                 className="text-[11px] px-2 py-0.5 disabled:opacity-50"
                                                 style={haEnabled
                                                     ? {color: '#f54f47', border: '1px solid rgba(245, 79, 71, 0.3)'}
@@ -2515,11 +2571,12 @@
                                         <div className="px-3 py-2 flex items-center gap-2">
                                             <Icons.Shield className="w-4 h-4" style={{color: haEnabled ? '#60b515' : '#728b9a'}} />
                                             <div>
-                                                <div className="text-[12px]" style={{color: '#e9ecef'}}>{haEnabled ? t('active') : t('disabled')}</div>
-                                                {haEnabled && <div className="text-[11px]" style={{color: '#728b9a'}}>Max Restart: 3 | Max Relocate: 3</div>}
+                                                <div className="text-[12px]" style={{color: '#e9ecef'}}>{!haResources ? t('unknown') : haEnabled ? t('active') : t('disabled')}</div>
+                                                {haEnabled && haResources && <div className="text-[11px]" style={{color: '#728b9a'}}>Max Restart: {haLimit(haResource?.max_restart, t('default'))} | Max Relocate: {haLimit(haResource?.max_relocate, t('default'))}</div>}
                                             </div>
                                         </div>
                                     </div>
+                                    )}
                                 </div>
                             </div>
 
@@ -2801,6 +2858,8 @@
             const canEdit = !haReadOnly && (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('ha.config')));
             const [resources, setResources] = useState([]);
             const [loading, setLoading] = useState(true);
+            // a list that could not be read is not "no VMs with HA"
+            const [unread, setUnread] = useState(false);
 
             // Local authFetch helper
             const authFetch = async (url, options = {}) => {
@@ -2820,11 +2879,12 @@
                 const fetchData = async () => {
                     try {
                         const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`);
-                        if(response && response.ok) {
-                            setResources(await response.json());
-                        }
+                        const data = response && response.ok ? await response.json() : null;
+                        setUnread(!Array.isArray(data));
+                        setResources(Array.isArray(data) ? data : []);
                     } catch (error) {
                         console.error('fetching HA data:', error);
+                        setUnread(true);
                     } finally {
                         setLoading(false);
                     }
@@ -2854,6 +2914,12 @@
                 );
             }
 
+            if(unread) {
+                return (
+                    <div className="text-xs text-yellow-400 p-3 bg-proxmox-dark rounded-lg">{t('haResourcesUnread')}</div>
+                );
+            }
+
             return (
                 <div className="space-y-3">
                     <div className="flex items-center justify-between">
@@ -2875,7 +2941,7 @@
                                                 {type === 'vm' ? 'VM' : 'CT'} {vmid}
                                             </span>
                                             <span className="text-xs text-gray-500">
-                                                Max Restart: {resource.max_restart || 3}
+                                                Max Restart: {haLimit(resource.max_restart, t('default'))}
                                             </span>
                                         </div>
                                         {canEdit && (

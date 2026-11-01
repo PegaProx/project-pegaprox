@@ -22303,6 +22303,7 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
+                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}

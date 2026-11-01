@@ -12629,23 +12629,29 @@ echo "AGENT_INSTALLED_OK"
     # PROXMOX NATIVE HA INTEGRATION
     # =====================================================
     
-    def get_proxmox_ha_resources(self) -> List[Dict]:
-        
+    def get_proxmox_ha_resources(self, strict: bool = False) -> Optional[List[Dict]]:
+        """The cluster's HA resources. A failed read is [] for the balancer, which only
+        wants a list to skip; strict=True answers None for it, so the HA list route can
+        tell "no guest in HA" from "could not ask" (no connection, non-200, an error)."""
+        unread = None if strict else []
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
-        
+                return unread
+
         try:
             host = self.host
             url = f"https://{host}:{self.api_port}/api2/json/cluster/ha/resources"
             response = self._api_get(url)
-            
+
             if response.status_code == 200:
-                return response.json().get('data', [])
-            return []
+                data = response.json().get('data', [])
+                if strict and not isinstance(data, list):
+                    return None
+                return data
+            return unread
         except Exception as e:
             self.logger.error(f"Error getting Proxmox HA resources: {e}")
-            return []
+            return unread
     
     def get_proxmox_ha_groups(self) -> List[Dict]:
         """Return HA groups in the legacy group shape so the existing UI keeps working.

@@ -6276,8 +6276,9 @@
                                                                 </span>
                                                             </td>
                                                             <td className="p-3">{String(res.node || '-')}</td>
-                                                            <td className="p-3">{res.max_restart !== undefined ? res.max_restart : 1}</td>
-                                                            <td className="p-3">{res.max_relocate !== undefined ? res.max_relocate : 1}</td>
+                                                            {/* a limit the resource leaves out is PVE's default, not a number we know (haLimit, vm_modals.js) */}
+                                                            <td className="p-3">{haLimit(res.max_restart, t('default'))}</td>
+                                                            <td className="p-3">{haLimit(res.max_relocate, t('default'))}</td>
                                                             <td className="p-3">{String(res.group || '-')}</td>
                                                             <td className="p-3 text-gray-400 text-sm max-w-xs truncate">{String(res.comment || '-')}</td>
                                                             <td className="p-3">
@@ -6409,7 +6410,7 @@
                                                             type="number" 
                                                             min="0" 
                                                             max="10" 
-                                                            value={newHaResource.max_restart || 1} 
+                                                            value={newHaResource.max_restart ?? 1} 
                                                             onChange={e => setNewHaResource({...newHaResource, max_restart: parseInt(e.target.value) || 0})} 
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" 
                                                         />
@@ -6420,7 +6421,7 @@
                                                             type="number" 
                                                             min="0" 
                                                             max="10" 
-                                                            value={newHaResource.max_relocate || 1} 
+                                                            value={newHaResource.max_relocate ?? 1} 
                                                             onChange={e => setNewHaResource({...newHaResource, max_relocate: parseInt(e.target.value) || 0})} 
                                                             className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" 
                                                         />
@@ -6506,8 +6507,9 @@
                                                         var payload = { 
                                                             sid: sidVal, 
                                                             state: newHaResource.state || 'started', 
-                                                            max_restart: newHaResource.max_restart || 1, 
-                                                            max_relocate: newHaResource.max_relocate || 1 
+                                                            // 0 is a limit PVE takes as it is, so only a missing value falls back to 1
+                                                            max_restart: newHaResource.max_restart ?? 1,
+                                                            max_relocate: newHaResource.max_relocate ?? 1 
                                                         };
                                                         if (newHaResource.group) payload.group = newHaResource.group;
                                                         if (newHaResource.comment) payload.comment = newHaResource.comment;
