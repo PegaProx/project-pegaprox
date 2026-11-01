@@ -331,6 +331,7 @@
                                         <span className={`w-3 h-3 rounded-full ${
                                             selectedTask.status === 'running' ? 'bg-blue-500 animate-pulse' :
                                             selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'bg-red-500' :
+                                            /^WARNINGS/.test(selectedTask.status || '') ? 'bg-yellow-500' :
                                             'bg-green-500'
                                         }`} />
                                         <div>
@@ -354,6 +355,7 @@
                                         <span className={`font-medium ${
                                             selectedTask.status === 'running' ? 'text-blue-400' :
                                             selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'text-red-400' :
+                                            /^WARNINGS/.test(selectedTask.status || '') ? 'text-yellow-400' :
                                             'text-green-400'
                                         }`}>{selectedTask.status || '-'}</span>
                                     </div>
@@ -519,7 +521,9 @@
                                                 // ('OK' = success, anything else = failure). #590: failed backups came back
                                                 // as 'stopped' + a non-OK exitstatus and slipped through to the green bucket.
                                                 const _ex = task.exitstatus || '';
-                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK');
+                                                // "WARNINGS: n" ended, like in Proxmox: yellow, not red
+                                                const isWarn = !isRunning && /^WARNINGS/.test(_ex);
+                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK' && !isWarn);
                                                 
                                                 return (
                                                     <tr 
@@ -531,6 +535,7 @@
                                                             <span className={`inline-block w-2 h-2 rounded-full ${
                                                                 isRunning ? 'bg-blue-500 animate-pulse' :
                                                                 isFailed ? 'bg-red-500' :
+                                                                isWarn ? 'bg-yellow-500' :
                                                                 'bg-green-500'
                                                             }`} />
                                                         </td>
@@ -553,9 +558,11 @@
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
                                                                 isRunning ? 'bg-blue-500/20 text-blue-400' : 
                                                                 isFailed ? 'bg-red-500/20 text-red-400' : 
+                                                                isWarn ? 'bg-yellow-500/20 text-yellow-400' :
                                                                 'bg-green-500/20 text-green-400'
-                                                            }`}>
-                                                                {task.status || '-'}
+                                                            }`} title={_ex && _ex !== task.status ? _ex : undefined}>
+                                                                {/* a failed task says what Proxmox said, not just 'failed' */}
+                                                                {isFailed && _ex ? _ex : (task.status || '-')}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -2148,6 +2155,7 @@
             // NS: cluster-wide affinity rules (fetched lazily — only when diagram is open)
             const [affinityRules, setAffinityRules] = useState([]);
             const [showAffinity, setShowAffinity] = useState(false);
+            const [affinityUnread, setAffinityUnread] = useState(false);
             // NS May 2026 — storage / network tier toggles. Default OFF so diagram
             // stays uncluttered for users who don't care about infra layers.
             const [showStorage, setShowStorage] = useState(() => {
@@ -3051,11 +3059,19 @@
                                 <button
                                     onClick={() => {
                                         // lazy-fetch affinity rules the first time the user opens the toggle
+                                        // no authFetch in this view, the click used to throw before it toggled
                                         if (!showAffinity && affinityRules.length === 0 && clusterId) {
-                                            authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`)
-                                                .then(r => r && r.ok ? r.json() : null)
-                                                .then(d => setAffinityRules(Array.isArray(d) ? d : (d?.rules || [])))
-                                                .catch(() => {});
+                                            fetch(`${API_URL}/clusters/${clusterId}/affinity-rules`, {
+                                                headers: getAuthHeaders(), credentials: 'include'
+                                            })
+                                                .then(r => r.ok ? r.json() : null)
+                                                .then(d => {
+                                                    const rules = Array.isArray(d) ? d : d?.rules;
+                                                    // a refused or failed read is not "no rules"
+                                                    setAffinityUnread(!Array.isArray(rules) || !!d?.error);
+                                                    setAffinityRules(Array.isArray(rules) ? rules : []);
+                                                })
+                                                .catch(() => setAffinityUnread(true));
                                         }
                                         setShowAffinity(v => !v);
                                     }}
@@ -3068,6 +3084,11 @@
                                     title={t('toggleAffinityEdges') || 'Show / hide affinity rule connections'}>
                                     {showAffinity ? '●' : '○'} {t('affinity') || 'Affinity'}
                                 </button>
+                                {showAffinity && affinityUnread && (
+                                    <span role="status" data-affinity-unread="1" style={{fontSize: 11, color: '#f7b428'}}>
+                                        {t('affinityRulesUnread')}
+                                    </span>
+                                )}
                                 <button
                                     onClick={toggleLegend}
                                     style={{
@@ -6376,9 +6397,33 @@
             const [catFilter, setCatFilter] = React.useState('');
             const [policy, setPolicy] = React.useState([]);
             const [allowDraft, setAllowDraft] = React.useState({});
+            // NS Nov 2026 - how the last read of status and findings went: null before the first
+            // answer, then { ok, error }. A read that failed is no empty list
+            const [readState, setReadState] = React.useState(null);
+            // the same for the policy checks, which have their own read
+            const [policyRead, setPolicyRead] = React.useState(null);
+            // every refresh takes a number; an answer whose number is no longer the latest (another
+            // cluster, another filter, a second click) is dropped instead of drawn over a newer one
+            const readSeq = React.useRef(0);
+            const clusterNow = React.useRef(clusterId);
+            clusterNow.current = clusterId;
+            const shownFor = React.useRef(clusterId);
+
+            // another cluster picked: the last one's counts, rows and checks go before the paint,
+            // and whatever of it is still on the way is dropped
+            React.useLayoutEffect(() => {
+                if (shownFor.current === clusterId) return;
+                shownFor.current = clusterId;
+                readSeq.current++;
+                setStatus(null); setEvents([]); setPolicy([]); setPolicyRead(null);
+                setReadState(null); setExpanded({}); setAllowDraft({}); setBusy(false);
+            }, [clusterId]);
 
             const refresh = async () => {
-                if (!clusterId) return;
+                // a handler of the last cluster that ends after the switch asks for nothing
+                if (!clusterId || clusterNow.current !== clusterId) return;
+                const mine = ++readSeq.current;
+                const stale = () => mine !== readSeq.current;
                 setBusy(true);
                 try {
                     const q = `status=${filter}&limit=200` + (kindFilter ? `&kind=${kindFilter}` : '') + (catFilter ? `&category=${catFilter}` : '');
@@ -6387,23 +6432,33 @@
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/events?${q}`),
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/policy`),
                     ]);
+                    if (stale()) return;
                     const away = (await haLeaderAway(sr)) || (await haLeaderAway(er));
+                    if (stale()) return;
                     setLeaderAway(away);
                     if (away) { setStatus(null); setEvents([]); setPolicy([]); return; }
                     const s = await sr?.json().catch(() => null);
                     const e = await er?.json().catch(() => null);
                     const pj = await pr?.json().catch(() => null);
-                    if (s && !s.error) setStatus(s);
-                    if (e && e.events) setEvents(e.events);
-                    if (pj && pj.checks) {
-                        setPolicy(pj.checks);
+                    if (stale()) return;
+                    // what failed is dropped, so neither old counts nor old rows stand in for it
+                    const statusOk = !!(sr && sr.ok && s && !s.error);
+                    const eventsOk = !!(er && er.ok && e && Array.isArray(e.events));
+                    const policyOk = !!(pr && pr.ok && pj && Array.isArray(pj.checks));
+                    const why = (j) => (j && typeof j.error === 'string' ? j.error : '');
+                    setStatus(statusOk ? s : null);
+                    setEvents(eventsOk ? e.events : []);
+                    setReadState({ ok: statusOk && eventsOk, error: (!eventsOk && why(e)) || (!statusOk && why(s)) || '' });
+                    setPolicy(policyOk ? pj.checks : []);
+                    setPolicyRead({ ok: policyOk, error: policyOk ? '' : why(pj) });
+                    if (policyOk) {
                         setAllowDraft(d => {
                             const next = { ...d };
                             pj.checks.forEach(c => { if (c.allow && next[c.id] === undefined) next[c.id] = c.allow.join(', '); });
                             return next;
                         });
                     }
-                } finally { setBusy(false); }
+                } finally { if (!stale()) setBusy(false); }
             };
 
             // again when forwarding comes or goes: the list is the leader's then, or not
@@ -6452,7 +6507,19 @@
                         body: JSON.stringify({ seed: status && status.baselines === 0 }),
                     });
                     if (r?.ok) {
-                        const j = await r.json();
+                        const j = await r.json().catch(() => ({}));
+                        // a skipped scan answers 200 as well (cluster offline, nothing answered, one
+                        // already running): it compared nothing, so it is no "Scan complete"
+                        if (j.ok !== true) {
+                            const why = j.error === 'cluster offline' ? (t('clusterOffline') || 'Cluster unreachable')
+                                : j.error === 'cluster did not answer' ? (t('driftSkipNoAnswer') || 'Cluster did not answer')
+                                : j.error === 'a scan of this cluster is already running' ? (t('driftScanRunning') || 'A scan of this cluster is already running')
+                                : (j.error || '');
+                            const head = j.status === 'skipped' ? (t('driftScanSkipped') || 'Scan skipped, nothing was compared')
+                                : (t('driftScanFailed') || 'Scan failed');
+                            addToast(why ? `${head}: ${why}` : head, j.status === 'skipped' ? 'warning' : 'error');
+                            return;
+                        }
                         const m = j.seeded_baselines > 0
                             ? `${t('driftSeeded') || 'baseline seeded'}: ${j.seeded_baselines}`
                             : `${j.events_count || 0} ${t('driftEvents') || 'events'}`;
@@ -6560,7 +6627,7 @@
                                 {t('driftDetection') || 'Config Drift Detection'}
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5">
-                                {t('driftDetectionDesc') || 'Snapshots cluster config nightly. Flags any change vs the admin-set baseline.'}
+                                {t('driftDetectionDesc') || 'Snapshots cluster config every 6 hours. Flags any change vs the admin-set baseline.'}
                             </p>
                         </div>
                         <div className="flex gap-2">
@@ -6698,16 +6765,46 @@
                         </div>
                     )}
 
+                    {!leaderAway && policyRead && !policyRead.ok && (
+                        <div data-drift-policy-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-3 text-sm">
+                            <div className="text-red-400">{t('driftPolicyReadFailed') || 'The policy checks could not be read.'}</div>
+                            {policyRead.error && <div className="text-xs text-gray-500 mt-1">{policyRead.error}</div>}
+                        </div>
+                    )}
+
+                    {!leaderAway && readState && !readState.ok && (
+                        <div data-drift-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-6 text-center text-sm">
+                            <div className="text-red-400">{t('driftReadFailed') || 'The drift status or events could not be read, so this view does not know whether the cluster matches its baseline.'}</div>
+                            {readState.error && <div className="text-xs text-gray-500 mt-1">{readState.error}</div>}
+                            <button onClick={refresh} disabled={busy}
+                                className="mt-3 px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50">
+                                {t('retry') || 'Retry'}
+                            </button>
+                        </div>
+                    )}
+
                     {leaderAway ? (
                         <div data-ha-leader-away="drift" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-400">
                             {t('pgHaLeaderAwayView')}
                         </div>
-                    ) : events.length === 0 ? (
-                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
-                            {filter === 'open' ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
-                                              : (t('driftNoEvents') || 'No events for this filter.')}
+                    ) : events.length === 0 ? (!readState ? (
+                        <div data-drift-empty="loading" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {t('loading') || 'Loading...'}
                         </div>
-                    ) : (
+                    ) : readState.ok && status && (
+                        // "matches baseline" only for the whole open list, every kind compared.
+                        // status too: the setters above render one by one outside an event.
+                        // The kinds live in memory: after a start nothing was compared until the
+                        // first scan, which is its own case and not "some kinds were not"
+                        <div data-drift-empty className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {filter !== 'open' || kindFilter || catFilter ? (t('driftNoEvents') || 'No events for this filter.')
+                                : !status.last_scan_at || !Object.keys(status.kinds || {}).length
+                                    ? (t('driftNoScanYet') || 'No scan has run since this server started. Use Scan now.')
+                                : status.baselines > 0 && DRIFT_KINDS.every(k => (status.kinds || {})[k] === 'checked')
+                                    ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
+                                    : (t('driftNoOpenUnchecked') || 'No open drift events, but not every kind was compared with a baseline.')}
+                        </div>
+                    )) : (
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl divide-y divide-proxmox-border/40">
                             {events.map(ev => {
                                 const open = expanded[ev.id];
@@ -14189,9 +14286,12 @@
             
             // NS: Reports/Analytics state
             const [reportData, setReportData] = useState(null);
+            const [reportFailed, setReportFailed] = useState(false);
             const [reportPeriod, setReportPeriod] = useState('day');
             const [reportLoading, setReportLoading] = useState(false);
-            const [topVms, setTopVms] = useState([]);
+            // the top lists: null until the first answer, false when the read failed
+            const [topVms, setTopVms] = useState(null);
+            const [topVmsMem, setTopVmsMem] = useState(null);
             const [reportSubTab, setReportSubTab] = useState('summary');
             const [complianceSubTab, setComplianceSubTab] = useState('hardening');
             // NS Oct 2026 - hardening and drift read with admin.audit or node.maintenance, the change
@@ -16184,12 +16284,15 @@
                     if (response && response.ok) {
                         const data = await response.json();
                         setReportData(data);
+                        setReportFailed(false);
                     } else {
                         setReportData(null);
+                        setReportFailed(true);
                     }
                 } catch (err) {
                     console.error('Failed to load report:', err);
                     setReportData(null);
+                    setReportFailed(true);
                 }
                 setReportLoading(false);
             };
@@ -16202,6 +16305,30 @@
                 metrics: { cpu: d.cpu?.samples || [], memory: d.memory?.samples || [] },
             } : null;
             const reportSeries = React.useMemo(() => reportToSeries(reportData), [reportData]);
+            // NS (Nov 2026): the figures of the tiles, null where the server says it could not read
+            // them (live.unread: the cluster is not connected, the node status or the guest list
+            // did not answer). A stored sample still counts for CPU and memory.
+            const reportNow = React.useMemo(() => {
+                if (!reportData) return null;
+                const live = reportData.live || {}, unread = live.unread || [];
+                const stored = m => (reportData[m]?.samples?.length || 0) > 0;
+                const nodes = !unread.includes('nodes'), guests = !unread.includes('guests');
+                return {
+                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current ?? live.cpu_percent ?? 0) : null,
+                    memory: (stored('memory') || nodes) ? (reportData.memory?.current ?? live.mem_percent ?? 0) : null,
+                    // a live 0 running is a figure, not a reason to show an older snapshot's count
+                    vms: guests ? (live.vms_running ?? reportData.vms_running?.current ?? 0) : null,
+                    cts: guests ? (live.cts_running ?? 0) : null,
+                };
+            }, [reportData]);
+            // where a gauge would be: the same room, a dash and why
+            const reportUnreadGauge = (label, what) => (
+                <div className="gauge-container flex flex-col items-center justify-center" data-report-unread={what}>
+                    <span className="text-3xl font-bold text-gray-500">-</span>
+                    <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
+                    <span className="text-[11px] text-gray-500 text-center">{t('reportValueUnread')}</span>
+                </div>
+            );
             const reportZoom = useChartZoom({
                 preset: reportPeriod, loaded: reportSeries, resetKey: selectedCluster?.id,
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${selectedCluster?.id}/reports/summary?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
@@ -16211,18 +16338,20 @@
             const loadTopVms = async (metric = 'cpu', limit = 10, clusterId = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
+                // the memory list is a ranking of its own: the ten busiest CPUs re-sorted by memory left
+                // out the guests with the most memory in use
+                const put = metric === 'memory' ? setTopVmsMem : setTopVms;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/top-vms?metric=${metric}&limit=${limit}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setTopVms(data);
+                        put(Array.isArray(data) ? data : false);
                     } else {
-                        setTopVms([]);
+                        put(false);
                     }
                 } catch (err) {
                     console.error('Failed to load top VMs:', err);
-                    setTopVms([]);
+                    put(false);
                 }
             };
             
@@ -16279,6 +16408,15 @@
                 setDebsecanInstalling(false);
             };
 
+            // NS Nov 2026 - controls whose apply changes nothing on the node, the server answers them
+            // noop. The catalog of GET /api/hardening/profiles marks them; a server without that field
+            // gets the old list: the informational VS-NfD group and net_protocols, which fs_modules covers
+            const hardenNoopIds = () => {
+                const catalog = Array.isArray(hardenProfiles?.catalog) ? hardenProfiles.catalog : [];
+                if (catalog.some(c => c && 'noop' in c)) return new Set(catalog.filter(c => c && c.noop).map(c => c.id));
+                return new Set(['net_protocols', ...Object.keys(hardeningControlInfo(t).vsnfdControls)]);
+            };
+
             // CIS hardening check/apply
             const checkHardening = async (nodeName, verbose = false, profile = '') => {
                 if (!selectedCluster?.id || !nodeName) return;
@@ -16298,12 +16436,13 @@
                         setHardenStatus(data);
                         // pre-select all controls that are NOT yet applied
                         const sel = {};
+                        const noop = hardenNoopIds();
                         Object.entries(data.controls || {}).forEach(([id, v]) => {
                             // verbose: v is {status, evidence}, non-verbose: v is bool. LW Oct 2026 -
                             // null is a control that was not checked: its state is unknown, so it
                             // is not ticked for an apply on its own
                             const applied = (v && typeof v === 'object') ? v.status : v;
-                            if (applied === false) sel[id] = true;
+                            if (applied === false && !noop.has(id)) sel[id] = true;
                         });
                         setHardenSelected(sel);
                     } else {
@@ -16346,6 +16485,7 @@
                 // ones like fail2ban). Per-control HTTP overhead is negligible vs. SSH runtime.
                 const accumulated = {};
                 let appliedOk = 0;
+                let refused = '';
                 try {
                     for (let i = 0; i < toApply.length; i++) {
                         const ctrlId = toApply[i];
@@ -16369,14 +16509,23 @@
                             } else {
                                 const errData = await resp?.json().catch(() => ({}));
                                 accumulated[ctrlId] = { success: false, error: errData?.error || `HTTP ${resp?.status}` };
+                                // not a Proxmox VE cluster: every control gets the same answer
+                                if (errData?.code === 'PVE_ONLY') refused = errData.error;
                             }
                         } catch (perCtrlErr) {
                             accumulated[ctrlId] = { success: false, error: String(perCtrlErr) };
                         }
                         // Live UI update — show per-control result as it lands
                         setHardenResults({ ...accumulated });
+                        if (refused) break;
                     }
-                    addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`, appliedOk === toApply.length ? 'success' : 'warning');
+                    // success only counts what ran and passed its check afterwards; the ones that
+                    // change nothing (noop) are not applied and get named apart
+                    const noopCount = Object.values(accumulated).filter(r => r.noop).length;
+                    if (refused) addToast(refused, 'error');
+                    else addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`
+                        + (noopCount ? ` · ${fillText(t('hardenNoopCount'), { n: noopCount })}` : ''),
+                        appliedOk === toApply.length ? 'success' : 'warning');
                     // refresh status
                     checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
@@ -16405,7 +16554,11 @@
                         const data = await resp.json();
                         setHardenResults({ ...(data.results || {}) });
                         const n = data.restored || 0;
-                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`, n === toRoll.length ? 'success' : 'warning');
+                        // restored counts full rollbacks only; one that brought back some of its files is named apart
+                        const partial = Object.values(data.results || {}).filter(r => r && r.partial).length;
+                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`
+                            + (partial ? ` · ${fillText(t('hardenRollbackPartialCount'), { n: partial })}` : ''),
+                            n === toRoll.length ? 'success' : 'warning');
                         checkHardening(hardenNode, hardenVerbose, hardenProfile);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
@@ -16479,6 +16632,7 @@
                 if (activeTab === 'reports' && selectedCluster?.id) {
                     loadReportSummary(reportPeriod, selectedCluster.id);
                     loadTopVms('cpu', 10, selectedCluster.id);
+                    loadTopVms('memory', 10, selectedCluster.id);
                 }
             }, [activeTab, reportPeriod, selectedCluster?.id]);
             
@@ -18692,7 +18846,11 @@
                                 } else if (!statusResp || statusResp.status === 503 || statusResp.status === 504 || statusResp.status === 502) {
                                     // #594: a null here means the request aborted (timeout) or the network
                                     // failed — treat a slow cluster the same as a 5xx and back it off.
-                                    bumpBackoff();
+                                    // A 502 that names the reads Proxmox refused came back at once, there is
+                                    // no load to take off it: poll it next round like a good one
+                                    const said = statusResp && statusResp.status === 502
+                                        ? await statusResp.json().catch(() => null) : null;
+                                    if (!(said && Array.isArray(said.unread))) bumpBackoff();
                                 }
 
                                 // get vms/cts for the top guests table + topology
@@ -21752,7 +21910,8 @@
                                                                 <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />
                                                             )}
                                                         </div>
-                                                        <button onClick={() => loadTabData('overview')} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
+                                                        {/* NS Nov 2026 - loadTabData only exists in the node modal, the click threw; same reads as the Cloud shell's refresh */}
+                                                        <button onClick={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
                                                             <Icons.RotateCw className="w-3 h-3 inline mr-1" />{t('refreshData') || 'Refresh'}
                                                         </button>
                                                     </div>
@@ -21844,6 +22003,10 @@
                                                     const clusterStatus = allClusterMetrics[selectedCluster.id]?.data?.cluster;
                                                     // #326: standalone nodes have no corosync -> no quorum concept, don't show red badge
                                                     const isStandalone = clusterStatus?.standalone === true;
+                                                    // no status read yet (or every read refused): no guess from the node rows,
+                                                    // that is when the quorum is most in doubt. A read status without quorate
+                                                    // (XCP-ng) keeps the guess it always had
+                                                    const quorumUnread = !clusterStatus;
                                                     const isQuorate = clusterStatus?.quorate != null ? !!clusterStatus.quorate : onlineCount > (totalNodes || onlineCount) / 2;
                                                     return (
                                                         <div className="corp-services-bar">
@@ -21857,6 +22020,8 @@
                                                                 <span className="corp-svc-label">{isStandalone ? 'Mode' : 'Quorum'}</span>
                                                                 {isStandalone ? (
                                                                     <span className="corp-badge" style={{background: 'rgba(56,139,253,0.12)', color: '#58a6ff', border: '1px solid rgba(56,139,253,0.25)', fontSize: 11, padding: '0 5px'}}>Standalone</span>
+                                                                ) : quorumUnread ? (
+                                                                    <span className="corp-badge corp-quorum-unread" style={{color: 'var(--corp-text-muted)', border: '1px solid var(--corp-border-medium)', fontSize: 11, padding: '0 5px'}}>-</span>
                                                                 ) : (
                                                                     <span className="corp-badge" style={isQuorate
                                                                         ? {background: 'rgba(96,181,21,0.12)', color: '#60b515', border: '1px solid rgba(96,181,21,0.25)', fontSize: 11, padding: '0 5px'}
@@ -22149,12 +22314,12 @@
                                                                     if (d < 86400) return `${Math.floor(d / 3600)}h ${t('timeAgo')}`;
                                                                     return `${Math.floor(d / 86400)}d ${t('timeAgo')}`;
                                                                 };
-                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : '#728b9a';
+                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : /^WARNINGS/.test(s || '') ? '#f7b428' : '#728b9a';
                                                                 return (
                                                                     <div>
                                                                         {recent.map((task, i) => (
                                                                             <div key={task.upid || i} className="corp-tasks-item">
-                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK') ? 'failed' : (task.status || task.exitstatus))}}></span>
+                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK' && !/^WARNINGS/.test(task.exitstatus)) ? 'failed' : (task.status || task.exitstatus))}}></span>
                                                                                 <span className="corp-tasks-desc">{task.type || task.worker_type || '?'}{task.id ? ` ${task.id}` : ''}</span>
                                                                                 <span className="corp-tasks-node">{task.node || ''}</span>
                                                                                 <span className="corp-tasks-time">{relTime(task.starttime || task.pstart)}</span>
@@ -22195,6 +22360,7 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
+                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}
@@ -22836,7 +23002,7 @@
 
                                         {/* Datastore Tab */}
                                         {activeTab === 'datastore' && (
-                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} sharedDatastoreData={clusterDatastores} />
+                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} initialPick={selectedSidebarDatastore} sharedDatastoreData={clusterDatastores} />
                                         )}
 
                                         {/* Automation Tab - NS Jan 2026 - Combines Schedules, Tags, Alerts, Affinity, Scripts */}
@@ -23520,7 +23686,8 @@
                                                                 const notChecked = (id in controls) && _notChecked(ctrlData);
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
-                                                                const failed = hardenResults?.[id]?.success === false;
+                                                                // a noop answer is "nothing to apply", not a failed apply
+                                                                const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                 // NS Apr 2026 — three live states during apply:
                                                                 //   inFlight = this control is currently being applied (spinner)
                                                                 //   queued   = selected but not yet processed (dim badge)
@@ -23570,7 +23737,7 @@
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
                                                                                 {notChecked && <span className="text-xs bg-gray-500/20 text-gray-300 px-2 py-0.5 rounded" title={(isVerboseData && ctrlData.not_checked) || t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>{t('hardenNotCheckedBadge') || 'Not checked'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
-                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{t('failed') || 'Failed'}</span>}
+                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={hardenResults[id].error || undefined}>{t('failed') || 'Failed'}</span>}
                                                                             </div>
                                                                             <p className="text-xs text-gray-400 mt-1">{info.desc}</p>
                                                                             <p className="text-xs text-gray-600 mt-0.5">{t('pveImpact') || 'PVE Impact'}: {info.impact}</p>
@@ -23696,7 +23863,7 @@
                                                                         const v = controls[id];
                                                                         const isObj = v && typeof v === 'object';
                                                                         const applied = isObj ? v.status === true : v === true;
-                                                                        const failed = hardenResults?.[id]?.success === false;
+                                                                        const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                         return [info.ref || '-', info.title || id, statusLbl(applied, failed, (id in controls) && _notChecked(v)), (info.impact || '').slice(0, 90)];
                                                                     });
                                                                     blocks.push({
@@ -23912,7 +24079,8 @@
                                                                     <div className="flex gap-3 text-xs">
                                                                         <button onClick={() => {
                                                                             const sel = {};
-                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false) sel[id] = true; });
+                                                                            const noop = hardenNoopIds();
+                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false && !noop.has(id)) sel[id] = true; });
                                                                             setHardenSelected(sel);
                                                                         }} className="text-blue-400 hover:text-blue-300">{t('selectAll') || 'Select all'}</button>
                                                                         <button onClick={() => setHardenSelected({})} className="text-gray-500 hover:text-gray-400">{t('deselectAll') || 'Deselect all'}</button>
@@ -24003,7 +24171,7 @@
                                                                     </button>
                                                                 ))}
                                                                 <button
-                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); }}
+                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); loadTopVms('memory'); }}
                                                                     className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
                                                                     title={t('refresh') || 'Refresh'}
                                                                 >
@@ -24044,8 +24212,11 @@
                                                                 <button
                                                                     onClick={() => {
                                                                         const period = reportPeriod === 'hour' ? 'Last Hour' : reportPeriod === 'day' ? 'Last 24h' : 'Last Week';
-                                                                        const topCpuRows = topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]);
-                                                                        const topMemRows = [...topVms].sort((a,b)=>(b.mem_percent||0)-(a.mem_percent||0)).slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]);
+                                                                        // a list or figure that was not read says so, it is no 0 and no empty list
+                                                                        const unreadRow = [['-', 'Could not be read', '-']];
+                                                                        const said = (v, unit = '') => v == null ? '-' : `${v}${unit}`;
+                                                                        const topCpuRows = Array.isArray(topVms) ? topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]) : unreadRow;
+                                                                        const topMemRows = Array.isArray(topVmsMem) ? topVmsMem.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]) : unreadRow;
                                                                         generatePegaProxPDF({
                                                                             title: 'Cluster Report',
                                                                             subtitle: period,
@@ -24053,10 +24224,10 @@
                                                                             filename: `pegaprox-report-${selectedCluster?.name || 'cluster'}.pdf`,
                                                                             content: [
                                                                                 { type: 'stats', data: [
-                                                                                    { label: 'CPU', value: `${reportData?.cpu?.current || 0}%`, color: '#3b82f6' },
-                                                                                    { label: 'Memory', value: `${reportData?.memory?.current || 0}%`, color: '#22c55e' },
-                                                                                    { label: 'VMs', value: String(reportData?.live?.vms_running || 0), color: '#f97316' },
-                                                                                    { label: 'Containers', value: String(reportData?.live?.cts_running || 0), color: '#a855f7' },
+                                                                                    { label: 'CPU', value: said(reportNow?.cpu, '%'), color: '#3b82f6' },
+                                                                                    { label: 'Memory', value: said(reportNow?.memory, '%'), color: '#22c55e' },
+                                                                                    { label: 'VMs', value: said(reportNow?.vms), color: '#f97316' },
+                                                                                    { label: 'Containers', value: said(reportNow?.cts), color: '#a855f7' },
                                                                                 ]},
                                                                                 { type: 'spacer', height: 4 },
                                                                                 { type: 'table', title: 'Top VMs by CPU', columns: ['#', 'VM', 'CPU'], rows: topCpuRows },
@@ -24078,12 +24249,25 @@
                                                             </div>
                                                         ) : (
                                                             <div id="report-summary-content" className="space-y-6">
+                                                                {/* a summary that could not be read shows no 0 % and no 0 VMs */}
+                                                                {reportFailed && (
+                                                                    <div data-report-unread="summary" className="bg-proxmox-card border border-yellow-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3 text-sm text-yellow-400">
+                                                                        <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                                                        <span className="flex-1 min-w-0">{t('reportUnread')}</span>
+                                                                        <button onClick={() => loadReportSummary(reportPeriod)}
+                                                                            className="px-3 py-1 text-xs rounded border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500">
+                                                                            {t('retry') || 'Retry'}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
                                                                 {/* Live Metrics — Gauge circles + counters */}
-                                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                                {reportNow && <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                                                     {/* CPU Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.cpu?.current || reportData?.live?.cpu_percent || 0} label="CPU" color="#3b82f6" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.cpu != null
+                                                                            ? <Gauge value={reportNow.cpu} label="CPU" color="#3b82f6" />
+                                                                            : reportUnreadGauge('CPU', 'cpu')}
+                                                                        {reportData?.data_points > 0 && reportData?.cpu?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.cpu?.avg || 0}% &middot; {reportData?.cpu?.min || 0}%-{reportData?.cpu?.max || 0}%
                                                                             </div>
@@ -24094,8 +24278,10 @@
                                                                     </div>
                                                                     {/* Memory Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.memory?.current || reportData?.live?.mem_percent || 0} label="Memory" color="#22c55e" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.memory != null
+                                                                            ? <Gauge value={reportNow.memory} label="Memory" color="#22c55e" />
+                                                                            : reportUnreadGauge('Memory', 'memory')}
+                                                                        {reportData?.data_points > 0 && reportData?.memory?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.memory?.avg || 0}% &middot; {reportData?.memory?.min || 0}%-{reportData?.memory?.max || 0}%
                                                                             </div>
@@ -24106,18 +24292,20 @@
                                                                     </div>
                                                                     {/* VMs count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-orange-400">{reportData?.live?.vms_running || reportData?.vms_running?.current || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.vms == null ? 'text-gray-500' : 'text-orange-400'}`} data-report-unread={reportNow.vms == null ? 'vms' : undefined}>{reportNow.vms ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">VMs {t('running').toLowerCase()}</div>
+                                                                        {reportNow.vms == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                         {reportData?.vms_running?.samples?.length > 2 && (
                                                                             <div className="mt-2"><Sparkline data={reportData.vms_running.samples} width={80} height={20} color="#f97316" /></div>
                                                                         )}
                                                                     </div>
                                                                     {/* Container count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-purple-400">{reportData?.live?.cts_running || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.cts == null ? 'text-gray-500' : 'text-purple-400'}`} data-report-unread={reportNow.cts == null ? 'cts' : undefined}>{reportNow.cts ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">Container</div>
+                                                                        {reportNow.cts == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                     </div>
-                                                                </div>
+                                                                </div>}
 
                                                                 {/* Timeline Charts — CPU & Memory over time */}
                                                                 {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (
@@ -24164,7 +24352,9 @@
                                                                             {t('topVmsCpu') || 'Highest CPU Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
+                                                                            {topVms === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-cpu">{t('reportValueUnread')}</p>
+                                                                            ) : topVms?.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
                                                                                 const cpuPct = Math.min((vm.cpu || 0) * 100, 100);
                                                                                 const barColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#eab308' : '#3b82f6';
                                                                                 return (
@@ -24178,7 +24368,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{cpuPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVms && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -24191,7 +24381,9 @@
                                                                             {t('topVmsMem') || 'Highest Memory Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? [...topVms].sort((a, b) => (b.mem_percent || 0) - (a.mem_percent || 0)).slice(0, 5).map((vm, idx) => {
+                                                                            {topVmsMem === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-mem">{t('reportValueUnread')}</p>
+                                                                            ) : topVmsMem?.length > 0 ? topVmsMem.slice(0, 5).map((vm, idx) => {
                                                                                 const memPct = Math.min(vm.mem_percent || 0, 100);
                                                                                 const barColor = memPct > 80 ? '#ef4444' : memPct > 50 ? '#eab308' : '#22c55e';
                                                                                 return (
@@ -24205,7 +24397,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{memPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVmsMem && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>

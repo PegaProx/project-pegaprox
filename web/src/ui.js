@@ -1951,6 +1951,33 @@
             { keys: ['Shift', '?'],                     desc: 'Show keyboard shortcuts' },
         ];
 
+        // NS Nov 2026 - Escape for the big modals that hold their own dialogs (Settings,
+        // My Profile): it closes like the X, but only when the key is theirs. Not when a
+        // handler before took it, not on a native select (its popup takes Escape), and
+        // not while one of their inner dialogs, or anything above them, holds the middle
+        // of the window.
+        function useEscapeToClose(isOpen, onClose, layerRef) {
+            const closeRef = React.useRef(onClose);
+            closeRef.current = onClose;
+            React.useEffect(() => {
+                if (!isOpen) return;
+                const onKey = (e) => {
+                    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+                    if (e.target && e.target.tagName === 'SELECT') return;
+                    const layer = layerRef.current;
+                    let el = layer && document.elementFromPoint(window.innerWidth / 2, window.innerHeight / 2);
+                    if (!el || !layer.contains(el)) return;
+                    for (; el && el !== layer; el = el.parentElement) {
+                        if (window.getComputedStyle(el).position === 'fixed') return;
+                    }
+                    e.preventDefault();
+                    closeRef.current();
+                };
+                window.addEventListener('keydown', onKey);
+                return () => window.removeEventListener('keydown', onKey);
+            }, [isOpen]);
+        }
+
         function KeyboardShortcutsModal({ open, onClose }) {
             React.useEffect(() => {
                 if (!open) return;

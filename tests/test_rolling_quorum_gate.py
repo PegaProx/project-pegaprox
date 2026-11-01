@@ -5,8 +5,7 @@ before each node goes into maintenance and before its update, it reads /cluster/
 votes of corosync.conf and the QDevice, and goes on only when the cluster stays quorate with
 that node down. Otherwise it pauses with the reason 'quorum' (rolling_runs.change, the _hold
 of the worker); Continue looks again, Continue anyway takes that one node down all the same,
-Cancel ends the run. A scheduled run pauses the same way and hands the run to the worker of
-a run started by hand on Continue.
+Cancel ends the run. A scheduled run is run by the same worker and pauses the same way.
 
 Without the gate the runs below walk straight into maintenance with a node of a three-node
 cluster already down (test_a_node_already_down_holds_the_run_before_maintenance fails on
@@ -329,7 +328,7 @@ def test_a_restart_while_held_looks_again_on_continue(api, seed, db, root, fast,
     waiting.join(10)
 
 
-def test_a_scheduled_run_pauses_and_continue_hands_it_to_the_worker(api, seed, db, root, monkeypatch):  # noqa: F811
+def test_a_scheduled_run_pauses_for_its_quorum_and_continue_goes_on(api, seed, db, root, monkeypatch):  # noqa: F811
     import pegaprox.api.schedules as sch
     import pegaprox.api.settings as st
     from test_rolling_runs_survive_restart import _FastTime
@@ -338,7 +337,9 @@ def test_a_scheduled_run_pauses_and_continue_hands_it_to_the_worker(api, seed, d
     cluster = api.set_manager(CID, _Voting(status=_status(online=('pve1', 'pve2'))))
     sch.execute_scheduled_rolling_update(cluster, CID, {'config': {'include_reboot': False,
                                                                     'skip_up_to_date': False}})
-    _worker_gone()
+    # the worker of a run started by hand: it waits in the pause for Continue or Cancel
+    assert _paused(cluster)
+    assert rolling_runs.worker_here(CID, cluster)
     state = rolling_runs.current(cluster)
     assert state['status'] == 'paused' and state['paused_reason'] == 'quorum', state['logs']
     assert state['resume_at'] == {'index': 0, 'phase': 'maintenance'}

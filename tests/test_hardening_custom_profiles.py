@@ -115,7 +115,8 @@ def test_the_list_names_the_builtin_profiles_and_the_catalog(api, seed):
     assert entries['backup_dns'] == {'id': 'backup_dns', 'templated': True,
                                      'param_keys': ['dns1', 'dns2'],
                                      'defaults': {'dns1': '1.1.1.1', 'dns2': '9.9.9.9'},
-                                     'rollback': bool(catalog['backup_dns'].get('backup_files'))}
+                                     'rollback': bool(catalog['backup_dns'].get('backup_files')),
+                                     'noop': False}
     assert entries['ssh_perms']['templated'] is False and entries['ssh_perms']['param_keys'] == []
     assert entries['ssh_crypto']['rollback'] is True
     assert body['format'] == 'pegaprox-hardening-profile' and body['format_version'] == 1
@@ -507,7 +508,8 @@ def test_backup_dns_looks_for_the_address_itself(tmp_path):
     conf.write_text('nameserver 110.0.0.53\n')
     cmd = _apply_cmd('backup_dns', 'dns1', '10.0.0.53').replace('/etc/resolv.conf', str(conf))
     p = subprocess.run(['bash', '-c', cmd], capture_output=True, text=True, timeout=10)
-    assert p.stdout.strip() == 'DONE', p.stderr
+    # ran to its end; the exit status and the control's own check follow DONE
+    assert p.stdout.splitlines()[0] == 'DONE', p.stderr
     assert conf.read_text().splitlines() == ['nameserver 110.0.0.53', 'nameserver 10.0.0.53',
                                              'nameserver 9.9.9.9']
     # there already: nothing added
