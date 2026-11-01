@@ -165,3 +165,13 @@ def test_the_restore_test_wait_takes_warnings_as_done(said, ok):
     # a manager without the per-task status read: the wait falls back to the task list
     lister = types.SimpleNamespace(get_tasks=_mgr([row]).get_tasks)
     assert backup_verify._wait_task(lister, row['upid'], timeout=5) is ok
+
+
+@pytest.mark.parametrize('exit_text,ok', [('OK', True), ('WARNINGS: 1', True), ('unable to restore', False)])
+def test_the_restore_test_wait_reads_the_exit_text_of_a_stopped_row(exit_text, ok):
+    # the node task shape: status 'stopped' and Proxmox's text in exitstatus
+    from pegaprox.core import backup_verify
+    upid = 'UPID:pve1:0000ABCD:0001:6720A000:qmrestore:31:root@pam:'
+    lister = types.SimpleNamespace(
+        get_tasks=lambda limit=50: [{'upid': upid, 'status': 'stopped', 'exitstatus': exit_text}])
+    assert backup_verify._wait_task(lister, upid, timeout=5) is ok
