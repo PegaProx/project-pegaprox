@@ -5687,10 +5687,11 @@
                     ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
                     : (vmsRunning + vmsStopped);
 
+                // a status never read is no cluster at 0 %: no figures and no health for it
+                const hasMetrics = !!allMetrics[cluster.id]?.data;
                 // health score - weighted average of metrics
-                const healthScore = cluster.connected
-                    ? Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)))
-                    : 0;
+                const healthScore = !cluster.connected ? 0 : !hasMetrics ? null
+                    : Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)));
 
                 const alerts = [];
                 if (!cluster.connected) alerts.push({ type: 'error', msg: 'Offline' });
@@ -5707,8 +5708,8 @@
                     nodeCount, onlineNodes, offlineNodes,
                     avgCpu, avgMem, avgStorage,
                     totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
-                    healthScore: Math.round(healthScore),
-                    hasMetrics: nodeCount > 0 || cluster.connected,
+                    healthScore: healthScore == null ? null : Math.round(healthScore),
+                    hasMetrics,
                     lastUpdate,
                     alerts,
                     cpuHistory: cpuHistory[cluster.id] || [],
@@ -5741,9 +5742,9 @@
                 totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
                 runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
                 stoppedVms: clusterStats.reduce((acc, c) => acc + c.stoppedVms, 0),
-                avgCpu: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgCpu, 0) / withMetrics.length : 0,
-                avgMem: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgMem, 0) / withMetrics.length : 0,
-                avgStorage: withMetrics.length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgStorage, 0) / withMetrics.length : 0,
+                avgCpu: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgCpu, 0) / withMetrics.length : 0,
+                avgMem: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgMem, 0) / withMetrics.length : 0,
+                avgStorage: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgStorage, 0) / withMetrics.length : 0,
                 totalAlerts: clusterStats.reduce((acc, c) => acc + c.alerts.length, 0)
             };
 
@@ -5843,7 +5844,7 @@
                                             <span className={`text-xs font-medium ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`}>{cluster.alerts.length}</span>
                                         </div>
                                     )}
-                                    {cluster.connected ? (
+                                    {cluster.connected ? cluster.healthScore != null && (
                                         <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
                                             <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
                                         </div>
@@ -5996,33 +5997,37 @@
                                                     <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
                                                 </span>
                                             </td>
-                                            <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
-                                            <td><span style={{color: '#60b515'}}>{cluster.runningVms}</span> / <span style={{color: '#728b9a'}}>{cluster.stoppedVms}</span></td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            {cluster.hasMetrics ? (<>
+                                                <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
+                                                <td><span style={{color: '#60b515'}}>{cluster.runningVms}</span> / <span style={{color: '#728b9a'}}>{cluster.stoppedVms}</span></td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            </>) : (
+                                                <td colSpan={6} style={{color: 'var(--corp-text-muted)'}}>{t('noDataAvailable') || 'No data available'}</td>
+                                            )}
                                         </tr>
                                     );
                                 })}
@@ -7607,10 +7612,12 @@
                     ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
                     : (vmsRunning + vmsStopped);
                 
+                // only a status that was read has figures; before that (or while every read
+                // is refused) the card says so instead of 0/0 and a green 100 %
+                const hasMetrics = !!allMetrics[cluster.id]?.data;
                 // health score calculation - cpu/ram/storage weighted
-                const healthScore = cluster.connected 
-                    ? Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)))
-                    : 0;
+                const healthScore = !cluster.connected ? 0 : !hasMetrics ? null
+                    : Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)));
                 
                 // Count alerts/warnings
                 const alerts = [];
@@ -7628,8 +7635,8 @@
                     nodeCount, onlineNodes, offlineNodes,
                     avgCpu, avgMem, avgStorage,
                     totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
-                    healthScore: Math.round(healthScore),
-                    hasMetrics: nodeCount > 0 || cluster.connected,
+                    healthScore: healthScore == null ? null : Math.round(healthScore),
+                    hasMetrics,
                     lastUpdate,
                     alerts,
                     cpuHistory: cpuHistory[cluster.id] || [],
@@ -7790,7 +7797,7 @@
                                     )}
                                     
                                     {/* Health Badge */}
-                                    {cluster.connected && (
+                                    {cluster.connected && cluster.healthScore != null && (
                                         <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
                                             <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
                                         </div>
@@ -7960,36 +7967,40 @@
                                                     <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
                                                 </span>
                                             </td>
-                                            <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
-                                            <td>
-                                                <span style={{color: 'var(--color-success)'}}>{cluster.runningVms}</span>
-                                                <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.stoppedVms}</span>
-                                            </td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td>
-                                                <div className="flex items-center gap-1.5">
-                                                    <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
-                                                    <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
-                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
-                                                    </span>
-                                                </div>
-                                            </td>
-                                            <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            {cluster.hasMetrics ? (<>
+                                                <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
+                                                <td>
+                                                    <span style={{color: 'var(--color-success)'}}>{cluster.runningVms}</span>
+                                                    <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.stoppedVms}</span>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            </>) : (
+                                                <td colSpan={6} style={{color: 'var(--corp-text-muted)'}}>{t('noDataAvailable') || 'No data available'}</td>
+                                            )}
                                         </tr>
                                     );
                                 })}

@@ -334,6 +334,7 @@
             }, [initialSection]);
             const [loading, setLoading] = useState(true);
             const [dcStatus, setDcStatus] = useState(null);
+            const [dcStatusError, setDcStatusError] = useState(null);
             const [clusterNodes, setClusterNodes] = useState([]);
             const [joinInfo, setJoinInfo] = useState(null);
             const [showJoinInfo, setShowJoinInfo] = useState(false);
@@ -1073,7 +1074,16 @@
                     
                     const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14] = results;
 
-                    if (r1?.ok) setDcStatus(await r1.json());
+                    // NS Nov 2026 - a status read that failed left the figures of the cluster
+                    // shown before on screen: show that it was not read instead
+                    if (r1?.ok) {
+                        setDcStatus(await r1.json());
+                        setDcStatusError(null);
+                    } else {
+                        const why = r1 ? await r1.json().catch(() => null) : null;
+                        setDcStatus(null);
+                        setDcStatusError({ detail: (why && why.error) || (r1 ? `HTTP ${r1.status}` : '') });
+                    }
                     if (r2?.ok) {
                         const tmp = await r2.json();
                         
@@ -1977,6 +1987,12 @@
                             );
                         })()}
                         {/* Summary */}
+                        {activeSection === 'summary' && !dcStatus && dcStatusError && (
+                            <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm">
+                                <div className="text-red-400">{t('dcStatusNotRead') || 'The cluster status could not be read. No figures are shown until a read succeeds.'}</div>
+                                {dcStatusError.detail && <div className="text-xs text-gray-400 mt-1">{dcStatusError.detail}</div>}
+                            </div>
+                        )}
                         {activeSection === 'summary' && dcStatus && (
                             <>
                                 <div className="grid grid-cols-2 gap-6">

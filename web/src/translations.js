@@ -1132,6 +1132,7 @@
                 showing: 'Zeige',
                 perPage: 'Pro Seite',
                 loadingDatacenter: 'Lade Datacenter Daten...',
+                dcStatusNotRead: 'Der Clusterstatus konnte nicht gelesen werden. Zahlen erscheinen erst, wenn das Lesen wieder gelingt.',
                 subscriptions: 'Subscriptions',
 
                 // Cluster
@@ -9040,6 +9041,7 @@
                 showing: 'Showing',
                 perPage: 'Per page',
                 loadingDatacenter: 'Loading datacenter data...',
+                dcStatusNotRead: 'The cluster status could not be read. No figures are shown until a read succeeds.',
                 subscriptions: 'Subscriptions',
 
                 // Cluster
@@ -16285,6 +16287,7 @@
                 showing: '显示中',
                 perPage: '每页',
                 loadingDatacenter: '正在加载数据中心数据...',
+                dcStatusNotRead: '无法读取集群状态。读取成功之前不显示任何数据。',
                 subscriptions: '订阅',
                 clusters: '集群',
                 noClusterSelected: '未选择集群 - 在侧栏中选择一个。',
@@ -23127,6 +23130,7 @@
                 showing: 'Wyświetlanie',
                 perPage: 'Na stronę',
                 loadingDatacenter: 'Ładowanie danych centrum danych...',
+                dcStatusNotRead: 'Nie udało się odczytać stanu klastra. Do czasu udanego odczytu nie są pokazywane żadne liczby.',
                 subscriptions: 'Subskrypcje',
                 clusters: 'Klastry',
                 noClusterSelected: 'Nie wybrano klastra',
@@ -29458,6 +29462,7 @@
                 showing: 'Affichant',
                 perPage: 'Par page',
                 loadingDatacenter: 'Chargement...',
+                dcStatusNotRead: "L'état du cluster n'a pas pu être lu. Aucun chiffre n'est affiché tant qu'une lecture n'a pas réussi.",
 
                 // Cluster
                 clusters: 'Clusters',
@@ -36687,6 +36692,7 @@
                 showing: 'Mostrando',
                 perPage: 'Por página',
                 loadingDatacenter: 'Cargando datos de datacenter...',
+                dcStatusNotRead: 'No se pudo leer el estado del clúster. No se muestran cifras hasta que una lectura tenga éxito.',
 
                 // Cluster
                 clusters: 'Clústeres',
@@ -44015,6 +44021,7 @@
                 showing: 'Mostrando',
                 perPage: 'Por página',
                 loadingDatacenter: 'Carregando dados do datacenter...',
+                dcStatusNotRead: 'Não foi possível ler o estado do cluster. Nenhum número é mostrado até que uma leitura seja bem-sucedida.',
 
                 // Cluster
                 clusters: 'Clusters',
@@ -50993,6 +51000,7 @@
                 showing: '표시',
                 perPage: '페이지당',
                 loadingDatacenter: '데이터센터 데이터 로딩 중...',
+                dcStatusNotRead: '클러스터 상태를 읽을 수 없습니다. 읽기에 성공할 때까지 수치는 표시되지 않습니다.',
 
                 // Cluster
                 clusters: '클러스터',
@@ -58396,6 +58404,7 @@
                 showing: 'Visualizzando',
                 perPage: 'Per pagina',
                 loadingDatacenter: 'Caricamento dati datacenter...',
+                dcStatusNotRead: 'Non è stato possibile leggere lo stato del cluster. Nessun valore viene mostrato finché una lettura non riesce.',
 
                 // Cluster
                 clusters: 'Cluster',

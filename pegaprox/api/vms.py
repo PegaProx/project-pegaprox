@@ -53,6 +53,7 @@ from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.api.helpers import node_shell_address
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
+from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
                                   node_maintenance_for_caller)
@@ -225,8 +226,38 @@ def get_datacenter_status(cluster_id):
                 pass  # best-effort; user sees the offline state this round
             return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
 
-        status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
-        resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
+        # NS Nov 2026 - a read Proxmox refused (401, 403, a 500 from pmxcfs) was taken as an
+        # empty list, and the answer was a 200 with zero nodes, zero guests and standalone,
+        # which every view showed as the cluster's real state. Say it was not read instead:
+        # the pollers keep what they had. A status list with no node in it is no answer either.
+        status_data = (status_resp.json().get('data') or []) if status_resp.status_code == 200 else None
+        resources_data = (resources_resp.json().get('data') or []) if resources_resp.status_code == 200 else None
+        unread = {}
+        if status_data is None:
+            unread['cluster/status'] = f"HTTP {status_resp.status_code}"
+        else:
+            listed = sum(1 for s in status_data if s.get('type') == 'node')
+            if not listed:
+                unread['cluster/status'] = 'no node listed'
+            elif listed > 1 and not any(s.get('type') == 'cluster' for s in status_data):
+                # one node without a cluster entry is a node in no cluster, several are a
+                # list that lost the entry with the quorum (as rolling_runs.quorum_facts reads it)
+                unread['cluster/status'] = 'several nodes but no cluster entry'
+        if resources_data is None:
+            unread['cluster/resources'] = f"HTTP {resources_resp.status_code}"
+        if unread:
+            why = ', '.join(f"{name} ({reason})" for name, reason in unread.items())
+            logging.warning(f"[API] Cluster {cluster_id}: Proxmox did not answer {why} for datacenter/status")
+            # what Proxmox answered for the read that failed, its 401/403 marked like upstream_failure
+            # does it (#1142); still a 502, and a 200 here is a list that said too little
+            codes = [resp.status_code for name, resp in (('cluster/status', status_resp),
+                                                         ('cluster/resources', resources_resp)) if name in unread]
+            upstream = (next((c for c in codes if c in UPSTREAM_AUTH_STATUSES), None)
+                        or next((c for c in codes if c != 200), codes[0]))
+            body = {'error': f"Proxmox did not answer {why}", 'unread': list(unread), 'upstream_status': upstream}
+            if upstream in UPSTREAM_AUTH_STATUSES:
+                body['code'] = UPSTREAM_AUTH
+            return jsonify(body), 502
 
         # calc summary
         nodes_online = sum(1 for s in status_data if s.get('type') == 'node' and s.get('online', 0) == 1)

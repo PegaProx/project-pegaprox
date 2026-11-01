@@ -509,6 +509,12 @@ def ack_active_alert(cluster_id, fired_id):
             (datetime.now().isoformat(), user, fired_id, cluster_id))
         db.conn.commit()
         if cur.rowcount > 0:
+            # NS Nov 2026 - an ack stops the escalation, so it goes into the audit like a mute
+            row = cur.execute("SELECT message FROM active_alerts WHERE id=? AND cluster_id=?",
+                              (fired_id, cluster_id)).fetchone()
+            msg = row['message'] if row else None
+            log_audit(user, 'alert.acknowledged', f"Acknowledged incident {fired_id}" + (f": {msg}" if msg else ''),
+                      cluster=cluster_id)
             return jsonify({'success': True, 'acked_by': user})
         return jsonify({'error': 'Active alert not found or already resolved'}), 404
     except Exception as e:

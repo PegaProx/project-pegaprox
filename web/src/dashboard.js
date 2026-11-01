@@ -18845,7 +18845,11 @@
                                 } else if (!statusResp || statusResp.status === 503 || statusResp.status === 504 || statusResp.status === 502) {
                                     // #594: a null here means the request aborted (timeout) or the network
                                     // failed — treat a slow cluster the same as a 5xx and back it off.
-                                    bumpBackoff();
+                                    // A 502 that names the reads Proxmox refused came back at once, there is
+                                    // no load to take off it: poll it next round like a good one
+                                    const said = statusResp && statusResp.status === 502
+                                        ? await statusResp.json().catch(() => null) : null;
+                                    if (!(said && Array.isArray(said.unread))) bumpBackoff();
                                 }
 
                                 // get vms/cts for the top guests table + topology
@@ -21998,6 +22002,10 @@
                                                     const clusterStatus = allClusterMetrics[selectedCluster.id]?.data?.cluster;
                                                     // #326: standalone nodes have no corosync -> no quorum concept, don't show red badge
                                                     const isStandalone = clusterStatus?.standalone === true;
+                                                    // no status read yet (or every read refused): no guess from the node rows,
+                                                    // that is when the quorum is most in doubt. A read status without quorate
+                                                    // (XCP-ng) keeps the guess it always had
+                                                    const quorumUnread = !clusterStatus;
                                                     const isQuorate = clusterStatus?.quorate != null ? !!clusterStatus.quorate : onlineCount > (totalNodes || onlineCount) / 2;
                                                     return (
                                                         <div className="corp-services-bar">
@@ -22011,6 +22019,8 @@
                                                                 <span className="corp-svc-label">{isStandalone ? 'Mode' : 'Quorum'}</span>
                                                                 {isStandalone ? (
                                                                     <span className="corp-badge" style={{background: 'rgba(56,139,253,0.12)', color: '#58a6ff', border: '1px solid rgba(56,139,253,0.25)', fontSize: 11, padding: '0 5px'}}>Standalone</span>
+                                                                ) : quorumUnread ? (
+                                                                    <span className="corp-badge corp-quorum-unread" style={{color: 'var(--corp-text-muted)', border: '1px solid var(--corp-border-medium)', fontSize: 11, padding: '0 5px'}}>-</span>
                                                                 ) : (
                                                                     <span className="corp-badge" style={isQuorate
                                                                         ? {background: 'rgba(96,181,21,0.12)', color: '#60b515', border: '1px solid rgba(96,181,21,0.25)', fontSize: 11, padding: '0 5px'}
