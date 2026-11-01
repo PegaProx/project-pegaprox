@@ -2903,11 +2903,11 @@
         const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
 
         /** Return missing devices from PVE's semicolon or whitespace-delimited boot order. */
-        function migrationBootOrderIssues(config, vmType) {
+        function migrationBootOrderIssues(config, vmType, allowImplicitNet0 = false) {
             const boot = typeof config.boot === 'string' ? config.boot : '';
             const order = boot.split(',').find(part => part.startsWith('order='));
             return order ? order.slice(6).split(/[;\s]+/)
-                .filter(device => device && !config[device] && !(device === 'net0' && vmType === 'qemu')) : [];
+                .filter(device => device && !config[device] && !(device === 'net0' && vmType === 'qemu' && allowImplicitNet0)) : [];
         }
 
         /** Configure a migration to another node in the same cluster. */
@@ -2983,7 +2983,7 @@
                     setHasCdDvd(foundIsos.length > 0);
                     setDetectedIsos(foundIsos);
                     
-                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type));
+                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type, true));
 
                     // a VM with virtiofs does not migrate live (qemu-server check_local_resources), and
                     // offline only to a node its directory mappings cover
@@ -3226,7 +3226,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning') || 'Boot order references non-existent devices'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
@@ -4725,7 +4725,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning') || 'Boot order references non-existent devices'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>

@@ -38,6 +38,7 @@ def test_missing_later_boot_devices_are_shown(xc_app, layout, dialog, boot):
     warning = view.get_by_text('Boot Order Issue', exact=True)
     warning.wait_for(timeout=5000)
     assert warning.locator('..').locator('code').inner_text() == 'ide2, net1'
+    assert 'Boot order references non-existent devices' in warning.locator('..').inner_text()
     assert not app.errors, app.errors
 
 
@@ -67,8 +68,8 @@ def _update_config(page, config):
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
 @pytest.mark.parametrize('dialog', ['local', 'cross'])
 @pytest.mark.parametrize('missing', [False, True], ids=['implicit-net0', 'missing-net1'])
-def test_qemu_implicit_net0_matches_the_server(xc_app, layout, dialog, missing):
-    """QEMU's implicit net0 is valid, while an absent net1 still needs attention."""
+def test_qemu_net0_warning_matches_the_migration_path(xc_app, layout, dialog, missing):
+    """Only same-cluster migration tolerates an absent QEMU net0."""
     config = dict(SRC_CFG, boot='order=net0;net1' if missing else 'order=net0')
     config.pop('net0', None)
     app = xc_app(layout=layout, src_cfg=dict(SRC_CFG, boot='order=missing0'))
@@ -76,10 +77,13 @@ def test_qemu_implicit_net0_matches_the_server(xc_app, layout, dialog, missing):
     warning = view.get_by_text('Boot Order Issue', exact=True)
     warning.wait_for(timeout=5000)
     _update_config(app.page, config)
-    if missing:
+    if missing or dialog == 'cross':
         code = warning.locator('..').locator('code')
         from playwright.sync_api import expect
-        expect(code).to_have_text('net1')
+        expected = ['net0'] if dialog == 'cross' else []
+        if missing:
+            expected.append('net1')
+        expect(code).to_have_text(', '.join(expected))
     else:
         warning.wait_for(state='hidden', timeout=5000)
     assert not app.errors, app.errors
