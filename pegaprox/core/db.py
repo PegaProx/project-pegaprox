@@ -43,6 +43,15 @@ _LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
 
+# Options of a run started by hand that a rolling update schedule carries too, added in
+# place; a schedule saved before them gets the safe value of the default
+UPDATE_SCHEDULE_RUN_COLUMNS = (
+    ('wait_for_reboot', 'INTEGER DEFAULT 1'),
+    ('pause_on_evacuation_error', 'INTEGER DEFAULT 1'),
+    ('ceph_health_gate', "TEXT DEFAULT 'off'"),
+    ('notify_channels', "TEXT DEFAULT '[]'"),
+)
+
 # Encryption imports
 ENCRYPTION_AVAILABLE = False
 LEGACY_ENCRYPTION = False
@@ -874,6 +883,9 @@ class PegaProxDB:
             for _col in ('migrate_templates', 'relax_anti_affinity'):
                 if _col not in _us_cols:
                     cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+            for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                if _col not in _us_cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
         except Exception as _e:
             logging.warning(f"update_schedules reboot_timeout migration skipped: {_e}")
 
@@ -1606,6 +1618,9 @@ class PegaProxDB:
                 for _col in ('migrate_templates', 'relax_anti_affinity'):   # #763, #954
                     if _col not in _us_cols2:
                         cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+                for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                    if _col not in _us_cols2:
+                        cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
             except Exception as _e2:
                 logging.warning(f"update_schedules reboot_timeout migration skipped: {_e2}")
             logging.info("Ensured update_schedules table exists")

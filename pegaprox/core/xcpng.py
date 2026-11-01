@@ -3637,7 +3637,10 @@ class XcpngManager:
         """Start async yum update on XCP-ng node."""
         from pegaprox.models.tasks import UpdateTask
 
-        if not force and node_name in self.nodes_in_maintenance:
+        # NS Nov 2026 - without force only a host in maintenance, as on Proxmox VE. This said the
+        # opposite, so a rolling update (which puts the host into maintenance first) got None
+        # for every host unless it forced the update
+        if not force and node_name not in self.nodes_in_maintenance:
             return None
 
         with self.update_lock:
