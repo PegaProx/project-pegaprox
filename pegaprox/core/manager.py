@@ -16704,10 +16704,18 @@ echo "AGENT_INSTALLED_OK"
             # comments that picking VirtIO in PegaProx left PVE on LSI; turns
             # out the dropdown was already showing VirtIO without anything to
             # save against, so the user's "no-op" save kept PVE's lsi default.
+            # MK Nov 2026 - an unset cpu is PVE's default type (CPUConfig.pm get_default_cpu_type):
+            # kvm64, qemu64 without KVM, host on aarch64 (max without KVM). 'host' here made the
+            # dropdown claim host and a CPU flag click write cpu=host,flags=..., a silent type change
+            _kvm = str(config.get('kvm', 1)) != '0'
+            if config.get('arch') == 'aarch64':
+                _cpu_default = 'host' if _kvm else 'max'
+            else:
+                _cpu_default = 'kvm64' if _kvm else 'qemu64'
             parsed['hardware'] = {
                 'cores': config.get('cores', 1),
                 'sockets': config.get('sockets', 1),
-                'cpu': config.get('cpu', 'host'),
+                'cpu': config.get('cpu', _cpu_default),
                 'memory': config.get('memory', 512),
                 'balloon': config.get('balloon', 0),
                 'numa': config.get('numa', 0),
@@ -18299,6 +18307,29 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    # MK Nov 2026 - the parts of a network device the edit dialog owns. Everything else in the
+    # stored string (trunks, an LXC link_down or type, a part a newer PVE adds) is kept: the
+    # rebuild from the dialog fields used to drop it, so editing the rate of a trunk port
+    # turned off its VLAN trunks.
+    _NET_DIALOG_PARTS = {
+        'qemu': {'model', 'macaddr', 'bridge', 'tag', 'firewall', 'rate', 'queues', 'mtu', 'link_down'},
+        'lxc': {'name', 'bridge', 'hwaddr', 'ip', 'gw', 'ip6', 'gw6', 'tag', 'firewall', 'rate', 'mtu'},
+    }
+
+    @classmethod
+    def _net_kept_parts(cls, vm_type: str, stored: str) -> List[str]:
+        """The parts of a stored netN string the dialog does not own, in their order."""
+        owned = cls._NET_DIALOG_PARTS['qemu' if vm_type == 'qemu' else 'lxc']
+        kept = []
+        for i, part in enumerate(p for p in str(stored or '').split(',') if p):
+            key = part.split('=', 1)[0]
+            # QEMU writes the model as "<model>=<mac>" in front
+            if vm_type == 'qemu' and i == 0 and '=' in part and key not in owned:
+                continue
+            if key not in owned:
+                kept.append(part)
+        return kept
+
     def update_network(self, node: str, vmid: int, vm_type: str, net_id: str, net_config: Dict) -> Dict[str, Any]:
         """Update network configuration
         
@@ -18313,6 +18344,12 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
+            cfg_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/{'qemu' if vm_type == 'qemu' else 'lxc'}/{vmid}/config"
+            cur = self._api_get(cfg_url)
+            if cur.status_code != 200:
+                return {'success': False, 'error': f'Could not read the current {net_id}, nothing was changed'}
+            kept = self._net_kept_parts(vm_type, ((cur.json() or {}).get('data') or {}).get(net_id, ''))
+
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
                 
@@ -18369,6 +18406,7 @@ echo "AGENT_INSTALLED_OK"
                 
                 net_str = ','.join(parts)
             
+            net_str = ','.join([net_str] + kept) if kept else net_str
             data = {net_id: net_str}
             response = self._api_put(url, data=data)
             
