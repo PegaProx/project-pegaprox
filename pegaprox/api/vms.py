@@ -10069,7 +10069,8 @@ def _wait_for_task(mgr, task_upid, timeout=600, poll=5):
                 if t and t.get('upid') == task_upid:
                     st = t.get('status', '')
                     if st and st != 'running':
-                        ok = st in ('OK', 'WARNINGS')
+                        # Proxmox says 'WARNINGS: 2', not a bare 'WARNINGS'; the task did finish
+                        ok = st == 'OK' or str(st).startswith('WARNINGS')
                         detail = st if ok else (t.get('exitstatus') or st)
                         return (ok, detail)
                     break

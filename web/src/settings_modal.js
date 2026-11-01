@@ -2699,6 +2699,8 @@
             // haStandby: the saves below that no standby carries out, forwarding or not (#625)
             const { getAuthHeaders, user: currentUser, isAdmin, haStandby } = useAuth();
             const { isCorporate } = useLayout(); // LW: Feb 2026 - Corporate styling
+            const layerRef = useRef(null);
+            useEscapeToClose(isOpen, onClose, layerRef);
             const [activeTab, setActiveTab] = useState('users');
             const [users, setUsers] = useState([]);
             const [auditLogs, setAuditLogs] = useState([]);
@@ -4560,6 +4562,7 @@
             return (
                 <>
                 <div
+                    ref={layerRef}
                     className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80"}
                     onClick={onClose}
                 >

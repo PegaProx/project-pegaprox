@@ -4650,7 +4650,10 @@ echo DONE""",
         return tasks  # all tasks are pool-wide anyway
 
     def get_node_task_log(self, node, upid, start=0, limit=50):
-        return self.get_task_log(node, upid, limit)
+        # NS Nov 2026 - a list of lines like the Proxmox manager; the route joins it with
+        # '\n', and the plain str came out one character per line
+        lines = self.get_task_log(node, upid, limit).split('\n')
+        return lines[max(int(start or 0), 0):]
 
     # ──────────────────────────────────────────
     # Proxmox-specific stubs (no-ops for XCP-ng)

@@ -331,6 +331,7 @@
                                         <span className={`w-3 h-3 rounded-full ${
                                             selectedTask.status === 'running' ? 'bg-blue-500 animate-pulse' :
                                             selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'bg-red-500' :
+                                            /^WARNINGS/.test(selectedTask.status || '') ? 'bg-yellow-500' :
                                             'bg-green-500'
                                         }`} />
                                         <div>
@@ -354,6 +355,7 @@
                                         <span className={`font-medium ${
                                             selectedTask.status === 'running' ? 'text-blue-400' :
                                             selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'text-red-400' :
+                                            /^WARNINGS/.test(selectedTask.status || '') ? 'text-yellow-400' :
                                             'text-green-400'
                                         }`}>{selectedTask.status || '-'}</span>
                                     </div>
@@ -519,7 +521,9 @@
                                                 // ('OK' = success, anything else = failure). #590: failed backups came back
                                                 // as 'stopped' + a non-OK exitstatus and slipped through to the green bucket.
                                                 const _ex = task.exitstatus || '';
-                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK');
+                                                // "WARNINGS: n" ended, like in Proxmox: yellow, not red
+                                                const isWarn = !isRunning && /^WARNINGS/.test(_ex);
+                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK' && !isWarn);
                                                 
                                                 return (
                                                     <tr 
@@ -531,6 +535,7 @@
                                                             <span className={`inline-block w-2 h-2 rounded-full ${
                                                                 isRunning ? 'bg-blue-500 animate-pulse' :
                                                                 isFailed ? 'bg-red-500' :
+                                                                isWarn ? 'bg-yellow-500' :
                                                                 'bg-green-500'
                                                             }`} />
                                                         </td>
@@ -553,9 +558,11 @@
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
                                                                 isRunning ? 'bg-blue-500/20 text-blue-400' : 
                                                                 isFailed ? 'bg-red-500/20 text-red-400' : 
+                                                                isWarn ? 'bg-yellow-500/20 text-yellow-400' :
                                                                 'bg-green-500/20 text-green-400'
-                                                            }`}>
-                                                                {task.status || '-'}
+                                                            }`} title={_ex && _ex !== task.status ? _ex : undefined}>
+                                                                {/* a failed task says what Proxmox said, not just 'failed' */}
+                                                                {isFailed && _ex ? _ex : (task.status || '-')}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -2148,6 +2155,7 @@
             // NS: cluster-wide affinity rules (fetched lazily — only when diagram is open)
             const [affinityRules, setAffinityRules] = useState([]);
             const [showAffinity, setShowAffinity] = useState(false);
+            const [affinityUnread, setAffinityUnread] = useState(false);
             // NS May 2026 — storage / network tier toggles. Default OFF so diagram
             // stays uncluttered for users who don't care about infra layers.
             const [showStorage, setShowStorage] = useState(() => {
@@ -3051,11 +3059,19 @@
                                 <button
                                     onClick={() => {
                                         // lazy-fetch affinity rules the first time the user opens the toggle
+                                        // no authFetch in this view, the click used to throw before it toggled
                                         if (!showAffinity && affinityRules.length === 0 && clusterId) {
-                                            authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`)
-                                                .then(r => r && r.ok ? r.json() : null)
-                                                .then(d => setAffinityRules(Array.isArray(d) ? d : (d?.rules || [])))
-                                                .catch(() => {});
+                                            fetch(`${API_URL}/clusters/${clusterId}/affinity-rules`, {
+                                                headers: getAuthHeaders(), credentials: 'include'
+                                            })
+                                                .then(r => r.ok ? r.json() : null)
+                                                .then(d => {
+                                                    const rules = Array.isArray(d) ? d : d?.rules;
+                                                    // a refused or failed read is not "no rules"
+                                                    setAffinityUnread(!Array.isArray(rules) || !!d?.error);
+                                                    setAffinityRules(Array.isArray(rules) ? rules : []);
+                                                })
+                                                .catch(() => setAffinityUnread(true));
                                         }
                                         setShowAffinity(v => !v);
                                     }}
@@ -3068,6 +3084,11 @@
                                     title={t('toggleAffinityEdges') || 'Show / hide affinity rule connections'}>
                                     {showAffinity ? '●' : '○'} {t('affinity') || 'Affinity'}
                                 </button>
+                                {showAffinity && affinityUnread && (
+                                    <span role="status" data-affinity-unread="1" style={{fontSize: 11, color: '#f7b428'}}>
+                                        {t('affinityRulesUnread')}
+                                    </span>
+                                )}
                                 <button
                                     onClick={toggleLegend}
                                     style={{
@@ -21860,7 +21881,8 @@
                                                                 <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />
                                                             )}
                                                         </div>
-                                                        <button onClick={() => loadTabData('overview')} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
+                                                        {/* NS Nov 2026 - loadTabData only exists in the node modal, the click threw; same reads as the Cloud shell's refresh */}
+                                                        <button onClick={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
                                                             <Icons.RotateCw className="w-3 h-3 inline mr-1" />{t('refreshData') || 'Refresh'}
                                                         </button>
                                                     </div>
@@ -22257,12 +22279,12 @@
                                                                     if (d < 86400) return `${Math.floor(d / 3600)}h ${t('timeAgo')}`;
                                                                     return `${Math.floor(d / 86400)}d ${t('timeAgo')}`;
                                                                 };
-                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : '#728b9a';
+                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : /^WARNINGS/.test(s || '') ? '#f7b428' : '#728b9a';
                                                                 return (
                                                                     <div>
                                                                         {recent.map((task, i) => (
                                                                             <div key={task.upid || i} className="corp-tasks-item">
-                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK') ? 'failed' : (task.status || task.exitstatus))}}></span>
+                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK' && !/^WARNINGS/.test(task.exitstatus)) ? 'failed' : (task.status || task.exitstatus))}}></span>
                                                                                 <span className="corp-tasks-desc">{task.type || task.worker_type || '?'}{task.id ? ` ${task.id}` : ''}</span>
                                                                                 <span className="corp-tasks-node">{task.node || ''}</span>
                                                                                 <span className="corp-tasks-time">{relTime(task.starttime || task.pstart)}</span>

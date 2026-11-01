@@ -12501,13 +12501,16 @@ echo "AGENT_INSTALLED_OK"
                             task_info['vmid'] = task_info['id']
                     
                     # Get exit status for completed tasks
-                    if getattr(task, 'status', None) and task['status'] != 'running':
-                        task_info['exitstatus'] = task.get('exitstatus', '')
-                        # Mark as failed if exit status indicates error
-                        if task_info['exitstatus'] and 'error' in task_info['exitstatus'].lower():
-                            task_info['status'] = 'failed'
-                            task_info['error'] = task_info['exitstatus']
-                        elif task_info['exitstatus'] and task_info['exitstatus'] != 'OK':
+                    # NS: task is a dict, the old getattr() never saw its status, so no
+                    # task was ever marked failed. /cluster/tasks has no exitstatus either: a
+                    # finished task carries 'OK', 'WARNINGS: n' or the error itself in status.
+                    # 'stopped' alone only says it ended, the result would be in exitstatus.
+                    _st = task_info['status']
+                    _said = task.get('exitstatus') or ('' if _st == 'stopped' else _st)
+                    if _st and _st != 'running' and _said:
+                        task_info['exitstatus'] = str(_said)
+                        # warnings: done, worth a look in the log, not a failure
+                        if task_info['exitstatus'] != 'OK' and not task_info['exitstatus'].startswith('WARNINGS'):
                             task_info['status'] = 'failed'
                             task_info['error'] = task_info['exitstatus']
                     

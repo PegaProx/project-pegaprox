@@ -1130,7 +1130,8 @@ def _wait_task(pve_mgr, upid, timeout=600):
                 if t and t.get('upid') == upid:
                     st = t.get('status', '')
                     if st and st != 'running':
-                        return st in ('OK', 'WARNINGS')
+                        # with warnings it ended too, and the text carries a count
+                        return st == 'OK' or str(st).startswith('WARNINGS')
                     break
         except Exception:
             pass
