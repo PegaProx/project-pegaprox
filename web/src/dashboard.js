@@ -6376,9 +6376,33 @@
             const [catFilter, setCatFilter] = React.useState('');
             const [policy, setPolicy] = React.useState([]);
             const [allowDraft, setAllowDraft] = React.useState({});
+            // NS Nov 2026 - how the last read of status and findings went: null before the first
+            // answer, then { ok, error }. A read that failed is no empty list
+            const [readState, setReadState] = React.useState(null);
+            // the same for the policy checks, which have their own read
+            const [policyRead, setPolicyRead] = React.useState(null);
+            // every refresh takes a number; an answer whose number is no longer the latest (another
+            // cluster, another filter, a second click) is dropped instead of drawn over a newer one
+            const readSeq = React.useRef(0);
+            const clusterNow = React.useRef(clusterId);
+            clusterNow.current = clusterId;
+            const shownFor = React.useRef(clusterId);
+
+            // another cluster picked: the last one's counts, rows and checks go before the paint,
+            // and whatever of it is still on the way is dropped
+            React.useLayoutEffect(() => {
+                if (shownFor.current === clusterId) return;
+                shownFor.current = clusterId;
+                readSeq.current++;
+                setStatus(null); setEvents([]); setPolicy([]); setPolicyRead(null);
+                setReadState(null); setExpanded({}); setAllowDraft({}); setBusy(false);
+            }, [clusterId]);
 
             const refresh = async () => {
-                if (!clusterId) return;
+                // a handler of the last cluster that ends after the switch asks for nothing
+                if (!clusterId || clusterNow.current !== clusterId) return;
+                const mine = ++readSeq.current;
+                const stale = () => mine !== readSeq.current;
                 setBusy(true);
                 try {
                     const q = `status=${filter}&limit=200` + (kindFilter ? `&kind=${kindFilter}` : '') + (catFilter ? `&category=${catFilter}` : '');
@@ -6387,23 +6411,33 @@
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/events?${q}`),
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/policy`),
                     ]);
+                    if (stale()) return;
                     const away = (await haLeaderAway(sr)) || (await haLeaderAway(er));
+                    if (stale()) return;
                     setLeaderAway(away);
                     if (away) { setStatus(null); setEvents([]); setPolicy([]); return; }
                     const s = await sr?.json().catch(() => null);
                     const e = await er?.json().catch(() => null);
                     const pj = await pr?.json().catch(() => null);
-                    if (s && !s.error) setStatus(s);
-                    if (e && e.events) setEvents(e.events);
-                    if (pj && pj.checks) {
-                        setPolicy(pj.checks);
+                    if (stale()) return;
+                    // what failed is dropped, so neither old counts nor old rows stand in for it
+                    const statusOk = !!(sr && sr.ok && s && !s.error);
+                    const eventsOk = !!(er && er.ok && e && Array.isArray(e.events));
+                    const policyOk = !!(pr && pr.ok && pj && Array.isArray(pj.checks));
+                    const why = (j) => (j && typeof j.error === 'string' ? j.error : '');
+                    setStatus(statusOk ? s : null);
+                    setEvents(eventsOk ? e.events : []);
+                    setReadState({ ok: statusOk && eventsOk, error: (!eventsOk && why(e)) || (!statusOk && why(s)) || '' });
+                    setPolicy(policyOk ? pj.checks : []);
+                    setPolicyRead({ ok: policyOk, error: policyOk ? '' : why(pj) });
+                    if (policyOk) {
                         setAllowDraft(d => {
                             const next = { ...d };
                             pj.checks.forEach(c => { if (c.allow && next[c.id] === undefined) next[c.id] = c.allow.join(', '); });
                             return next;
                         });
                     }
-                } finally { setBusy(false); }
+                } finally { if (!stale()) setBusy(false); }
             };
 
             // again when forwarding comes or goes: the list is the leader's then, or not
@@ -6452,7 +6486,19 @@
                         body: JSON.stringify({ seed: status && status.baselines === 0 }),
                     });
                     if (r?.ok) {
-                        const j = await r.json();
+                        const j = await r.json().catch(() => ({}));
+                        // a skipped scan answers 200 as well (cluster offline, nothing answered, one
+                        // already running): it compared nothing, so it is no "Scan complete"
+                        if (j.ok !== true) {
+                            const why = j.error === 'cluster offline' ? (t('clusterOffline') || 'Cluster unreachable')
+                                : j.error === 'cluster did not answer' ? (t('driftSkipNoAnswer') || 'Cluster did not answer')
+                                : j.error === 'a scan of this cluster is already running' ? (t('driftScanRunning') || 'A scan of this cluster is already running')
+                                : (j.error || '');
+                            const head = j.status === 'skipped' ? (t('driftScanSkipped') || 'Scan skipped, nothing was compared')
+                                : (t('driftScanFailed') || 'Scan failed');
+                            addToast(why ? `${head}: ${why}` : head, j.status === 'skipped' ? 'warning' : 'error');
+                            return;
+                        }
                         const m = j.seeded_baselines > 0
                             ? `${t('driftSeeded') || 'baseline seeded'}: ${j.seeded_baselines}`
                             : `${j.events_count || 0} ${t('driftEvents') || 'events'}`;
@@ -6560,7 +6606,7 @@
                                 {t('driftDetection') || 'Config Drift Detection'}
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5">
-                                {t('driftDetectionDesc') || 'Snapshots cluster config nightly. Flags any change vs the admin-set baseline.'}
+                                {t('driftDetectionDesc') || 'Snapshots cluster config every 6 hours. Flags any change vs the admin-set baseline.'}
                             </p>
                         </div>
                         <div className="flex gap-2">
@@ -6698,16 +6744,46 @@
                         </div>
                     )}
 
+                    {!leaderAway && policyRead && !policyRead.ok && (
+                        <div data-drift-policy-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-3 text-sm">
+                            <div className="text-red-400">{t('driftPolicyReadFailed') || 'The policy checks could not be read.'}</div>
+                            {policyRead.error && <div className="text-xs text-gray-500 mt-1">{policyRead.error}</div>}
+                        </div>
+                    )}
+
+                    {!leaderAway && readState && !readState.ok && (
+                        <div data-drift-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-6 text-center text-sm">
+                            <div className="text-red-400">{t('driftReadFailed') || 'The drift status or events could not be read, so this view does not know whether the cluster matches its baseline.'}</div>
+                            {readState.error && <div className="text-xs text-gray-500 mt-1">{readState.error}</div>}
+                            <button onClick={refresh} disabled={busy}
+                                className="mt-3 px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50">
+                                {t('retry') || 'Retry'}
+                            </button>
+                        </div>
+                    )}
+
                     {leaderAway ? (
                         <div data-ha-leader-away="drift" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-400">
                             {t('pgHaLeaderAwayView')}
                         </div>
-                    ) : events.length === 0 ? (
-                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
-                            {filter === 'open' ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
-                                              : (t('driftNoEvents') || 'No events for this filter.')}
+                    ) : events.length === 0 ? (!readState ? (
+                        <div data-drift-empty="loading" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {t('loading') || 'Loading...'}
                         </div>
-                    ) : (
+                    ) : readState.ok && status && (
+                        // "matches baseline" only for the whole open list, every kind compared.
+                        // status too: the setters above render one by one outside an event.
+                        // The kinds live in memory: after a start nothing was compared until the
+                        // first scan, which is its own case and not "some kinds were not"
+                        <div data-drift-empty className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {filter !== 'open' || kindFilter || catFilter ? (t('driftNoEvents') || 'No events for this filter.')
+                                : !status.last_scan_at || !Object.keys(status.kinds || {}).length
+                                    ? (t('driftNoScanYet') || 'No scan has run since this server started. Use Scan now.')
+                                : status.baselines > 0 && DRIFT_KINDS.every(k => (status.kinds || {})[k] === 'checked')
+                                    ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
+                                    : (t('driftNoOpenUnchecked') || 'No open drift events, but not every kind was compared with a baseline.')}
+                        </div>
+                    )) : (
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl divide-y divide-proxmox-border/40">
                             {events.map(ev => {
                                 const open = expanded[ev.id];

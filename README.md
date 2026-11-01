@@ -176,7 +176,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 💿 **Ceph Management** - Monitor and manage Ceph storage pools, RBD mirroring
 - 🔐 **ACME / Let's Encrypt** - Automatic SSL certificate renewal with HTTP-01 challenge (+ custom ACME CAs)
 - 📋 **Integrated Syslog Server** - Receive and view syslog messages (UDP/TCP) with filtering, search, and severity-based coloring
-- 🧬 **Config Drift Detection** - Nightly snapshot of cluster config (VM configs, storage.cfg, network, datacenter options) - alerts on any unauthorized change vs the admin-set baseline. Pairs with the Compliance Dashboard.
+- 🧬 **Config Drift Detection** - Snapshot of cluster config every 6 hours (VM configs, storage.cfg, network, datacenter options) - alerts on any unauthorized change vs the admin-set baseline. Pairs with the Compliance Dashboard.
 
 ### Reports & Analytics
 - 💰 **Cost Dashboard / Chargeback** - €/VM/Month from real metrics (CPU-h × node tariff + RAM-GB-h + Storage-GB-month). Currency-configurable, per-cluster rates, top-spender table, by-node breakdown. CSV + PDF export.

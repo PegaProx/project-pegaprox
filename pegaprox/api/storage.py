@@ -2371,7 +2371,9 @@ def rescan_storage(cluster_id, storage_id):
             results.append(node_result)
         
         # Log the action
-        log_audit(username, 'storage.rescan', f'Rescanned storage {storage_id} on {len(nodes)} nodes (deep_scan={deep_scan})', cluster_id)
+        # the fourth argument is the caller's address, the cluster goes by name
+        log_audit(username, 'storage.rescan', f'Rescanned storage {storage_id} on {len(nodes)} nodes (deep_scan={deep_scan})',
+                  cluster=manager.config.name)
         
         success_count = sum(1 for r in results if r['success'])
         

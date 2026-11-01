@@ -6,6 +6,7 @@ SQLite database wrapper with encryption support.
 # MK: the db stuff was the worst part of the monolith, everything was just inline sql
 
 import os
+import re
 import sys
 import json
 import time
@@ -34,6 +35,9 @@ from pegaprox.constants import (
     ESXI_CONFIG_FILE, STORAGE_CLUSTERS_FILE,
 )
 from pegaprox.models.tasks import balancer_cooldown, BALANCER_COOLDOWN_DEFAULT
+
+# an audit field with one of these cannot be encoded, see add_audit_entry
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
 
 # Fallback tenant ID for existing users (mirrors pegaprox.utils.rbac.DEFAULT_TENANT_ID)
 # Defined here to avoid circular import: rbac imports from db
@@ -5029,9 +5033,11 @@ class PegaProxDB:
             else:
                 severity = 'info'
 
-        # stored as text whatever came in, so the row reads back as it was hashed
+        # stored as text whatever came in, so the row reads back as it was hashed.
+        # NS Nov 2026 - a lone surrogate ("\ud800" in a client's JSON) has no UTF-8 form: the
+        # chain hash raised on it and the entry was lost. It is replaced before the hash.
         def _txt(v):
-            return None if v is None else str(v)
+            return None if v is None else _LONE_SURROGATE.sub('\ufffd', str(v))
         row = {'user': _txt(user), 'action': _txt(action) or '', 'details': _txt(details),
                'ip_address': _txt(ip), 'cluster': _txt(cluster) or '', 'severity': severity,
                'cluster_id': _txt(cluster_id) or ''}

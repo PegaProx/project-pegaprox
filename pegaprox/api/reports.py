@@ -1503,11 +1503,22 @@ def apply_hardening(cluster_id, node):
     results.update(blocked)
     ok_count = sum(1 for v in results.values() if v.get('success'))
 
+    # NS Nov 2026 - this was log_audit('node.hardening_applied', {...}): the action went in as
+    # the user and a dict as the action, and the dict broke the write, so no row was stored
     from pegaprox.utils.audit import log_audit
-    log_audit('node.hardening_applied', {
-        'node': node, 'controls': list(results.keys()), 'forced': force,
-        'success': ok_count, 'total': requested_count
-    })
+    # one list per outcome: a reader of the log must not take a failed control for an applied one
+    applied = [str(c) for c, v in results.items() if v.get('success')]
+    held = [str(c) for c, v in results.items() if not v.get('success') and v.get('blocked')]
+    failed = [str(c) for c, v in results.items() if not v.get('success') and not v.get('blocked')]
+    outcome = [f"applied: {', '.join(applied) or 'none'}"]
+    if failed:
+        outcome.append(f"failed: {', '.join(failed)}")
+    if held:
+        outcome.append(f"blocked: {', '.join(held)}")
+    log_audit(_hp_user(), 'node.hardening_applied',
+              f"Hardening on {node}: {ok_count} of {requested_count} controls applied "
+              f"({'; '.join(outcome)})" + (', forced' if force else ''),
+              cluster=mgr.config.name)
 
     return jsonify({
         'node': node, 'results': results,
@@ -1539,11 +1550,15 @@ def rollback_hardening(cluster_id, node):
     results = mgr.rollback_node_hardening(node, controls)
     ok_count = sum(1 for v in results.values() if v.get('success'))
 
+    # a restore that put back only some of a control's files says so in its result, when the
+    # manager reports it at all
+    partly = [str(c) for c, v in results.items() if isinstance(v, dict) and v.get('partial')]
     from pegaprox.utils.audit import log_audit
-    log_audit('node.hardening_rolled_back', {
-        'node': node, 'controls': controls,
-        'restored': ok_count, 'total': len(controls)
-    })
+    log_audit(_hp_user(), 'node.hardening_rolled_back',
+              f"Hardening on {node}: {ok_count} of {len(controls)} controls rolled back "
+              f"({', '.join(str(c) for c in controls)})"
+              + (f", {len(partly)} only partly restored ({', '.join(partly)})" if partly else ''),
+              cluster=mgr.config.name)
 
     return jsonify({
         'node': node, 'results': results,
