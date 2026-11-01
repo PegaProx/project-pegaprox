@@ -305,3 +305,57 @@ def test_unverified_token_relogin_preserves_existing_access(
     assert user['permissions'] == ['vm.delete']
     assert user['tenant_permissions'] == held['tenant_permissions']
     assert db.get_user_directory_groups(username) == ['operators']
+
+
+@pytest.mark.parametrize('claim_name', ['groups', 'groups_proxmox'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_entra_canonical_overage_preserves_access_until_graph_is_complete(
+        api, db, idp, signer, monkeypatch, claim_name, complete):
+    import pegaprox.api.auth as auth
+
+    monkeypatch.setattr(auth, 'oidc_get_user_groups_ex', lambda *a: (
+        [{'id': 'operators', 'name': 'Operators'}] if complete else [], complete))
+    config = {'provider': 'entra', 'groups_claim': claim_name}
+    username = _okta_sign_in(
+        api, monkeypatch, _id_token(signer, **{claim_name: ['operators']}), **config)
+    held = db.get_user(username)
+    held.update(permissions=['vm.delete'], groups=['operators'],
+                tenant_permissions={'default': {'role': 'viewer', 'extra': ['vm.view']}})
+    db.save_user(username, held)
+
+    token = _id_token(signer, **{claim_name: [], '_claim_names': {'groups': 'src1'}})
+    assert _okta_sign_in(api, monkeypatch, token, **config) == username
+    user = db.get_user(username)
+    assert user['role'] == 'user'
+    assert user['permissions'] == ([] if complete else ['vm.delete'])
+    assert user['tenant_permissions'] == ({} if complete else held['tenant_permissions'])
+    assert db.get_user_directory_groups(username) == ['operators']
+
+
+def test_complete_direct_graph_memberships_do_not_discard_verified_nested_groups():
+    direct = '11111111-1111-4111-8111-111111111111'
+    nested = '22222222-2222-4222-8222-222222222222'
+    mapping = oidc.oidc_map_groups_to_role(
+        _config(provider='entra', admin_group_id=nested, user_group_id=direct),
+        [{'id': direct, 'name': 'Operators'}],
+        oidc._VerifiedClaims({'groups_proxmox': [nested]}), groups_complete=True)
+    assert mapping['_authoritative'] is True
+    assert mapping['role'] == 'admin'
+    assert mapping['groups'] == [direct, nested]
+
+
+@pytest.mark.parametrize('claims,reason', [
+    ({'groups_proxmox': ['private-group-value']}, 'signature was not verified'),
+    (oidc._VerifiedClaims({}), 'missing'),
+    (oidc._VerifiedClaims({'groups_proxmox': 'private-group-value'}), 'not an array'),
+    (oidc._VerifiedClaims({'groups_proxmox': ['private-group-value', {}]}), 'invalid entry'),
+])
+def test_ignored_claim_diagnostics_identify_reason_without_group_values(caplog, claims, reason):
+    with caplog.at_level('INFO'):
+        mapping = oidc.oidc_map_groups_to_role(_config(), [], claims, groups_complete=False)
+    assert mapping['_authoritative'] is False
+    assert mapping['role'] == 'viewer'
+    assert mapping['groups'] == []
+    assert 'groups_proxmox' in caplog.text
+    assert reason in caplog.text
+    assert 'private-group-value' not in caplog.text

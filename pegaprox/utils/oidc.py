@@ -785,8 +785,14 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     _claim = []
     _claim_valid = False
     if oidc_id_token_verified(id_token_claims):
-        raw_claim = id_token_claims.get(claim_name)
-        if isinstance(raw_claim, list):
+        if claim_name not in id_token_claims:
+            logging.info("[OIDC] groups claim %r is missing; token group mapping was not applied",
+                         claim_name)
+        elif not isinstance(id_token_claims[claim_name], list):
+            logging.warning("[OIDC] groups claim %r ignored: not an array; "
+                            "token group mapping was not applied", claim_name)
+        else:
+            raw_claim = id_token_claims[claim_name]
             for value in raw_claim:
                 if isinstance(value, str) and value.strip():
                     _claim.append(value.strip())
@@ -796,9 +802,14 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
                     # Do not turn an invalid list into an authoritative empty/partial
                     # one, or let its remaining entries grant access.
                     _claim = []
+                    logging.warning("[OIDC] groups claim %r ignored: invalid entry; "
+                                    "token group mapping was not applied", claim_name)
                     break
             else:
                 _claim_valid = True
+    elif isinstance(id_token_claims, dict) and claim_name in id_token_claims:
+        logging.warning("[OIDC] groups claim %r ignored: ID token signature was not verified; "
+                        "token group roles and memberships were not applied", claim_name)
     if groups_complete:
         result['_authoritative'] = True
     elif _claim_valid:
@@ -811,7 +822,8 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         # present but partial, and deciding a revocation on a partial list is the thing
         # this whole mechanism exists to avoid. Grant from it, never revoke.
         _names = id_token_claims.get('_claim_names')
-        if isinstance(_names, dict) and claim_name in _names:
+        if isinstance(_names, dict) and (
+                claim_name in _names or (config.get('provider') == 'entra' and 'groups' in _names)):
             logging.warning(
                 "[OIDC] the ID token signals a groups overage - the claim is truncated, "
                 "so this login can grant but not revoke. Give the app Graph group-read "
