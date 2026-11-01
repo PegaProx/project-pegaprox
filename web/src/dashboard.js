@@ -16314,10 +16314,11 @@
                 const stored = m => (reportData[m]?.samples?.length || 0) > 0;
                 const nodes = !unread.includes('nodes'), guests = !unread.includes('guests');
                 return {
-                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current || live.cpu_percent || 0) : null,
-                    memory: (stored('memory') || nodes) ? (reportData.memory?.current || live.mem_percent || 0) : null,
-                    vms: guests ? (live.vms_running || reportData.vms_running?.current || 0) : null,
-                    cts: guests ? (live.cts_running || 0) : null,
+                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current ?? live.cpu_percent ?? 0) : null,
+                    memory: (stored('memory') || nodes) ? (reportData.memory?.current ?? live.mem_percent ?? 0) : null,
+                    // a live 0 running is a figure, not a reason to show an older snapshot's count
+                    vms: guests ? (live.vms_running ?? reportData.vms_running?.current ?? 0) : null,
+                    cts: guests ? (live.cts_running ?? 0) : null,
                 };
             }, [reportData]);
             // where a gauge would be: the same room, a dash and why

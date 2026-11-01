@@ -223,3 +223,16 @@ def test_runtime_null_figures_of_the_server_draw_no_average(open_app, layout):
     assert 'avg' not in tiles['grid'], tiles['grid']
     assert 'VMs running' in tiles['grid'] and not tiles['overflow'], tiles
     assert not app.errors, app.errors
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+def test_runtime_none_running_now_is_zero_not_the_stored_count(open_app, layout):
+    # the guest list was read and says no VM runs now; a stored snapshot of the window
+    # still had 3. The tile took the stored 3 because 0 is falsy.
+    body = dict(SUMMARY, live=dict(LIVE, vms_running=0, cts_running=0))
+    app = open_app(layout, summary=(200, body))
+    counts = app.page.evaluate('''() => Array.from(document.querySelectorAll(
+        '#report-summary-content .text-orange-400, #report-summary-content .text-purple-400'))
+        .filter(e => e.classList.contains('text-4xl')).map(e => e.textContent.trim())''')
+    assert counts == ['0', '0'], counts
+    assert not app.errors, app.errors
