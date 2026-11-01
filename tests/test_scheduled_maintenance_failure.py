@@ -8,7 +8,7 @@ from pegaprox.models.tasks import MaintenanceTask, UpdateTask
 from test_rolling_templates_affinity_763_954 import _FastTime, _finish
 
 
-@pytest.mark.parametrize('failure', ['refused', 'failed', 'partial'])
+@pytest.mark.parametrize('failure', ['refused', 'failed', 'partial', 'raised', 'raised_partial'])
 def test_refused_maintenance_does_not_force_start_an_update(api, monkeypatch, failure):
     """A false or failed maintenance result never reaches the forced updater."""
     import pegaprox.api.schedules as schedules
@@ -30,8 +30,10 @@ def test_refused_maintenance_does_not_force_start_an_update(api, monkeypatch, fa
         """Refuse before or after registering a partially prepared host."""
         task = MaintenanceTask(node)
         task.status, task.error = 'failed', 'host disable failed'
-        if failure == 'partial':
+        if failure in ('partial', 'raised_partial'):
             manager.nodes_in_maintenance[node] = task
+        if failure.startswith('raised'):
+            raise RuntimeError('maintenance launch failed')
         return task if failure == 'failed' else None
 
     def leave(node):
@@ -49,7 +51,10 @@ def test_refused_maintenance_does_not_force_start_an_update(api, monkeypatch, fa
     assert state['status'] == 'failed', state['logs']
     assert 'maintenance' in state['error'].lower()
     assert state['completed_nodes'] == []
+    assert state['failed_nodes'] == [{'node': 'blade1', 'error': state['error']}]
+    assert state['node_state']['blade1']['result'] == 'failed'
+    assert state['node_state']['blade1']['phase'] == 'failed'
     manager.start_node_update.assert_not_called()
-    if failure == 'partial':
+    if failure in ('partial', 'raised_partial'):
         manager.exit_maintenance_mode.assert_called_once_with('blade1')
         assert manager.nodes_in_maintenance == {}

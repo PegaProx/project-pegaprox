@@ -735,12 +735,18 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     if not ha.confirm_step(f'rolling update of {node_name}'):
                         rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break
-                    maintenance_task = mgr.enter_maintenance_mode(
-                        node_name, skip_evacuation=skip_evacuation,
-                        allow_local_disks=allow_local_disks,
-                        **({'migrate_templates': True} if migrate_templates else {}))  # #763
-                    if not maintenance_task or getattr(maintenance_task, 'status', None) == 'failed':
-                        raise RuntimeError(f"Failed to start maintenance mode on {node_name}")
+                    try:
+                        maintenance_task = mgr.enter_maintenance_mode(
+                            node_name, skip_evacuation=skip_evacuation,
+                            allow_local_disks=allow_local_disks,
+                            **({'migrate_templates': True} if migrate_templates else {}))  # #763
+                        if not maintenance_task or getattr(maintenance_task, 'status', None) == 'failed':
+                            raise RuntimeError(f"Failed to start maintenance mode on {node_name}")
+                    except Exception as error:
+                        _set(add={'failed_nodes': {'node': node_name, 'error': str(error)}},
+                             node=(node_name, {'phase': 'failed', 'result': 'failed',
+                                               'in_maintenance': node_name in mgr.nodes_in_maintenance}))
+                        raise
                     _set(node=(node_name, {'in_maintenance': True}))
                     if not skip_evacuation:
                         _set(current_step='evacuating', node=(node_name, {'phase': 'evacuating'}))
