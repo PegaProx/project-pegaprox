@@ -10869,10 +10869,29 @@ def get_hardware_options():
     """Get available hardware options (CPU types, SCSI controllers, etc.)
 
     NS: Extended Dec 2025 with machine types
+
+    MK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are
+    read live from one of its nodes, so they follow its PVE version and its custom models. The
+    first registered cluster used to answer for every dialog, an XCP-ng pool with its two types
+    or an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller
+    may see.
     """
-    # Use any manager to get options
-    if cluster_managers:
-        manager = list(cluster_managers.values())[0]
+    manager = None
+    cluster_id = request.args.get('cluster_id')
+    if cluster_id:
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
+        manager = cluster_managers.get(cluster_id)
+        if manager is not None and not hasattr(manager, 'get_cpu_types'):
+            manager = None
+    else:
+        for cid, m in list(cluster_managers.items()):
+            if getattr(m, 'cluster_type', 'proxmox') == 'proxmox' and hasattr(m, 'get_cpu_types') \
+                    and check_cluster_access(cid)[0]:
+                manager = m
+                break
+    if manager is not None:
         return jsonify({
             'cpu_types': manager.get_cpu_types(),
             'scsi_controllers': manager.get_scsi_controllers(),

@@ -18474,23 +18474,35 @@ echo "AGENT_INSTALLED_OK"
     # CPU profiles (see manager.cluster.cpu-models in pve-manager 9.2). We try
     # to fetch + append on connect; on older clusters the endpoint 404s and
     # the static list is returned unchanged.
+    # MK Nov 2026 - the fallback is the x86_64 list qemu-server keeps in CPUConfig.pm
+    # (initialize_cpu_models) plus host and the x86-64-v* levels. It lacked 34 newer models
+    # (EPYC-Genoa/-Turin, GraniteRapids, SierraForest, the -vN revisions) and offered n270,
+    # which PVE refuses.
     _STATIC_CPU_TYPES = [
         'host', 'kvm64', 'kvm32', 'qemu64', 'qemu32',
         'max', 'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
-        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-        'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Cascadelake-Server-v2',
-        'Conroe', 'Cooperlake', 'Cooperlake-v2',
-        'EPYC', 'EPYC-IBPB', 'EPYC-Milan', 'EPYC-Rome', 'EPYC-v3',
+        '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+        'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+        'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
         'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
+        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
+        'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+        'Skylake-Server-v5',
+        'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+        'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+        'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
         'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
-        'IvyBridge', 'IvyBridge-IBRS',
-        'Nehalem', 'Nehalem-IBRS',
-        'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-        'Penryn', 'SandyBridge', 'SandyBridge-IBRS',
-        'SapphireRapids', 'Skylake-Client', 'Skylake-Client-IBRS',
-        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS',
-        'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo', 'coreduo',
-        'n270', 'pentium', 'pentium2', 'pentium3', 'phenom'
+        'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+        'Icelake-Server-v7',
+        'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+        'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+        'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+        'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+        'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+        'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+        'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+        'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
     ]
 
     def get_cpu_types(self) -> List[str]:
@@ -18502,7 +18514,7 @@ echo "AGENT_INSTALLED_OK"
              shows up — e.g. EPYC entries only on AMD nodes). Returns rows
              with {name, vendor, custom} — we keep names verbatim, including
              custom-* models the admin defined.
-          2) Fall back to the static 61-entry list on any error or when no
+          2) Fall back to the static list (qemu-server's own) on any error or when no
              node is reachable. Same shape that PegaProx has been returning
              since forever, so callers don't see breakage.
 
