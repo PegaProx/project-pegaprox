@@ -1214,8 +1214,9 @@ def list_hardening_profiles():
     dropped_controls (stored ids this version has no control for), created_at, updated_at,
     and for those who may manage them created_by and updated_by. builtin: id and the
     controls it runs. catalog: per control whether it takes parameters (templated,
-    param_keys, defaults) and whether it can be rolled back. can_manage: whether the
-    caller may create, change and delete custom profiles."""
+    param_keys, defaults), whether it can be rolled back and whether its apply changes
+    nothing on the node (noop). can_manage: whether the caller may create, change and
+    delete custom profiles."""
     catalog = _hardening_catalog()
     try:
         rows = _hp_rows()
@@ -1240,8 +1241,11 @@ def list_hardening_profiles():
     for cid, ctrl in catalog.items():
         templated = bool(ctrl.get('apply_template'))
         defaults = dict(ctrl.get('defaults') or {}) if templated else {}
+        # noop: the apply changes nothing on the node and is answered noop (the tab
+        # does not pre-tick these)
         entries.append({'id': cid, 'templated': templated, 'param_keys': list(defaults),
-                        'defaults': defaults, 'rollback': bool(ctrl.get('backup_files'))})
+                        'defaults': defaults, 'rollback': bool(ctrl.get('backup_files')),
+                        'noop': bool(ctrl.get('noop'))})
     return jsonify({
         'custom': custom, 'builtin': builtin, 'catalog': entries, 'can_manage': can_manage,
         'format': HARDENING_PROFILE_FORMAT, 'format_version': HARDENING_PROFILE_VERSION,
@@ -1460,6 +1464,22 @@ def check_hardening(cluster_id, node):
     return jsonify(out)
 
 
+def _hardening_pve_only(mgr, what):
+    """None on a Proxmox VE cluster, else the refusal. The controls, their snapshots and
+    the rollback are written for PVE nodes; an XCP-ng pool has a check of its own (the GET
+    above) and nothing here to apply or roll back. Other cluster types (ESXi) have no
+    hardening check either, so only an XCP-ng pool is told that the check runs."""
+    ctype = getattr(mgr, 'cluster_type', 'proxmox')
+    if ctype == 'proxmox':
+        return None
+    msg = f'Hardening controls are {what} on Proxmox VE nodes only.'
+    if ctype == 'xcpng':
+        msg += ' On this cluster the check runs, but nothing is changed.'
+    else:
+        msg += ' Nothing was changed on this cluster.'
+    return jsonify({'error': msg, 'code': 'PVE_ONLY'}), 400
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardening', methods=['POST'])
 @require_auth(perms=['node.maintenance'])
 def apply_hardening(cluster_id, node):
@@ -1473,6 +1493,9 @@ def apply_hardening(cluster_id, node):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
+    refused = _hardening_pve_only(mgr, 'applied')
+    if refused:
+        return refused
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster offline'}), 503
 
@@ -1539,6 +1562,9 @@ def rollback_hardening(cluster_id, node):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
+    refused = _hardening_pve_only(mgr, 'rolled back')
+    if refused:
+        return refused
     if not mgr.is_connected:
         return jsonify({'error': 'Cluster offline'}), 503
 

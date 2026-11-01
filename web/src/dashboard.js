@@ -16407,6 +16407,15 @@
                 setDebsecanInstalling(false);
             };
 
+            // NS Nov 2026 - controls whose apply changes nothing on the node, the server answers them
+            // noop. The catalog of GET /api/hardening/profiles marks them; a server without that field
+            // gets the old list: the informational VS-NfD group and net_protocols, which fs_modules covers
+            const hardenNoopIds = () => {
+                const catalog = Array.isArray(hardenProfiles?.catalog) ? hardenProfiles.catalog : [];
+                if (catalog.some(c => c && 'noop' in c)) return new Set(catalog.filter(c => c && c.noop).map(c => c.id));
+                return new Set(['net_protocols', ...Object.keys(hardeningControlInfo(t).vsnfdControls)]);
+            };
+
             // CIS hardening check/apply
             const checkHardening = async (nodeName, verbose = false, profile = '') => {
                 if (!selectedCluster?.id || !nodeName) return;
@@ -16426,12 +16435,13 @@
                         setHardenStatus(data);
                         // pre-select all controls that are NOT yet applied
                         const sel = {};
+                        const noop = hardenNoopIds();
                         Object.entries(data.controls || {}).forEach(([id, v]) => {
                             // verbose: v is {status, evidence}, non-verbose: v is bool. LW Oct 2026 -
                             // null is a control that was not checked: its state is unknown, so it
                             // is not ticked for an apply on its own
                             const applied = (v && typeof v === 'object') ? v.status : v;
-                            if (applied === false) sel[id] = true;
+                            if (applied === false && !noop.has(id)) sel[id] = true;
                         });
                         setHardenSelected(sel);
                     } else {
@@ -16474,6 +16484,7 @@
                 // ones like fail2ban). Per-control HTTP overhead is negligible vs. SSH runtime.
                 const accumulated = {};
                 let appliedOk = 0;
+                let refused = '';
                 try {
                     for (let i = 0; i < toApply.length; i++) {
                         const ctrlId = toApply[i];
@@ -16497,14 +16508,23 @@
                             } else {
                                 const errData = await resp?.json().catch(() => ({}));
                                 accumulated[ctrlId] = { success: false, error: errData?.error || `HTTP ${resp?.status}` };
+                                // not a Proxmox VE cluster: every control gets the same answer
+                                if (errData?.code === 'PVE_ONLY') refused = errData.error;
                             }
                         } catch (perCtrlErr) {
                             accumulated[ctrlId] = { success: false, error: String(perCtrlErr) };
                         }
                         // Live UI update — show per-control result as it lands
                         setHardenResults({ ...accumulated });
+                        if (refused) break;
                     }
-                    addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`, appliedOk === toApply.length ? 'success' : 'warning');
+                    // success only counts what ran and passed its check afterwards; the ones that
+                    // change nothing (noop) are not applied and get named apart
+                    const noopCount = Object.values(accumulated).filter(r => r.noop).length;
+                    if (refused) addToast(refused, 'error');
+                    else addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`
+                        + (noopCount ? ` · ${fillText(t('hardenNoopCount'), { n: noopCount })}` : ''),
+                        appliedOk === toApply.length ? 'success' : 'warning');
                     // refresh status
                     checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
@@ -16533,7 +16553,11 @@
                         const data = await resp.json();
                         setHardenResults({ ...(data.results || {}) });
                         const n = data.restored || 0;
-                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`, n === toRoll.length ? 'success' : 'warning');
+                        // restored counts full rollbacks only; one that brought back some of its files is named apart
+                        const partial = Object.values(data.results || {}).filter(r => r && r.partial).length;
+                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`
+                            + (partial ? ` · ${fillText(t('hardenRollbackPartialCount'), { n: partial })}` : ''),
+                            n === toRoll.length ? 'success' : 'warning');
                         checkHardening(hardenNode, hardenVerbose, hardenProfile);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
@@ -23651,7 +23675,8 @@
                                                                 const notChecked = (id in controls) && _notChecked(ctrlData);
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
-                                                                const failed = hardenResults?.[id]?.success === false;
+                                                                // a noop answer is "nothing to apply", not a failed apply
+                                                                const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                 // NS Apr 2026 — three live states during apply:
                                                                 //   inFlight = this control is currently being applied (spinner)
                                                                 //   queued   = selected but not yet processed (dim badge)
@@ -23701,7 +23726,7 @@
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
                                                                                 {notChecked && <span className="text-xs bg-gray-500/20 text-gray-300 px-2 py-0.5 rounded" title={(isVerboseData && ctrlData.not_checked) || t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>{t('hardenNotCheckedBadge') || 'Not checked'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
-                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{t('failed') || 'Failed'}</span>}
+                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={hardenResults[id].error || undefined}>{t('failed') || 'Failed'}</span>}
                                                                             </div>
                                                                             <p className="text-xs text-gray-400 mt-1">{info.desc}</p>
                                                                             <p className="text-xs text-gray-600 mt-0.5">{t('pveImpact') || 'PVE Impact'}: {info.impact}</p>
@@ -23827,7 +23852,7 @@
                                                                         const v = controls[id];
                                                                         const isObj = v && typeof v === 'object';
                                                                         const applied = isObj ? v.status === true : v === true;
-                                                                        const failed = hardenResults?.[id]?.success === false;
+                                                                        const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                         return [info.ref || '-', info.title || id, statusLbl(applied, failed, (id in controls) && _notChecked(v)), (info.impact || '').slice(0, 90)];
                                                                     });
                                                                     blocks.push({
@@ -24043,7 +24068,8 @@
                                                                     <div className="flex gap-3 text-xs">
                                                                         <button onClick={() => {
                                                                             const sel = {};
-                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false) sel[id] = true; });
+                                                                            const noop = hardenNoopIds();
+                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false && !noop.has(id)) sel[id] = true; });
                                                                             setHardenSelected(sel);
                                                                         }} className="text-blue-400 hover:text-blue-300">{t('selectAll') || 'Select all'}</button>
                                                                         <button onClick={() => setHardenSelected({})} className="text-gray-500 hover:text-gray-400">{t('deselectAll') || 'Deselect all'}</button>

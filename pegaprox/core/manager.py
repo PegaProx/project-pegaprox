@@ -20715,6 +20715,9 @@ echo DONE""",
             'check': "[ -f /etc/modprobe.d/cis-disable-modules.conf ] && echo OK || echo FAIL",
             'apply': """# included in fs_modules control
 echo DONE""",
+            # the apply changes nothing, so it is never reported as applied
+            'noop': 'covered by fs_modules, which writes the module blocklist for these '
+                    'protocols: apply that control instead',
         },
         'journald': {
             'check': """{ systemd-analyze cat-config systemd/journald.conf 2>/dev/null || cat /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null; } | grep -qE '^[[:space:]]*SystemMaxUse[[:space:]]*=[[:space:]]*[^[:space:]]' && echo OK || echo FAIL""",
@@ -21696,36 +21699,45 @@ echo DONE""",
     # no-op that prints DONE so the existing apply API doesn't blow up. Operator must
     # configure these manually after reading the evidence (BSI Grundschutz expects
     # documented operator decision per environment).
+    # an apply of these answers noop with this reason instead of a success
+    _VSNFD_AUDIT_ONLY = ('audit only: PegaProx does not change this setting, it is made by hand '
+                         '(the check says what the node has now)')
     _VSNFD_EXTRA_CHECKS = {
         'vsnfd_disk_encryption': {
             'check': """if lsblk -o NAME,FSTYPE,TYPE 2>/dev/null | grep -qE 'crypto_LUKS|zfs.*encrypt'; then echo OK; else echo FAIL; fi""",
             'verbose_check': """echo '--- block devices ---'; lsblk -o NAME,FSTYPE,SIZE,MOUNTPOINT 2>/dev/null | head -20; echo '--- LUKS ---'; lsblk -o NAME,FSTYPE 2>/dev/null | grep -i luks || echo '  (no LUKS volumes found)'; echo '--- ZFS encryption ---'; zfs get encryption 2>/dev/null | grep -v 'off' | head -5 || echo '  (no encrypted ZFS datasets)'; """,
             'apply': "echo 'INFORMATIONAL: configure disk encryption manually per BSI guidance'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_audit_retention': {
             'check': """RETENTION=$(grep -h '^MaxRetentionSec' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$RETENTION" ]; then case "$RETENTION" in *month|*M) NUM=${RETENTION%[mM]*}; [ "$NUM" -ge 6 ] && echo OK || echo FAIL ;; *year|*Y) echo OK ;; *week|*w) NUM=${RETENTION%[wW]*}; [ "$NUM" -ge 26 ] && echo OK || echo FAIL ;; *day|*d) NUM=${RETENTION%[dD]*}; [ "$NUM" -ge 180 ] && echo OK || echo FAIL ;; *[!0-9]*) echo FAIL ;; *) [ "$RETENTION" -ge 15552000 ] && echo OK || echo FAIL ;; esac; else echo FAIL; fi""",
             'verbose_check': """echo '--- journald retention configuration ---'; grep -h 'MaxRetentionSec\\|SystemMaxUse\\|Storage' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no MaxRetentionSec configured)'; echo '--- current journal size ---'; journalctl --disk-usage 2>/dev/null""",
             'apply': "echo 'INFORMATIONAL: set MaxRetentionSec=6month (or higher) in /etc/systemd/journald.conf manually'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_journald_size': {
             'check': """SIZE=$(grep -h '^SystemMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null | tail -1 | awk -F= '{print $2}' | tr -d ' '); if [ -n "$SIZE" ]; then case "$SIZE" in *G|*g) NUM=${SIZE%[gG]*}; [ "$NUM" -ge 1 ] && echo OK || echo FAIL ;; *) echo FAIL ;; esac; else echo FAIL; fi""",
             'verbose_check': """grep -h 'SystemMaxUse\\|RuntimeMaxUse' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/*.conf 2>/dev/null || echo '  (no SystemMaxUse configured, journald uses 10% of /var/log/journal partition default)'""",
             'apply': "echo 'INFORMATIONAL: set SystemMaxUse=1G or larger in /etc/systemd/journald.conf manually'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_secure_boot': {
             'check': """if [ -d /sys/firmware/efi ]; then if mokutil --sb-state 2>/dev/null | grep -qi 'enabled'; then echo OK; else echo FAIL; fi; else echo FAIL; fi""",
             'verbose_check': """echo '--- EFI status ---'; [ -d /sys/firmware/efi ] && echo 'EFI: yes' || echo 'EFI: no (legacy BIOS)'; echo '--- Secure Boot ---'; mokutil --sb-state 2>/dev/null || echo '  (mokutil not available)'; echo '--- TPM ---'; ls /dev/tpm* 2>/dev/null || echo '  (no TPM device)' """,
             'apply': "echo 'INFORMATIONAL: enable Secure Boot in firmware (UEFI) — host re-installation may be required'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_kernel_lockdown': {
             'check': """LD=$(cat /sys/kernel/security/lockdown 2>/dev/null | tr -d ' '); echo "$LD" | grep -qE '\\[integrity\\]|\\[confidentiality\\]' && echo OK || echo FAIL""",
             'verbose_check': """echo '--- kernel lockdown ---'; cat /sys/kernel/security/lockdown 2>/dev/null || echo '  (lockdown not available — kernel built without CONFIG_SECURITY_LOCKDOWN_LSM)'""",
             'apply': "echo 'INFORMATIONAL: kernel lockdown is set at boot via cmdline (lockdown=integrity) or by Secure Boot. Cannot toggle live.'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
         'vsnfd_password_min_12': {
             'check': """grep -h 'minlen\\s*=' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null | grep -oE 'minlen\\s*=\\s*[0-9]+' | tail -1 | awk -F= '{print $2}' | awk '{if ($1+0 >= 12) print "OK"; else print "FAIL"}' """,
             'verbose_check': """echo '--- pwquality configuration ---'; grep -h 'minlen\\|minclass\\|dcredit\\|ucredit\\|lcredit\\|ocredit' /etc/security/pwquality.conf /etc/security/pwquality.conf.d/*.conf 2>/dev/null || echo '  (no pwquality settings found — install libpam-pwquality)'""",
             'apply': "echo 'INFORMATIONAL: BSI requires minlen=12+. Use pw_quality CIS control with custom params or edit /etc/security/pwquality.conf manually.'; echo DONE",
+            'noop': _VSNFD_AUDIT_ONLY,
         },
     }
 
@@ -21876,9 +21888,11 @@ echo DONE""",
         return results
 
     def apply_node_hardening(self, node_name, controls, params=None):
-        """Apply selected CIS controls to a node. Returns per-control results.
+        """Apply selected CIS controls to a node. Returns per-control results:
+        {success, verified, exit_code[, error]}, see _hardening_apply_result.
 
-        NS Apr 2026 — also accepts VS-NfD informational checks (apply is no-op).
+        A control that changes nothing (net_protocols, the VS-NfD checks) is
+        answered {success: False, noop: True, error: why} without going to the node.
         """
         all_checks = self._all_hardening_controls()
         out = {}
@@ -21887,6 +21901,9 @@ echo DONE""",
                 out[ctrl_id] = {'success': False, 'error': 'unknown control'}
                 continue
             check = all_checks[ctrl_id]
+            if check.get('noop'):
+                out[ctrl_id] = {'success': False, 'noop': True, 'error': check['noop']}
+                continue
             cmd = check['apply']
             # MK: templated controls get user-supplied values merged with defaults
             # NS Apr 2026 — extended validator to accept Linux usernames (comma-list)
@@ -21901,7 +21918,25 @@ echo DONE""",
                         # empty or not allowed: silently dropped (defaults remain)
                         if v:
                             vals[k] = v
-                cmd = cmd.format(**vals)
+                try:
+                    cmd = cmd.format(**vals)
+                except (KeyError, IndexError, ValueError) as e:
+                    # a shell brace in the text that format takes for a field; the request
+                    # used to end in a 500 here, and nothing has reached the node yet
+                    out[ctrl_id] = {'success': False, 'verified': None, 'exit_code': None,
+                                    'error': f'the command of this control could not be built '
+                                             f'({e!r}), nothing was sent to the node'}
+                    continue
+            # NS Nov 2026 - every apply ends in `echo DONE`, so DONE alone said nothing about
+            # an install that failed into /dev/null or a script that stopped half way. The
+            # apply runs in a subshell (its exit and set -e stay in there), then the control's
+            # own check runs in the same SSH call. The script's last command is not asked:
+            # usb_storage, restrict_compilers and others end in a step that fails on purpose.
+            # The whole thing exits 0, so a failed apply is not run again with the next
+            # credential the SSH helpers would try. The exit marker starts a line of its own
+            # even when the apply's last output had no newline.
+            cmd = ('(\n%s\n)\nrc=$?; printf \'\\n---PEGAPROX-APPLY-EXIT:%%s---\\n\' "$rc"\n{ %s; }\n'
+                   'echo ---PEGAPROX-END---' % (cmd, check['check']))
             # NS #386: snapshot the files this control edits BEFORE applying, so the
             # change can be rolled back. Only the first apply backs up (preserves
             # the true pre-hardening state); a re-apply won't clobber the original.
@@ -21914,16 +21949,60 @@ echo DONE""",
                     for f in bf
                 )
                 cmd = pre + '; ' + cmd
-            result = self._ssh_node_output(node_name, cmd, timeout=60)
-            if result is not None and 'DONE' in result:
-                out[ctrl_id] = {'success': True}
-            else:
-                out[ctrl_id] = {'success': False, 'error': result or 'SSH command failed'}
+            out[ctrl_id] = self._hardening_apply_result(self._ssh_node_output(node_name, cmd, timeout=60))
         return out
+
+    @staticmethod
+    def _hardening_apply_result(raw):
+        """What one apply of apply_node_hardening sent back, as {success, verified, exit_code}.
+
+        success: the script reached its own DONE with exit status 0 and the control's check
+        printed OK right after. verified is that check (None: no verdict came back),
+        exit_code the subshell's status (None: no answer). Anything short of success
+        carries an error with the reason and the end of what the script printed.
+        """
+        if raw is None:
+            return {'success': False, 'verified': None, 'exit_code': None,
+                    'error': 'SSH command failed or timed out, the state of the node is unknown '
+                             'until the next check'}
+        # the marker has a line of its own (printf puts a newline in front of it); the last
+        # one is ours, the apply's own output comes before it
+        m = None
+        for m in re.finditer(r'^---PEGAPROX-APPLY-EXIT:(\d+)---$', raw, re.M):
+            pass
+        said = (raw[:m.start()] if m else raw).strip()
+        exit_code = int(m.group(1)) if m else None
+        verified = None
+        for line in (raw[m.end():] if m else '').splitlines():
+            line = line.strip()
+            if line == '---PEGAPROX-END---':
+                break
+            if line in ('OK', 'FAIL'):
+                verified = line == 'OK'
+                break
+        done = 'DONE' in (l.strip() for l in said.splitlines())
+        res = {'success': done and exit_code == 0 and verified is True,
+               'verified': verified, 'exit_code': exit_code}
+        if res['success']:
+            return res
+        if exit_code is None:
+            why = 'the apply did not finish, its output was cut short'
+        elif exit_code != 0 or not done:
+            why = f'the apply script stopped before its end with exit status {exit_code}'
+        elif verified is False:
+            why = "the apply ran, but the control's check still fails"
+        else:
+            why = 'the apply ran, but the check afterwards gave no verdict'
+        tail = said[-300:]
+        res['error'] = f'{why}: {tail}' if tail else why
+        return res
 
     def rollback_node_hardening(self, node_name, controls):
         """Restore the config files a CIS control changed, from the snapshot taken
         at apply time (#386). Only controls that declare backup_files can roll back."""
+        # files says per file 'restored', 'no_snapshot', 'failed' (the copy back
+        # failed) or 'unknown' (no answer). success needs every file restored; some of them is
+        # partial, never a full rollback
         all_checks = self._all_hardening_controls()
         out = {}
         for ctrl_id in controls:
@@ -21939,19 +22018,38 @@ echo DONE""",
             for f in bf:
                 bak = f + '.pegaprox-bak.' + ctrl_id
                 qf, qb = shlex.quote(f), shlex.quote(bak)
-                steps.append('if [ -f %s ]; then cp -p %s %s && rm -f %s && echo RESTORED:%s; else echo NOBACKUP:%s; fi'
-                             % (qb, qb, qf, qb, ctrl_id, ctrl_id))
+                # the file is restored once the copy back worked; a snapshot that cannot be
+                # removed afterwards does not make that a failure
+                steps.append('if [ -f %s ]; then if cp -p %s %s; then rm -f %s; echo %s; else echo %s; fi; '
+                             'else echo %s; fi'
+                             % (qb, qb, qf, qb, shlex.quote('RESTORED:' + f), shlex.quote('FAILED:' + f),
+                                shlex.quote('NOBACKUP:' + f)))
             post = ctrl.get('rollback_post')
             if post:
                 steps.append('{ %s ; } || true' % post)
             steps.append('echo DONE')
             result = self._ssh_node_output(node_name, ' ; '.join(steps), timeout=60)
-            if result and 'DONE' in result and 'RESTORED:' in result:
-                out[ctrl_id] = {'success': True}
-            elif result and 'NOBACKUP:' in result and 'RESTORED:' not in result:
-                out[ctrl_id] = {'success': False, 'error': 'no snapshot found — control was never applied (or already rolled back)'}
+            files = dict.fromkeys(bf, 'unknown')
+            for line in (result or '').splitlines():
+                tag, _, path = line.strip().partition(':')
+                if path in files and tag in ('RESTORED', 'NOBACKUP', 'FAILED'):
+                    files[path] = {'RESTORED': 'restored', 'NOBACKUP': 'no_snapshot', 'FAILED': 'failed'}[tag]
+            restored = [f for f in bf if files[f] == 'restored']
+            missing = [f for f in bf if files[f] == 'no_snapshot']
+            if len(restored) == len(bf):
+                out[ctrl_id] = {'success': True, 'files': files}
+            elif restored:
+                why = [f'only {len(restored)} of {len(bf)} files were restored']
+                if missing:
+                    why.append('no snapshot of ' + ', '.join(missing))
+                if len(restored) + len(missing) < len(bf):
+                    why.append('not restored: ' + ', '.join(f for f in bf if files[f] in ('failed', 'unknown')))
+                out[ctrl_id] = {'success': False, 'partial': True, 'files': files, 'error': '; '.join(why)}
+            elif result is not None and len(missing) == len(bf):
+                out[ctrl_id] = {'success': False, 'files': files,
+                                'error': 'no snapshot found - control was never applied (or already rolled back)'}
             else:
-                out[ctrl_id] = {'success': False, 'error': (result or 'SSH command failed')[:300]}
+                out[ctrl_id] = {'success': False, 'files': files, 'error': (result or 'SSH command failed')[:300]}
         return out
 
     def _fetch_qemu_ips(self, node: str, vmid: int) -> list:

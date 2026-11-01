@@ -4104,8 +4104,13 @@ echo DONE""",
                     for cid, ok in results.items()}
         return results
 
-    def apply_node_hardening(self, node_name, controls):
-        """Apply selected CIS controls via SSH."""
+    def apply_node_hardening(self, node_name, controls, params=None):
+        """Apply selected CIS controls via SSH.
+
+        Takes params like the PVE manager, unused: no control here is templated. The
+        shared routes refuse apply and rollback on anything but Proxmox VE before they
+        get here, so this is not reached from the API today.
+        """
         results = {}
         for cid in controls:
             spec = self._CIS_CHECKS.get(cid)
@@ -4119,6 +4124,11 @@ echo DONE""",
             else:
                 results[cid] = {'success': False, 'error': out.strip()[-200:] if out else 'No output'}
         return results
+
+    def rollback_node_hardening(self, node_name, controls):
+        """No control here keeps a snapshot, so there is nothing to restore."""
+        return {cid: {'success': False, 'error': 'control has no rollback snapshot (not reversible)'
+                      if cid in self._CIS_CHECKS else 'unknown control'} for cid in controls}
 
     # ──────────────────────────────────────────
     # Node disks & storage repos - NS/LW Mar 2026

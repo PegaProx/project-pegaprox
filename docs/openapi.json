@@ -33087,7 +33087,7 @@
           }
         },
         "summary": "The custom hardening profiles, the built-in ones and the controls both pick from.",
-        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults) and whether it can be rolled back. can_manage: whether the\ncaller may create, change and delete custom profiles.",
+        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults), whether it can be rolled back and whether its apply changes\nnothing on the node (noop). can_manage: whether the caller may create, change and\ndelete custom profiles.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
