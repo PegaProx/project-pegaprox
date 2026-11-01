@@ -42,7 +42,7 @@ def pbs_upstream_error(result):
     """
     if not isinstance(result, dict) or 'error' not in result:
         return None
-    upstream = result.get('status_code')
+    upstream = result.get('upstream_status', result.get('status_code'))
     if upstream == 403:
         # PBS guards the node log with Sys.Audit on /system/log. A token minted for
         # backup work alone (Datastore.*) does not carry it, and that is the common case.
@@ -50,8 +50,9 @@ def pbs_upstream_error(result):
     if upstream is None:
         # never got an answer: DNS, refused, timed out, TLS
         return 502, {'error': 'PBS is unreachable', 'code': 'PBS_UNREACHABLE', 'upstream_status': None}
-    return 502, {'error': f'PBS returned HTTP {upstream}', 'code': 'PBS_UPSTREAM',
-                 'upstream_status': upstream}
+    reason = ('PBS returned an invalid response' if 'upstream_status' in result
+              else f'PBS returned HTTP {upstream}')
+    return 502, {'error': reason, 'code': 'PBS_UPSTREAM', 'upstream_status': upstream}
 
 
 def _link_refusal(links, empty_error):
@@ -1211,7 +1212,8 @@ def get_pbs_tasks(pbs_id):
     if failed:
         status, payload = failed
         return jsonify(payload), status
-    if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+    if (not isinstance(result, dict) or not isinstance(result.get('data'), list)
+            or any(not isinstance(row, dict) for row in result['data'])):
         return jsonify({'error': 'PBS returned an invalid task list', 'code': 'PBS_UPSTREAM'}), 502
     # sec (audit) — the report path scopes these very rows; the raw list didn't, so a scoped
     # caller read every guest's backup history off the same server. Rows with no guest (gc,

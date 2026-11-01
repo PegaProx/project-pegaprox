@@ -76,3 +76,71 @@ def test_empty_task_list_and_log_remain_successful(task_client):
     assert detail.status_code == 200 and detail.get_json() == {
         'status': {'status': 'stopped'}, 'log': [],
     }
+
+
+@pytest.mark.parametrize('failed_method', ['get_tasks', 'get_task_status', 'get_task_log'])
+@pytest.mark.parametrize('reauthenticate', [False, True])
+def test_malformed_json_is_an_upstream_response_error(task_client, failed_method, reauthenticate):
+    """A responding PBS with invalid JSON is not an unreachable PBS."""
+    from requests import Response
+    from pegaprox.core.pbs import PBSManager
+
+    client, mgr = task_client
+    response = Response()
+    response.status_code, response._content = 200, b'not json'
+    upstream = MagicMock()
+    upstream.base_url, upstream.name = 'https://pbs.invalid/api2/json', 'test PBS'
+    upstream.connect.return_value = True
+    if reauthenticate:
+        expired = Response()
+        expired.status_code = 401
+        upstream._session.get.side_effect = [expired, response]
+    else:
+        upstream._session.get.return_value = response
+    getattr(mgr, failed_method).side_effect = (
+        lambda *a, **kw: PBSManager.api_get(upstream, 'nodes/localhost/tasks'))
+
+    path = f'/api/pbs/{PBS_ID}/tasks'
+    if failed_method != 'get_tasks':
+        path += f'/{UPID}'
+    result = client.get(path)
+
+    assert result.status_code == 502
+    assert result.get_json()['code'] == 'PBS_UPSTREAM'
+    assert result.get_json()['upstream_status'] == 200
+
+
+@pytest.mark.parametrize('row', [None, 0, 'bad row', []])
+@pytest.mark.parametrize('scoped', [False, True])
+def test_malformed_task_rows_are_rejected_before_scoping(task_client, monkeypatch, row, scoped):
+    """Malformed rows are 502 responses for scoped and unconfined callers alike."""
+    import pegaprox.api.pbs as pbs_api
+
+    client, mgr = task_client
+    monkeypatch.setattr(pbs_api, 'acts_as_admin', lambda user: False)
+    monkeypatch.setattr(pbs_api, '_caller_is_scoped_here', lambda manager, user: scoped)
+    mgr.get_tasks.return_value = {'data': [row]}
+
+    result = client.get(f'/api/pbs/{PBS_ID}/tasks')
+
+    assert result.status_code == 502
+    assert result.get_json()['code'] == 'PBS_UPSTREAM'
+
+
+def test_invalid_json_cannot_turn_a_snapshot_read_error_into_http_200(task_client):
+    """Other PBS read routes must retain a failing HTTP status for decode errors."""
+    from requests import Response
+    from pegaprox.core.pbs import PBSManager
+
+    client, mgr = task_client
+    reply = Response()
+    reply.status_code, reply._content = 200, b'not json'
+    upstream = MagicMock()
+    upstream.base_url, upstream.name = 'https://pbs.invalid/api2/json', 'test PBS'
+    upstream._session.get.return_value = reply
+    mgr.get_snapshots.side_effect = (
+        lambda *a, **kw: PBSManager.api_get(upstream, 'admin/datastore/store/snapshots'))
+
+    result = client.get(f'/api/pbs/{PBS_ID}/datastores/store/snapshots')
+
+    assert result.status_code == 502

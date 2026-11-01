@@ -282,6 +282,10 @@ class PBSManager:
                         return resp.json()
             logging.warning(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
             return {'error': f"HTTP {resp.status_code}", 'status_code': resp.status_code}
+        except requests.exceptions.JSONDecodeError:
+            logging.warning(f"[PBS:{self.name}] GET {path} returned invalid JSON")
+            return {'error': 'PBS returned invalid JSON', 'status_code': 502,
+                    'upstream_status': resp.status_code}
         except Exception as e:
             logging.error(f"[PBS:{self.name}] GET {path} failed: {e}")
             return {'error': str(e)}
