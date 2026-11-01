@@ -11562,6 +11562,67 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/qemu/{vmid}/pending": {
+      "get": {
+        "operationId": "vms.get_vm_pending_api_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What of a VM's config waits for its next start, as PVE itself reports it. Read only: the keys with a pending value or a pending delete, nothing else.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/lock": {
       "get": {
         "operationId": "vms.get_vm_lock_status_api_get",

@@ -5731,6 +5731,68 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
     return _get_vm_config_response(cluster_id, node, vm_type, vmid)
 
 
+# PVE masks it in its own answer; masked here too, whatever the version sends
+_PENDING_MASKED = ('cipassword',)
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/pending', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_pending_api(cluster_id, node, vmid):
+    """What of a VM's config waits for its next start, as PVE itself reports it. Read only:
+    the keys with a pending value or a pending delete, nothing else."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', 'qemu')
+    if denied:
+        return denied
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return jsonify({'error': 'Invalid node name'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'The pending list is a Proxmox VE setting'}), 400
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/qemu/{vmid}/pending"
+    try:
+        resp = manager._create_session().get(url, timeout=10)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for the pending list: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in (401, 403):
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the pending changes'),
+                        'upstream_status': resp.status_code}), 502
+
+    rows = []
+    for item in resp.json().get('data') or []:
+        if not isinstance(item, dict) or not item.get('key'):
+            continue
+        has_pending = 'pending' in item
+        try:
+            delete = int(item.get('delete') or 0)
+        except (TypeError, ValueError):
+            delete = 0
+        if not has_pending and not delete:
+            continue
+        row = {'key': str(item['key'])}
+        if 'value' in item:
+            row['value'] = item['value']
+        if has_pending:
+            row['pending'] = item['pending']
+        if delete:
+            # 2 is PVE's forced delete
+            row['delete'] = 2 if delete == 2 else 1
+        if row['key'] in _PENDING_MASKED:
+            for k in ('value', 'pending'):
+                if k in row:
+                    row[k] = '**********'
+        rows.append(row)
+    return jsonify({'pending': rows})
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/lock', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
