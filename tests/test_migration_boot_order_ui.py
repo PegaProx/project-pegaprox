@@ -41,13 +41,45 @@ def test_missing_later_boot_devices_are_shown(xc_app, layout, dialog, boot):
     assert not app.errors, app.errors
 
 
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
 @pytest.mark.parametrize('dialog', ['local', 'cross'])
 @pytest.mark.parametrize('boot', ['order=scsi0;net0', 'order=scsi0; net0',
                                   'order=scsi0 net0', 'cdn'])
-def test_existing_devices_and_legacy_order_have_no_warning(xc_app, dialog, boot):
+def test_existing_devices_and_legacy_order_have_no_warning(xc_app, layout, dialog, boot):
     """Configured boot devices and the legacy BIOS order do not produce false warnings."""
     config = dict(SRC_CFG, boot=boot)
-    app = xc_app(src_cfg=config)
-    view = _cross_dialog(app) if dialog == 'cross' else _migrate(app)
-    assert view.get_by_text('Boot Order Issue', exact=True).count() == 0
+    app = xc_app(layout=layout, src_cfg=dict(SRC_CFG, boot='order=missing0'))
+    view = _dialog(app, layout, dialog)
+    warning = view.get_by_text('Boot Order Issue', exact=True)
+    warning.wait_for(timeout=5000)
+    _update_config(app.page, config)
+    warning.wait_for(state='hidden', timeout=5000)
+    assert not app.errors, app.errors
+
+
+def _update_config(page, config):
+    """Process a real config update after the initial warning has rendered."""
+    page.evaluate("""config => window.dispatchEvent(new CustomEvent('pegaprox-vm-config', {
+        detail: {vmid: 100, vm_type: 'qemu', cluster_id: 'cluster_1', config}
+    }))""", config)
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+@pytest.mark.parametrize('dialog', ['local', 'cross'])
+@pytest.mark.parametrize('missing', [False, True], ids=['implicit-net0', 'missing-net1'])
+def test_qemu_implicit_net0_matches_the_server(xc_app, layout, dialog, missing):
+    """QEMU's implicit net0 is valid, while an absent net1 still needs attention."""
+    config = dict(SRC_CFG, boot='order=net0;net1' if missing else 'order=net0')
+    config.pop('net0', None)
+    app = xc_app(layout=layout, src_cfg=dict(SRC_CFG, boot='order=missing0'))
+    view = _dialog(app, layout, dialog)
+    warning = view.get_by_text('Boot Order Issue', exact=True)
+    warning.wait_for(timeout=5000)
+    _update_config(app.page, config)
+    if missing:
+        code = warning.locator('..').locator('code')
+        from playwright.sync_api import expect
+        expect(code).to_have_text('net1')
+    else:
+        warning.wait_for(state='hidden', timeout=5000)
     assert not app.errors, app.errors

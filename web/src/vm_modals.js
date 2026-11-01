@@ -2903,10 +2903,11 @@
         const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
 
         /** Return missing devices from PVE's semicolon or whitespace-delimited boot order. */
-        function migrationBootOrderIssues(config) {
+        function migrationBootOrderIssues(config, vmType) {
             const boot = typeof config.boot === 'string' ? config.boot : '';
             const order = boot.split(',').find(part => part.startsWith('order='));
-            return order ? order.slice(6).split(/[;\s]+/).filter(device => device && !config[device]) : [];
+            return order ? order.slice(6).split(/[;\s]+/)
+                .filter(device => device && !config[device] && !(device === 'net0' && vmType === 'qemu')) : [];
         }
 
         /** Configure a migration to another node in the same cluster. */
@@ -2982,7 +2983,7 @@
                     setHasCdDvd(foundIsos.length > 0);
                     setDetectedIsos(foundIsos);
                     
-                    setBootOrderIssues(migrationBootOrderIssues(config));
+                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type));
 
                     // a VM with virtiofs does not migrate live (qemu-server check_local_resources), and
                     // offline only to a node its directory mappings cover
@@ -4407,7 +4408,7 @@
                     setHasCdDvd(foundIsos.length > 0);
                     setDetectedIsos(foundIsos);
                     
-                    setBootOrderIssues(migrationBootOrderIssues(config));
+                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type));
                     
                     // Calculate total disk size for large VM warning
                     let totalDiskGb = 0;
