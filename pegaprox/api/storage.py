@@ -426,6 +426,8 @@ _cache_lock = threading.Lock()
 
 # Track active auto-balance migrations to prevent duplicates
 active_auto_migrations = {}
+# groups the worker found it cannot compare, so it says so once
+_unbalanceable_groups = set()
 
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 
@@ -557,6 +559,179 @@ def _bounded_worker_int(value, default, lo, hi):
     return max(lo, min(hi, n))
 
 
+def _member_stats(members, rows, node):
+    """One entry per member storage of a group, from the storage list `rows` of `node`
+    (None when that read failed or there was no node to read from).
+
+    NS Nov 2026 - a member that is not active, switched off, gone or without a size used to
+    count as 0 % used. That made it the emptiest member of its group, and the status route
+    and the worker both sent disks to it; a failed read gave an empty list that read as
+    balanced. Only the usable members are compared now, the rest say what they are.
+    """
+    by_name = {r.get('storage'): r for r in (rows or []) if isinstance(r, dict)}
+    out = []
+    for name in members:
+        row = by_name.get(name)
+        entry = {'storage': name, 'type': (row or {}).get('type'), 'total': None, 'used': None,
+                 'avail': None, 'usage_percent': None, 'usable': False, 'node': node,
+                 'shared': bool(row['shared']) if row and 'shared' in row else None}
+        total, used = (row or {}).get('total'), (row or {}).get('used')
+        if rows is None:
+            entry['state'] = 'unreadable'
+        elif row is None:
+            entry['state'] = 'missing'
+        elif not row.get('enabled', 1):
+            entry['state'] = 'disabled'
+        elif not row.get('active', 1):
+            entry['state'] = 'inactive'
+        elif not isinstance(total, (int, float)) or total <= 0 or not isinstance(used, (int, float)):
+            entry['state'] = 'no_size'
+        else:
+            entry.update(state='ok', usable=True, total=total, used=used, avail=row.get('avail', 0),
+                         usage_percent=round(used / total * 100, 1))
+        out.append(entry)
+    return out
+
+
+def _spread(stats):
+    """(imbalance, fullest, emptiest) over the usable members; (None, None, None) with fewer
+    than two of them, which is no figure at all rather than 0 points."""
+    usable = sorted((s for s in stats if s.get('usable')), key=lambda s: s['usage_percent'], reverse=True)
+    if len(usable) < 2:
+        return None, None, None
+    return usable[0]['usage_percent'] - usable[-1]['usage_percent'], usable[0], usable[-1]
+
+
+def _shared_member(name, rows, online):
+    """A shared member from its /cluster/resources rows, one per node that has it enabled.
+
+    It is usable when a node that is up reports it available, and the figure is that node's.
+    The rows carry no active flag: a status other than 'available' is a node that has no
+    current figure for it, an inactive or unreachable mount for instance.
+    """
+    by_node = {r.get('node'): r for r in rows}
+    up = [by_node[n] for n in online if by_node.get(n, {}).get('status') == 'available']
+    sized = [r for r in up if isinstance(r.get('maxdisk'), (int, float)) and r['maxdisk'] > 0
+             and isinstance(r.get('disk'), (int, float))]
+    entry = {'storage': name, 'type': rows[0].get('plugintype'), 'total': None, 'used': None,
+             'avail': None, 'usage_percent': None, 'usable': False, 'node': None, 'shared': True}
+    if sized:
+        r = sized[0]
+        entry.update(state='ok', usable=True, node=r['node'], total=r['maxdisk'], used=r['disk'],
+                     avail=max(r['maxdisk'] - r['disk'], 0),
+                     usage_percent=round(r['disk'] / r['maxdisk'] * 100, 1))
+    elif up:
+        entry.update(state='no_size', node=up[0].get('node'))
+    else:
+        entry['state'] = 'unavailable'
+    return entry
+
+
+def _read_members(manager, host, port, members, acquire):
+    """(stats, read_error) for the members of a group, or None when `acquire` (the rate
+    limiter) said no.
+
+    The shared members come from one /cluster/resources?type=storage read, which holds every
+    node's view of them, so a node with a bad mount or one that is down no longer decides the
+    group. A local member, and one that read does not list, still comes from the storage list
+    of the first node that is up. read_error says why when no member could be read at all.
+    """
+    base = f"https://{host}:{port}/api2/json"
+    nodes_response = manager._create_session().get(f"{base}/nodes", timeout=10)
+    if nodes_response.status_code != 200:
+        return (_member_stats(members, None, None),
+                f"The node list could not be read (HTTP {nodes_response.status_code})")
+    online = [n['node'] for n in nodes_response.json().get('data', []) or []
+              if n.get('status', 'online') == 'online']
+    if not online:
+        return _member_stats(members, None, None), 'No node of the cluster is online'
+
+    if not acquire():
+        return None
+    listed = {}
+    resources = manager._create_session().get(f"{base}/cluster/resources?type=storage", timeout=10)
+    if resources.status_code == 200:
+        for r in resources.json().get('data', []) or []:
+            if isinstance(r, dict) and r.get('type') == 'storage' and r.get('storage') in members:
+                listed.setdefault(r['storage'], []).append(r)
+    shared = {name: rows for name, rows in listed.items() if all(r.get('shared') for r in rows)}
+
+    per_node, read_error = {}, None
+    rest = [m for m in members if m not in shared]
+    if rest:
+        if not acquire():
+            return None
+        node = online[0]
+        storage_response = manager._create_session().get(f"{base}/nodes/{node}/storage", timeout=10)
+        rows = None
+        if storage_response.status_code == 200:
+            rows = storage_response.json().get('data', [])
+        else:
+            read_error = f"The storage list of {node} could not be read (HTTP {storage_response.status_code})"
+        per_node = {s['storage']: s for s in _member_stats(rest, rows, node)}
+
+    stats = [_shared_member(m, shared[m], online) if m in shared else per_node[m] for m in members]
+    if not all(s['state'] == 'unreadable' for s in stats):
+        read_error = None
+    return stats, read_error
+
+
+def _local_node(source, target):
+    """The node whose guests may move between these two members, None for every node.
+
+    A member that is not shared has one figure per node, and the one in hand is that of the
+    node it was read on: only guests there may be moved on it.
+    """
+    for s in (source, target):
+        if s.get('shared') is False:
+            return s.get('node')
+    return None
+
+
+def _is_cdrom(value):
+    # an ISO or a cloud-init drive sits on a storage too, and PVE moves neither
+    return 'media=cdrom' in value.split(',')[1:]
+
+
+def _guest_word(vm_type, vmid):
+    return f"container {vmid}" if vm_type == 'lxc' else f"VM {vmid}"
+
+
+def _move_call(vm_type, node, vmid, disk, storage):
+    """(path, form) of the call that moves one disk of a guest to `storage` and drops the
+    source. A container has no move_disk (PVE answers 501): its volumes (rootfs, mpN) move
+    with move_volume, and only while it is stopped."""
+    if vm_type == 'lxc':
+        return f"/nodes/{node}/lxc/{vmid}/move_volume", {'volume': disk, 'storage': storage, 'delete': 1}
+    return f"/nodes/{node}/qemu/{vmid}/move_disk", {'disk': disk, 'storage': storage, 'delete': 1}
+
+
+CT_RUNNING_REASON = 'Proxmox VE moves the volume of a container only while the container is stopped'
+
+
+def _pve_refusal(response):
+    """What PVE said when it refused a call. It often puts the reason into the status line
+    and sends {"data":null}, which is what the user was shown before."""
+    import html
+    text = response.text or ''
+    try:
+        # a message with a raw newline in it, as PVE sends them, is no valid JSON otherwise
+        body = json.loads(text.replace('\n', ' ').replace('\r', '')) if text else None
+    except ValueError:
+        body = None
+    reason = ' '.join(str(getattr(response, 'reason', '') or '').split())
+    if isinstance(body, dict) and (body.get('message') or body.get('errors')):
+        said = html.unescape(parse_pve_error(text))
+    elif reason:
+        said = reason[:300]
+    elif text.strip() and body is None:
+        said = html.unescape(parse_pve_error(text))
+    else:
+        return f'HTTP {response.status_code}'
+    # escaped once, the same way on every branch: the alert showed &#x27; for a quote
+    return html.escape(said, quote=False)
+
+
 @bp.route('/api/clusters/<cluster_id>/storage-clusters', methods=['GET'])
 @require_auth(perms=["storage.view"])
 def get_storage_clusters(cluster_id):
@@ -604,7 +779,8 @@ def create_storage_cluster(cluster_id):
     data = request.json or {}
     name = _storage_cluster_name(data.get('name'))
     storages = data.get('storages', [])
-    threshold = data.get('threshold', 20)
+    # points of spread, the range the slider offers; the worker compares it as a number
+    threshold = _bounded_worker_int(data.get('threshold', 20), 20, 5, 50)
     
     if not name:
         return jsonify({'error': 'A name of up to 128 characters is required'}), 400
@@ -630,6 +806,8 @@ def create_storage_cluster(cluster_id):
             'auto_balance': data.get('auto_balance', False),
             'max_concurrent': _bounded_worker_int(data.get('max_concurrent', 1), 1, 1, 32),
             'check_interval': _bounded_worker_int(data.get('check_interval', 3600), 3600, 60, 86400),  # seconds
+            # the worker moves only above threshold + tolerance; the UI sent it and nothing kept it
+            'tolerance': _bounded_worker_int(data.get('tolerance', 5), 5, 0, 20),
             'last_auto_run': None,
             'created': datetime.now().isoformat()
         }
@@ -698,7 +876,7 @@ def update_storage_cluster(cluster_id, sc_id):
                 if 'storages' in data:
                     sc['storages'] = data['storages']
                 if 'threshold' in data:
-                    sc['threshold'] = data['threshold']
+                    sc['threshold'] = _bounded_worker_int(data['threshold'], 20, 5, 50)
                 if 'enabled' in data:
                     sc['enabled'] = data['enabled']
                 if 'auto_balance' in data:
@@ -707,6 +885,8 @@ def update_storage_cluster(cluster_id, sc_id):
                     sc['max_concurrent'] = _bounded_worker_int(data['max_concurrent'], 1, 1, 32)
                 if 'check_interval' in data:
                     sc['check_interval'] = _bounded_worker_int(data['check_interval'], 3600, 60, 86400)
+                if 'tolerance' in data:
+                    sc['tolerance'] = _bounded_worker_int(data['tolerance'], 5, 0, 20)
                 
                 storage_clusters_config[cluster_id]['clusters'][i] = sc
                 save_storage_clusters()
@@ -761,6 +941,7 @@ def delete_storage_cluster(cluster_id, sc_id):
                 
                 user = request.session.get('user', 'unknown')
                 log_audit(user, 'storage_cluster.deleted', f"Deleted storage cluster '{deleted['name']}'", cluster=manager.config.name)
+                _unbalanceable_groups.discard(f"{cluster_id}:{deleted.get('id')}")
                 
                 return jsonify({'success': True})
     
@@ -794,70 +975,30 @@ def get_storage_cluster_status(cluster_id, sc_id):
         
         # Try to get storage stats from cache first
         cache_key = f"storage_stats:{sc_id}"
-        storage_stats, cache_hit = _storage_cache.get(cluster_id, cache_key)
+        cached, cache_hit = _storage_cache.get(cluster_id, cache_key)
         
         if not cache_hit:
             # Rate limit API calls
             if not _api_rate_limiter.acquire(cluster_id):
                 return jsonify({'error': 'API rate limit exceeded, please try again'}), 429
-            
-            storage_stats = []
-            nodes = []
-            
-            # Get nodes
-            nodes_url = f"https://{host}:{port}/api2/json/nodes"
-            nodes_response = manager._create_session().get(nodes_url, timeout=10)
-            if nodes_response.status_code == 200:
-                nodes = [n['node'] for n in nodes_response.json().get('data', [])]
-            
-            # Get storage info from first node
-            if nodes:
-                if not _api_rate_limiter.acquire(cluster_id):
-                    return jsonify({'error': 'API rate limit exceeded'}), 429
-                
-                node = nodes[0]
-                storage_url = f"https://{host}:{port}/api2/json/nodes/{node}/storage"
-                storage_response = manager._create_session().get(storage_url, timeout=10)
-                
-                if storage_response.status_code == 200:
-                    for storage in storage_response.json().get('data', []):
-                        # Only include storages that are in this storage cluster
-                        if storage['storage'] not in sc_config['storages']:
-                            continue
-                        
-                        total = storage.get('total', 0)
-                        used = storage.get('used', 0)
-                        usage_percent = (used / total * 100) if total > 0 else 0
-                        
-                        storage_stats.append({
-                            'storage': storage['storage'],
-                            'type': storage.get('type'),
-                            'total': total,
-                            'used': used,
-                            'avail': storage.get('avail', 0),
-                            'usage_percent': round(usage_percent, 1)
-                        })
-            
+            cached = _read_members(manager, host, port, sc_config['storages'],
+                                   lambda: _api_rate_limiter.acquire(cluster_id))
+            if cached is None:
+                return jsonify({'error': 'API rate limit exceeded'}), 429
             # Cache storage stats for 30 seconds
-            _storage_cache.set(cluster_id, cache_key, storage_stats, ttl_seconds=30)
+            _storage_cache.set(cluster_id, cache_key, cached, ttl_seconds=30)
+        storage_stats, read_error = cached
         
-        # Calculate imbalance within this storage cluster
-        if len(storage_stats) >= 2:
-            usages = [s['usage_percent'] for s in storage_stats]
-            imbalance = max(usages) - min(usages)
-        else:
-            imbalance = 0
+        # Calculate imbalance within this storage cluster, over the members that could be read
+        imbalance, source_storage, target_storage = _spread(storage_stats)
         
         # Generate recommendations if imbalance exceeds threshold
         recommendations = []
         threshold = sc_config.get('threshold', 20)
-        max_recommendations = int(request.args.get('max_recommendations', 10))  # configurable
+        max_recommendations = _bounded_worker_int(request.args.get('max_recommendations', 10), 10, 1, 100)
         
-        if imbalance > threshold and len(storage_stats) >= 2 and sc_config.get('enabled', True):
-            # Find most and least used storage in THIS cluster
-            sorted_stats = sorted(storage_stats, key=lambda x: x['usage_percent'], reverse=True)
-            source_storage = sorted_stats[0]
-            target_storage = sorted_stats[-1]
+        if imbalance is not None and imbalance > threshold and sc_config.get('enabled', True):
+            local_node = _local_node(source_storage, target_storage)
             
             # Try to get VM list from cache
             vm_cache_key = f"vm_list:{cluster_id}"
@@ -873,6 +1014,7 @@ def get_storage_cluster_status(cluster_id, sc_id):
                         'storages': storage_stats,
                         'imbalance': round(imbalance, 1),
                         'threshold': threshold,
+                        'tolerance': sc_config.get('tolerance', 5),
                         'recommendations': [],
                         'rate_limited': True
                     })
@@ -912,6 +1054,8 @@ def get_storage_cluster_status(cluster_id, sc_id):
                 vmid = vm.get('vmid')
                 vm_type = 'qemu' if vm.get('type') == 'qemu' else 'lxc'
                 vm_status = vm.get('status', '')
+                if local_node and vm_node != local_node:
+                    continue
                 
                 # Try to get VM config from cache
                 config_cache_key = f"vm_config:{vmid}"
@@ -954,6 +1098,8 @@ def get_storage_cluster_status(cluster_id, sc_id):
                         continue
                     if not any(key.startswith(prefix) for prefix in ['scsi', 'sata', 'virtio', 'ide', 'rootfs', 'mp']):
                         continue
+                    if _is_cdrom(value):
+                        continue
                     
                     # Check disk is on source storage (must be in this storage cluster)
                     if value.startswith(source_storage['storage'] + ':'):
@@ -970,17 +1116,22 @@ def get_storage_cluster_status(cluster_id, sc_id):
                             except:
                                 pass
                         
-                        recommendations.append({
+                        rec = {
                             'type': 'move_disk',
                             'vmid': vmid,
                             'vm_name': vm.get('name', f'VM {vmid}'),
+                            'vm_type': vm_type,
                             'vm_status': vm_status,
                             'disk': key,
                             'source': source_storage['storage'],
                             'target': target_storage['storage'],
                             'disk_size': disk_size,
+                            'movable': True,
                             'reason': f"Balance: {source_storage['storage']} ({source_storage['usage_percent']}%) → {target_storage['storage']} ({target_storage['usage_percent']}%)"
-                        })
+                        }
+                        if vm_type == 'lxc' and vm_status == 'running':
+                            rec.update(movable=False, blocked='ct_running', blocked_reason=CT_RUNNING_REASON)
+                        recommendations.append(rec)
                         
                         if len(recommendations) >= max_recommendations:
                             break
@@ -994,8 +1145,11 @@ def get_storage_cluster_status(cluster_id, sc_id):
             'name': sc_config['name'],
             'enabled': sc_config.get('enabled', True),
             'storages': storage_stats,
-            'imbalance': round(imbalance, 1),
+            'imbalance': round(imbalance, 1) if imbalance is not None else None,
             'threshold': threshold,
+            'tolerance': sc_config.get('tolerance', 5),
+            # why no member could be read (node list refused, every node down), else None
+            'read_error': read_error,
             'recommendations': recommendations,
             # MK: Include stats for debugging large clusters
             '_stats': {
@@ -1028,6 +1182,11 @@ def execute_storage_migration(cluster_id):
     
     if not all([vmid, disk, target_storage]):
         return jsonify({'error': 'Missing required parameters: vmid, disk, target'}), 400
+    # the guest list has it as a number; "100" from a script found no guest
+    try:
+        vmid = int(vmid)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'vmid must be a number'}), 400
     
     # Verify user has access to the specific VM before allowing disk operations —
     # stops a storage.config holder with any VM ACL from moving arbitrary VMs' disks.
@@ -1037,7 +1196,7 @@ def execute_storage_migration(cluster_id):
     user = build_authz_user(username, request.session)
 
     # Require vm.config permission for the specific VM (disk operations are configuration changes)
-    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.config'):
+    if not user_can_access_vm(user, cluster_id, vmid, 'vm.config'):
         log_audit(username, 'storage_balancing.disk_move_denied',
                   f"Denied attempt to move disk {disk} of VM {vmid} (no VM access)")
         return jsonify({'error': 'Access denied: you do not have permission to modify this VM'}), 403
@@ -1051,12 +1210,14 @@ def execute_storage_migration(cluster_id):
         
         vm_node = None
         vm_type = None
+        vm_status = None
         
         if resources_response.status_code == 200:
             for vm in resources_response.json().get('data', []):
                 if vm.get('vmid') == vmid:
                     vm_node = vm.get('node')
                     vm_type = 'qemu' if vm.get('type') == 'qemu' else 'lxc'
+                    vm_status = vm.get('status')
                     
                     # Check for lock
                     status_url = f"https://{host}:{port}/api2/json/nodes/{vm_node}/{vm_type}/{vmid}/status/current"
@@ -1067,6 +1228,7 @@ def execute_storage_migration(cluster_id):
                             return jsonify({
                                 'error': f'VM {vmid} is locked ({status_data.get("lock")})'
                             }), 400
+                        vm_status = status_data.get('status', vm_status)
                     break
         
         if not vm_node or not vm_type:
@@ -1084,20 +1246,22 @@ def execute_storage_migration(cluster_id):
         except Exception as e:
             logging.warning(f"Could not check efficient snapshots for VM {vmid}: {e}")
 
-        # Execute disk move
-        move_url = f"https://{host}:{port}/api2/json/nodes/{vm_node}/{vm_type}/{vmid}/move_disk"
-        move_data = {
-            'disk': disk,
-            'storage': target_storage,
-            'delete': 1  # Delete source after move
-        }
+        # a container went through the QEMU move_disk call, which PVE does not have for
+        # containers, and the user read '{"data":null}' from the 501
+        if vm_type == 'lxc' and vm_status == 'running':
+            return jsonify({'error': f'Container {vmid} is running: {CT_RUNNING_REASON}'}), 409
+
+        # Execute disk move, the source is deleted after it
+        move_path, move_data = _move_call(vm_type, vm_node, vmid, disk, target_storage)
+        move_url = f"https://{host}:{port}/api2/json{move_path}"
         
         response = manager._create_session().post(move_url, data=move_data, timeout=10)
         
         if response.status_code == 200:
             result = response.json()
             user = request.session.get('user', 'unknown')
-            log_audit(user, 'storage_balancing.disk_moved', f"Moved {disk} of VM {vmid} to {target_storage}")
+            log_audit(user, 'storage_balancing.disk_moved',
+                      f"Moved {disk} of {_guest_word(vm_type, vmid)} to {target_storage}")
             
             return jsonify({
                 'success': True,
@@ -1105,8 +1269,9 @@ def execute_storage_migration(cluster_id):
                 'upid': result.get('data')
             })
         else:
-            error_msg = response.json().get('errors', response.text) if response.text else 'Migration failed'
-            return upstream_failure(response.status_code, error_msg)
+            return upstream_failure(response.status_code,
+                                    f"Proxmox VE refused to move {disk} of {_guest_word(vm_type, vmid)} "
+                                    f"to {target_storage}: {_pve_refusal(response)}")
             
     except Exception as e:
         logging.error(f"Error executing storage migration: {e}")
@@ -1210,6 +1375,9 @@ def run_auto_storage_balance():
             # Get a snapshot of config
             with _storage_config_lock:
                 config_snapshot = dict(storage_clusters_config)
+            # a group that is gone (deleted, its cluster removed) need not be remembered
+            _unbalanceable_groups.intersection_update(
+                f"{cid}:{g.get('id')}" for cid, c in config_snapshot.items() for g in c.get('clusters', []))
             
             for cluster_id, config in config_snapshot.items():
                 if cluster_id not in cluster_managers:
@@ -1275,48 +1443,32 @@ def run_auto_storage_balance():
                         
                         # Try to get storage stats from cache first
                         cache_key = f"auto_balance_storage:{sc['id']}"
-                        storage_stats, cache_hit = _storage_cache.get(cluster_id, cache_key)
+                        cached, cache_hit = _storage_cache.get(cluster_id, cache_key)
                         
                         if not cache_hit:
-                            storage_stats = []
-                            nodes_url = f"https://{host}:{port}/api2/json/nodes"
-                            nodes_response = manager._create_session().get(nodes_url, timeout=10)
-                            nodes = []
-                            if nodes_response.status_code == 200:
-                                nodes = [n['node'] for n in nodes_response.json().get('data', [])]
-                            
-                            if nodes:
-                                if not _api_rate_limiter.acquire(cluster_id, timeout=5):
-                                    continue
-                                    
-                                storage_url = f"https://{host}:{port}/api2/json/nodes/{nodes[0]}/storage"
-                                storage_response = manager._create_session().get(storage_url, timeout=10)
-                                
-                                if storage_response.status_code == 200:
-                                    for storage in storage_response.json().get('data', []):
-                                        if storage['storage'] not in sc['storages']:
-                                            continue
-                                        total = storage.get('total', 0)
-                                        used = storage.get('used', 0)
-                                        usage_percent = (used / total * 100) if total > 0 else 0
-                                        storage_stats.append({
-                                            'storage': storage['storage'],
-                                            'usage_percent': usage_percent
-                                        })
-                            
+                            cached = _read_members(manager, host, port, sc['storages'],
+                                                   lambda: _api_rate_limiter.acquire(cluster_id, timeout=5))
+                            if cached is None:
+                                continue
                             # Cache for 60 seconds
-                            _storage_cache.set(cluster_id, cache_key, storage_stats, ttl_seconds=60)
+                            _storage_cache.set(cluster_id, cache_key, cached, ttl_seconds=60)
+                        storage_stats, read_error = cached
                         
-                        if len(storage_stats) < 2:
-                            continue
-                        
-                        # Calculate imbalance
-                        usages = [s['usage_percent'] for s in storage_stats]
-                        imbalance = max(usages) - min(usages)
+                        # Calculate imbalance, over the members that could be read and are up
+                        imbalance, source, target = _spread(storage_stats)
+                        if imbalance is None:
+                            # said once, not at every check of the group
+                            if active_key not in _unbalanceable_groups:
+                                _unbalanceable_groups.add(active_key)
+                                logging.warning(f"Auto-balance: {sc['name']} has fewer than two member "
+                                                f"storages that could be read and are active, nothing is moved"
+                                                + (f" ({read_error})" if read_error else ''))
+                        else:
+                            _unbalanceable_groups.discard(active_key)
                         
                         # NS: tolerance deadband to prevent storage ping-pong
                         effective_threshold = sc.get('threshold', 20) + sc.get('tolerance', 5)
-                        if imbalance <= effective_threshold:
+                        if imbalance is None or imbalance <= effective_threshold:
                             # Update last run time
                             with _storage_config_lock:
                                 # Re-find the cluster in case it changed
@@ -1328,9 +1480,9 @@ def run_auto_storage_balance():
                             continue
                         
                         # Find source and target
-                        sorted_stats = sorted(storage_stats, key=lambda x: x['usage_percent'], reverse=True)
-                        source_storage = sorted_stats[0]['storage']
-                        target_storage = sorted_stats[-1]['storage']
+                        source_storage = source['storage']
+                        target_storage = target['storage']
+                        local_node = _local_node(source, target)
                         
                         # Get VM list from cache or API
                         vm_cache_key = f"auto_balance_vms:{cluster_id}"
@@ -1445,6 +1597,12 @@ def run_auto_storage_balance():
                             if vmid in restricted_vmids:
                                 continue
 
+                            # a running container's volumes cannot move
+                            if vm_type == 'lxc' and vm.get('status') == 'running':
+                                continue
+                            if local_node and vm_node != local_node:
+                                continue
+
                             # Check if target storage is available on this VM's node
                             if vm_node in node_storages:
                                 if target_storage not in node_storages[vm_node]:
@@ -1464,6 +1622,9 @@ def run_auto_storage_balance():
                                     status_data = status_response.json().get('data', {})
                                     if status_data.get('lock'):
                                         actively_migrating_vmids.add(vmid)  # remember for rest of cycle
+                                        continue
+                                    # started since the guest list was read
+                                    if vm_type == 'lxc' and status_data.get('status') == 'running':
                                         continue
                             except:
                                 continue
@@ -1492,18 +1653,16 @@ def run_auto_storage_balance():
                                     continue
                                 if not any(key.startswith(p) for p in ['scsi', 'sata', 'virtio', 'ide', 'rootfs', 'mp']):
                                     continue
+                                if _is_cdrom(value):
+                                    continue
                                 
                                 if value.startswith(source_storage + ':'):
                                     # Execute migration
                                     if not _api_rate_limiter.acquire(cluster_id, timeout=5):
                                         break
                                     
-                                    move_url = f"https://{host}:{port}/api2/json/nodes/{vm_node}/{vm_type}/{vmid}/move_disk"
-                                    move_data = {
-                                        'disk': key,
-                                        'storage': target_storage,
-                                        'delete': 1
-                                    }
+                                    move_path, move_data = _move_call(vm_type, vm_node, vmid, key, target_storage)
+                                    move_url = f"https://{host}:{port}/api2/json{move_path}"
 
                                     # it deletes the source: not from a leader that lost its lease (#625)
                                     if not ha.confirm_step(f'moving {key} of {vmid} to {target_storage}'):
@@ -1511,9 +1670,10 @@ def run_auto_storage_balance():
                                     move_response = manager._create_session().post(move_url, data=move_data, timeout=10)
                                     
                                     if move_response.status_code == 200:
-                                        logging.info(f"Auto-balance: Migrated {key} of VM {vmid} from {source_storage} to {target_storage}")
+                                        guest = _guest_word(vm_type, vmid)
+                                        logging.info(f"Auto-balance: Migrated {key} of {guest} from {source_storage} to {target_storage}")
                                         log_audit('system', 'storage_balancing.auto_migrate',
-                                                 f"Auto-migrated {key} of VM {vmid} from {source_storage} to {target_storage}")
+                                                 f"Auto-migrated {key} of {guest} from {source_storage} to {target_storage}")
 
                                         # Track migration
                                         with _migration_lock:
@@ -1537,7 +1697,7 @@ def run_auto_storage_balance():
                                         migration_done = True
                                     else:
                                         # NS: Feb 2026 - handle lock errors gracefully (#83)
-                                        err_text = move_response.text or ''
+                                        err_text = _pve_refusal(move_response)
                                         if "lock" in err_text.lower() or "locked" in err_text.lower():
                                             logging.info(f"Auto-balance: VM {vmid} is locked (disk migration in progress?), skipping")
                                             actively_migrating_vmids.add(vmid)

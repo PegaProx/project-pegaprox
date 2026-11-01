@@ -22836,7 +22836,7 @@
 
                                         {/* Datastore Tab */}
                                         {activeTab === 'datastore' && (
-                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} sharedDatastoreData={clusterDatastores} />
+                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} initialPick={selectedSidebarDatastore} sharedDatastoreData={clusterDatastores} />
                                         )}
 
                                         {/* Automation Tab - NS Jan 2026 - Combines Schedules, Tags, Alerts, Affinity, Scripts */}

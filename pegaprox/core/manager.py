@@ -18168,14 +18168,15 @@ echo "AGENT_INSTALLED_OK"
             else:
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/lxc/{vmid}/move_volume"
             
+            # move_volume names the volume 'volume' and refuses 'disk' as an unknown parameter
             data = {
-                'disk': disk_id,
+                'disk' if vm_type == 'qemu' else 'volume': disk_id,
                 'storage': target_storage,
                 'delete': 1 if delete_original else 0
             }
-            
+
             response = self._api_post(url, data=data)
-            
+
             if response.status_code == 200:
                 task_id = response.json().get('data')
                 self.logger.info(f"[OK] Moving disk {disk_id} to {target_storage} (Task: {task_id})")
