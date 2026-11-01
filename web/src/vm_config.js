@@ -5860,16 +5860,19 @@
                                                                     { key: 'memory', label: t('hotplugMemory') },
                                                                     { key: 'cpu', label: t('hotplugCpu') },
                                                                 ].map(hp => {
-                                                                    const hotplugValue = getValue('options', 'hotplug') || 'disk,network,usb';
-                                                                    const isEnabled = hotplugValue === '1' || hotplugValue.includes(hp.key);
+                                                                    // MK Nov 2026 - PVE reads '1' as its default network,disk,usb, not as every feature
+                                                                    // (QemuServer.pm parse_hotplug_features); memory and cpu stay off
+                                                                    let hotplugValue = getValue('options', 'hotplug') || 'disk,network,usb';
+                                                                    if (String(hotplugValue) === '1') hotplugValue = 'disk,network,usb';
+                                                                    const isEnabled = String(hotplugValue).split(',').includes(hp.key);
                                                                     return (
                                                                         <label key={hp.key} className="flex items-center gap-2 text-sm text-gray-400">
                                                                             <input 
                                                                                 type="checkbox"
                                                                                 checked={isEnabled}
                                                                                 onChange={(e) => {
-                                                                                    let current = getValue('options', 'hotplug') || 'disk,network,usb';
-                                                                                    if (current === '1') current = 'disk,network,usb,memory,cpu';
+                                                                                    let current = String(getValue('options', 'hotplug') || 'disk,network,usb');
+                                                                                    if (current === '1') current = 'disk,network,usb';
                                                                                     if (current === '0') current = '';
                                                                                     
                                                                                     let parts = current.split(',').filter(p => p);
