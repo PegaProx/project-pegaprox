@@ -53,6 +53,7 @@ from pegaprox.core.config import save_config
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, register_task_user, safe_error, parse_pve_error, scope_vm_rows, require_unconfined, caller_is_scoped
 from pegaprox.api.helpers import node_shell_address
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
+from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
                                   node_maintenance_for_caller)
@@ -225,8 +226,38 @@ def get_datacenter_status(cluster_id):
                 pass  # best-effort; user sees the offline state this round
             return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
 
-        status_data = status_resp.json().get('data', []) if status_resp.status_code == 200 else []
-        resources_data = resources_resp.json().get('data', []) if resources_resp.status_code == 200 else []
+        # NS Nov 2026 - a read Proxmox refused (401, 403, a 500 from pmxcfs) was taken as an
+        # empty list, and the answer was a 200 with zero nodes, zero guests and standalone,
+        # which every view showed as the cluster's real state. Say it was not read instead:
+        # the pollers keep what they had. A status list with no node in it is no answer either.
+        status_data = (status_resp.json().get('data') or []) if status_resp.status_code == 200 else None
+        resources_data = (resources_resp.json().get('data') or []) if resources_resp.status_code == 200 else None
+        unread = {}
+        if status_data is None:
+            unread['cluster/status'] = f"HTTP {status_resp.status_code}"
+        else:
+            listed = sum(1 for s in status_data if s.get('type') == 'node')
+            if not listed:
+                unread['cluster/status'] = 'no node listed'
+            elif listed > 1 and not any(s.get('type') == 'cluster' for s in status_data):
+                # one node without a cluster entry is a node in no cluster, several are a
+                # list that lost the entry with the quorum (as rolling_runs.quorum_facts reads it)
+                unread['cluster/status'] = 'several nodes but no cluster entry'
+        if resources_data is None:
+            unread['cluster/resources'] = f"HTTP {resources_resp.status_code}"
+        if unread:
+            why = ', '.join(f"{name} ({reason})" for name, reason in unread.items())
+            logging.warning(f"[API] Cluster {cluster_id}: Proxmox did not answer {why} for datacenter/status")
+            # what Proxmox answered for the read that failed, its 401/403 marked like upstream_failure
+            # does it (#1142); still a 502, and a 200 here is a list that said too little
+            codes = [resp.status_code for name, resp in (('cluster/status', status_resp),
+                                                         ('cluster/resources', resources_resp)) if name in unread]
+            upstream = (next((c for c in codes if c in UPSTREAM_AUTH_STATUSES), None)
+                        or next((c for c in codes if c != 200), codes[0]))
+            body = {'error': f"Proxmox did not answer {why}", 'unread': list(unread), 'upstream_status': upstream}
+            if upstream in UPSTREAM_AUTH_STATUSES:
+                body['code'] = UPSTREAM_AUTH
+            return jsonify(body), 502
 
         # calc summary
         nodes_online = sum(1 for s in status_data if s.get('type') == 'node' and s.get('online', 0) == 1)
@@ -5700,6 +5731,68 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
     return _get_vm_config_response(cluster_id, node, vm_type, vmid)
 
 
+# PVE masks it in its own answer; masked here too, whatever the version sends
+_PENDING_MASKED = ('cipassword',)
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/pending', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_pending_api(cluster_id, node, vmid):
+    """What of a VM's config waits for its next start, as PVE itself reports it. Read only:
+    the keys with a pending value or a pending delete, nothing else."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', 'qemu')
+    if denied:
+        return denied
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return jsonify({'error': 'Invalid node name'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'The pending list is a Proxmox VE setting'}), 400
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/qemu/{vmid}/pending"
+    try:
+        resp = manager._create_session().get(url, timeout=10)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for the pending list: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in (401, 403):
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the pending changes'),
+                        'upstream_status': resp.status_code}), 502
+
+    rows = []
+    for item in resp.json().get('data') or []:
+        if not isinstance(item, dict) or not item.get('key'):
+            continue
+        has_pending = 'pending' in item
+        try:
+            delete = int(item.get('delete') or 0)
+        except (TypeError, ValueError):
+            delete = 0
+        if not has_pending and not delete:
+            continue
+        row = {'key': str(item['key'])}
+        if 'value' in item:
+            row['value'] = item['value']
+        if has_pending:
+            row['pending'] = item['pending']
+        if delete:
+            # 2 is PVE's forced delete
+            row['delete'] = 2 if delete == 2 else 1
+        if row['key'] in _PENDING_MASKED:
+            for k in ('value', 'pending'):
+                if k in row:
+                    row[k] = '**********'
+        rows.append(row)
+    return jsonify({'pending': rows})
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/lock', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
@@ -5727,13 +5820,15 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
         else:
             # MK: Return not-locked instead of error for better UX
             # The VM config might not be accessible but that doesn't mean it's locked
+            # NS Nov 2026 - read:false says so, the views show the lock as unknown then
             logging.warning(f"Could not get lock status for {vm_type}/{vmid}: {result.get('error')}")
             return jsonify({
                 'locked': False,
                 'lock_reason': None,
                 'lock_description': None,
                 'unlock_command': None,
-                'note': 'Could not determine lock status'
+                'note': 'Could not determine lock status',
+                'read': False
             })
     except Exception as e:
         logging.error(f"Error getting lock status for {vm_type}/{vmid}: {e}")
@@ -5741,7 +5836,8 @@ def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
             'locked': False,
             'lock_reason': None,
             'lock_description': None,
-            'unlock_command': None
+            'unlock_command': None,
+            'read': False
         })
 
 
@@ -10066,7 +10162,8 @@ def _wait_for_task(mgr, task_upid, timeout=600, poll=5):
                 if t and t.get('upid') == task_upid:
                     st = t.get('status', '')
                     if st and st != 'running':
-                        ok = st in ('OK', 'WARNINGS')
+                        # Proxmox says 'WARNINGS: 2', not a bare 'WARNINGS'; the task did finish
+                        ok = st == 'OK' or str(st).startswith('WARNINGS')
                         detail = st if ok else (t.get('exitstatus') or st)
                         return (ok, detail)
                     break

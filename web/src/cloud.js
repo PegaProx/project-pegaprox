@@ -1268,7 +1268,7 @@
                                                 <tr className="cloud-table-row cloud-table-row-static" key={tk.upid || i}>
                                                     <td>{run ? <CloudPill color="#2f9fe0" bg="rgba(56,189,248,0.14)" border="rgba(56,189,248,0.36)" dot>Running</CloudPill>
                                                         : ok ? <CloudPill color="#1bbf8a" bg="rgba(45,212,167,0.16)" border="rgba(45,212,167,0.42)" dot>OK</CloudPill>
-                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.status || 'Error'}</CloudPill>}</td>
+                                                        : <CloudPill color="#e0686c" bg="rgba(248,113,113,0.14)" border="rgba(248,113,113,0.36)" dot>{tk.exitstatus || tk.status || 'Error'}</CloudPill>}</td>
                                                     <td className="cloud-table-mono">{tk.type || '—'}</td>
                                                     <td className="cloud-table-mono">{tk.id || '—'}</td>
                                                     <td>{tk.node || '—'}</td>

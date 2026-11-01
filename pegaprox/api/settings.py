@@ -5068,7 +5068,8 @@ def start_rolling_update(cluster_id):
     - reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)
       (the three timeouts are clamped to 60-7200)
     - notify_channels: list - Alert channel ids (GET /api/alert-channels) that get
-      rolling_update.started, rolling_update.finished and rolling_update.interrupted (default: none)
+      rolling_update.started, rolling_update.paused, rolling_update.interrupted and
+      rolling_update.finished (default: none)
 
     MK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused
     while another one of the cluster is running or paused, across restarts too.
@@ -5228,6 +5229,22 @@ def start_rolling_update(cluster_id):
     })
 
 
+def _scheduled_end(mgr, cluster_id, how):
+    """The end of a run a schedule started, in the audit log as the scheduler, whoever
+    continued it in between: by its worker, or by a cancel that took the run down without
+    one. Nothing for a run started by hand. Never raises."""
+    try:
+        done = rolling_runs.current(mgr) or {}
+        if not done.get('scheduled'):
+            return
+        log_audit('scheduler', 'scheduled.rolling_update',
+                  f"Scheduled rolling update {how}: {len(done.get('completed_nodes') or [])} updated, "
+                  f"{len(done.get('skipped_nodes') or [])} skipped, {len(done.get('failed_nodes') or [])} failed",
+                  cluster=getattr(getattr(mgr, 'config', None), 'name', None) or cluster_id)
+    except Exception as e:
+        logging.error(f"[RollingUpdate] audit of the end of the scheduled run of {cluster_id} failed: {e}")
+
+
 # MK Oct 2026 - the worker of a rolling update started by hand, and of every run that goes on
 # after a pause no worker here waited out (a restart, or another instance took over, #625):
 # Continue starts it again with resume = {'index', 'phase'} of the node to go on with, and that
@@ -5272,6 +5289,17 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         on that comes when no worker waits here any more."""
         _set(status='paused', current_step=step, paused_reason=reason, paused_details=details,
              resume_at=resume_at, log=line)
+        # once per hold, not per look below: the channels that muted their monitoring on the
+        # start hear that the run now waits for a human
+        try:
+            node = (details or {}).get('node') or ''
+            notify_lifecycle('rolling_update.paused',
+                             f"Rolling update paused on {getattr(mgr.config, 'name', None) or cluster_id}",
+                             f"Paused at {node or 'the cluster'} ({reason}): "
+                             f"{(details or {}).get('message') or line}",
+                             cluster_id=cluster_id, severity='warning', channel_ids=notify_channels)
+        except Exception as e:
+            logging.debug(f"[RollingUpdate] paused event of {cluster_id} not sent: {e}")
         while _status() == 'paused':
             time.sleep(2)
         status = _status()
@@ -5880,6 +5908,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                  log=["=== Rolling update completed ===", summary])
         logging.info(f"[RollingUpdate] Rolling update {'cancelled' if cancelled else 'completed'}: "
                      f"{completed} updated, {skipped} skipped, {failed} failed")
+        _scheduled_end(mgr, cluster_id, 'cancelled' if cancelled else 'completed')
         # #716 - un-mute, and say whether anyone needs to look
         notify_lifecycle('rolling_update.finished',
                          f"Rolling update {'cancelled' if cancelled else 'finished'} on {mgr.config.name}",
@@ -5893,6 +5922,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         rolling_rules_back_on(mgr, who)   # #954, before the status says the run is over
         _set(status='failed', completed_at=time.strftime('%Y-%m-%d %H:%M:%S'), error=str(e),
              log=f"Rolling update failed: {e}")
+        _scheduled_end(mgr, cluster_id, 'failed')
         # #716 - a run that died is exactly when the on-call wants to be un-muted
         notify_lifecycle('rolling_update.finished',
                          f"Rolling update FAILED on {mgr.config.name}",
@@ -5984,6 +6014,7 @@ def cancel_rolling_update(cluster_id):
             undone = [{'kind': 'error', 'error': safe_error(e, 'Cleanup failed')}]
         rolling_runs.change(manager, status='cancelled', cancel_report=undone, rebooting_nodes=[],
                             log=['=== Rolling update cancelled ==='] + _rolling_report_lines(undone))
+        _scheduled_end(manager, cluster_id, 'cancelled')
     try:
         from pegaprox.utils.webhooks import notify_lifecycle
         notify_lifecycle('rolling_update.finished', f"Rolling update cancelled on {name}",
