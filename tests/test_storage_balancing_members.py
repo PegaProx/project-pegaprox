@@ -637,6 +637,49 @@ def test_a_threshold_out_of_range_is_held_to_the_range(admin, pve, sent, kept):
     assert put.get_json()['threshold'] == kept
 
 
+
+# --- the switches and the member list are what they say --------------------------------------
+# "false" as a string was truthy and armed the userless worker; a member list that was no list
+# gave a 500, and a refused update had already renamed the group in memory
+
+@pytest.mark.parametrize('bad', ['false', 'yes', 2, [], {}])
+def test_auto_balance_that_is_not_a_boolean_arms_nothing(admin, pve, storage, bad):
+    pve(_Pve({}), [])
+    r = admin.post(f'/api/clusters/{CLUSTER}/storage-clusters',
+                   json={'name': 'arm', 'storages': ['full', 'half'], 'auto_balance': bad})
+    assert r.status_code == 400 and 'auto_balance' in r.get_json()['error'], r.data
+    assert storage.storage_clusters_config[CLUSTER]['clusters'] == []
+    sc = admin.post(f'/api/clusters/{CLUSTER}/storage-clusters',
+                    json={'name': 'arm', 'storages': ['full', 'half']}).get_json()
+    url = f"/api/clusters/{CLUSTER}/storage-clusters/{sc['id']}"
+    for key in ('auto_balance', 'enabled'):
+        assert admin.put(url, json={key: bad}).status_code == 400
+    kept = storage.storage_clusters_config[CLUSTER]['clusters'][0]
+    assert kept['auto_balance'] is False and kept['enabled'] is True
+
+
+@pytest.mark.parametrize('bad', [7, 'full,half', ['full', 3], ['full', ' '], {'a': 1}])
+def test_a_member_list_that_is_no_list_of_names_is_refused(admin, pve, storage, bad):
+    pve(_Pve({}), [])
+    r = admin.post(f'/api/clusters/{CLUSTER}/storage-clusters', json={'name': 'm', 'storages': bad})
+    assert r.status_code == 400 and 'storages' in r.get_json()['error'], r.data
+    sc = admin.post(f'/api/clusters/{CLUSTER}/storage-clusters',
+                    json={'name': 'm', 'storages': ['full', 'half']}).get_json()
+    r = admin.put(f"/api/clusters/{CLUSTER}/storage-clusters/{sc['id']}",
+                  json={'name': 'renamed', 'storages': bad})
+    assert r.status_code == 400, r.data
+    kept = storage.storage_clusters_config[CLUSTER]['clusters'][0]
+    assert kept['name'] == 'm' and kept['storages'] == ['full', 'half']
+
+
+def test_zero_and_one_switch_a_group_as_booleans(admin, pve, storage):
+    pve(_Pve({}), [])
+    sc = admin.post(f'/api/clusters/{CLUSTER}/storage-clusters',
+                    json={'name': 'z', 'storages': ['full', 'half'], 'auto_balance': 0}).get_json()
+    assert sc['auto_balance'] is False
+    got = admin.put(f"/api/clusters/{CLUSTER}/storage-clusters/{sc['id']}", json={'enabled': 0}).get_json()
+    assert got['enabled'] is False
+
 # --- the container disk move dialog (manager.move_disk) -------------------------------------------
 
 @pytest.mark.parametrize('vm_type,disk,path,key', [

@@ -493,6 +493,24 @@ def _storage_cluster_name(value):
     return name if 0 < len(name) <= 128 else None
 
 
+def _storage_cluster_flag(value):
+    """A switch of a request body, or None when it is none. "false" as a string was truthy
+    and armed the userless auto-balance worker."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return None
+
+
+def _storage_cluster_members(value):
+    """The member storage names of a body, or None when that is no list of names."""
+    if not isinstance(value, list) or len(value) > 64:
+        return None
+    names = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+    return names if len(names) == len(value) else None
+
+
 def save_storage_clusters():
     """save storage cluster config to sqlite
 
@@ -778,12 +796,17 @@ def create_storage_cluster(cluster_id):
     
     data = request.json or {}
     name = _storage_cluster_name(data.get('name'))
-    storages = data.get('storages', [])
+    storages = _storage_cluster_members(data.get('storages', []))
+    auto_balance = _storage_cluster_flag(data.get('auto_balance', False))
     # points of spread, the range the slider offers; the worker compares it as a number
     threshold = _bounded_worker_int(data.get('threshold', 20), 20, 5, 50)
     
     if not name:
         return jsonify({'error': 'A name of up to 128 characters is required'}), 400
+    if storages is None:
+        return jsonify({'error': 'storages must be a list of storage names'}), 400
+    if auto_balance is None:
+        return jsonify({'error': 'auto_balance must be true or false'}), 400
     if len(storages) < 2:
         return jsonify({'error': 'At least 2 storages required'}), 400
     
@@ -803,7 +826,7 @@ def create_storage_cluster(cluster_id):
             'storages': storages,
             'threshold': threshold,
             'enabled': True,
-            'auto_balance': data.get('auto_balance', False),
+            'auto_balance': auto_balance,
             'max_concurrent': _bounded_worker_int(data.get('max_concurrent', 1), 1, 1, 32),
             'check_interval': _bounded_worker_int(data.get('check_interval', 3600), 3600, 60, 86400),  # seconds
             # the worker moves only above threshold + tolerance; the UI sent it and nothing kept it
@@ -870,17 +893,24 @@ def update_storage_cluster(cluster_id, sc_id):
                         return jsonify({'error': 'A name of up to 128 characters is required'}), 400
                     if any(o.get('name') == new_name and o is not sc for o in clusters):
                         return jsonify({'error': 'A storage cluster with this name already exists'}), 409
+                # checked before anything changes, a refusal leaves the group as it was
+                members = _storage_cluster_members(data['storages']) if 'storages' in data else None
+                if 'storages' in data and (members is None or len(members) < 2):
+                    return jsonify({'error': 'storages must be a list of at least 2 storage names'}), 400
+                for key in ('enabled', 'auto_balance'):
+                    if key in data and _storage_cluster_flag(data[key]) is None:
+                        return jsonify({'error': f'{key} must be true or false'}), 400
                 # Update fields
                 if renamed:
                     sc['name'] = new_name
-                if 'storages' in data:
-                    sc['storages'] = data['storages']
+                if members is not None:
+                    sc['storages'] = members
                 if 'threshold' in data:
                     sc['threshold'] = _bounded_worker_int(data['threshold'], 20, 5, 50)
                 if 'enabled' in data:
-                    sc['enabled'] = data['enabled']
+                    sc['enabled'] = _storage_cluster_flag(data['enabled'])
                 if 'auto_balance' in data:
-                    sc['auto_balance'] = data['auto_balance']
+                    sc['auto_balance'] = _storage_cluster_flag(data['auto_balance'])
                 if 'max_concurrent' in data:
                     sc['max_concurrent'] = _bounded_worker_int(data['max_concurrent'], 1, 1, 32)
                 if 'check_interval' in data:
