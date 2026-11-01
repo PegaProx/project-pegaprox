@@ -4466,7 +4466,10 @@ def get_proxmox_ha_resources(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    _res = cluster_managers[cluster_id].get_proxmox_ha_resources()
+    _res = cluster_managers[cluster_id].get_proxmox_ha_resources(strict=True)
+    # an empty list would read as "no guest in HA" and the views would offer to add one
+    if _res is None:
+        return jsonify({'error': 'Could not read the Proxmox HA resources'}), 502
     if isinstance(_res, list):
         _res = [r for r in _res if _ha_sid_authorized(cluster_id, r.get('sid'), 'vm.view')]
     return jsonify(_res)

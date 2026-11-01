@@ -2863,6 +2863,8 @@
             const { t, languageLocked } = useTranslation();
             const { getAuthHeaders, user, updatePreferences, updateCurrentUser, layoutLock } = useAuth();
             const { isCorporate } = useLayout();
+            const layerRef = React.useRef(null);
+            useEscapeToClose(isOpen, onClose, layerRef);
             const [activeTab, setActiveTab] = useState('appearance');
             const [loading, setLoading] = useState(false);
             const [selectedTheme, setSelectedTheme] = useState(user?.theme || 'proxmoxDark');
@@ -3235,7 +3237,7 @@
                 : `flex-1 px-4 py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${active ? 'text-proxmox-orange border-b-2 border-proxmox-orange' : 'text-gray-400 hover:text-white'}`;
 
             return(
-                <div className={overlayCls} onClick={onClose}>
+                <div ref={layerRef} className={overlayCls} onClick={onClose}>
                     <div
                         className={panelCls}
                         onClick={e => e.stopPropagation()}
