@@ -51,6 +51,14 @@ def _period_cutoff(period):
     return 1, now - timedelta(days=1)
 
 
+def _guests_running(totals):
+    """Running VMs plus containers of a snapshot's totals, None where its guest list was
+    not read (the collector leaves the counts out then, a 0 there read as "all down")."""
+    if 'vms_running' not in totals and 'cts_running' not in totals:
+        return None
+    return (totals.get('vms_running') or 0) + (totals.get('cts_running') or 0)
+
+
 def _with_offset(ts):
     """A stored timestamp as ISO with the server's UTC offset.
 
@@ -252,6 +260,8 @@ def get_reports_summary():
 
     Query params:
     - period: 'hour', 'day', 'week' (default: day)
+
+    A cluster's vms_running is null when no snapshot of the window has a guest count.
     """
     period = request.args.get('period', 'day')
 
@@ -312,9 +322,10 @@ def get_reports_summary():
                 mem_percent = totals['mem_used'] / totals['mem_total'] * 100
                 report['clusters'][cluster_id]['mem_samples'].append(mem_percent)
             
-            # the history has the cluster's totals only, not a confined caller's share
-            if not scoped[cluster_id]:
-                vm_count = totals.get('vms_running', 0) + totals.get('cts_running', 0)
+            # the history has the cluster's totals only, not a confined caller's share; a
+            # snapshot whose guest list was not read has no count at all (_guests_running)
+            vm_count = None if scoped[cluster_id] else _guests_running(totals)
+            if vm_count is not None:
                 report['clusters'][cluster_id]['vm_samples'].append(vm_count)
     
     # Calculate stats
@@ -341,11 +352,13 @@ def get_reports_summary():
             'current': round(mem[-1], 1) if mem else 0
         }
         
+        # no snapshot of the window has a guest count (every guest list there went unread):
+        # null, not "0 running"
         data['vms_running'] = {
-            'avg': round(sum(vms) / len(vms), 1) if vms else 0,
-            'min': min(vms) if vms else 0,
-            'max': max(vms) if vms else 0,
-            'current': vms[-1] if vms else 0
+            'avg': round(sum(vms) / len(vms), 1) if vms else None,
+            'min': min(vms) if vms else None,
+            'max': max(vms) if vms else None,
+            'current': vms[-1] if vms else None
         }
     
     return jsonify(report)
@@ -551,6 +564,9 @@ def get_reports_timeline():
     - period: 'hour', 'day', 'week'
     - cluster_id: Optional - filter to specific cluster
     - metric: 'cpu', 'memory', 'vms' (default: all)
+
+    A series holds null at a snapshot without that figure (no totals for CPU or memory,
+    a guest list that was not read for vms).
     """
     period = request.args.get('period', 'day')
     filter_cluster = request.args.get('cluster_id')
@@ -608,16 +624,16 @@ def get_reports_timeline():
             
             totals = cluster_data.get('totals', {})
             
-            # CPU
+            # CPU and memory: null where the snapshot has no totals, a 0 drew a dip to idle
             if metric in ['all', 'cpu']:
-                cpu = 0
+                cpu = None
                 if totals.get('cpu_total', 0) > 0:
                     cpu = round(totals['cpu_used'] / totals['cpu_total'] * 100, 1)
                 timeline['data'][cluster_id]['cpu'].append(cpu)
             
             # Memory
             if metric in ['all', 'memory']:
-                mem = 0
+                mem = None
                 if totals.get('mem_total', 0) > 0:
                     mem = round(totals['mem_used'] / totals['mem_total'] * 100, 1)
                 timeline['data'][cluster_id]['memory'].append(mem)
@@ -625,8 +641,7 @@ def get_reports_timeline():
             # VMs - MK Oct 2026: the history has the cluster's totals only, so a confined
             # caller gets no guest count series, as in the summaries
             if metric in ['all', 'vms'] and not scoped[cluster_id]:
-                vms = totals.get('vms_running', 0) + totals.get('cts_running', 0)
-                timeline['data'][cluster_id]['vms'].append(vms)
+                timeline['data'][cluster_id]['vms'].append(_guests_running(totals))
     
     return jsonify(timeline)
 
@@ -639,6 +654,11 @@ def get_top_vms():
     Query params:
     - metric: 'cpu' or 'memory' (default: cpu)
     - limit: Number of results (default: 10)
+
+    The body is the list of guests. A cluster whose guest list could not be read (not
+    connected, or the read did not answer) has no rows in it and is named in the
+    X-Unread-Clusters header, a JSON list of cluster ids, so a partial ranking does not
+    pass for the whole one. The header is absent when every cluster was read.
     """
     metric = request.args.get('metric', 'cpu')
     limit = int(request.args.get('limit', 10))
@@ -653,18 +673,25 @@ def get_top_vms():
     accessible_clusters = get_user_clusters(user_data)  # None = admin (all clusters)
 
     vms = []
+    unread = []
 
     for cluster_id, mgr in list(cluster_managers.items()):
         # Skip clusters the user cannot access
         if accessible_clusters is not None and cluster_id not in accessible_clusters:
             continue
         if not mgr.is_connected:
+            unread.append(cluster_id)
             continue
         
         try:
+            rows = mgr.get_vm_resources()
+            if getattr(rows, 'unavailable', False) is True:
+                unread.append(cluster_id)
+                continue
             # #773 audit — tenant filtering (accessible_clusters) gates the CLUSTER; still scope
             # the per-VM rows so a pool-/ACL-scoped user doesn't see every VM on a cluster they own.
-            resources = scope_vm_rows(cluster_id, mgr.get_vm_resources())
+            resources = scope_vm_rows(cluster_id, rows)
+            ranked = []
             for r in resources:
                 if r.get('status') != 'running':
                     continue
@@ -681,9 +708,11 @@ def get_top_vms():
                     'maxmem': r.get('maxmem', 0),
                     'mem_percent': round(r.get('mem', 0) / max(r.get('maxmem', 1), 1) * 100, 1)
                 }
-                vms.append(vm_data)
-        except:
-            pass
+                ranked.append(vm_data)
+            vms.extend(ranked)
+        except Exception as e:
+            logging.error(f"Error ranking the guests of {cluster_id}: {e}")
+            unread.append(cluster_id)
     
     # Sort by metric
     if metric == 'memory':
@@ -691,7 +720,11 @@ def get_top_vms():
     else:
         vms.sort(key=lambda x: x.get('cpu', 0), reverse=True)
     
-    return jsonify(vms[:limit])
+    resp = jsonify(vms[:limit])
+    if unread:
+        # a header, since the body is a list every client already iterates
+        resp.headers['X-Unread-Clusters'] = json.dumps(unread)
+    return resp
 
 
 # Start background threads when server starts
@@ -1607,6 +1640,10 @@ def get_cluster_report_summary(cluster_id):
     - period: 'hour', 'day', 'week' (default: day)
     - from, to: unix seconds, instead of period: a range picked on the charts, at full
       resolution as far as the stored history reaches (a year apart at most)
+
+    live.unread names what the live read did not get ('nodes' for CPU and memory,
+    'guests' for the running counts) and is absent after a complete read. Without stored
+    samples, cpu, memory and vms_running then carry null rather than 0.
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok:
@@ -1638,6 +1675,8 @@ def get_cluster_report_summary(cluster_id):
     mem_total = 0
     mem_used = 0
     nodes_online = 0
+    # NS, Nov 2026: what the live part could not read, its zeros are no figures then
+    unread = ['nodes', 'guests']
 
     if mgr.is_connected:
         try:
@@ -1665,20 +1704,27 @@ def get_cluster_report_summary(cluster_id):
             # Average CPU across nodes
             if nodes_online > 0:
                 live_cpu = live_cpu / nodes_online
+                unread.remove('nodes')
         except Exception as e:
             logging.error(f"Error getting node status for reports: {e}")
 
-        # Count running VMs
+        # Count running VMs. The broadcast loop's list will do (max_age), as for the two
+        # top lists the page asks for with it. 'guests' counts as read once the count is done.
         try:
-            resources = mgr.get_vm_resources() or []
-            if scoped:
-                resources = scope_vm_rows(cluster_id, resources)
-            for r in resources:
-                if r and r.get('status') == 'running':
-                    if r.get('type') == 'qemu':
-                        live_vms += 1
-                    else:
-                        live_cts += 1
+            resources = mgr.get_vm_resources(max_age=6)
+            if not getattr(resources, 'unavailable', False):
+                resources = resources or []
+                if scoped:
+                    resources = scope_vm_rows(cluster_id, resources)
+                vms_now = cts_now = 0
+                for r in resources:
+                    if r and r.get('status') == 'running':
+                        if r.get('type') == 'qemu':
+                            vms_now += 1
+                        else:
+                            cts_now += 1
+                live_vms, live_cts = vms_now, cts_now
+                unread.remove('guests')
         except Exception as e:
             logging.error(f"Error getting VM resources: {e}")
 
@@ -1704,15 +1750,19 @@ def get_cluster_report_summary(cluster_id):
         cutoff_str = cutoff.isoformat()
         filtered = [s for s in snapshots if s.get('timestamp', '') >= cutoff_str]
 
-    # Extract data for this cluster only
+    # Extract data for this cluster only. Without stored samples the figures are the live
+    # ones, and null where the live read did not answer: a 0 there read as an idle cluster
+    cpu_now = None if 'nodes' in unread else live_cpu_pct
+    mem_now = None if 'nodes' in unread else live_mem_pct
+    guests_now = None if 'guests' in unread else live_vms + live_cts
     report = {
         'period': period,
         'cluster_id': cluster_id,
         'cluster_name': getattr(mgr.config, 'name', None) or cluster_id,
         'data_points': 0,
-        'cpu': {'avg': live_cpu_pct, 'min': live_cpu_pct, 'max': live_cpu_pct, 'current': live_cpu_pct, 'samples': []},
-        'memory': {'avg': live_mem_pct, 'min': live_mem_pct, 'max': live_mem_pct, 'current': live_mem_pct, 'samples': []},
-        'vms_running': {'avg': live_vms + live_cts, 'min': live_vms + live_cts, 'max': live_vms + live_cts, 'current': live_vms + live_cts, 'samples': []},
+        'cpu': {'avg': cpu_now, 'min': cpu_now, 'max': cpu_now, 'current': cpu_now, 'samples': []},
+        'memory': {'avg': mem_now, 'min': mem_now, 'max': mem_now, 'current': mem_now, 'samples': []},
+        'vms_running': {'avg': guests_now, 'min': guests_now, 'max': guests_now, 'current': guests_now, 'samples': []},
         'timestamps': [],
         # Add live data section
         'live': {
@@ -1725,6 +1775,8 @@ def get_cluster_report_summary(cluster_id):
             'mem_used': mem_used
         }
     }
+    if unread:
+        report['live']['unread'] = unread
     if picked:
         report['from'], report['to'] = int(picked[0]), int(picked[1])
 
@@ -1749,8 +1801,8 @@ def get_cluster_report_summary(cluster_id):
             report['memory']['samples'].append(mem)
 
         # VMs
-        if not scoped:
-            vms = totals.get('vms_running', 0) + totals.get('cts_running', 0)
+        vms = None if scoped else _guests_running(totals)
+        if vms is not None:
             report['vms_running']['samples'].append(vms)
 
     if scoped:

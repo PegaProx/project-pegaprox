@@ -14189,9 +14189,12 @@
             
             // NS: Reports/Analytics state
             const [reportData, setReportData] = useState(null);
+            const [reportFailed, setReportFailed] = useState(false);
             const [reportPeriod, setReportPeriod] = useState('day');
             const [reportLoading, setReportLoading] = useState(false);
-            const [topVms, setTopVms] = useState([]);
+            // the top lists: null until the first answer, false when the read failed
+            const [topVms, setTopVms] = useState(null);
+            const [topVmsMem, setTopVmsMem] = useState(null);
             const [reportSubTab, setReportSubTab] = useState('summary');
             const [complianceSubTab, setComplianceSubTab] = useState('hardening');
             // NS Oct 2026 - hardening and drift read with admin.audit or node.maintenance, the change
@@ -16184,12 +16187,15 @@
                     if (response && response.ok) {
                         const data = await response.json();
                         setReportData(data);
+                        setReportFailed(false);
                     } else {
                         setReportData(null);
+                        setReportFailed(true);
                     }
                 } catch (err) {
                     console.error('Failed to load report:', err);
                     setReportData(null);
+                    setReportFailed(true);
                 }
                 setReportLoading(false);
             };
@@ -16202,6 +16208,29 @@
                 metrics: { cpu: d.cpu?.samples || [], memory: d.memory?.samples || [] },
             } : null;
             const reportSeries = React.useMemo(() => reportToSeries(reportData), [reportData]);
+            // NS (Nov 2026): the figures of the tiles, null where the server says it could not read
+            // them (live.unread: the cluster is not connected, the node status or the guest list
+            // did not answer). A stored sample still counts for CPU and memory.
+            const reportNow = React.useMemo(() => {
+                if (!reportData) return null;
+                const live = reportData.live || {}, unread = live.unread || [];
+                const stored = m => (reportData[m]?.samples?.length || 0) > 0;
+                const nodes = !unread.includes('nodes'), guests = !unread.includes('guests');
+                return {
+                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current || live.cpu_percent || 0) : null,
+                    memory: (stored('memory') || nodes) ? (reportData.memory?.current || live.mem_percent || 0) : null,
+                    vms: guests ? (live.vms_running || reportData.vms_running?.current || 0) : null,
+                    cts: guests ? (live.cts_running || 0) : null,
+                };
+            }, [reportData]);
+            // where a gauge would be: the same room, a dash and why
+            const reportUnreadGauge = (label, what) => (
+                <div className="gauge-container flex flex-col items-center justify-center" data-report-unread={what}>
+                    <span className="text-3xl font-bold text-gray-500">-</span>
+                    <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
+                    <span className="text-[11px] text-gray-500 text-center">{t('reportValueUnread')}</span>
+                </div>
+            );
             const reportZoom = useChartZoom({
                 preset: reportPeriod, loaded: reportSeries, resetKey: selectedCluster?.id,
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${selectedCluster?.id}/reports/summary?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
@@ -16211,18 +16240,20 @@
             const loadTopVms = async (metric = 'cpu', limit = 10, clusterId = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
+                // the memory list is a ranking of its own: the ten busiest CPUs re-sorted by memory left
+                // out the guests with the most memory in use
+                const put = metric === 'memory' ? setTopVmsMem : setTopVms;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/top-vms?metric=${metric}&limit=${limit}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setTopVms(data);
+                        put(Array.isArray(data) ? data : false);
                     } else {
-                        setTopVms([]);
+                        put(false);
                     }
                 } catch (err) {
                     console.error('Failed to load top VMs:', err);
-                    setTopVms([]);
+                    put(false);
                 }
             };
             
@@ -16479,6 +16510,7 @@
                 if (activeTab === 'reports' && selectedCluster?.id) {
                     loadReportSummary(reportPeriod, selectedCluster.id);
                     loadTopVms('cpu', 10, selectedCluster.id);
+                    loadTopVms('memory', 10, selectedCluster.id);
                 }
             }, [activeTab, reportPeriod, selectedCluster?.id]);
             
@@ -24003,7 +24035,7 @@
                                                                     </button>
                                                                 ))}
                                                                 <button
-                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); }}
+                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); loadTopVms('memory'); }}
                                                                     className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
                                                                     title={t('refresh') || 'Refresh'}
                                                                 >
@@ -24044,8 +24076,11 @@
                                                                 <button
                                                                     onClick={() => {
                                                                         const period = reportPeriod === 'hour' ? 'Last Hour' : reportPeriod === 'day' ? 'Last 24h' : 'Last Week';
-                                                                        const topCpuRows = topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]);
-                                                                        const topMemRows = [...topVms].sort((a,b)=>(b.mem_percent||0)-(a.mem_percent||0)).slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]);
+                                                                        // a list or figure that was not read says so, it is no 0 and no empty list
+                                                                        const unreadRow = [['-', 'Could not be read', '-']];
+                                                                        const said = (v, unit = '') => v == null ? '-' : `${v}${unit}`;
+                                                                        const topCpuRows = Array.isArray(topVms) ? topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]) : unreadRow;
+                                                                        const topMemRows = Array.isArray(topVmsMem) ? topVmsMem.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]) : unreadRow;
                                                                         generatePegaProxPDF({
                                                                             title: 'Cluster Report',
                                                                             subtitle: period,
@@ -24053,10 +24088,10 @@
                                                                             filename: `pegaprox-report-${selectedCluster?.name || 'cluster'}.pdf`,
                                                                             content: [
                                                                                 { type: 'stats', data: [
-                                                                                    { label: 'CPU', value: `${reportData?.cpu?.current || 0}%`, color: '#3b82f6' },
-                                                                                    { label: 'Memory', value: `${reportData?.memory?.current || 0}%`, color: '#22c55e' },
-                                                                                    { label: 'VMs', value: String(reportData?.live?.vms_running || 0), color: '#f97316' },
-                                                                                    { label: 'Containers', value: String(reportData?.live?.cts_running || 0), color: '#a855f7' },
+                                                                                    { label: 'CPU', value: said(reportNow?.cpu, '%'), color: '#3b82f6' },
+                                                                                    { label: 'Memory', value: said(reportNow?.memory, '%'), color: '#22c55e' },
+                                                                                    { label: 'VMs', value: said(reportNow?.vms), color: '#f97316' },
+                                                                                    { label: 'Containers', value: said(reportNow?.cts), color: '#a855f7' },
                                                                                 ]},
                                                                                 { type: 'spacer', height: 4 },
                                                                                 { type: 'table', title: 'Top VMs by CPU', columns: ['#', 'VM', 'CPU'], rows: topCpuRows },
@@ -24078,12 +24113,25 @@
                                                             </div>
                                                         ) : (
                                                             <div id="report-summary-content" className="space-y-6">
+                                                                {/* a summary that could not be read shows no 0 % and no 0 VMs */}
+                                                                {reportFailed && (
+                                                                    <div data-report-unread="summary" className="bg-proxmox-card border border-yellow-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3 text-sm text-yellow-400">
+                                                                        <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                                                        <span className="flex-1 min-w-0">{t('reportUnread')}</span>
+                                                                        <button onClick={() => loadReportSummary(reportPeriod)}
+                                                                            className="px-3 py-1 text-xs rounded border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500">
+                                                                            {t('retry') || 'Retry'}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
                                                                 {/* Live Metrics — Gauge circles + counters */}
-                                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                                {reportNow && <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                                                     {/* CPU Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.cpu?.current || reportData?.live?.cpu_percent || 0} label="CPU" color="#3b82f6" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.cpu != null
+                                                                            ? <Gauge value={reportNow.cpu} label="CPU" color="#3b82f6" />
+                                                                            : reportUnreadGauge('CPU', 'cpu')}
+                                                                        {reportData?.data_points > 0 && reportData?.cpu?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.cpu?.avg || 0}% &middot; {reportData?.cpu?.min || 0}%-{reportData?.cpu?.max || 0}%
                                                                             </div>
@@ -24094,8 +24142,10 @@
                                                                     </div>
                                                                     {/* Memory Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.memory?.current || reportData?.live?.mem_percent || 0} label="Memory" color="#22c55e" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.memory != null
+                                                                            ? <Gauge value={reportNow.memory} label="Memory" color="#22c55e" />
+                                                                            : reportUnreadGauge('Memory', 'memory')}
+                                                                        {reportData?.data_points > 0 && reportData?.memory?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.memory?.avg || 0}% &middot; {reportData?.memory?.min || 0}%-{reportData?.memory?.max || 0}%
                                                                             </div>
@@ -24106,18 +24156,20 @@
                                                                     </div>
                                                                     {/* VMs count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-orange-400">{reportData?.live?.vms_running || reportData?.vms_running?.current || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.vms == null ? 'text-gray-500' : 'text-orange-400'}`} data-report-unread={reportNow.vms == null ? 'vms' : undefined}>{reportNow.vms ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">VMs {t('running').toLowerCase()}</div>
+                                                                        {reportNow.vms == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                         {reportData?.vms_running?.samples?.length > 2 && (
                                                                             <div className="mt-2"><Sparkline data={reportData.vms_running.samples} width={80} height={20} color="#f97316" /></div>
                                                                         )}
                                                                     </div>
                                                                     {/* Container count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-purple-400">{reportData?.live?.cts_running || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.cts == null ? 'text-gray-500' : 'text-purple-400'}`} data-report-unread={reportNow.cts == null ? 'cts' : undefined}>{reportNow.cts ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">Container</div>
+                                                                        {reportNow.cts == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                     </div>
-                                                                </div>
+                                                                </div>}
 
                                                                 {/* Timeline Charts — CPU & Memory over time */}
                                                                 {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (
@@ -24164,7 +24216,9 @@
                                                                             {t('topVmsCpu') || 'Highest CPU Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
+                                                                            {topVms === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-cpu">{t('reportValueUnread')}</p>
+                                                                            ) : topVms?.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
                                                                                 const cpuPct = Math.min((vm.cpu || 0) * 100, 100);
                                                                                 const barColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#eab308' : '#3b82f6';
                                                                                 return (
@@ -24178,7 +24232,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{cpuPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVms && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -24191,7 +24245,9 @@
                                                                             {t('topVmsMem') || 'Highest Memory Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? [...topVms].sort((a, b) => (b.mem_percent || 0) - (a.mem_percent || 0)).slice(0, 5).map((vm, idx) => {
+                                                                            {topVmsMem === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-mem">{t('reportValueUnread')}</p>
+                                                                            ) : topVmsMem?.length > 0 ? topVmsMem.slice(0, 5).map((vm, idx) => {
                                                                                 const memPct = Math.min(vm.mem_percent || 0, 100);
                                                                                 const barColor = memPct > 80 ? '#ef4444' : memPct > 50 ? '#eab308' : '#22c55e';
                                                                                 return (
@@ -24205,7 +24261,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{memPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVmsMem && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>

@@ -76,7 +76,11 @@ def _caller_sees_nodes():
 @bp.route('/api/clusters/<cluster_id>/reports/top-vms', methods=['GET'])
 @require_auth()
 def get_cluster_top_vms(cluster_id):
-    """Get top VMs by resource usage for a specific cluster"""
+    """Get top VMs by resource usage for a specific cluster
+
+    503 when the cluster is not connected or its guest list did not answer, 500 when a
+    row cannot be ranked: an error, no empty list that reads as "no running VMs".
+    """
     ok, err = check_cluster_access(cluster_id)
     if not ok: 
         return err
@@ -88,14 +92,19 @@ def get_cluster_top_vms(cluster_id):
     metric = request.args.get('metric', 'cpu')
     limit = int(request.args.get('limit', 10))
     
+    # A list that was not read is no "no running VMs", so say so. The broadcast loop's
+    # guest list will do (max_age): the page asks for the CPU and the memory list at once.
     if not mgr.is_connected:
-        return jsonify([])
-    
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+    rows = mgr.get_vm_resources(max_age=6)
+    if getattr(rows, 'unavailable', False):
+        return jsonify({'error': 'The guest list of the cluster could not be read'}), 503
+
     vms = []
     try:
         # #773 audit — top-VMs is per-VM identifiable; scope to what the caller may see so a
         # pool-/ACL-scoped user gets their own top VMs, not the whole cluster's.
-        resources = scope_vm_rows(cluster_id, mgr.get_vm_resources())
+        resources = scope_vm_rows(cluster_id, rows)
         for r in resources:
             if r.get('status') != 'running':
                 continue
@@ -111,8 +120,10 @@ def get_cluster_top_vms(cluster_id):
                 'mem_percent': round(r.get('mem', 0) / max(r.get('maxmem', 1), 1) * 100, 1)
             }
             vms.append(vm_data)
-    except:
-        pass
+    except (AttributeError, TypeError, ValueError) as e:
+        # a row the ranking cannot read (not a dict, mem or maxmem not a number): an
+        # error for the page, the partial list it left was shown as the whole one
+        return jsonify({'error': safe_error(e, 'The guest list of the cluster could not be ranked')}), 500
     
     # Sort by metric
     if metric == 'memory':
