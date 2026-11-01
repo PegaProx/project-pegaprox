@@ -1302,7 +1302,7 @@ def set_update_schedule(cluster_id):
     # The options of a run started by hand that the schedule carries. One the body leaves out
     # (or sends as null) keeps its stored value: the schedule dialog sends only some of them,
     # and a save from it must not drop the channels or the Ceph gate set through the API.
-    from pegaprox.api.settings import _rolling_flag
+    from pegaprox.api.settings import _rolling_flag, _rolling_seconds
     try:
         stored = load_update_schedule(cluster_id, strict=True)
     except Exception as e:
@@ -1316,6 +1316,14 @@ def set_update_schedule(cluster_id):
         wait_for_reboot = _rolling_flag(data, 'wait_for_reboot', stored['wait_for_reboot'])
         pause_on_evacuation_error = _rolling_flag(data, 'pause_on_evacuation_error',
                                                   stored['pause_on_evacuation_error'])
+        # the older switches too: "false" as a string was truthy, so it armed a schedule or
+        # skipped the evacuation it was meant to keep
+        enabled = _rolling_flag(data, 'enabled', False)
+        include_reboot = _rolling_flag(data, 'include_reboot', True)
+        skip_evacuation = _rolling_flag(data, 'skip_evacuation', False)
+        skip_up_to_date = _rolling_flag(data, 'skip_up_to_date', True)
+        evacuation_timeout = _rolling_seconds(data, 'evacuation_timeout', 1800)
+        reboot_timeout = _rolling_seconds(data, 'reboot_timeout', 600)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     ceph_health_gate = stored['ceph_health_gate']
@@ -1325,7 +1333,7 @@ def set_update_schedule(cluster_id):
     # MK Sep 2026 - arming this with include_reboot set schedules a node reboot, and
     # node.reboot is the permission for that (see the manual route in settings.py). It
     # was enforced nowhere, so withholding it from a role changed nothing.
-    if data.get('enabled', False) and data.get('include_reboot', True):
+    if enabled and include_reboot:
         from pegaprox.utils.rbac import has_permission as _hasp
         from pegaprox.utils.auth import build_authz_user as _bau
         if not _hasp(_bau(usr, getattr(request, 'session', {}) or {}), 'node.reboot'):
@@ -1337,15 +1345,15 @@ def set_update_schedule(cluster_id):
     # unless asked for, and off on XCP-ng as for a run started by hand
     migrate_templates, relax_anti_affinity = evacuation_options(mgr, data)
     schedule = {
-        'enabled': data.get('enabled', False),
+        'enabled': enabled,
         'schedule_type': data.get('schedule_type', 'recurring'),
         'day': data.get('day', 'sunday'),
         'time': data.get('time', '03:00'),
-        'include_reboot': data.get('include_reboot', True),
-        'skip_evacuation': data.get('skip_evacuation', False),
-        'skip_up_to_date': data.get('skip_up_to_date', True),
-        'evacuation_timeout': data.get('evacuation_timeout', 1800),
-        'reboot_timeout': data.get('reboot_timeout', 600),
+        'include_reboot': include_reboot,
+        'skip_evacuation': skip_evacuation,
+        'skip_up_to_date': skip_up_to_date,
+        'evacuation_timeout': evacuation_timeout,
+        'reboot_timeout': reboot_timeout,
         'wait_for_reboot': wait_for_reboot,
         'pause_on_evacuation_error': pause_on_evacuation_error,
         'ceph_health_gate': ceph_health_gate,

@@ -203,7 +203,9 @@ def test_a_stored_schedule_that_cannot_be_read_is_not_overwritten(api, seed, db,
 
 # -- 4. the switches are booleans ----------------------------------------------------------------
 
-@pytest.mark.parametrize('key', ['wait_for_reboot', 'pause_on_evacuation_error'])
+# the older switches too: "false" as a string was truthy and skipped the evacuation
+@pytest.mark.parametrize('key', ['wait_for_reboot', 'pause_on_evacuation_error', 'enabled', 'include_reboot',
+                                 'skip_evacuation', 'skip_up_to_date'])
 @pytest.mark.parametrize('bad', ['false', 'yes', 2, [], {}])
 def test_a_switch_that_is_not_a_boolean_is_refused(api, seed, db, root, key, bad):
     api.set_manager(CID, _Scheduled())
@@ -227,6 +229,16 @@ def test_zero_and_one_are_switches_as_on_the_manual_route(api, seed, db, root):
     got = c.get(SCHEDULE).get_json()
     assert got['wait_for_reboot'] is True and got['pause_on_evacuation_error'] is True
 
+
+
+@pytest.mark.parametrize('key', ['evacuation_timeout', 'reboot_timeout'])
+def test_a_timeout_is_a_number_of_seconds_held_to_its_range(api, seed, db, root, key):
+    api.set_manager(CID, _Scheduled())
+    c = api.as_user(root)
+    r = c.post(SCHEDULE, json={'enabled': True, 'include_reboot': False, key: 'soon'})
+    assert r.status_code == 400 and key in r.get_json()['error'], r.data
+    assert c.post(SCHEDULE, json={'enabled': True, 'include_reboot': False, key: 99999}).status_code == 200
+    assert c.get(SCHEDULE).get_json()[key] == 7200
 
 # -- 5. the end of a scheduled run cancelled without its worker -----------------------------------
 
