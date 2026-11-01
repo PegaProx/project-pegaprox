@@ -3292,7 +3292,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent devices'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
@@ -4791,7 +4791,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent devices'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
