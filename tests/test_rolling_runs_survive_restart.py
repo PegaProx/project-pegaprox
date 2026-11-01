@@ -152,7 +152,7 @@ class _Cluster:
             return False
         return self.nodes_in_maintenance.pop(node, None) is not None
 
-    def start_node_update(self, node, reboot=False, force=False):
+    def start_node_update(self, node, reboot=False, force=False, auto_exit_maintenance=True):
         self.calls.append(('update', node))
         self._die('updating', node)
         t = UpdateTask(node, reboot=reboot)

@@ -35,7 +35,7 @@ def _completed_task(rebooted, back_online):
     return task
 
 
-def _run(api, monkeypatch, task, exit_race=False):
+def _run(api, monkeypatch, task, exit_race=False, expected_status='completed'):
     """Run one scheduled node update, optionally simulating a concurrent auto-exit."""
     import pegaprox.api.schedules as schedules_mod
 
@@ -68,7 +68,7 @@ def _run(api, monkeypatch, task, exit_race=False):
     while time.time() < deadline and (fake._rolling_update or {}).get('status') == 'running':
         time.sleep(0.01)
     state = fake._rolling_update
-    assert state['status'] == 'completed', state['logs']
+    assert state['status'] == expected_status, state['logs']
     return state, clock
 
 

@@ -774,7 +774,8 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                     if not ha.confirm_step(f'update of {node_name}'):
                         rolling_log(mgr, "stopped: this instance does not hold the lease")
                         break
-                    update_task = mgr.start_node_update(node_name, reboot=include_reboot, force=True)
+                    update_task = mgr.start_node_update(
+                        node_name, reboot=include_reboot, force=True, auto_exit_maintenance=False)
                     if update_task:
                         waited = 0
                         while waited < (1800 if include_reboot else 900):
@@ -790,8 +791,8 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
                                 rolling_log(mgr, f"{node_name} did not require a reboot - skipping reboot wait")
                             elif node_rebooted and back_online:
                                 rolling_log(mgr, f"✓ {node_name} rebooted during the update and is back online")
-                                if node_name in mgr.nodes_in_maintenance:
-                                    time.sleep(30)  # let HA services settle before maintenance exit
+                                # Membership can be cleared by another actor; recovery still needs to settle.
+                                time.sleep(30)
                             elif node_rebooted:
                                 _set(current_step='rebooting', add={'rebooting_nodes': node_name},
                                      node=(node_name, {'phase': 'rebooting', 'rebooted': True}))

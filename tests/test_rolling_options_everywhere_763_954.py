@@ -539,7 +539,7 @@ def fast_schedule(monkeypatch):
 def _scheduled_fake(api, guests=GUESTS, cluster_type='proxmox'):
     fake, order = _cluster_manager(api, guests, cluster_type=cluster_type)
 
-    def update(node, reboot=False, force=False):
+    def update(node, reboot=False, force=False, auto_exit_maintenance=True):
         order.append(('update', node))
         t = UpdateTask(node, reboot=False)
         t.status, t.phase = 'completed', 'done'

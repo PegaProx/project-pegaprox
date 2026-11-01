@@ -13603,7 +13603,8 @@ echo "AGENT_INSTALLED_OK"
         self.logger.error(f"Timeout waiting for {node_name} to come online")
         return False
     
-    def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
+    def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False,
+                          auto_exit_maintenance: bool = True) -> Optional[UpdateTask]:
         
         # check node is in maintenance mode (unless force)
         if not force:
@@ -13627,6 +13628,7 @@ echo "AGENT_INSTALLED_OK"
                 return existing
 
             task = UpdateTask(node_name, reboot)
+            task.auto_exit_maintenance = auto_exit_maintenance
             self.nodes_updating[node_name] = task
         
         self.logger.info(f"[SYNC] Starting update for node: {node_name} (reboot: {reboot}, force: {force})")
@@ -13888,8 +13890,8 @@ echo "AGENT_INSTALLED_OK"
             task.completed_at = datetime.now()
             task.add_output(f"[OK] Update completed / abgeschlossen!")
             
-            # Auto-exit maintenance mode after successful update
-            if node_name in self.nodes_in_maintenance:
+            # Rolling callers settle HA and perform their own maintenance cleanup.
+            if getattr(task, 'auto_exit_maintenance', True) and node_name in self.nodes_in_maintenance:
                 task.add_output(f"Exiting maintenance mode / Beende Wartungsmodus...")
                 try:
                     self.exit_maintenance_mode(node_name)

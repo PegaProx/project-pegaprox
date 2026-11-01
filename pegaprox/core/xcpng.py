@@ -3633,7 +3633,7 @@ class XcpngManager:
     # NS/MK Mar 2026
     # ──────────────────────────────────────────
 
-    def start_node_update(self, node_name, reboot=True, force=False):
+    def start_node_update(self, node_name, reboot=True, force=False, auto_exit_maintenance=True):
         """Start async yum update on XCP-ng node."""
         from pegaprox.models.tasks import UpdateTask
 
@@ -3647,6 +3647,7 @@ class XcpngManager:
                     return existing  # already running
 
         task = UpdateTask(node_name, reboot)
+        task.auto_exit_maintenance = auto_exit_maintenance
         with self.update_lock:
             self.nodes_updating[node_name] = task
 
@@ -3751,6 +3752,7 @@ class XcpngManager:
         time.sleep(20)  # give it time to shut down
 
         deadline = time.time() + timeout
+        host_ref = None
         while time.time() < deadline:
             try:
                 sock = socket.create_connection((host_ip, 443), timeout=5)
@@ -3758,7 +3760,11 @@ class XcpngManager:
                 # brief pause then verify XAPI responds
                 time.sleep(5)
                 api = self._api()
-                if api:
+                if api and host_ref is None:
+                    api, host_ref = self._resolve_host_ref(node_name)
+                if api and host_ref:
+                    # This RPC is forwarded to the named host, unlike cached pool state.
+                    api.host.get_servertime(host_ref)
                     self._cached_nodes = None
                     return True
             except Exception:
