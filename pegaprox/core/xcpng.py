@@ -4143,8 +4143,14 @@ echo DONE""",
         # LW: validate node name against injection
         if not re.match(r'^[a-zA-Z0-9\-_.]+$', node):
             return []
+        # resolved strictly, as for the wipe: the pool host's disks must never be listed
+        # under another node, where Wipe Disk would then erase a disk of that node
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return []
         rc, out, _ = self._ssh_exec(node,
-            "lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN,FSTYPE 2>/dev/null")
+            "lsblk -J -b -o NAME,SIZE,TYPE,MOUNTPOINT,MODEL,SERIAL,ROTA,TRAN,FSTYPE 2>/dev/null",
+            host_ip=host_ip)
         if rc != 0 or not out.strip():
             return []
         try:

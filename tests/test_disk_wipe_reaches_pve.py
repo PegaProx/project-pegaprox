@@ -83,3 +83,17 @@ def test_xcpng_wipes_nothing_on_a_host_it_cannot_place():
     res = XcpngManager.wipe_disk(mgr, 'gone-host', '/dev/sdb')
     assert res['success'] is False and 'nothing was wiped' in res['error']
     assert not mgr._ssh_exec.called
+
+
+def test_xcpng_lists_the_disks_of_the_host_the_wipe_goes_to():
+    """The Disks tab must not show the pool host's disks under a node it cannot place."""
+    from pegaprox.core.xcpng import XcpngManager
+    mgr = MagicMock()
+    mgr.member_node_ip.return_value = None
+    assert XcpngManager.get_node_disks(mgr, 'gone-host') == []
+    assert not mgr._ssh_exec.called
+
+    mgr.member_node_ip.return_value = '192.0.2.21'
+    mgr._ssh_exec.return_value = (0, '{"blockdevices": [{"name": "sdb", "size": 1, "type": "disk"}]}', '')
+    assert [d['devpath'] for d in XcpngManager.get_node_disks(mgr, 'xcp1')] == ['/dev/sdb']
+    assert mgr._ssh_exec.call_args.kwargs['host_ip'] == '192.0.2.21'
