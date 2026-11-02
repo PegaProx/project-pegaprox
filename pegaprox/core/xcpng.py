@@ -3253,9 +3253,10 @@ class XcpngManager:
                 time.sleep(3)
         return None
 
-    def _ssh_exec(self, node_name, cmd, timeout=60):
-        """Run command on XCP-ng host via SSH. Returns (exit_code, stdout, stderr)."""
-        host_ip = self._get_host_ip(node_name)
+    def _ssh_exec(self, node_name, cmd, timeout=60, host_ip=None):
+        """Run command on XCP-ng host via SSH. Returns (exit_code, stdout, stderr).
+        host_ip: an address the caller resolved itself, e.g. with member_node_ip."""
+        host_ip = host_ip or self._get_host_ip(node_name)
         ssh = self._ssh_connect(host_ip)
         if not ssh:
             return -1, '', 'SSH connection failed'
@@ -4225,7 +4226,12 @@ echo DONE""",
             disk = disk[len('/dev/'):]
         if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
             return {'success': False, 'error': f'Invalid disk: {disk}'}
-        rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30)
+        # _get_host_ip answers the pool address for a name it cannot find; a wipe must not
+        # run there, so the host is resolved strictly, as for the node shell (#1143)
+        host_ip = self.member_node_ip(node)
+        if not host_ip:
+            return {'success': False, 'error': f'{node} is not a host of this pool, nothing was wiped'}
+        rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30, host_ip=host_ip)
         if rc == 0:
             return {'success': True, 'message': f'/dev/{disk} wiped'}
         return {'success': False, 'error': err or 'wipefs failed'}

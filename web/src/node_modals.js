@@ -3245,7 +3245,7 @@
                                                                                                 if(res.ok) {
                                                                                                     // PVE answers with the task it started, the wipe is not done yet
                                                                                                     const r = await res.json().catch(() => ({}));
-                                                                                                    addToast(r.task ? 'Disk wipe started' : 'Disk wiped successfully', 'success');
+                                                                                                    addToast(r.task ? t('diskWipeStarted') : t('diskWiped'), 'success');
                                                                                                     loadTabData('disks');
                                                                                                 } else {
                                                                                                     const err = await res.json();

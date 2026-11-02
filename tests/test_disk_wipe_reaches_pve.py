@@ -59,15 +59,27 @@ def test_the_wipe_button_sends_the_confirmation_the_route_asks_for():
 
 def test_a_started_pve_task_is_not_reported_as_a_finished_wipe():
     handler = _wipe_handler()
-    assert "r.task ? 'Disk wipe started'" in handler, handler
+    assert "r.task ? t('diskWipeStarted') : t('diskWiped')" in handler, handler
 
 
 def test_xcpng_takes_the_devpath_the_disk_list_gives():
     from pegaprox.core.xcpng import XcpngManager
     mgr = MagicMock()
+    mgr.member_node_ip.return_value = '192.0.2.21'
     mgr._ssh_exec.return_value = (0, '', '')
     assert XcpngManager.wipe_disk(mgr, 'xcp1', '/dev/sdb') == {'success': True, 'message': '/dev/sdb wiped'}
     assert mgr._ssh_exec.call_args.args[1] == 'wipefs -a /dev/sdb'
+    assert mgr._ssh_exec.call_args.kwargs['host_ip'] == '192.0.2.21'
     assert XcpngManager.wipe_disk(mgr, 'xcp1', 'sdb')['success'] is True
     for bad in ('/dev/../etc/passwd', '/dev/sdb; reboot', '/etc/sdb'):
         assert XcpngManager.wipe_disk(mgr, 'xcp1', bad)['success'] is False, bad
+
+
+def test_xcpng_wipes_nothing_on_a_host_it_cannot_place():
+    """_get_host_ip falls back to the pool address for an unknown name; the wipe must not."""
+    from pegaprox.core.xcpng import XcpngManager
+    mgr = MagicMock()
+    mgr.member_node_ip.return_value = None
+    res = XcpngManager.wipe_disk(mgr, 'gone-host', '/dev/sdb')
+    assert res['success'] is False and 'nothing was wiped' in res['error']
+    assert not mgr._ssh_exec.called
