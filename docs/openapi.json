@@ -15250,7 +15250,7 @@
           }
         },
         "summary": "Get available hardware options (CPU types, SCSI controllers, etc.)",
-        "description": "NS: Extended Dec 2025 with machine types",
+        "description": "NS: Extended Dec 2025 with machine types\n\nMK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are\nread live from one of its nodes, so they follow its PVE version and its custom models. The\nfirst registered cluster used to answer for every dialog, an XCP-ng pool with its two types\nor an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller\nmay see.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -16729,6 +16729,59 @@
         ],
         "x-pegaprox-permissions": [
           "node.network"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/nodes/{node}/network/changes": {
+      "get": {
+        "operationId": "nodes.get_node_network_changes_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
         ]
       }
     },

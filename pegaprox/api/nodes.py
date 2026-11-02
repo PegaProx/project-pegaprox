@@ -9,6 +9,7 @@ import uuid
 import re
 import shlex
 from datetime import datetime, timedelta
+import requests
 from flask import Blueprint, jsonify, request
 
 from pegaprox.constants import *
@@ -22,7 +23,7 @@ from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
-                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES)
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error)
 
 bp = Blueprint('nodes', __name__)
 
@@ -115,6 +116,53 @@ def get_node_network_api(cluster_id, node):
 
     manager = cluster_managers[cluster_id]
     return jsonify(manager.get_node_network_config(node))
+
+
+# MK Nov 2026 - what waits in interfaces.new until Apply. PVE sends it as the 'changes'
+# attribute next to the list (a unified diff, left out when nothing waits); the list read above
+# hands on only the list. Read only, same access as the list. A read that fails says so with
+# its reason and is never handed on as "nothing waits"
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/changes', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_network_changes_api(cluster_id, node):
+    """The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    bad, status = _reject_bad_node(node)
+    if bad is not None:
+        return bad, status
+
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Pending network changes are a Proxmox VE feature', 'code': 'NOT_SUPPORTED'}), 501
+    if not manager.is_connected and not manager.connect_to_proxmox():
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/network"
+    try:
+        resp = manager._api_get(url)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {_sl(cluster_id)} unreachable for the pending network changes: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the network configuration'),
+                        'upstream_status': resp.status_code}), 502
+    try:
+        body = resp.json()
+    except ValueError:
+        return jsonify({'error': 'Proxmox VE sent an answer that is not JSON', 'upstream_status': 200}), 502
+    # only a left out attribute means nothing waits; any other shape is an answer we cannot read
+    changes = body.get('changes') if isinstance(body, dict) else 0
+    if changes is None:
+        changes = ''
+    if not isinstance(changes, str):
+        return jsonify({'error': 'Proxmox VE sent an unexpected answer for the pending changes', 'upstream_status': 200}), 502
+    return jsonify({'changes': changes})
 
 
 # MK May 2026 — node-name regex (mirrors vms.py:2718 hardening). RFC-1035-ish
