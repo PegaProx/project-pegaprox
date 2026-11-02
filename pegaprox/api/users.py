@@ -356,7 +356,9 @@ def update_user_preferences():
     # NS: UI Layout - Jan 2026
     if 'ui_layout' in data:
         layout = data['ui_layout']
-        if layout in ['modern', 'classic', 'corporate', 'cloud']:
+        # MK Oct 2026 - corporate-redesigned is a preview skin over Corporate. A lock can
+        # not name it (UI_LAYOUT_LOCKS), a corporate lock pins its users to the classic one
+        if layout in ['modern', 'classic', 'corporate', 'corporate-redesigned', 'cloud']:
             user['ui_layout'] = layout
             logging.info(f"update_user_preferences: Setting ui_layout to '{_sl(layout)}' for user '{_sl(username)}'")
         else:
