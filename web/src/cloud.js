@@ -794,13 +794,13 @@
                                 {statusFilter !== 'all' && (
                                     <span className="cloud-filterchip">
                                         {(t('cloud.colStatus') || 'Status')}: {statusFilter === 'running' ? (t('cloud.running') || 'Running') : (t('cloud.stopped') || 'Stopped')}
-                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                        <button type="button" onClick={() => { setStatusFilter('all'); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
                                     </span>
                                 )}
                                 {q && (
                                     <span className="cloud-filterchip">
                                         {(t('cloud.search') || 'Search')}: “{query}”
-                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label="Remove filter"><Icons.X /></button>
+                                        <button type="button" onClick={() => { setQuery(''); setPage(0); }} aria-label={t('cloud.removeFilter') || 'Remove filter'}><Icons.X /></button>
                                     </span>
                                 )}
                                 <button type="button" className="cloud-clearfilters" onClick={() => { setStatusFilter('all'); setQuery(''); setPage(0); }}>{t('cloud.clearFilters') || 'Clear all filters'}</button>
@@ -823,7 +823,7 @@
                                 <table className="cloud-table cloud-table-selectable">
                                     <thead>
                                         <tr>
-                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label="Select page" /></th>
+                                            <th className="cloud-th-check"><input type="checkbox" checked={pageAllOn} onChange={toggleAllPage} aria-label={t('cloud.selectPage') || 'Select page'} /></th>
                                             <SortTh k="name">{t('cloud.colName') || 'Name'}</SortTh>
                                             <SortTh k="vmid">{t('cloud.colId') || 'ID'}</SortTh>
                                             <SortTh k="status">{t('cloud.colStatus') || 'Status'}</SortTh>
@@ -842,7 +842,7 @@
                                             return (
                                                 <tr key={k} className={'cloud-table-row' + (isChecked ? ' cloud-table-row-checked' : '')} onClick={() => onOpen(r)}>
                                                     <td className="cloud-td-check" onClick={(e) => { e.stopPropagation(); toggleOne(k); }}>
-                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label="Select" />
+                                                        <input type="checkbox" checked={isChecked} onChange={() => {}} tabIndex={-1} aria-label={t('cloud.selectRow') || 'Select'} />
                                                     </td>
                                                     <td>
                                                         <span className="cloud-table-name">
@@ -958,7 +958,7 @@
                             </CloudKVPanel>
                             <CloudKVPanel title={t('cloud.tabCapacity') || 'Capacity'}>
                                 <CloudKVRow label={t('cloud.vcpu') || 'vCPU'} value={Number(r.maxcpu) || '—'} />
-                                <CloudKVRow label={t('cloud.colCpu') || 'CPU usage'} value={cpuP + '%'} />
+                                <CloudKVRow label={t('cloud.cpuUsage') || 'CPU usage'} value={cpuP + '%'} />
                                 <CloudKVRow label={t('cloud.ram') || 'Memory'} value={memMax ? cloudFmtBytes(memMax) : '—'} />
                                 <CloudKVRow label={t('cloud.ramInUse') || 'Memory used'} value={`${cloudFmtBytes(memUse)} (${memP}%)`} />
                                 {diskMax > 0 && <CloudKVRow label={t('cloud.disk') || 'Disk'} value={`${cloudFmtBytes(diskUse)} / ${cloudFmtBytes(diskMax)}`} />}
