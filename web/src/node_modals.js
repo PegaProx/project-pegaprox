@@ -3240,7 +3240,7 @@
                                                                                                     method: 'POST',
                                                                                                     credentials: 'include',
                                                                                                     headers: { 'Content-Type': 'application/json' },
-                                                                                                    body: JSON.stringify({ disk: d.devpath })
+                                                                                                    body: JSON.stringify({ disk: d.devpath, confirm_name: d.devpath })
                                                                                                 });
                                                                                                 if(res.ok) {
                                                                                                     addToast('Disk wiped successfully', 'success');
