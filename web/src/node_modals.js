@@ -5394,10 +5394,12 @@
                 setSaving(false);
             };
 
+            // LW Nov 2026 - the repos route sends name / enabled / uri in lower case (settings.py
+            // get_node_repos); read as Enabled every repo was off and the button always enabled
             const handleRepoToggle = async (repo) => {
-                const payload = { enabled: !repo.Enabled };
+                const payload = { enabled: !repo.enabled };
                 if (repo.is_other) { payload.file = repo.file; payload.index = repo.index; payload.name = repo.name; }
-                await handleSave(`repos/${repo.id || repo.index}`, payload, repo.Enabled ? 'Repository disabled' : 'Repository enabled');
+                await handleSave(`repos/${repo.id || repo.index}`, payload, repo.enabled ? 'Repository disabled' : 'Repository enabled');
             };
 
             const handleCertUpload = async () => {
@@ -6296,14 +6298,14 @@
                                                         <tbody>
                                                             {(Array.isArray(data.repos) ? data.repos : []).map((repo, i) => (
                                                                 <tr key={i}>
-                                                                    <td>{repo.Name || repo.Components?.join(', ') || '-'}</td>
-                                                                    <td className="text-[11px] font-mono" style={{color: '#728b9a'}}>{repo.URIs?.join(', ') || '-'}</td>
-                                                                    <td><span className={`corp-badge ${repo.Enabled ? 'corp-badge-online' : 'corp-badge-stopped'}`}>{repo.Enabled ? t('enabled') : t('disabled')}</span></td>
+                                                                    <td>{repo.name || '-'}</td>
+                                                                    <td className="text-[11px] font-mono" style={{color: '#728b9a'}}>{repo.uri || (Array.isArray(repo.content?.URIs) ? repo.content.URIs.join(', ') : '') || '-'}</td>
+                                                                    <td><span className={`corp-badge ${repo.enabled ? 'corp-badge-online' : 'corp-badge-stopped'}`}>{repo.enabled ? t('enabled') : t('disabled')}</span></td>
                                                                     <td>
                                                                         <button onClick={() => handleRepoToggle(repo)}
                                                                             className="px-2 py-0.5 text-[11px]"
-                                                                            style={repo.Enabled ? {color: '#f54f47', border: '1px solid rgba(245,79,71,0.3)'} : {color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>
-                                                                            {repo.Enabled ? t('disable') : t('enable')}
+                                                                            style={repo.enabled ? {color: '#f54f47', border: '1px solid rgba(245,79,71,0.3)'} : {color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>
+                                                                            {repo.enabled ? t('disable') : t('enable')}
                                                                         </button>
                                                                     </td>
                                                                 </tr>
