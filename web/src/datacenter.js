@@ -320,10 +320,10 @@
         }
 
         // Datacenter Tab Component
-        function DatacenterTab({ clusterId, addToast, initialSection, onSectionShown }) {
+        function DatacenterTab({ clusterId, addToast, initialSection, onSectionShown, crDc }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
-            const { isCorporate } = useLayout();
+            const { isCorporate, isCorpRedesigned } = useLayout();
             const [activeSection, setActiveSection] = useState(initialSection || 'summary');
             // LW Oct 2026 - opened from an overview on one section (the Ceph one): that once,
             // the next visit starts where the user left it
@@ -1073,6 +1073,8 @@
                     ]);
                     
                     const [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14] = results;
+                    // LW Nov 2026 - what this cluster's status read answered, for the redesigned summary
+                    crDcRead.current = { cid: clusterId, code: r1 ? r1.status : 0, at: Date.now() };
 
                     // NS Nov 2026 - a status read that failed left the figures of the cluster
                     // shown before on screen: show that it was not read instead
@@ -1084,7 +1086,12 @@
                         setDcStatus(null);
                         setDcStatusError({ detail: (why && why.error) || (r1 ? `HTTP ${r1.status}` : '') });
                     }
-                    if (r2?.ok) {
+                    // LW Nov 2026 - the variant takes the corosync list as it is; the per-node summaries only
+                    // feed CPU Compatibility and are read when that section opens (crCpu below), not on every open
+                    if (r2?.ok && isCorpRedesigned && crDc) {
+                        const tmp = await r2.json();
+                        setClusterNodes((Array.isArray(tmp) ? tmp : []).map(node => ({ ...node, summary: null, name: node.node || node.name })));
+                    } else if (r2?.ok) {
                         const tmp = await r2.json();
                         
                         // Fetch summary for each node - NS Jan 2026
@@ -1511,6 +1518,36 @@
             // NS: Scan storage targets (iSCSI, NFS, CIFS, etc.)
             const [scanning, setScanning] = useState(false);
             const [scanResults, setScanResults] = useState([]);
+            const crDcRead = useRef(null);
+            // the variant: the node summaries for CPU Compatibility, once per cluster when the section opens
+            const crCpu = useRef({ cid: null, seq: 0 });
+            useEffect(() => {
+                if (!(isCorpRedesigned && crDc) || activeSection !== 'cpucompat' || loading) return undefined;
+                const online = (clusterNodes || []).filter(n => n.online !== 0 && n.name);
+                if (!online.length || crCpu.current.cid === clusterId) return undefined;
+                const seq = ++crCpu.current.seq;
+                crCpu.current.cid = clusterId;
+                setCpuInfo([]);
+                setRecommendedCpu(null);
+                (async () => {
+                    const got = await Promise.all(online.map(async (node) => {
+                        try {
+                            const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node.name}/summary`);
+                            if (!res?.ok) return null;
+                            const s = await res.json();
+                            const cpuModel = s.cpuinfo?.model || 'Unknown';
+                            const detected = detectCpuGeneration(cpuModel);
+                            return { node: node.name, model: cpuModel, cores: s.cpuinfo?.cores || 0, sockets: s.cpuinfo?.sockets || 1,
+                                     detectedLevel: detected.level, generation: detected.generation };
+                        } catch (e) { return null; }
+                    }));
+                    if (seq !== crCpu.current.seq) return;
+                    const list = got.filter(Boolean);
+                    setCpuInfo(list);
+                    setRecommendedCpu(calculateRecommendedCpu(list));
+                })();
+                return undefined;
+            }, [isCorpRedesigned, crDc ? 1 : 0, activeSection, loading, clusterId, clusterNodes]);
             
             const scanStorage = async (type) => {
                 setScanning(true);
@@ -1847,7 +1884,29 @@
                 } catch(e) { console.error(e); }
             };
 
-            if (loading) {
+            // LW Nov 2026 - the redesigned summary draws from what the dashboard holds: it does not wait for the reads below.
+            // Another section still waits for them, with the section list kept so the summary stays one click away
+            const crSummary = isCorpRedesigned && !!crDc;
+            if (loading && crSummary && activeSection !== 'summary') {
+                return (
+                    <div className="flex gap-0" data-cr-dc-wait="">
+                        <div className="corp-subnav" style={{position: 'sticky', top: 0, alignSelf: 'flex-start'}}>
+                            {sections.map(section => (
+                                <button key={section.id} type="button" onClick={() => setActiveSection(section.id)}
+                                    className={`corp-subnav-item ${activeSection === section.id ? 'active' : ''}`} style={{display: 'flex', alignItems: 'center', gap: 6}}>
+                                    <section.icon style={{width: 14, height: 14, flexShrink: 0}} />
+                                    <span>{t(section.labelKey)}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex-1 flex items-center justify-center h-64">
+                            <Icons.RotateCw />
+                            <span className="ml-2">{t('loadingDatacenter') || 'Loading datacenter data / Lade Datacenter Daten...'}</span>
+                        </div>
+                    </div>
+                );
+            }
+            if (loading && !(crSummary && activeSection === 'summary')) {
                 return (
                     <div className="flex items-center justify-center h-64">
                         <Icons.RotateCw />
@@ -1987,13 +2046,18 @@
                             );
                         })()}
                         {/* Summary */}
-                        {activeSection === 'summary' && !dcStatus && dcStatusError && (
+                        {activeSection === 'summary' && crSummary && (
+                            <CrBoundary key={clusterId} id="dc-summary">
+                                <CrDcSummary clusterId={clusterId} {...crDc} read={crDcRead.current} clusterNodes={clusterNodes} nodesLoading={loading} />
+                            </CrBoundary>
+                        )}
+                        {activeSection === 'summary' && !crSummary && !dcStatus && dcStatusError && (
                             <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 text-sm">
                                 <div className="text-red-400">{t('dcStatusNotRead') || 'The cluster status could not be read. No figures are shown until a read succeeds.'}</div>
                                 {dcStatusError.detail && <div className="text-xs text-gray-400 mt-1">{dcStatusError.detail}</div>}
                             </div>
                         )}
-                        {activeSection === 'summary' && dcStatus && (
+                        {activeSection === 'summary' && !crSummary && dcStatus && (
                             <>
                                 <div className="grid grid-cols-2 gap-6">
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">

@@ -2044,9 +2044,9 @@ def test_compliance_stays_a_reading_tab_on_a_standby(dash):
     assert ("if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') "
             "|| holds('changes.view');") in dash
     # holds() decides this tab (and the sub tabs of it, with the change plans' request button),
-    # whether a standby offers a console on the active, and the console entries of a member
-    # that opens them itself
-    assert len(re.findall(r'\bholds\(', dash)) == 9
+    # whether a standby offers a console on the active, the console entries of a member
+    # that opens them itself, and whether the Corporate Redesigned dashboard reads the audit trail
+    assert len(re.findall(r'\bholds\(', dash)) == 10
     assert 'const onActiveItems = (permission, search, disabled = false) => !holds(permission) ? [] : [{' in dash
     assert 'const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));' in dash
     drift = _function(dash, 'DriftTab')
@@ -4426,7 +4426,7 @@ def test_the_leader_only_lists_say_when_the_leader_is_away(ctx, dash):
     assert 'const away = await haLeaderAway(r);' in bell
     assert 'if (away) { setItems([]); setUnread(0); return; }' in bell
     assert '{items.length === 0 && !leaderAway && (' in bell
-    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId) => {', 'const ackAlert = ')
+    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId, force) => {', 'const ackAlert = ')
     assert 'setActiveAlertsAway(await haLeaderAway(r));' in alerts
     for where in ('drift', 'inbox', 'alerts'):
         at = dash.index(f'data-ha-leader-away="{where}"')

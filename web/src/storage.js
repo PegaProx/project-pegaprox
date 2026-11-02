@@ -3,7 +3,7 @@
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData }) {
+        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData, guests, onOpenGuest, crTasks, crSub, onCrSubShown }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, user, haReadOnly } = useAuth();
             // #644: gate the storage action bar on the same fine-grained perms the API
@@ -11,13 +11,16 @@
             // check — a non-admin who holds e.g. storage.upload should get the button.
             // #625: a standby keeps the reading ones only.
             const hasPerm = (p) => (!haReadOnly || haReadPermission(p)) && (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes(p)));
-            const { isCorporate } = useLayout();
+            const { isCorporate, isCorpRedesigned } = useLayout();
             const [loading, setLoading] = useState(true);
             const [datastores, setDatastores] = useState({ shared: [], local: {}, nodes: [] });
             const [selectedStorage, setSelectedStorage] = useState(null);
             const [storageContent, setStorageContent] = useState([]);
             const [contentLoading, setContentLoading] = useState(false);
             const [contentError, setContentError] = useState(null);
+            // LW Oct 2026 - Corporate Redesigned: why the content read failed, and the newest read
+            const [crContentError, setCrContentError] = useState(null);
+            const crContentSeq = useRef(0);
             const [expandedNodes, setExpandedNodes] = useState({});
             const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla, recovery
             const [syncStatus, setSyncStatus] = useState(null);
@@ -44,6 +47,15 @@
                     .catch(() => {})
                     .finally(() => setSlaLoading(false));
             };
+
+            // LW Oct 2026 - Corporate Redesigned: the health of a guest links to its Backup SLA or
+            // Restore tests; the tab opens on that sub tab, read as its button reads it
+            useEffect(() => {
+                if (!isCorpRedesigned || !crSub) return;
+                if (crSub === 'sla') { setActiveTab('sla'); refreshSla(); }
+                else if (crSub === 'recovery') setActiveTab('recovery');
+                if (onCrSubShown) onCrSubShown();
+            }, [crSub]);
 
             const saveSlaConfig = async () => {
                 setSlaSaving(true);
@@ -187,6 +199,8 @@
             const [newClusterThreshold, setNewClusterThreshold] = useState(20);
             const [newClusterTolerance, setNewClusterTolerance] = useState(5);
             const [balancingLoading, setBalancingLoading] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned: what became of the last read of the storage cluster list
+            const [crScRead, setCrScRead] = useState(null);
             
             // NS: ESXi Integration state - Dec 2025
             const [esxiHosts, setEsxiHosts] = useState([]);
@@ -306,6 +320,7 @@
                 setStorageClusters([]);  // NS: also reset storage clusters
                 setSelectedCluster(null);
                 setClusterStatus(null);
+                if (isCorpRedesigned) setCrScRead(null);
                 setEsxiHosts([]);  // NS: reset ESXi hosts too
                 setSelectedEsxi(null);
                 setEsxiVms([]);
@@ -432,8 +447,27 @@
                 }
             };
             
+            // LW Oct 2026 - Corporate Redesigned: the same GET, but a refused, failed or late answer says so
+            // instead of leaving "no storage clusters" (or the list of the cluster before) on screen
+            const crFetchStorageClusters = async () => {
+                const cid = clusterId;
+                setCrScRead(prev => ({ ...(prev && prev.cid === cid ? prev : {}), cid, pending: true }));
+                const r = await authFetch(`${API_URL}/clusters/${cid}/storage-clusters`);
+                const body = r ? await r.json().catch(() => null) : null;
+                if (cid !== activeClusterIdRef.current) return;
+                if (r && r.ok && Array.isArray(body)) {
+                    setStorageClusters(body);
+                    setCrScRead({ cid, state: 'ok', at: Date.now() });
+                    return;
+                }
+                const msg = body && typeof body.error === 'string' ? body.error : '';
+                const state = !r ? 'offline' : r.ok ? 'malformed' : r.status === 403 ? 'forbidden' : r.status === 404 ? 'notfound' : 'error';
+                setCrScRead({ cid, state, code: r ? r.status : 0, msg });
+            };
+
             // storage clusters (ceph etc)
             const fetchStorageClusters = async () => {
+                if (isCorpRedesigned) return crFetchStorageClusters();
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters`);
                     if (r?.ok) {
@@ -648,28 +682,37 @@
             };
             
             const loadStorageContent = async (storageName, node) => {
+                // LW Oct 2026 - Corporate Redesigned: only the newest click lands, and a refused read says so
+                const crSeq = ++crContentSeq.current;
+                const crStale = () => isCorpRedesigned && crSeq !== crContentSeq.current;
                 setContentLoading(true);
                 setSelectedStorage({ name: storageName, node });
                 setContentError(null);
+                if (isCorpRedesigned) setCrContentError(null);
                 try {
                     const url = node 
                         ? `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content?node=${node}`
                         : `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content`;
                     const response = await authFetch(url);
+                    if (crStale()) return;
                     const data = response ? await response.json().catch(() => null) : null;
+                    if (crStale()) return;
                     if (response && response.ok && Array.isArray(data)) {
                         setStorageContent(data);
                     } else {
                         // not the previous storage's content under this one's name
                         setStorageContent([]);
                         setContentError(errorText(response, data));
+                        if (isCorpRedesigned) setCrContentError((data && data.error) || t('crDsLoadFailed'));
                     }
                 } catch (error) {
                     console.error('loading content:', error);
+                    if (crStale()) return;
                     setStorageContent([]);
                     setContentError(error?.message || String(error));
+                    if (isCorpRedesigned) setCrContentError(t('crDsLoadFailed'));
                 } finally {
-                    setContentLoading(false);
+                    if (!crStale()) setContentLoading(false);
                 }
             };
             
@@ -1401,6 +1444,26 @@
                         </div>
                     ) : activeTab === 'recovery' ? (
                         <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
+                    ) : activeTab === 'browse' && isCorpRedesigned ? (
+                        /* LW Oct 2026 - Corporate Redesigned: the same state, setters and dialogs, drawn by CrStorageBrowse */
+                        <CrStorageBrowse key={clusterId} datastores={datastores} selected={selectedStorage}
+                            content={storageContent} loading={contentLoading} error={crContentError}
+                            onPick={loadStorageContent} may={hasPerm} canUploadTo={canUploadTo} isAdmin={isAdmin}
+                            guests={guests} onOpenGuest={onOpenGuest}
+                            run={{
+                                templates: () => { setShowTemplateModal(true); loadAvailableTemplates(); },
+                                url: () => setDownloadUrlModalOpen(true),
+                                upload: () => setUploadModalOpen(true),
+                                rescan: () => setShowRescanModal(true),
+                                restore: () => setBatchRestore('pick'),
+                                recent: () => setBatchRestore('runs'),
+                                remove: (item) => setDeleteConfirm(item),
+                            }}
+                            esxi={{
+                                hosts: esxiHosts, selected: selectedEsxi, vms: esxiVms, loading: esxiVmsLoading,
+                                pick: fetchEsxiVms, disconnect: disconnectEsxiHost, connect: () => setShowAddEsxi(true),
+                                close: () => { setSelectedEsxi(null); setEsxiVms([]); },
+                            }} />
                     ) : activeTab === 'browse' ? (
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                             {/* Storage Tree */}
@@ -1773,6 +1836,14 @@
                         )}
                     </div>
                 </div>
+            ) : activeTab === 'balancing' && isCorpRedesigned ? (
+                /* LW Oct 2026 - Corporate Redesigned: the group list and datastores held here, the create dialog below */
+                <CrBoundary key={clusterId} id="balancing">
+                    <CrStorageBalancing clusterId={clusterId} authFetch={authFetch} datastores={datastores}
+                        dsLoading={loading} list={storageClusters} listRead={crScRead && crScRead.cid === clusterId ? crScRead : null}
+                        setList={setStorageClusters} reloadList={fetchStorageClusters} may={hasPerm} standby={!!haReadOnly}
+                        guests={guests} onOpenGuest={onOpenGuest} tasks={crTasks} onCreate={() => setShowCreateCluster(true)} />
+                </CrBoundary>
             ) : (
                 /* Storage Balancing Tab with Storage Clusters */
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -2111,7 +2182,8 @@
                                             max={50}
                                             step={5}
                                         />
-                                        <Slider
+                                        {/* LW Oct 2026 - Corporate Redesigned: the server does not store a tolerance, so the preview does not ask for one */}
+                                        {!isCorpRedesigned && <Slider
                                             label={t('migrationTolerance') || 'Tolerance'}
                                             description={t('storageToleranceDesc')}
                                             value={newClusterTolerance}
@@ -2119,7 +2191,7 @@
                                             min={0}
                                             max={20}
                                             step={1}
-                                        />
+                                        />}
                                     </div>
                                     <div className="flex gap-2 justify-end pt-4">
                                         <button

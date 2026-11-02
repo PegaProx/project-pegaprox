@@ -794,14 +794,15 @@
             );
         }
 
-        function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false }) {
+        function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false, initialTab = 'general' }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haStandby } = useAuth();
             const [config, setConfig] = useState(null);
             const [configError, setConfigError] = useState(null);  // MK: Track config load errors
             const [loading, setLoading] = useState(true);
             const [saving, setSaving] = useState(false);
-            const [activeTab, setActiveTab] = useState('general');
+            // LW Oct 2026 - Corporate Redesigned opens it on the tab of the part that was clicked
+            const [activeTab, setActiveTab] = useState(initialTab);
             const [changes, setChanges] = useState({});
             const [hasChanges, setHasChanges] = useState(false);
             const [descEditMode, setDescEditMode] = useState(false);
@@ -955,6 +956,15 @@
             const [fwSubTab, setFwSubTab] = useState('rules');
 
             const isQemu = vm.type === 'qemu';
+            // LW Nov 2026 - Corporate Redesigned: a QEMU VM's dialog hands its changes to cr_vmcfg.js
+            // (restart classes, the pending changes panel, the General tab in sections)
+            // (a Proxmox VE cluster only: the restart rules are those of qemu-server)
+            const { isCorpRedesigned } = useLayout();
+            const crVcCluster = allClusters.find(c => c.id === clusterId);
+            const crVc = isCorpRedesigned && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
+            // LW Nov 2026 - the preview's edits of network devices, saved from the review with the classic request
+            const [crNets, setCrNets] = useState({});
+            const crv = useCrVc({ on: crVc, vm, clusterId, authFetch, config, changes, nets: crNets });
 
             // NS Jul 2026 (modal-perf): fire the ~14 open-time fetches ONLY when the
             // target VM/cluster changes. This effect previously ALSO depended on
@@ -1021,12 +1031,15 @@
                                 ...newConfig.raw
                             }
                         }));
+                        // LW Nov 2026 - the preview reads what waits for the next start again, the
+                        // running config its prediction compares with comes from it
+                        if (crVc) crv.refresh();
                     }
                 };
 
                 window.addEventListener('pegaprox-vm-config', handleVmConfigUpdate);
                 return () => window.removeEventListener('pegaprox-vm-config', handleVmConfigUpdate);
-            }, [vm, clusterId, hasChanges, saving]);
+            }, [vm, clusterId, hasChanges, saving, crVc]);
 
             // MK: Auto-fetch history when history tab is selected
             useEffect(() => {
@@ -1217,6 +1230,7 @@
                         setSelectedPciDevice(null);
                         setSelectedPciMapping('');
                         fetchPassthrough();
+                        if (crVc) crv.refresh();
                         await ptAdded(response);
                     }else{
                         await ptRefused(response);
@@ -1245,6 +1259,7 @@
                         setSelectedUsbDevice(null);
                         setSelectedUsbMapping('');
                         fetchPassthrough();
+                        if (crVc) crv.refresh();
                         await ptAdded(response);
                     }else{
                         await ptRefused(response);
@@ -1266,6 +1281,7 @@
                     if (response && response.ok) {
                         setShowAddSerial(false);
                         fetchPassthrough();
+                        if (crVc) crv.refresh();
                         addToast(t('deviceAdded'));
                     }else{
                         const err = await response.json();
@@ -1287,6 +1303,7 @@
                     );
                     if (response && response.ok) {
                         fetchPassthrough();
+                        if (crVc) crv.refresh();
                         addToast(t('deviceRemoved'));
                     }else{
                         await ptRefused(response);
@@ -1299,12 +1316,15 @@
 
             const fetchConfig = async (retryCount = 0) => {
                 setLoading(true);
+                // LW Nov 2026 - handed back for the preview's save (the classic callers ignore it)
+                let loaded = null;
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`
                     );
                     if (response && response.ok) {
                         const data = await response.json();
+                        loaded = data;
                         setConfig(data);
                         setConfigError(null);  // LW: Clear any previous error
                     } else if (response) {
@@ -1323,6 +1343,7 @@
                     setConfigError(t('configLoadError') || 'Could not load configuration');
                 }
                 setLoading(false);
+                return loaded;
             };
 
             const fetchHardwareOptions = async () => {
@@ -2094,7 +2115,32 @@
                 }
             };
 
+            // LW Nov 2026 - one change taken back (key null: all of them)
+            const crVcRevert = (key) => {
+                if (key == null) setCrNets({});
+                else if (crNets[key]) {
+                    const n = { ...crNets };
+                    delete n[key];
+                    setCrNets(n);
+                    return;
+                }
+                const next = { ...changes };
+                if (key == null) Object.keys(next).forEach(k => { delete next[k]; });
+                else delete next[key];
+                setChanges(next);
+                setHasChanges(Object.keys(next).length > 0);
+            };
+
+            // LW Nov 2026 - an edit of the preview's Hardware tab: several keys and the delete list in one go
+            const crVcSet = (patch) => {
+                const next = crVcPatch(changes, patch, config?.raw);
+                setChanges(next);
+                setHasChanges(Object.keys(next).length > 0);
+            };
+
             const handleChange = (section, key, value) => {
+                // in the preview a value set back to what the config holds is no change any more
+                if (crVc && crVcSame(config?.raw?.[key], value)) return crVcRevert(key);
                 setChanges(prev => ({
                     ...prev,
                     [key]: value
@@ -2103,7 +2149,7 @@
             };
 
             const handleSave = async () => {
-                if (Object.keys(changes).length === 0) return;
+                if (Object.keys(changes).length === 0) return false;
 
                 // Validate VM name format (DNS-compatible)
                 // KG Aug 2026 — this demanded a SINGLE label starting with a LETTER, which is
@@ -2121,11 +2167,12 @@
                     // API reject the request.
                     if (!dnsRegex.test(nameValue) || nameValue.length > 255) {
                         addToast(t('invalidDnsName'), 'error');
-                        return;
+                        return false;
                     }
                 }
 
                 setSaving(true);
+                let saved = false;
                 try {
                     const response = await authFetch(
                         `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`,
@@ -2137,6 +2184,7 @@
                     );
                     
                     if (response && response.ok) {
+                        saved = true;
                         addToast(t('configSaved'), 'success');
                         setChanges({});
                         setHasChanges(false);
@@ -2149,6 +2197,123 @@
                     addToast(t('connectionError'), 'error');
                 }
                 setSaving(false);
+                // LW Nov 2026 - the preview reads what PVE keeps pending once it knows the outcome
+                return saved;
+            };
+
+            // the preview saves only from its review; the rows are the prediction PVE's answer goes next to
+            const crVcSave = async () => {
+                const sent = crv.rows;
+                crv.beginSave();
+                let ok = true;
+                // a network device goes through the classic dialog's request, one per device; the
+                // panel's save stays disabled meanwhile
+                const left = { ...crNets };
+                // the keys of the requests that failed: only those can be "not saved"
+                const failed = [];
+                if (Object.keys(crNets).length) setSaving(true);
+                for (const id of Object.keys(crNets)) {
+                    if (await handleUpdateNetwork(id, crNets[id])) delete left[id];
+                    else { ok = false; failed.push(id); }
+                }
+                setCrNets(left);
+                setSaving(false);
+                let after = null;
+                if (Object.keys(changes).length && !(await handleSave())) {
+                    ok = false;
+                    failed.push(...Object.keys(changes).filter(k => k !== 'delete'), ...crVcDelList(changes));
+                    // PVE applies and writes what it can before it raises the error (API2/Qemu.pm 2641):
+                    // read the config once (the classic form does not after a failure), keep the rest
+                    const data = await fetchConfig();
+                    after = (data && data.raw) || null;
+                    if (after) {
+                        const next = crVcUnstored(changes, after);
+                        setChanges(next);
+                        setHasChanges(Object.keys(next).length > 0);
+                    }
+                }
+                await crv.afterSave(sent, ok, failed, after);
+            };
+
+            // LW Nov 2026 - the delete buttons of EFI disk, TPM and cloud-init drive, out of the classic
+            // Hardware tab so the preview's tab sends the same requests
+            const handleDeleteEfiDisk = async () => {
+                if (!confirm(t('confirmDeleteEfiDisk') || 'Delete EFI disk? This may prevent the VM from booting.')) return;
+                try {
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: 'efidisk0' })
+                    });
+                    if (res.ok) {
+                        addToast(t('efiDiskDeleted') || 'EFI disk deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting EFI disk', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting EFI disk', 'error');
+                }
+            };
+
+            const handleDeleteTpm = async () => {
+                if (!confirm(t('confirmDeleteTpm') || 'Delete TPM? Windows 11 and BitLocker will stop working.')) return;
+                try {
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: 'tpmstate0' })
+                    });
+                    if (res.ok) {
+                        addToast(t('tpmDeleted') || 'TPM deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting TPM', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting TPM', 'error');
+                }
+            };
+
+            const handleDeleteCloudInit = async (driveKey) => {
+                if (!confirm(t('confirmDeleteCloudInitDrive'))) return;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: driveKey })
+                    });
+                    if (res?.ok) {
+                        addToast(t('cloudInitDriveRemoved'), 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || t('cloudInitDriveRemoveFailed'), 'error');
+                    }
+                } catch (e) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleUnlockVm = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, {
+                        method: 'POST'
+                    });
+                    if (response && response.ok) {
+                        addToast(t('vmUnlocked'), 'success');
+                        fetchConfig(); // Reload config
+                    } else {
+                        const err = await response.json();
+                        addToast(err.error || t('deleteFailed'), 'error');
+                    }
+                } catch(e) {
+                    addToast(t('connectionError'), 'error');
+                }
             };
 
             // Disk operations - LW: refactored this like 3 times, finally happy with it
@@ -2194,6 +2359,29 @@
                     }
                 } catch(error) {
                     addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // LW Nov 2026 - the permanent delete of an unused disk, out of the classic Disks tab so the
+            // preview's tab sends the same request
+            const handleDeleteUnusedDisk = async (disk) => {
+                if (!confirm(t('deleteUnusedDiskConfirm') || `Permanently delete ${disk.id}? This cannot be undone!`)) return;
+                try {
+                    // First delete the unused reference, then purge the actual volume
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: disk.id })
+                    });
+                    if (res && res.ok) {
+                        addToast(t('unusedDiskDeleted') || 'Unused disk deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting disk', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting disk', 'error');
                 }
             };
 
@@ -2325,6 +2513,7 @@
                         addToast(t('vmNetworkUpdated'));
                         setShowEditNetwork(null);
                         await fetchConfig();
+                        return true;
                     } else if (response) {
                         const err = await response.json();
                         addToast(err.error || t('error'), 'error');
@@ -2332,6 +2521,7 @@
                 } catch(error) {
                     addToast(t('connectionError'), 'error');
                 }
+                return false;
             };
 
             const handleRemoveNetwork = async (netId) => {
@@ -2525,7 +2715,285 @@
             // header with explicit Apply / Cancel actions). The Modern dark
             // pill-tab look feels foreign in the Corporate layout especially
             // under the light theme. Body markup is shared between layouts.
+            // LW Nov 2026 - the SMBIOS card of the Options tab, the preview's Options tab shows it too
+            const renderSmbiosCard = () => (
+                                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                                                                <Icons.Cpu />
+                                                                {t('smbiosSettings') || 'SMBIOS Settings'}
+                                                            </label>
+                                                            <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</CrVcRestartBadge>
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mb-4">{t('smbiosHint') || 'System Management BIOS settings - useful for Windows licensing and VM identification'}</p>
+                                                        
+                                                        {/* Current SMBIOS value display */}
+                                                        {getValue('options', 'smbios1') && (
+                                                            <div className="mb-4 p-3 bg-black/50 rounded-lg border border-green-500/30">
+                                                                <label className="block text-[10px] text-green-400 mb-1 font-medium">{t('currentValue') || 'Current Value'} (smbios1):</label>
+                                                                <code className="text-xs text-green-300 font-mono break-all">
+                                                                    {getValue('options', 'smbios1')}
+                                                                </code>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {(() => {
+                                                            // Parse existing smbios1 value
+                                                            const smbiosRaw = getValue('options', 'smbios1') || '';
+                                                            const parseSmbios = (raw) => {
+                                                                const result = { uuid: '', manufacturer: '', product: '', version: '', serial: '', sku: '', family: '' };
+                                                                if (!raw) return result;
+                                                                raw.split(',').forEach(part => {
+                                                                    const [key, ...valueParts] = part.split('=');
+                                                                    const value = valueParts.join('='); // Handle values with = in them
+                                                                    if (key && result.hasOwnProperty(key)) {
+                                                                        result[key] = value || '';
+                                                                    }
+                                                                });
+                                                                return result;
+                                                            };
+                                                            
+                                                            const smbios = parseSmbios(smbiosRaw);
+                                                            
+                                                            // Sanitize for Proxmox SMBIOS - only A-Za-z0-9, learned the hard way that underscores dont work either
+                                                            const sanitizeSmbios = (value) => {
+                                                                if (!value) return '';
+                                                                return value
+                                                                    .replace(/\s+/g, '')  // Remove spaces
+                                                                    .replace(/[^A-Za-z0-9]/g, '');  // Remove ALL other chars including underscores
+                                                            };
+                                                            
+                                                            const buildSmbios = (newValues) => {
+                                                                const parts = [];
+                                                                Object.entries(newValues).forEach(([key, value]) => {
+                                                                    if (value && value.trim()) {
+                                                                        // UUID is special - don't sanitize
+                                                                        const finalValue = key === 'uuid' ? value : sanitizeSmbios(value);
+                                                                        if (finalValue) {
+                                                                            parts.push(`${key}=${finalValue}`);
+                                                                        }
+                                                                    }
+                                                                });
+                                                                return parts.join(',');
+                                                            };
+                                                            
+                                                            const updateSmbios = (field, value) => {
+                                                                const newSmbios = { ...smbios, [field]: value };
+                                                                const encoded = buildSmbios(newSmbios);
+                                                                handleChange('options', 'smbios1', encoded || null);
+                                                            };
+                                                            
+                                                            const generateUuid = () => {
+                                                                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                                                                    const r = Math.random() * 16 | 0;
+                                                                    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                                                                    return v.toString(16);
+                                                                });
+                                                            };
+                                                            
+                                                            return (
+                                                                <div className="space-y-3">
+                                                                    {/* UUID - Display only, managed by Proxmox */}
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">UUID <span className="text-gray-600">({t('managedByProxmox') || 'managed by Proxmox'})</span></label>
+                                                                        <div className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-gray-500 text-sm font-mono">
+                                                                            {smbios.uuid ? smbios.uuid : <span className="italic">{t('willBeAutoGenerated') || 'Will be auto-generated on save'}</span>}
+                                                                        </div>
+                                                                    </div>
+                                                                    
+                                                                    {/* Format hint */}
+                                                                    <p className="text-[10px] text-yellow-500/70">
+                                                                        ⚠️ {t('smbiosFormatHint') || 'Only letters and numbers allowed (A-Za-z0-9)'}
+                                                                    </p>
+                                                                    
+                                                                    <div className="grid grid-cols-2 gap-3">
+                                                                        {/* Manufacturer */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('manufacturer') || 'Manufacturer'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.manufacturer}
+                                                                                onChange={(e) => updateSmbios('manufacturer', e.target.value)}
+                                                                                placeholder="e.g. Dell"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.manufacturer && sanitizeSmbios(smbios.manufacturer) !== smbios.manufacturer && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.manufacturer)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Product */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('product') || 'Product'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.product}
+                                                                                onChange={(e) => updateSmbios('product', e.target.value)}
+                                                                                placeholder="e.g. PowerEdgeR740"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.product && sanitizeSmbios(smbios.product) !== smbios.product && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.product)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Version */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('version') || 'Version'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.version}
+                                                                                onChange={(e) => updateSmbios('version', e.target.value)}
+                                                                                placeholder="e.g. v1"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.version && sanitizeSmbios(smbios.version) !== smbios.version && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.version)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Serial */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('serialNumber') || 'Serial Number'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.serial}
+                                                                                onChange={(e) => updateSmbios('serial', e.target.value)}
+                                                                                placeholder="e.g. ABC123"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.serial && sanitizeSmbios(smbios.serial) !== smbios.serial && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.serial)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* SKU */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">SKU</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.sku}
+                                                                                onChange={(e) => updateSmbios('sku', e.target.value)}
+                                                                                placeholder="e.g. SKU12345"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.sku && sanitizeSmbios(smbios.sku) !== smbios.sku && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.sku)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Family */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('family') || 'Family'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.family}
+                                                                                onChange={(e) => updateSmbios('family', e.target.value)}
+                                                                                placeholder="e.g. Server"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.family && sanitizeSmbios(smbios.family) !== smbios.family && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.family)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                    
+                                                                    {/* Live Preview */}
+                                                                    {(smbios.uuid || smbios.manufacturer || smbios.product || smbios.version || smbios.serial || smbios.sku || smbios.family) && (
+                                                                        <div className="p-3 bg-black/50 rounded-lg border border-proxmox-border">
+                                                                            <label className="block text-[10px] text-gray-500 mb-1">{t('preview') || 'Preview'} (smbios1):</label>
+                                                                            <code className="text-xs text-green-400 font-mono break-all">
+                                                                                {buildSmbios(smbios)}
+                                                                            </code>
+                                                                        </div>
+                                                                    )}
+                                                                    
+                                                                    {/* Quick presets - using only safe characters (A-Za-z0-9) */}
+                                                                    <div className="pt-2 border-t border-proxmox-border">
+                                                                        <label className="block text-xs text-gray-400 mb-2">{t('presets') || 'Quick Presets'}</label>
+                                                                        <div className="flex flex-wrap gap-2">
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Dell,product=PowerEdgeR740,version=v1,serial=DELL${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Dell Server
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=HP,product=ProLiantDL380,version=v1,serial=MXQ${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                HP Server
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Lenovo,product=ThinkPadX1,version=v1,serial=PF${Math.random().toString(36).substr(2, 8).toUpperCase()},family=ThinkPad`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Lenovo Laptop
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={async () => {
+                                                                                    // NS: fetch smbios settings from cluster config
+                                                                                    const sanitize = (v) => (v || '').replace(/\s+/g, '').replace(/[^A-Za-z0-9]/g, '');
+                                                                                    try {
+                                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`);
+                                                                                        const settings = res?.ok ? await res.json() : {};
+                                                                                        const mfg = sanitize(settings.manufacturer) || 'Proxmox';
+                                                                                        const prod = sanitize(settings.product) || 'PegaProxManagment';
+                                                                                        const ver = sanitize(settings.version) || 'v1';
+                                                                                        const fam = sanitize(settings.family) || 'ProxmoxVE';
+                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
+                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
+                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=${mfg},product=${prod},version=${ver},serial=PVE${timestamp}${randomPart},family=${fam}`);
+                                                                                    } catch (e) {
+                                                                                        // fallback to defaults
+                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
+                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
+                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=Proxmox,product=PegaProxManagment,version=v1,serial=PVE${timestamp}${randomPart},family=ProxmoxVE`);
+                                                                                    }
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-orange/20 border border-proxmox-orange/50 rounded text-xs text-proxmox-orange hover:bg-proxmox-orange/30"
+                                                                                title={t('applySmbiosFromClusterConfig') || 'Apply SMBIOS settings from cluster configuration'}
+                                                                            >
+                                                                                🦄 PegaProx
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Microsoft,product=VirtualMachine,version=HyperV,serial=0000000000000000,family=VirtualMachine`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Hyper-V
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    handleChange('options', 'smbios1', '');
+                                                                                }}
+                                                                                className="px-2 py-1 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/20"
+                                                                            >
+                                                                                {t('clear') || 'Clear'}
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+            );
+
             return(
+                <CrVcBadgeOff.Provider value={crVc}>
                 <div className={isCorporate
                     ? 'corp-vm-modal-overlay'
                     : 'fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80'}>
@@ -2557,10 +3025,10 @@
                                     </div>
                                 </div>
                                 <div className="corp-vm-modal-actions">
-                                    {hasChanges && (
+                                    {hasChanges && !crVc && (
                                         <span className="corp-unsaved-pill">{t('unsavedChanges') || 'Unsaved Changes'}</span>
                                     )}
-                                    {hasChanges && !haReadOnly && (
+                                    {hasChanges && !haReadOnly && (crVc ? null :
                                         <button
                                             onClick={handleSave}
                                             disabled={saving}
@@ -2688,7 +3156,12 @@
                                 // it: every tab but History renders its controls disabled
                                 <fieldset disabled={lockedTab} className="contents" data-ha-locked={lockedTab ? '' : undefined}>
                                     {/* General Tab */}
-                                    {activeTab === 'general' && (
+                                    {activeTab === 'general' && (crVc ? (
+                                        <CrVcGeneral t={t} vm={vm} config={config} changes={changes} rows={crv.rows}
+                                            clusterName={crVcCluster?.display_name || crVcCluster?.name || clusterId}
+                                            onChange={(k, v) => handleChange('general', k, v)} onRevert={crVcRevert}
+                                            clusterTags={clusterTags} onUnlock={handleUnlockVm} />
+                                    ) : (
                                         <div className="space-y-6">
                                             <div className="grid grid-cols-2 gap-4">
                                                 <ConfigInputField
@@ -2838,22 +3311,7 @@
                                                             </div>
                                                         </div>
                                                         <button
-                                                            onClick={async () => {
-                                                                try {
-                                                                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, {
-                                                                        method: 'POST'
-                                                                    });
-                                                                    if (response && response.ok) {
-                                                                        addToast(t('vmUnlocked'), 'success');
-                                                                        fetchConfig(); // Reload config
-                                                                    } else {
-                                                                        const err = await response.json();
-                                                                        addToast(err.error || t('deleteFailed'), 'error');
-                                                                    }
-                                                                } catch(e) {
-                                                                    addToast(t('connectionError'), 'error');
-                                                                }
-                                                            }}
+                                                            onClick={handleUnlockVm}
                                                             className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm font-medium transition-colors"
                                                         >
                                                             {t('unlockVm')}
@@ -2865,10 +3323,27 @@
                                                 </div>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
 
                                     {/* Hardware/Resources Tab */}
-                                    {(activeTab === 'hardware' || activeTab === 'resources') && (
+                                    {(activeTab === 'hardware' || activeTab === 'resources') && (crVc ? (
+                                        <CrVcHardware t={t} vm={vm} config={config} changes={changes} crv={crv}
+                                            hardwareOptions={hardwareOptions} onSet={crVcSet} onRevert={crVcRevert}
+                                            dev={{ passthrough, ptMappedLine, onAddPassthrough: openAddPassthrough,
+                                                   onRemovePassthrough: handleRemovePassthrough, onAddSerial: () => setShowAddSerial(true),
+                                                   onAddEfi: () => setShowAddEfiDisk(true), onDeleteEfi: handleDeleteEfiDisk,
+                                                   onAddTpm: () => setShowAddTpm(true), onDeleteTpm: handleDeleteTpm,
+                                                   onAddCloudInit: () => setShowAddCloudInit(true), onDeleteCloudInit: handleDeleteCloudInit }}
+                                            rngCard={
+                                                // running only draws the yellow restart pill; the device row's pending chip says it in the preview
+                                                <VirtioRngCard value={config?.raw?.rng0} running={false}
+                                                    onAdd={() => setShowRngDialog(true)} onEdit={() => setShowRngDialog(true)} onRemove={removeRng} t={t} />
+                                            }
+                                            vfsCard={
+                                                <VirtiofsCard raw={config?.raw} running={false} info={ptMappings.dir} node={vm.node}
+                                                    onAdd={() => openVirtiofs(null)} onEdit={openVirtiofs} onRemove={removeVirtiofs} t={t} />
+                                            } />
+                                    ) : (
                                         <div className="space-y-6">
                                             <div className="grid grid-cols-2 gap-4">
                                                 <ConfigInputField
@@ -3219,26 +3694,7 @@
                                                                             <div className="flex items-center gap-2">
                                                                                 <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('configured') || 'Configured'}</span>
                                                                                 <button
-                                                                                    onClick={async () => {
-                                                                                        if (!confirm(t('confirmDeleteEfiDisk') || 'Delete EFI disk? This may prevent the VM from booting.')) return;
-                                                                                        try {
-                                                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
-                                                                                                method: 'PUT',
-                                                                                                credentials: 'include',
-                                                                                                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                                                                                                body: JSON.stringify({ delete: 'efidisk0' })
-                                                                                            });
-                                                                                            if (res.ok) {
-                                                                                                addToast(t('efiDiskDeleted') || 'EFI disk deleted', 'success');
-                                                                                                fetchConfig();
-                                                                                            } else {
-                                                                                                const err = await res.json();
-                                                                                                addToast(err.error || 'Error deleting EFI disk', 'error');
-                                                                                            }
-                                                                                        } catch (e) {
-                                                                                            addToast('Error deleting EFI disk', 'error');
-                                                                                        }
-                                                                                    }}
+                                                                                    onClick={handleDeleteEfiDisk}
                                                                                     className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
                                                                                     title={t('delete')}
                                                                                 >
@@ -3279,26 +3735,7 @@
                                                                             <div className="flex items-center gap-2">
                                                                                 <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">TPM 2.0</span>
                                                                                 <button
-                                                                                    onClick={async () => {
-                                                                                        if (!confirm(t('confirmDeleteTpm') || 'Delete TPM? Windows 11 and BitLocker will stop working.')) return;
-                                                                                        try {
-                                                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
-                                                                                                method: 'PUT',
-                                                                                                credentials: 'include',
-                                                                                                headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                                                                                                body: JSON.stringify({ delete: 'tpmstate0' })
-                                                                                            });
-                                                                                            if (res.ok) {
-                                                                                                addToast(t('tpmDeleted') || 'TPM deleted', 'success');
-                                                                                                fetchConfig();
-                                                                                            } else {
-                                                                                                const err = await res.json();
-                                                                                                addToast(err.error || 'Error deleting TPM', 'error');
-                                                                                            }
-                                                                                        } catch (e) {
-                                                                                            addToast('Error deleting TPM', 'error');
-                                                                                        }
-                                                                                    }}
+                                                                                    onClick={handleDeleteTpm}
                                                                                     className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
                                                                                     title={t('delete')}
                                                                                 >
@@ -3347,25 +3784,7 @@
                                                                             <span className="text-sm font-mono text-gray-300 truncate">{cloudInitDrive[1]}</span>
                                                                         </div>
                                                                         <button
-                                                                            onClick={async () => {
-                                                                                if (!confirm(t('confirmDeleteCloudInitDrive'))) return;
-                                                                                try {
-                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
-                                                                                        method: 'PUT',
-                                                                                        headers: { 'Content-Type': 'application/json' },
-                                                                                        body: JSON.stringify({ delete: cloudInitDrive[0] })
-                                                                                    });
-                                                                                    if (res?.ok) {
-                                                                                        addToast(t('cloudInitDriveRemoved'), 'success');
-                                                                                        fetchConfig();
-                                                                                    } else {
-                                                                                        const err = await res.json();
-                                                                                        addToast(err.error || t('cloudInitDriveRemoveFailed'), 'error');
-                                                                                    }
-                                                                                } catch (e) {
-                                                                                    addToast(t('connectionError'), 'error');
-                                                                                }
-                                                                            }}
+                                                                            onClick={() => handleDeleteCloudInit(cloudInitDrive[0])}
                                                                             className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
                                                                             title={t('remove')}
                                                                         >
@@ -3524,10 +3943,18 @@
                                                 </>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
 
                                     {/* Disks Tab */}
-                                    {activeTab === 'disks' && (
+                                    {activeTab === 'disks' && (crVc ? (
+                                        <CrVcDisks t={t} config={config} changes={changes} crv={crv} onSet={crVcSet} onRevert={crVcRevert}
+                                            act={{ onMountIso: () => setShowMountISO(true), onAddDisk: () => setShowAddDisk(true),
+                                                   onImportDisk: () => setShowImportDisk(true),
+                                                   onChangeIso: (id) => { setMountIsoInitialDrive(id); setShowMountISO(true); },
+                                                   onEject: (id) => handleMountISO(null, id), onEditBus: setShowEditDisk, onResize: setShowResizeDisk,
+                                                   onMove: setShowMoveDisk, onReassign: setShowReassignOwner, onDetach: handleDetachDisk,
+                                                   onRemove: handleRemoveDisk, onReattach: setShowReattachDisk, onDeleteUnused: handleDeleteUnusedDisk }} />
+                                    ) : (
                                         <div className="space-y-4">
                                             <div className="flex justify-between items-center">
                                                 <h3 className="font-medium text-white">{t('disks')}</h3>
@@ -3564,22 +3991,7 @@
                                                 // #610 follow-up: order the list sensibly instead of raw PVE config
                                                 // order — data disks first (by bus then index), then CD/DVD drives,
                                                 // then firmware volumes (EFI / TPM) last. LXC: rootfs, then mp0..n.
-                                                [...config.disks].sort((a, b) => {
-                                                    const rank = (d) => {
-                                                        const id = String(d.id || '');
-                                                        const mm = id.match(/^([a-z]+)(\d*)$/) || [];
-                                                        const bus = mm[1] || id;
-                                                        const idx = mm[2] ? parseInt(mm[2]) : 0;
-                                                        const isCd = String(d.value || '').includes('media=cdrom') || d.media === 'cdrom' || (d.volume || '').includes('iso');
-                                                        const isSys = bus === 'efidisk' || bus === 'tpmstate';
-                                                        const cat = isSys ? 2 : (isCd ? 1 : 0);
-                                                        const busOrder = { rootfs: 0, scsi: 1, virtio: 2, sata: 3, ide: 4, mp: 5, efidisk: 8, tpmstate: 9 };
-                                                        return [cat, busOrder[bus] != null ? busOrder[bus] : 6, idx];
-                                                    };
-                                                    const ka = rank(a), kb = rank(b);
-                                                    for (let i = 0; i < 3; i++) { if (ka[i] !== kb[i]) return ka[i] - kb[i]; }
-                                                    return 0;
-                                                }).map((disk) => {
+                                                [...config.disks].sort(vcDiskOrder).map((disk) => {
                                                     // NS May 2026 — single source of truth for the cdrom check
                                                     // (used to swap the row's actions for an ISO-aware set).
                                                     const isCdrom = isQemu && (
@@ -3748,26 +4160,7 @@
                                                                     </button>
                                                                     {/* MK: Delete permanently */}
                                                                     <button
-                                                                        onClick={async () => {
-                                                                            if (!confirm(t('deleteUnusedDiskConfirm') || `Permanently delete ${disk.id}? This cannot be undone!`)) return;
-                                                                            try {
-                                                                                // First delete the unused reference, then purge the actual volume
-                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
-                                                                                    method: 'PUT',
-                                                                                    headers: { 'Content-Type': 'application/json' },
-                                                                                    body: JSON.stringify({ delete: disk.id })
-                                                                                });
-                                                                                if (res && res.ok) {
-                                                                                    addToast(t('unusedDiskDeleted') || 'Unused disk deleted', 'success');
-                                                                                    fetchConfig();
-                                                                                } else {
-                                                                                    const err = await res.json();
-                                                                                    addToast(err.error || 'Error deleting disk', 'error');
-                                                                                }
-                                                                            } catch (e) {
-                                                                                addToast('Error deleting disk', 'error');
-                                                                            }
-                                                                        }}
+                                                                        onClick={() => handleDeleteUnusedDisk(disk)}
                                                                         className="px-2 py-1 text-xs bg-red-600/20 text-red-400 rounded hover:bg-red-600/30 transition-colors"
                                                                         title={t('deletePermanently') || 'Delete permanently'}
                                                                     >
@@ -3780,10 +4173,14 @@
                                                 </div>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
 
                                     {/* Network Tab */}
-                                    {activeTab === 'network' && (
+                                    {activeTab === 'network' && (crVc ? (
+                                        <CrVcNetwork t={t} config={config} crv={crv} nets={crNets} onNets={setCrNets} netInitial={vcNetEditInitial}
+                                            bridgeList={bridgeList} hardwareOptions={hardwareOptions} generateMAC={generateMAC}
+                                            onAdd={() => setShowAddNetwork(true)} onToggleLink={handleToggleNetworkLink} onRemove={handleRemoveNetwork} />
+                                    ) : (
                                         <div className="space-y-4">
                                             <div className="flex justify-between items-center">
                                                 <h3 className="font-medium text-white">{t('networkInterfaces')}</h3>
@@ -3882,7 +4279,7 @@
                                                 </div>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
 
                                     {/* Snapshots Tab */}
                                     {activeTab === 'snapshots' && (
@@ -5782,7 +6179,10 @@
                                     )}
 
                                     {/* Options Tab */}
-                                    {activeTab === 'options' && (
+                                    {activeTab === 'options' && (crVc ? (
+                                        <CrVcOptions t={t} config={config} changes={changes} crv={crv} onSet={crVcSet} onRevert={crVcRevert}
+                                            bootModel={vcBootModel} smbiosCard={renderSmbiosCard()} onGoto={setActiveTab} />
+                                    ) : (
                                         <div className="space-y-6">
                                             <div className="space-y-4">
                                                 {/* General Options Card */}
@@ -5820,7 +6220,7 @@
                                                                         className="w-4 h-4 rounded"
                                                                     />
                                                                     <span className="text-sm font-medium text-gray-300">{t('qemuGuestAgent')}</span>
-                                                                    <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</span>
+                                                                    <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</CrVcRestartBadge>
                                                                 </label>
                                                             </div>
                                                             <p className="text-xs text-gray-500 mb-3">{t('qemuGuestAgentHint')}</p>
@@ -5955,76 +6355,9 @@
                                                         {/* Parse current boot order and available devices */}
                                                         {(() => {
                                                             const currentBoot = getValue('options', 'boot') || '';
-                                                            const raw = config?.raw || {};
                                                             const bootdisk = getValue('options', 'bootdisk') || '';
-                                                            
-                                                            // Collect all bootable device IDs from config
-                                                            const allBootableDevices = [];
-                                                            if (config.disks) {
-                                                                config.disks.forEach(d => {
-                                                                    if (!d.id.includes('cloudinit')) allBootableDevices.push(d.id);
-                                                                });
-                                                            }
-                                                            if (config.networks) {
-                                                                config.networks.forEach(n => allBootableDevices.push(n.id));
-                                                            }
-                                                            ['ide2', 'ide0', 'sata0', 'scsi0', 'virtio0', 'net0'].forEach(dev => {
-                                                                if (!allBootableDevices.includes(dev) && raw[dev]) {
-                                                                    allBootableDevices.push(dev);
-                                                                }
-                                                            });
-                                                            
-                                                            // Parse Proxmox boot order: [[legacy=]<[acdn]{1,4}>] [,order=<dev[;dev...]>]
-                                                            // legacy chars: a=floppy, c=hard disk (bootdisk), d=cdrom, n=network
-                                                            const bootDevices = [];
-                                                            if (currentBoot) {
-                                                                const parts = currentBoot.split(',');
-                                                                const legacyChars = [];
-                                                                let orderDevices = [];
-                                                                
-                                                                parts.forEach(part => {
-                                                                    if (part.startsWith('order=')) {
-                                                                        orderDevices = part.split('order=')[1].split(';').filter(d => d);
-                                                                    } else {
-                                                                        // Strip optional 'legacy=' prefix, then extract chars
-                                                                        const clean = part.startsWith('legacy=') ? part.slice(7) : part;
-                                                                        for (const ch of clean.toLowerCase()) {
-                                                                            if ('acdn'.includes(ch)) legacyChars.push(ch);
-                                                                        }
-                                                                    }
-                                                                });
-                                                                
-                                                                // Resolve legacy chars to device IDs
-                                                                legacyChars.forEach(ch => {
-                                                                    if (ch === 'c' && bootdisk && allBootableDevices.includes(bootdisk)) {
-                                                                        if (!bootDevices.includes(bootdisk)) bootDevices.push(bootdisk);
-                                                                    } else if (ch === 'd') {
-                                                                        allBootableDevices.forEach(d => {
-                                                                            if (d === 'ide2' || (raw[d] && String(raw[d]).includes('media=cdrom'))) {
-                                                                                if (!bootDevices.includes(d)) bootDevices.push(d);
-                                                                            }
-                                                                        });
-                                                                    } else if (ch === 'n') {
-                                                                        allBootableDevices.forEach(d => {
-                                                                            if (d.match(/^net\d+$/) && !bootDevices.includes(d)) bootDevices.push(d);
-                                                                        });
-                                                                    }
-                                                                    // 'a' = floppy — rarely configured, skip if no floppy device exists
-                                                                });
-                                                                
-                                                                // Append order= devices (explicit, take precedence)
-                                                                orderDevices.forEach(d => {
-                                                                    if (allBootableDevices.includes(d) && !bootDevices.includes(d)) {
-                                                                        bootDevices.push(d);
-                                                                    }
-                                                                });
-                                                            }
-                                                            
-                                                            // Sort: boot devices first in order, then others
-                                                            const sortedDevices = [
-                                                                ...bootDevices.filter(d => allBootableDevices.includes(d)),
-                                                                ...allBootableDevices.filter(d => !bootDevices.includes(d))
-                                                            ].filter((v, i, a) => a.indexOf(v) === i); // unique
+                                                            // LW Nov 2026 - parsed in vcBootModel, the preview's Options tab reads the same
+                                                            const { bootDevices, sortedDevices } = vcBootModel(config, currentBoot, bootdisk);
                                                             
                                                             const toggleDevice = (device) => {
                                                                 const newOrder = bootDevices.includes(device)
@@ -6133,279 +6466,7 @@
                                                     </div>
                                                     
                                                     {/* SMBIOS Configuration */}
-                                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
-                                                        <div className="flex items-center justify-between mb-3">
-                                                            <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
-                                                                <Icons.Cpu />
-                                                                {t('smbiosSettings') || 'SMBIOS Settings'}
-                                                            </label>
-                                                            <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</span>
-                                                        </div>
-                                                        <p className="text-xs text-gray-500 mb-4">{t('smbiosHint') || 'System Management BIOS settings - useful for Windows licensing and VM identification'}</p>
-                                                        
-                                                        {/* Current SMBIOS value display */}
-                                                        {getValue('options', 'smbios1') && (
-                                                            <div className="mb-4 p-3 bg-black/50 rounded-lg border border-green-500/30">
-                                                                <label className="block text-[10px] text-green-400 mb-1 font-medium">{t('currentValue') || 'Current Value'} (smbios1):</label>
-                                                                <code className="text-xs text-green-300 font-mono break-all">
-                                                                    {getValue('options', 'smbios1')}
-                                                                </code>
-                                                            </div>
-                                                        )}
-                                                        
-                                                        {(() => {
-                                                            // Parse existing smbios1 value
-                                                            const smbiosRaw = getValue('options', 'smbios1') || '';
-                                                            const parseSmbios = (raw) => {
-                                                                const result = { uuid: '', manufacturer: '', product: '', version: '', serial: '', sku: '', family: '' };
-                                                                if (!raw) return result;
-                                                                raw.split(',').forEach(part => {
-                                                                    const [key, ...valueParts] = part.split('=');
-                                                                    const value = valueParts.join('='); // Handle values with = in them
-                                                                    if (key && result.hasOwnProperty(key)) {
-                                                                        result[key] = value || '';
-                                                                    }
-                                                                });
-                                                                return result;
-                                                            };
-                                                            
-                                                            const smbios = parseSmbios(smbiosRaw);
-                                                            
-                                                            // Sanitize for Proxmox SMBIOS - only A-Za-z0-9, learned the hard way that underscores dont work either
-                                                            const sanitizeSmbios = (value) => {
-                                                                if (!value) return '';
-                                                                return value
-                                                                    .replace(/\s+/g, '')  // Remove spaces
-                                                                    .replace(/[^A-Za-z0-9]/g, '');  // Remove ALL other chars including underscores
-                                                            };
-                                                            
-                                                            const buildSmbios = (newValues) => {
-                                                                const parts = [];
-                                                                Object.entries(newValues).forEach(([key, value]) => {
-                                                                    if (value && value.trim()) {
-                                                                        // UUID is special - don't sanitize
-                                                                        const finalValue = key === 'uuid' ? value : sanitizeSmbios(value);
-                                                                        if (finalValue) {
-                                                                            parts.push(`${key}=${finalValue}`);
-                                                                        }
-                                                                    }
-                                                                });
-                                                                return parts.join(',');
-                                                            };
-                                                            
-                                                            const updateSmbios = (field, value) => {
-                                                                const newSmbios = { ...smbios, [field]: value };
-                                                                const encoded = buildSmbios(newSmbios);
-                                                                handleChange('options', 'smbios1', encoded || null);
-                                                            };
-                                                            
-                                                            const generateUuid = () => {
-                                                                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-                                                                    const r = Math.random() * 16 | 0;
-                                                                    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-                                                                    return v.toString(16);
-                                                                });
-                                                            };
-                                                            
-                                                            return (
-                                                                <div className="space-y-3">
-                                                                    {/* UUID - Display only, managed by Proxmox */}
-                                                                    <div>
-                                                                        <label className="block text-xs text-gray-400 mb-1">UUID <span className="text-gray-600">({t('managedByProxmox') || 'managed by Proxmox'})</span></label>
-                                                                        <div className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-gray-500 text-sm font-mono">
-                                                                            {smbios.uuid ? smbios.uuid : <span className="italic">{t('willBeAutoGenerated') || 'Will be auto-generated on save'}</span>}
-                                                                        </div>
-                                                                    </div>
-                                                                    
-                                                                    {/* Format hint */}
-                                                                    <p className="text-[10px] text-yellow-500/70">
-                                                                        ⚠️ {t('smbiosFormatHint') || 'Only letters and numbers allowed (A-Za-z0-9)'}
-                                                                    </p>
-                                                                    
-                                                                    <div className="grid grid-cols-2 gap-3">
-                                                                        {/* Manufacturer */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('manufacturer') || 'Manufacturer'}</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.manufacturer}
-                                                                                onChange={(e) => updateSmbios('manufacturer', e.target.value)}
-                                                                                placeholder="e.g. Dell"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.manufacturer && sanitizeSmbios(smbios.manufacturer) !== smbios.manufacturer && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.manufacturer)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                        
-                                                                        {/* Product */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('product') || 'Product'}</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.product}
-                                                                                onChange={(e) => updateSmbios('product', e.target.value)}
-                                                                                placeholder="e.g. PowerEdgeR740"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.product && sanitizeSmbios(smbios.product) !== smbios.product && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.product)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                        
-                                                                        {/* Version */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('version') || 'Version'}</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.version}
-                                                                                onChange={(e) => updateSmbios('version', e.target.value)}
-                                                                                placeholder="e.g. v1"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.version && sanitizeSmbios(smbios.version) !== smbios.version && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.version)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                        
-                                                                        {/* Serial */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('serialNumber') || 'Serial Number'}</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.serial}
-                                                                                onChange={(e) => updateSmbios('serial', e.target.value)}
-                                                                                placeholder="e.g. ABC123"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.serial && sanitizeSmbios(smbios.serial) !== smbios.serial && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.serial)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                        
-                                                                        {/* SKU */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">SKU</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.sku}
-                                                                                onChange={(e) => updateSmbios('sku', e.target.value)}
-                                                                                placeholder="e.g. SKU12345"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.sku && sanitizeSmbios(smbios.sku) !== smbios.sku && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.sku)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                        
-                                                                        {/* Family */}
-                                                                        <div>
-                                                                            <label className="block text-xs text-gray-400 mb-1">{t('family') || 'Family'}</label>
-                                                                            <input
-                                                                                type="text"
-                                                                                value={smbios.family}
-                                                                                onChange={(e) => updateSmbios('family', e.target.value)}
-                                                                                placeholder="e.g. Server"
-                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
-                                                                            />
-                                                                            {smbios.family && sanitizeSmbios(smbios.family) !== smbios.family && (
-                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.family)}</p>
-                                                                            )}
-                                                                        </div>
-                                                                    </div>
-                                                                    
-                                                                    {/* Live Preview */}
-                                                                    {(smbios.uuid || smbios.manufacturer || smbios.product || smbios.version || smbios.serial || smbios.sku || smbios.family) && (
-                                                                        <div className="p-3 bg-black/50 rounded-lg border border-proxmox-border">
-                                                                            <label className="block text-[10px] text-gray-500 mb-1">{t('preview') || 'Preview'} (smbios1):</label>
-                                                                            <code className="text-xs text-green-400 font-mono break-all">
-                                                                                {buildSmbios(smbios)}
-                                                                            </code>
-                                                                        </div>
-                                                                    )}
-                                                                    
-                                                                    {/* Quick presets - using only safe characters (A-Za-z0-9) */}
-                                                                    <div className="pt-2 border-t border-proxmox-border">
-                                                                        <label className="block text-xs text-gray-400 mb-2">{t('presets') || 'Quick Presets'}</label>
-                                                                        <div className="flex flex-wrap gap-2">
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Dell,product=PowerEdgeR740,version=v1,serial=DELL${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
-                                                                                }}
-                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
-                                                                            >
-                                                                                Dell Server
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=HP,product=ProLiantDL380,version=v1,serial=MXQ${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
-                                                                                }}
-                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
-                                                                            >
-                                                                                HP Server
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Lenovo,product=ThinkPadX1,version=v1,serial=PF${Math.random().toString(36).substr(2, 8).toUpperCase()},family=ThinkPad`);
-                                                                                }}
-                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
-                                                                            >
-                                                                                Lenovo Laptop
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={async () => {
-                                                                                    // NS: fetch smbios settings from cluster config
-                                                                                    const sanitize = (v) => (v || '').replace(/\s+/g, '').replace(/[^A-Za-z0-9]/g, '');
-                                                                                    try {
-                                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`);
-                                                                                        const settings = res?.ok ? await res.json() : {};
-                                                                                        const mfg = sanitize(settings.manufacturer) || 'Proxmox';
-                                                                                        const prod = sanitize(settings.product) || 'PegaProxManagment';
-                                                                                        const ver = sanitize(settings.version) || 'v1';
-                                                                                        const fam = sanitize(settings.family) || 'ProxmoxVE';
-                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
-                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
-                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=${mfg},product=${prod},version=${ver},serial=PVE${timestamp}${randomPart},family=${fam}`);
-                                                                                    } catch (e) {
-                                                                                        // fallback to defaults
-                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
-                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
-                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=Proxmox,product=PegaProxManagment,version=v1,serial=PVE${timestamp}${randomPart},family=ProxmoxVE`);
-                                                                                    }
-                                                                                }}
-                                                                                className="px-2 py-1 bg-proxmox-orange/20 border border-proxmox-orange/50 rounded text-xs text-proxmox-orange hover:bg-proxmox-orange/30"
-                                                                                title={t('applySmbiosFromClusterConfig') || 'Apply SMBIOS settings from cluster configuration'}
-                                                                            >
-                                                                                🦄 PegaProx
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
-                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Microsoft,product=VirtualMachine,version=HyperV,serial=0000000000000000,family=VirtualMachine`);
-                                                                                }}
-                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
-                                                                            >
-                                                                                Hyper-V
-                                                                            </button>
-                                                                            <button
-                                                                                onClick={() => {
-                                                                                    handleChange('options', 'smbios1', '');
-                                                                                }}
-                                                                                className="px-2 py-1 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/20"
-                                                                            >
-                                                                                {t('clear') || 'Clear'}
-                                                                            </button>
-                                                                        </div>
-                                                                    </div>
-                                                                </div>
-                                                            );
-                                                        })()}
-                                                    </div>
+                                                    {renderSmbiosCard()}
                                                 </div>
                                             )}
                                             {!isQemu && (
@@ -6423,7 +6484,8 @@
                                                 </div>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
+                                    {activeTab === 'options' && crVc && <CrVcOther t={t} config={config} />}
                                 </fieldset>
                             ) : (
                                 <div className="text-center py-8 text-red-400">
@@ -6432,7 +6494,12 @@
                             )}
                         </div>
 
-                        {/* Footer */}
+                        {/* Footer - the preview has its pending changes panel there */}
+                        {crVc && (
+                            <CrVcPanel t={t} crv={crv} changesCount={Object.keys(changes).length + Object.keys(crNets).length} saving={saving}
+                                readOnly={haReadOnly} onSave={crVcSave} onRevert={crVcRevert} />
+                        )}
+                        {!crVc && (
                         <div className="flex items-center justify-between px-6 py-4 border-t border-proxmox-border bg-proxmox-dark">
                             <div className="text-xs text-gray-500">
                                 {vm.status === 'running' && (
@@ -6462,6 +6529,7 @@
                                 </button>}
                             </div>
                         </div>
+                        )}
                     </div>
 
                     {/* Sub-Modals */}
@@ -7287,6 +7355,7 @@
                         </div>
                     )}
                 </div>
+                </CrVcBadgeOff.Provider>
             );
         }
 
@@ -8283,23 +8352,123 @@
             );
         }
 
+        // LW Nov 2026 - the order of the Disks tab (#610 follow-up), for the classic list and the preview's:
+        // data disks by bus and index, then CD/DVD drives, then the EFI and TPM volumes
+        function vcDiskOrder(a, b) {
+            const rank = (d) => {
+                const id = String(d.id || '');
+                const mm = id.match(/^([a-z]+)(\d*)$/) || [];
+                const bus = mm[1] || id;
+                const idx = mm[2] ? parseInt(mm[2]) : 0;
+                const isCd = String(d.value || '').includes('media=cdrom') || d.media === 'cdrom' || (d.volume || '').includes('iso');
+                const isSys = bus === 'efidisk' || bus === 'tpmstate';
+                const cat = isSys ? 2 : (isCd ? 1 : 0);
+                const busOrder = { rootfs: 0, scsi: 1, virtio: 2, sata: 3, ide: 4, mp: 5, efidisk: 8, tpmstate: 9 };
+                return [cat, busOrder[bus] != null ? busOrder[bus] : 6, idx];
+            };
+            const ka = rank(a), kb = rank(b);
+            for (let i = 0; i < 3; i++) { if (ka[i] !== kb[i]) return ka[i] - kb[i]; }
+            return 0;
+        }
+
+        // LW Nov 2026 - the boot order of the Options tab as data, for the classic list and the preview's:
+        // every device that can boot, the ones in the order (legacy letters resolved), and both sorted
+        function vcBootModel(config, currentBoot, bootdisk) {
+            const raw = config?.raw || {};
+
+            // Collect all bootable device IDs from config
+            const allBootableDevices = [];
+            if (config.disks) {
+                config.disks.forEach(d => {
+                    if (!d.id.includes('cloudinit')) allBootableDevices.push(d.id);
+                });
+            }
+            if (config.networks) {
+                config.networks.forEach(n => allBootableDevices.push(n.id));
+            }
+            ['ide2', 'ide0', 'sata0', 'scsi0', 'virtio0', 'net0'].forEach(dev => {
+                if (!allBootableDevices.includes(dev) && raw[dev]) {
+                    allBootableDevices.push(dev);
+                }
+            });
+
+            // Parse Proxmox boot order: [[legacy=]<[acdn]{1,4}>] [,order=<dev[;dev...]>]
+            // legacy chars: a=floppy, c=hard disk (bootdisk), d=cdrom, n=network
+            const bootDevices = [];
+            if (currentBoot) {
+                const parts = currentBoot.split(',');
+                const legacyChars = [];
+                let orderDevices = [];
+
+                parts.forEach(part => {
+                    if (part.startsWith('order=')) {
+                        orderDevices = part.split('order=')[1].split(';').filter(d => d);
+                    } else {
+                        // Strip optional 'legacy=' prefix, then extract chars
+                        const clean = part.startsWith('legacy=') ? part.slice(7) : part;
+                        for (const ch of clean.toLowerCase()) {
+                            if ('acdn'.includes(ch)) legacyChars.push(ch);
+                        }
+                    }
+                });
+
+                // Resolve legacy chars to device IDs
+                legacyChars.forEach(ch => {
+                    if (ch === 'c' && bootdisk && allBootableDevices.includes(bootdisk)) {
+                        if (!bootDevices.includes(bootdisk)) bootDevices.push(bootdisk);
+                    } else if (ch === 'd') {
+                        allBootableDevices.forEach(d => {
+                            if (d === 'ide2' || (raw[d] && String(raw[d]).includes('media=cdrom'))) {
+                                if (!bootDevices.includes(d)) bootDevices.push(d);
+                            }
+                        });
+                    } else if (ch === 'n') {
+                        allBootableDevices.forEach(d => {
+                            if (d.match(/^net\d+$/) && !bootDevices.includes(d)) bootDevices.push(d);
+                        });
+                    }
+                    // 'a' = floppy - rarely configured, skip if no floppy device exists
+                });
+
+                // Append order= devices (explicit, take precedence)
+                orderDevices.forEach(d => {
+                    if (allBootableDevices.includes(d) && !bootDevices.includes(d)) {
+                        bootDevices.push(d);
+                    }
+                });
+            }
+
+            // Sort: boot devices first in order, then others
+            const sortedDevices = [
+                ...bootDevices.filter(d => allBootableDevices.includes(d)),
+                ...allBootableDevices.filter(d => !bootDevices.includes(d))
+            ].filter((v, i, a) => a.indexOf(v) === i); // unique
+            return { bootDevices, sortedDevices };
+        }
+
+        // LW Nov 2026 - what the edit dialog of a network device starts from and sends (PUT .../networks/<id>);
+        // the preview's Network tab edits the same object
+        function vcNetEditInitial(network) {
+            return {
+            bridge: network.bridge || 'vmbr0',
+            model: network.model || 'virtio',
+            macaddr: network.macaddr || '',
+            firewall: network.firewall || false,
+            tag: network.tag || '',
+            rate: network.rate || '',
+            mtu: network.mtu || '',
+            queues: network.queues || '',  // LW: Multiqueue support
+            link_down: network.link_down || false,  // NS: Disconnect checkbox
+            name: network.name || 'eth0',
+            ip: network.ip || 'dhcp',
+            gw: network.gw || '',
+            hwaddr: network.hwaddr || '',
+            };
+        }
+
         function EditNetworkModal({ isQemu, network, bridgeList, hardwareOptions, generateMAC, onUpdate, onClose }) {
             const { t } = useTranslation();
-            const [editConfig, setEditConfig] = useState({
-                bridge: network.bridge || 'vmbr0',
-                model: network.model || 'virtio',
-                macaddr: network.macaddr || '',
-                firewall: network.firewall || false,
-                tag: network.tag || '',
-                rate: network.rate || '',
-                mtu: network.mtu || '',
-                queues: network.queues || '',  // LW: Multiqueue support
-                link_down: network.link_down || false,  // NS: Disconnect checkbox
-                name: network.name || 'eth0',
-                ip: network.ip || 'dhcp',
-                gw: network.gw || '',
-                hwaddr: network.hwaddr || '',
-            });
+            const [editConfig, setEditConfig] = useState(() => vcNetEditInitial(network));
 
             return(
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">

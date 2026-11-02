@@ -1614,9 +1614,10 @@
         }
 
         // LW: Feb 2026 - Corporate VM Detail View (experimental)
-        function CorporateVmDetailView({ vm, clusterId, clusterType = 'proxmox', onAction, onOpenConsole, onOpenSpice, onOpenConfig, onBack, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
+        function CorporateVmDetailView({ vm, clusterId, clusterType = 'proxmox', clusterName, onAction, onOpenConsole, onOpenSpice, onOpenConfig, onBack, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast, backupStatus, backupFor, crNav, crOpen, crKind }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haStandby, haConsolesElsewhere } = useAuth();
+            const { isCorpRedesigned } = useLayout();
             // #625 v2 - on a standby: no power, console, SPICE, snapshot or HA changes, and no
             // console preview either, since the grab runs on the node
             // A forwarding standby changes things through the active again. Consoles and the
@@ -1625,6 +1626,10 @@
             const acts = !haReadOnly;
             const consoles = !haConsolesElsewhere;
             const [activeDetailTab, setActiveDetailTab] = useState('summary');
+            // LW Oct 2026 - Monitor is a tab of Corporate Redesigned only; switched back to classic, show the summary
+            useEffect(() => {
+                if (!isCorpRedesigned && activeDetailTab === 'monitor') setActiveDetailTab('summary');
+            }, [isCorpRedesigned, activeDetailTab]);
             const [showActionsMenu, setShowActionsMenu] = useState(false);
             const [snapshots, setSnapshots] = useState([]);
             const [efficientSnapshots, setEfficientSnapshots] = useState([]);
@@ -1827,6 +1832,15 @@
             const [metricsTimeframe, setMetricsTimeframe] = useState('hour');
             const [metricsData, setMetricsData] = useState(null);
             const [metricsLoading, setMetricsLoading] = useState(false);
+            // LW Oct 2026 - a failed read, so the preview can tell it from a range without samples
+            const [metricsFailed, setMetricsFailed] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned: what came of the reads on open (the classic
+            // states keep their old fallbacks), each with the time it came back
+            const [lockRead, setLockRead] = useState(null);
+            const [agentRead, setAgentRead] = useState(null);
+            const [haRead, setHaRead] = useState(null);
+            const [haTick, setHaTick] = useState(0);
+            const [crConfig, setCrConfig] = useState(null);
             // MK #334 — filesystem usage from qemu-agent get-fsinfo
             const [fsInfo, setFsInfo] = useState(null);
 
@@ -1842,19 +1856,23 @@
             const fetchLockStatus = async (isStale) => {
                 // a read that failed (or read:false from the route) is "unknown", not "not locked"
                 let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null, unread: true };
+                let read = { state: 'unreachable' };
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/lock`);
                     if (response && response.ok) {
                         const data = await response.json();
                         next = { locked: data.locked || false, lock_reason: data.lock_reason || null, lock_description: data.lock_description || null, unlock_command: data.unlock_command || null, unread: data.read === false };
-                    }
-                } catch (error) {}
+                        // read:false or no unlock command: the route could not read the config
+                        read = { state: data.read !== false && (data.locked || (!data.note && data.unlock_command)) ? 'ok' : 'undetermined' };
+                    } else if (response) read = { state: response.status === 403 ? 'forbidden' : 'error', code: response.status };
+                } catch (error) { read = { state: 'error' }; }
                 // #828 - the lock of the VM shown before must not offer Unlock on this one
-                if (!isStale()) setLockInfo(next);
+                if (!isStale()) { setLockInfo(next); setLockRead({ ...read, at: Date.now() }); }
             };
             useEffect(() => {
                 let stale = false;
                 setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                setLockRead(null);
                 fetchLockStatus(() => stale);
                 return () => { stale = true; };
             }, [vm.vmid, clusterId]);
@@ -1867,6 +1885,7 @@
                     if (response && response.ok) {
                         if (addToast) addToast(t('vmUnlocked') || `VM ${vm.vmid} unlocked successfully`, 'success');
                         setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                        setLockRead({ state: 'ok', at: Date.now() });
                         setShowUnlockConfirm(false);
                     } else {
                         const err = await response.json();
@@ -1880,19 +1899,25 @@
             useEffect(() => {
                 const gkey = `${clusterId}:${vm.vmid}`;
                 // #560 — also fetch for LXC (backend returns os/ip via config+pct, no agent)
-                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
+                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); setAgentRead(null); return; }
                 // LW Oct 2026 (#828) - this VM's own last-known info (or none) while it loads; an
                 // answer for the VM shown before still fills its cache, never this view
                 setGuestInfo(_guestInfoCache[gkey] || null);
+                setAgentRead({ state: 'loading' });
                 let stale = false;
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
-                    .then(r => r && r.ok ? r.json() : null)
+                    .then(r => {
+                        if (r && !r.ok && !stale) setAgentRead({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now() });
+                        return r && r.ok ? r.json() : null;
+                    })
                     .then(data => {
+                        if (data && !stale) setAgentRead({ state: data.agent_running ? 'ok' : (data.is_lxc ? 'lxc' : 'down'), at: Date.now() });
+                        else if (!data && !stale) setAgentRead(a => (a && a.state !== 'loading' ? a : { state: 'unreachable', at: Date.now() }));
                         // LXC has no guest agent → accept on is_lxc, not just agent_running
                         if (data && (data.agent_running || data.is_lxc)) { _guestInfoCache[gkey] = data; if (!stale) setGuestInfo(data); }
                         else if (!stale) setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
                     })
-                    .catch(() => { if (!stale) setGuestInfo(_guestInfoCache[gkey] || null); });
+                    .catch(() => { if (!stale) { setGuestInfo(_guestInfoCache[gkey] || null); setAgentRead({ state: 'error', at: Date.now() }); } });
                 return () => { stale = true; };
             }, [vm.vmid, vm.status, clusterId]);
 
@@ -1900,14 +1925,15 @@
             // proxmox API with 500s for VMs without an agent.
             useEffect(() => {
                 setFsInfo(null);
-                if (!isQemu || vm.status !== 'running' || !guestInfo) return;
+                // LW Oct 2026 - Corporate Redesigned draws the copy guest-info already carries
+                if (!isQemu || vm.status !== 'running' || !guestInfo || isCorpRedesigned) return;
                 let stale = false;
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-fsinfo`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(d => { if (!stale) setFsInfo(d || null); })
                     .catch(() => { if (!stale) setFsInfo(null); });
                 return () => { stale = true; };
-            }, [vm.vmid, vm.status, clusterId, !!guestInfo]);
+            }, [vm.vmid, vm.status, clusterId, !!guestInfo, isCorpRedesigned]);
 
             // Fetch VM hardware config
             // LW Sep 2026 (#813) - clear FIRST, and drop an answer that arrives
@@ -1918,12 +1944,20 @@
             // about a specific VM, and reading the wrong one is worse than reading none.
             useEffect(() => {
                 setVmHwInfo(null);
-                if (!isQemu) return;
+                setCrConfig(isCorpRedesigned ? { state: 'loading' } : null);
+                // LW Oct 2026 - Corporate Redesigned shows a container's hardware from its config too
+                if (!isQemu && !isCorpRedesigned) return;
                 let stale = false;
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`)
-                    .then(r => r && r.ok ? r.json() : null)
+                    .then(r => {
+                        if (r && !r.ok && !stale && isCorpRedesigned) setCrConfig({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now() });
+                        return r && r.ok ? r.json() : null;
+                    })
                     .then(cfg => {
                         if (stale) return;
+                        if (isCorpRedesigned) setCrConfig(c => (cfg && typeof cfg === 'object' ? { state: 'ok', body: cfg, at: Date.now() }
+                            : c && c.state !== 'loading' ? c : { state: 'unreachable', at: Date.now() }));
+                        if (!isQemu) return;
                         if (!cfg) { setVmHwInfo(null); return; }
                         const raw = cfg.raw || cfg;
                         setVmHwInfo({
@@ -1937,34 +1971,47 @@
                             agent: raw.agent,
                         });
                     })
-                    .catch(() => { if (!stale) setVmHwInfo(null); });
+                    .catch(() => { if (!stale) { setVmHwInfo(null); if (isCorpRedesigned) setCrConfig({ state: 'error', at: Date.now() }); } });
                 return () => { stale = true; };
-            }, [vm.vmid, vm.node, clusterId]);
+            }, [vm.vmid, vm.node, clusterId, isCorpRedesigned]);
 
             // Fetch HA status
             // NS, Nov 2026: read again after a toggle too, so the card shows what PVE holds. Until a
             // list arrives haResources stays null and the card says unknown, not disabled
             const haSid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
-            const loadHa = (isStale = () => false) =>
-                authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`)
-                    .then(r => r && r.ok ? r.json() : null)
+            // #828 - every guest or cluster starts a new generation: an answer of the one before is dropped.
+            // LW Oct 2026 - haRead keeps what came of the read for the redesigned summary
+            const haGen = React.useRef(0);
+            const loadHa = () => {
+                const gen = haGen.current;
+                const isStale = () => gen !== haGen.current;
+                return authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`)
+                    .then(r => {
+                        if (r && !r.ok && !isStale()) setHaRead({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now(), cluster: clusterId });
+                        return r && r.ok ? r.json() : null;
+                    })
                     .then(resources => {
-                        // #828 - the HA switch acts on this VM, so it must not show another one's state
-                        if (Array.isArray(resources) && !isStale()) {
+                        if (isStale()) return;
+                        if (Array.isArray(resources)) {
                             setHaResources(resources);
                             setHaEnabled(resources.some(r => r.sid === haSid));
-                        }
+                            setHaRead({ state: 'ok', list: resources, at: Date.now(), cluster: clusterId });
+                        } else setHaRead(h => (h && h.state !== 'loading' && h.state !== 'ok' ? h : { state: 'unreachable', at: Date.now(), cluster: clusterId }));
                     })
-                    .catch(() => {});
+                    .catch(() => { if (!isStale()) setHaRead({ state: 'error', at: Date.now(), cluster: clusterId }); });
+            };
             // XCP-ng and ESXi have no Proxmox HA, their guests get no card and no read
             const pveHa = (clusterType || 'proxmox') === 'proxmox';
             useEffect(() => {
-                let stale = false;
+                haGen.current++;
                 setHaResources(null);
                 setHaEnabled(false);
-                if (pveHa) loadHa(() => stale);
-                return () => { stale = true; };
+                setHaRead({ state: 'loading', cluster: clusterId });
+                if (pveHa) loadHa();
+                return () => { haGen.current++; };
             }, [vm.vmid, clusterId, pveHa]);
+            // a re-read after a change in the redesigned summary keeps the list on screen until it is in
+            useEffect(() => { if (haTick && pveHa) loadHa(); }, [haTick]);
             const haResource = haResources ? haResources.find(r => r.sid === haSid) : null;
 
             // NS: inline perf charts - only bother fetching when vm is actually up
@@ -1972,15 +2019,16 @@
             // LW Oct 2026 (#828) - only the newest request draws the charts, and another VM
             // starts with empty ones instead of the previous VM's
             const metricsSeqRef = React.useRef(0);
-            useEffect(() => { setMetricsData(null); }, [vm.vmid, clusterId]);
+            useEffect(() => { setMetricsData(null); setMetricsFailed(false); }, [vm.vmid, clusterId]);
             const fetchMetrics = React.useCallback(() => {
                 const seq = ++metricsSeqRef.current;
                 if (!isRunning) { setMetricsLoading(false); return; }
                 setMetricsLoading(true);
+                setMetricsFailed(false);
                 authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${metricsTimeframe}`)
                     .then(r => r?.ok ? r.json() : null)
-                    .then(d => { if (seq !== metricsSeqRef.current) return; setMetricsData(d); setMetricsLoading(false); })
-                    .catch(() => { if (seq === metricsSeqRef.current) setMetricsLoading(false); });
+                    .then(d => { if (seq !== metricsSeqRef.current) return; setMetricsData(d); setMetricsFailed(!d); setMetricsLoading(false); })
+                    .catch(() => { if (seq === metricsSeqRef.current) { setMetricsFailed(true); setMetricsLoading(false); } });
             }, [metricsTimeframe, vm.vmid, isRunning, clusterId]);
 
             useEffect(() => {
@@ -1988,13 +2036,17 @@
                 return () => { metricsSeqRef.current++; };
             }, [fetchMetrics, metricsRefreshTick]);
 
+            // LW Nov 2026 - Corporate Redesigned draws the answers as crPfPrep (cr_perf.js) reads them: a
+            // time without snapshots of the stored history is a gap, not a straight line across it
+            const crMetrics = useMemo(() => (isCorpRedesigned ? crPfPrep(metricsData) : undefined), [isCorpRedesigned, metricsData]);
+            const crMetricsPrep = (d) => (isCorpRedesigned ? crPfPrep(d) : d);
             // LW Oct 2026 - a range dragged on one chart zooms all six, with finer data where needed
             const metricsZoom = useChartZoom({
-                preset: metricsTimeframe, loaded: metricsData, resetKey: `${clusterId}/${vm.vmid}`,
+                preset: metricsTimeframe, loaded: isCorpRedesigned ? crMetrics : metricsData, resetKey: `${clusterId}/${vm.vmid}`,
                 loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${tf}`)
-                    .then(r => r?.ok ? r.json() : null),
+                    .then(r => r?.ok ? r.json() : null).then(crMetricsPrep),
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.vmid}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
-                    .then(r => r?.ok ? r.json() : null),
+                    .then(r => r?.ok ? r.json() : null).then(crMetricsPrep),
             });
             const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
             const metricsMem = metricsZoom.series('memory');
@@ -2027,6 +2079,98 @@
             const cpuPercent = vm.maxcpu ? ((vm.cpu || 0) * 100).toFixed(1) : 0;
             const ramPercent = vm.maxmem ? ((vm.mem / vm.maxmem) * 100).toFixed(1) : 0;
 
+            // the buttons of the header, shared with the header of Corporate Redesigned
+            const vmToolbar = (
+                <>
+                    {acts && !isRunning && (
+                        <button onClick={() => handleAction('start')} disabled={actionLoading?.[`${vm.vmid}-start`]}>
+                            {actionLoading?.[`${vm.vmid}-start`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.PlayCircle className="w-3 h-3" style={{color: '#60b515'}} />} {t('start')}
+                        </button>
+                    )}
+                    {acts && isRunning && (
+                        <>
+                            <button onClick={() => handleAction('shutdown')} disabled={actionLoading?.[`${vm.vmid}-shutdown`]}>
+                                {actionLoading?.[`${vm.vmid}-shutdown`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.Power className="w-3 h-3" style={{color: '#f54f47'}} />} {t('shutdown')}
+                            </button>
+                            <button onClick={() => handleAction('reboot')} disabled={actionLoading?.[`${vm.vmid}-reboot`]}>
+                                {actionLoading?.[`${vm.vmid}-reboot`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.RefreshCw className="w-3 h-3" style={{color: '#efc006'}} />} {t('reboot')}
+                            </button>
+                        </>
+                    )}
+                    {consoles && isQemu && isRunning && (
+                        <button onClick={() => onOpenConsole(vm)}>
+                            <Icons.Terminal className="w-3 h-3" /> {t('console')}
+                        </button>
+                    )}
+                    {!consoles && isRunning && <HaOnActiveLink vm={vm} clusterId={clusterId} button iconClass="w-3 h-3" />}
+                    {consoles && isQemu && isRunning && onOpenSpice && (
+                        <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}>
+                            <Icons.ExternalLink className="w-3 h-3" /> {t('spiceConsole') || 'SPICE'}
+                        </button>
+                    )}
+                    <button onClick={() => onOpenConfig(vm)}>
+                        <Icons.Settings className="w-3 h-3" /> {t('configure')}
+                    </button>
+                    {/* Actions Dropdown */}
+                    <div className="relative">
+                        <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
+                            {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
+                        </button>
+                        {showActionsMenu && (
+                            <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
+                                {onShowMetrics && (
+                                    <button onClick={() => { onShowMetrics(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                        <Icons.BarChart className="w-3.5 h-3.5" /> {t('performanceMetrics')}
+                                    </button>
+                                )}
+                                {acts && (<>
+                                <button onClick={() => { onMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ArrowRight className="w-3.5 h-3.5" /> {t('migrate')}
+                                </button>
+                                {showCrossCluster && (
+                                    <button onClick={() => { onCrossClusterMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                        <Icons.Globe className="w-3.5 h-3.5" /> {t('crossClusterMigrate')}
+                                    </button>
+                                )}
+                                <button onClick={() => { onClone(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.Copy className="w-3.5 h-3.5" /> {t('clone')}
+                                </button>
+                                {isRunning && isQemu && (
+                                    <button onClick={() => { handleAction('reset'); setShowActionsMenu(false); }} disabled={actionLoading?.[`${vm.vmid}-reset`]} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#efc006'}}>
+                                        <Icons.Zap className="w-3.5 h-3.5" /> {t('forceReset') || 'Force Reset'}
+                                    </button>
+                                )}
+                                {isRunning && (
+                                    <button onClick={() => { onForceStop(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                        <Icons.XCircle className="w-3.5 h-3.5" /> {t('forceStop')}
+                                    </button>
+                                )}
+                                </>)}
+                                <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                                {/* LW Apr 2026 (#250) - user-configurable web URL for this VM */}
+                                <button onClick={() => { openVmWebUrl(); setShowActionsMenu(false); }}
+                                    className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                    {vmWebUrl ? (t('openVmWebUI') || 'Open Web UI') : (t('setVmWebLink') || 'Set Web URL…')}
+                                </button>
+                                {vmWebUrl && (
+                                    <button onClick={() => { promptForVmWebUrl(); setShowActionsMenu(false); }}
+                                        className="w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)', opacity: 0.7}}>
+                                        <span className="w-3.5 h-3.5" /> {t('editVmWebLink') || 'Edit Web URL…'}
+                                    </button>
+                                )}
+                                {acts && (<>
+                                <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                                <button onClick={() => { onDelete(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                    <Icons.Trash className="w-3.5 h-3.5" /> {t('delete')}
+                                </button>
+                                </>)}
+                            </div>
+                        )}
+                    </div>
+                </>
+            );
+
             return (
                 <div className="space-y-0">
                     {/* Unlock Confirmation Modal */}
@@ -2048,6 +2192,37 @@
                     )}
 
                     {/* Header Bar - Clarity dark theme */}
+                    {isCorpRedesigned ? (
+                        <CrObjectHeader kind={isQemu ? 'vm' : 'ct'} icon={isQemu ? <Icons.Monitor /> : <Icons.Box />} name={displayName}
+                            id={vm.vmid} onBack={onBack} status={<CrStateBadge state={vm.status} />}
+                            badges={(
+                                <>
+                                    {haEnabled && <CrBadge tone="info" dot={false}>HA</CrBadge>}
+                                    {lockInfo.locked && <CrBadge tone="warning">{t('locked')}</CrBadge>}
+                                </>
+                            )}
+                            meta={[
+                                { key: 'type', label: t('type'), value: isQemu ? 'QEMU/KVM' : 'LXC' },
+                                { key: 'node', label: t('node'), value: vm.node },
+                                { key: 'cluster', label: t('cluster'), value: clusterName },
+                                { key: 'os', label: t('guestOs'), value: guestInfo?.os_pretty_name || vmHwInfo?.ostype },
+                                { key: 'ip', label: t('ipAddress'), value: (guestInfo?.ip_addresses || []).slice(0, 2).join(', '), mono: true },
+                                { key: 'cpus', label: t('crVcpus'), value: vm.maxcpu },
+                                { key: 'mem', label: t('memory'), value: vm.maxmem ? formatBytes(vm.maxmem) : null },
+                                { key: 'uptime', label: t('uptime'), value: isRunning ? crUptime(vm.uptime) : null },
+                            ]}
+                            actions={(
+                                <>
+                                    {/* a container's console sat in the classic tab strip */}
+                                    {consoles && !isQemu && isRunning && (
+                                        <button onClick={() => onOpenConsole(vm)}>
+                                            <Icons.Terminal className="w-3 h-3" /> {t('console')}
+                                        </button>
+                                    )}
+                                    {vmToolbar}
+                                </>
+                            )} />
+                    ) : (
                     <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
                         <div className="flex items-center gap-2">
                             <button onClick={onBack} className="p-1 hover:text-white" style={{color: '#adbbc4'}} title={t('backToList')}>
@@ -2063,96 +2238,22 @@
                             {lockInfo.locked && <span className="corp-badge corp-badge-locked flex items-center gap-1"><Icons.Lock className="w-2.5 h-2.5" />{t('locked')}</span>}
                         </div>
                         <div className="corp-toolbar flex items-center gap-1">
-                            {acts && !isRunning && (
-                                <button onClick={() => handleAction('start')} disabled={actionLoading?.[`${vm.vmid}-start`]}>
-                                    {actionLoading?.[`${vm.vmid}-start`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.PlayCircle className="w-3 h-3" style={{color: '#60b515'}} />} {t('start')}
-                                </button>
-                            )}
-                            {acts && isRunning && (
-                                <>
-                                    <button onClick={() => handleAction('shutdown')} disabled={actionLoading?.[`${vm.vmid}-shutdown`]}>
-                                        {actionLoading?.[`${vm.vmid}-shutdown`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.Power className="w-3 h-3" style={{color: '#f54f47'}} />} {t('shutdown')}
-                                    </button>
-                                    <button onClick={() => handleAction('reboot')} disabled={actionLoading?.[`${vm.vmid}-reboot`]}>
-                                        {actionLoading?.[`${vm.vmid}-reboot`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.RefreshCw className="w-3 h-3" style={{color: '#efc006'}} />} {t('reboot')}
-                                    </button>
-                                </>
-                            )}
-                            {consoles && isQemu && isRunning && (
-                                <button onClick={() => onOpenConsole(vm)}>
-                                    <Icons.Terminal className="w-3 h-3" /> {t('console')}
-                                </button>
-                            )}
-                            {!consoles && isRunning && <HaOnActiveLink vm={vm} clusterId={clusterId} button iconClass="w-3 h-3" />}
-                            {consoles && isQemu && isRunning && onOpenSpice && (
-                                <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}>
-                                    <Icons.ExternalLink className="w-3 h-3" /> {t('spiceConsole') || 'SPICE'}
-                                </button>
-                            )}
-                            <button onClick={() => onOpenConfig(vm)}>
-                                <Icons.Settings className="w-3 h-3" /> {t('configure')}
-                            </button>
-                            {/* Actions Dropdown */}
-                            <div className="relative">
-                                <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
-                                    {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
-                                </button>
-                                {showActionsMenu && (
-                                    <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
-                                        {onShowMetrics && (
-                                            <button onClick={() => { onShowMetrics(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                                <Icons.BarChart className="w-3.5 h-3.5" /> {t('performanceMetrics')}
-                                            </button>
-                                        )}
-                                        {acts && (<>
-                                        <button onClick={() => { onMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.ArrowRight className="w-3.5 h-3.5" /> {t('migrate')}
-                                        </button>
-                                        {showCrossCluster && (
-                                            <button onClick={() => { onCrossClusterMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                                <Icons.Globe className="w-3.5 h-3.5" /> {t('crossClusterMigrate')}
-                                            </button>
-                                        )}
-                                        <button onClick={() => { onClone(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.Copy className="w-3.5 h-3.5" /> {t('clone')}
-                                        </button>
-                                        {isRunning && isQemu && (
-                                            <button onClick={() => { handleAction('reset'); setShowActionsMenu(false); }} disabled={actionLoading?.[`${vm.vmid}-reset`]} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#efc006'}}>
-                                                <Icons.Zap className="w-3.5 h-3.5" /> {t('forceReset') || 'Force Reset'}
-                                            </button>
-                                        )}
-                                        {isRunning && (
-                                            <button onClick={() => { onForceStop(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
-                                                <Icons.XCircle className="w-3.5 h-3.5" /> {t('forceStop')}
-                                            </button>
-                                        )}
-                                        </>)}
-                                        <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
-                                        {/* LW Apr 2026 (#250) — user-configurable web URL for this VM */}
-                                        <button onClick={() => { openVmWebUrl(); setShowActionsMenu(false); }}
-                                            className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.ExternalLink className="w-3.5 h-3.5" />
-                                            {vmWebUrl ? (t('openVmWebUI') || 'Open Web UI') : (t('setVmWebLink') || 'Set Web URL…')}
-                                        </button>
-                                        {vmWebUrl && (
-                                            <button onClick={() => { promptForVmWebUrl(); setShowActionsMenu(false); }}
-                                                className="w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)', opacity: 0.7}}>
-                                                <span className="w-3.5 h-3.5" /> {t('editVmWebLink') || 'Edit Web URL…'}
-                                            </button>
-                                        )}
-                                        {acts && (<>
-                                        <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
-                                        <button onClick={() => { onDelete(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
-                                            <Icons.Trash className="w-3.5 h-3.5" /> {t('delete')}
-                                        </button>
-                                        </>)}
-                                    </div>
-                                )}
-                            </div>
+                            {vmToolbar}
                         </div>
                     </div>
+                    )}
 
                     {/* Tab Strip - Clarity style */}
+                    {isCorpRedesigned ? (
+                        <CrTabs id="guest" active={activeDetailTab} label={displayName}
+                            onChange={id => { setActiveDetailTab(id); if (id === 'snapshots') fetchSnapshots(); }}
+                            tabs={[
+                                { id: 'summary', label: t('summary'), icon: <Icons.Monitor /> },
+                                { id: 'monitor', label: t('monitor'), icon: <Icons.BarChart /> },
+                                { id: 'snapshots', label: t('snapshotsTab'), icon: <Icons.Clock /> },
+                                { id: 'timeline', label: t('tlTab'), icon: <Icons.Activity />, hook: { 'data-corp-vm-timeline': '' } },
+                            ]} />
+                    ) : (
                     <div className="corp-tab-strip px-4">
                         <button className={activeDetailTab === 'summary' ? 'active' : ''} onClick={() => setActiveDetailTab('summary')}>
                             <Icons.Monitor className="w-3 h-3 inline mr-1" />{t('summary')}
@@ -2174,9 +2275,29 @@
                             </button>
                         )}
                     </div>
+                    )}
 
+                    {/* LW Oct 2026 - Corporate Redesigned: the summary from the same reads, drawn by CrVmSummary (cr_vm.js) */}
+                    {activeDetailTab === 'summary' && isCorpRedesigned && (
+                        <div className="p-4">
+                            <CrBoundary key={`${clusterId}:${vm.vmid}`} id="vm-summary">
+                            <CrVmSummary vm={vm} clusterId={clusterId} clusterName={clusterName}
+                                isQemu={isQemu} isRunning={isRunning} acts={acts} consoles={consoles} authFetch={authFetch}
+                                guestInfo={guestInfo} agentRead={agentRead} config={crConfig}
+                                lockInfo={lockInfo} lockRead={lockRead} onUnlock={() => setShowUnlockConfirm(true)}
+                                haRead={haRead && haRead.cluster === clusterId ? haRead : { state: 'loading' }} onHaChanged={() => setHaTick(n => n + 1)}
+                                backupStatus={backupStatus} backupFor={backupFor}
+                                metrics={{ data: metricsData, loading: metricsLoading, failed: metricsFailed, range: metricsTimeframe,
+                                           onRange: setMetricsTimeframe, onRetry: () => setMetricsRefreshTick(x => x + 1) }}
+                                shot={{ url: consoleShot, loading: shotLoading, onRefresh: () => setShotNonce(n => n + 1) }}
+                                onOpenConsole={onOpenConsole} onOpenSpice={onOpenSpice} onOpenConfig={onOpenConfig}
+                                onMigrate={onMigrate} onTimeline={() => setActiveDetailTab('timeline')}
+                                nav={crNav} open={crOpen} />
+                            </CrBoundary>
+                        </div>
+                    )}
                     {/* LW: Feb 2026 - summary tab, corporate layout */}
-                    {activeDetailTab === 'summary' && (
+                    {activeDetailTab === 'summary' && !isCorpRedesigned && (
                         <div className="p-4 space-y-4">
                             {/* console preview + vm info */}
                             <div className="flex gap-5">
@@ -2581,7 +2702,7 @@
                             </div>
 
                             {/* LW: Mar 2026 - inline perf charts, no more modal for corporate view */}
-                            {isRunning && (
+                            {isRunning && !isCorpRedesigned && (
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>
@@ -2648,6 +2769,18 @@
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {/* LW Oct 2026 - Corporate Redesigned: the charts of the summary on a tab of their own; LW Nov 2026 -
+                        with the figures, the data quality and the extra groups of cr_perf.js */}
+                    {isCorpRedesigned && activeDetailTab === 'monitor' && (
+                        <div className="p-4">
+                            <CrBoundary key={`${clusterId}:${vm.vmid}`} id="vm-perf">
+                                <CrGuestPerf vm={vm} clusterId={clusterId} kind={crKind} isRunning={isRunning} p={crMetrics}
+                                    loading={metricsLoading} failed={metricsFailed} range={metricsTimeframe} onRange={setMetricsTimeframe}
+                                    onReload={() => setMetricsRefreshTick(x => x + 1)} zoom={metricsZoom} authFetch={authFetch} />
+                            </CrBoundary>
                         </div>
                     )}
 
@@ -7548,7 +7681,7 @@
 
         // LW: All Clusters Overview - GitHub Feature Request #16
         // added a bunch of stuff here - storage, sparklines, sorting etc
-        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests }) {
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests, recentEvents, canAudit, authFetch }) {
             // #625: an empty list on a standby is no reason to offer adding a cluster there -
             // say why it is empty instead: no sync yet, or its live view is off
             const haInfo = (useAuth() || {}).ha || {};
@@ -7557,7 +7690,7 @@
             // a member that serves users is no standby to them
             const haNoClusters = haInfo.live_view === false ? t('pgHaNoClustersLiveOff')
                 : haInfo.serving === true ? t('pgHaNoClustersServing') : t('pgHaNoClustersHere');
-            const { isCorporate } = useLayout();
+            const { isCorporate, isCorpRedesigned } = useLayout();
             const [sortBy, setSortBy] = useState('name');
             const [sortDir, setSortDir] = useState('asc');
             const [guestSortBy, setGuestSortBy] = useState('cpu');    // #621 — Top Resources table sort (separate from the cluster table)
@@ -7875,6 +8008,17 @@
                 );
             };
             
+            // LW Oct 2026 - Corporate Redesigned (Preview) draws its own dashboard from the same figures
+            if (isCorpRedesigned && !topologyOnly) {
+                return (
+                    <CrDashboard clusters={clusters} allMetrics={allMetrics} clusterStats={clusterStats} clusterGroups={clusterGroups}
+                        allClusterGuests={allClusterGuests} recentEvents={recentEvents} canAudit={canAudit} authFetch={authFetch}
+                        onSelectCluster={onSelectCluster} onSelectVm={onSelectVm} onOpenClusterTab={onOpenClusterTab}
+                        onOpenGuests={onOpenGuests} addToast={addToast} onAutoInstall={haStandby ? undefined : onAutoInstall}
+                        openIn={openIn} emptyText={haStandby ? haNoClusters : t('noClustersConfigured')} />
+                );
+            }
+
             // LW: Feb 2026 - Corporate variant for AllClustersOverview
             if (isCorporate) {
                 const corpBarColor = (val) => val > 80 ? '#f54f47' : val > 60 ? '#efc006' : '#60b515';
@@ -10339,7 +10483,7 @@
             <div>
                 <label className="block text-xs font-medium text-gray-400 mb-1">
                     {label}
-                    {needsRestart && <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</span>}
+                    {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
                 </label>
                 {options ? (
                     <select
@@ -10383,7 +10527,7 @@
                     className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange focus:ring-proxmox-orange"
                 />
                 <span className="text-sm text-gray-300">{label}</span>
-                {needsRestart && <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'RESTART'}</span>}
+                {needsRestart && <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'RESTART'}</CrVcRestartBadge>}
             </label>
         );
 
@@ -10411,7 +10555,7 @@
                 <div>
                     <label className="block text-xs font-medium text-gray-400 mb-1">
                         {label}
-                        {needsRestart && <span className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</span>}
+                        {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
                     </label>
                     <div className="flex gap-2">
                         <input

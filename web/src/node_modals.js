@@ -4887,7 +4887,7 @@
         // ipmitool install, and shows the sensor/power/FRU/event rollup. Dropped
         // into both the corporate node-detail (a 'hardware' tab) and the default
         // NodeModal. Theme-adaptive via var(--color-text) + a shared status palette.
-        function HardwareMonitoringPanel({ clusterId, node, t, addToast, getAuthHeaders }) {
+        function HardwareMonitoringPanel({ clusterId, node, t, addToast, getAuthHeaders, onCrState }) {
             const { language } = useTranslation();   // request + record the localized warning (#609 phase 2)
             // both consents are this instance's own settings: no standby saves them (#625)
             const { haStandby } = useAuth();
@@ -4938,6 +4938,11 @@
                 setLoading(false);
             };
             useEffect(() => { refresh(); }, [clusterId, node, language]);   // re-fetch localized warning on language switch
+            // LW Nov 2026 - Corporate Redesigned shows these rows in its own sensor table (CrNodeHardware).
+            // What was read stays with the view when the tab is left (the Summary judges from it, with its age)
+            useEffect(() => {
+                if (onCrState) onCrState({ node, loading, consent: consent ? !!consent.enabled : null, hw, at: Date.now() });
+            }, [onCrState, node, loading, consent, hw]);
 
             const openWarn = () => {
                 setAckChecked(false);
@@ -5144,6 +5149,7 @@
                                     </div>
 
                                     {/* Sensors */}
+                                    {!onCrState && (
                                     <div style={card}>
                                         <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSensors') || 'Sensors'} {hw.sensors ? `(${hw.sensors.length})` : ''}</span></div>
                                         <div className="max-h-72 overflow-y-auto">
@@ -5159,6 +5165,7 @@
                                             </tbody></table>
                                         </div>
                                     </div>
+                                    )}
 
                                     {/* Event log (SEL) */}
                                     {hw.events && hw.events.length > 0 && (
@@ -5312,9 +5319,10 @@
             );
         }
 
-        function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast }) {
+        function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterName, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast, crKind }) {
             const { t } = useTranslation();
             const { getAuthHeaders, reverseProxyEnabled, haReadOnly, haConsolesElsewhere } = useAuth();
+            const { isCorpRedesigned } = useLayout();
             // #625 v2 - a standby shows the node: no power, maintenance or update actions, no
             // shell, and the configure and hardware forms render disabled
             // A forwarding standby acts through the active again; the shell tab points
@@ -5349,6 +5357,40 @@
             const [certForm, setCertForm] = useState({ cert: '', key: '', restart: true });
             const [saving, setSaving] = useState(false);
             const [nodeIp, setNodeIp] = useState('');
+            // LW Nov 2026 - where /ip took the address from; a *_fallback is a stand-in, not the node's own
+            const [nodeIpSource, setNodeIpSource] = useState('');
+            // LW Nov 2026 - the preview draws the in-band (BMC) rows with the other sensors: the panel hands up what it read
+            const [crBmc, setCrBmc] = useState(null);
+            const crHw = isCorpRedesigned && crKind === 'proxmox';
+            // ... and keeps it until the view shows another node
+            useEffect(() => { setCrBmc(null); }, [clusterId, node]);
+            // LW Nov 2026 - unsaved edits of a configure card in the preview: the cards report them, and a
+            // sub tab, a node tab, Back or a click that leaves the view asks first (keep or discard).
+            // Classic draws no such card, so every guard below goes straight on there
+            const crRootRef = useRef(null);
+            const crDirtyRef = useRef({});
+            const [crDirty, setCrDirty] = useState(false);
+            const [crLeave, setCrLeave] = useState(null);   // { go } while the question is open
+            const [crCfgGen, setCrCfgGen] = useState(0);    // a discard draws the cards afresh
+            const crOnDirty = useCallback((id, on) => {
+                const d = crDirtyRef.current;
+                if (on) d[id] = true; else delete d[id];
+                setCrDirty(Object.keys(d).length > 0);
+            }, []);
+            const crIsDirty = () => crHw && Object.keys(crDirtyRef.current).length > 0;
+            const crAsk = (go) => setCrLeave({ go });
+            const crGuard = (go) => { if (crIsDirty()) crAsk(go); else go(); };
+            const crDiscard = () => {
+                const go = crLeave && crLeave.go;
+                crDirtyRef.current = {};
+                setCrDirty(false);
+                setCrLeave(null);
+                setShowCertUpload(false);
+                setCertForm({ cert: '', key: '', restart: true });
+                setCrCfgGen(g => g + 1);
+                if (go) go();
+            };
+            useCrNcLeaveGuard(crHw && crDirty, crRootRef, crAsk);
 
             const metrics = clusterMetrics?.[node] || {};
             const nodeOnline = metrics.status !== 'offline';
@@ -5360,19 +5402,26 @@
                 catch(e) { console.error(e); return null; }
             };
 
+            // LW Nov 2026 - Corporate Redesigned draws the answer as crPfPrep (cr_perf.js) reads it: an {error}
+            // of the route is a failed read, the XCP-ng wrapper unwrapped, a time without snapshots a gap
+            const crPerf = useMemo(() => (isCorpRedesigned ? crPfPrep(data.performance, crKind) : undefined),
+                                   [isCorpRedesigned, data.performance, crKind]);
+            const crPerfPrep = (d) => (isCorpRedesigned ? crPfPrep(d, crKind) : d);
             // LW Oct 2026 - the performance charts zoom together, finer data for a narrow range
             const perfZoom = useChartZoom({
-                preset: perfTimeframe, loaded: data.performance, resetKey: navKey,
+                preset: perfTimeframe, loaded: isCorpRedesigned ? crPerf : data.performance, resetKey: navKey,
                 loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf}`)
-                    .then(r => r?.ok ? r.json() : null),
+                    .then(r => r?.ok ? r.json() : null).then(crPerfPrep),
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
-                    .then(r => r?.ok ? r.json() : null),
+                    .then(r => r?.ok ? r.json() : null).then(crPerfPrep),
             });
             const perfNet = perfZoom.source('net_in', 'net_out');
 
             // LW: Feb 2026 - save handler for configure tab edits
+            // LW Nov 2026 - it answers whether the write went through, so the preview keeps an edit open after a refusal
             const handleSave = async (endpoint, payload, successMsg, method) => {
                 setSaving(true);
+                let ok = false;
                 try {
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/${endpoint}`, {
                         method: method || 'PUT',
@@ -5380,6 +5429,7 @@
                         body: JSON.stringify(payload)
                     });
                     if (res && res.ok) {
+                        ok = true;
                         addToast(successMsg, 'success');
                         // Reload relevant data
                         if (endpoint.includes('dns') || endpoint.includes('hosts') || endpoint.includes('time') || endpoint.includes('certificates') || endpoint.includes('syslog')) loadTabData('system');
@@ -5392,6 +5442,14 @@
                     }
                 } catch (e) { addToast('Error', 'error'); }
                 setSaving(false);
+                return ok;
+            };
+
+            // LW Nov 2026 - the delete of one interface, from the classic table and from the preview
+            const deleteNetIface = async (iface) => {
+                if (!confirm(`${t('delete')} ${iface.iface}?`)) return;
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE' });
+                addToast(res && res.ok ? `${iface.iface} ${t('deleted')}` : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network');
             };
 
             // LW Nov 2026 - the repos route sends name / enabled / uri in lower case (settings.py
@@ -5399,21 +5457,30 @@
             const handleRepoToggle = async (repo) => {
                 const payload = { enabled: !repo.enabled };
                 if (repo.is_other) { payload.file = repo.file; payload.index = repo.index; payload.name = repo.name; }
-                await handleSave(`repos/${repo.id || repo.index}`, payload, repo.enabled ? 'Repository disabled' : 'Repository enabled');
+                return handleSave(`repos/${repo.id || repo.index}`, payload, repo.enabled ? 'Repository disabled' : 'Repository enabled');
+            };
+
+            // LW Nov 2026 - apt update of the node, from the classic button and from the preview
+            const handleAptUpdate = async () => {
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' });
+                addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error');
+                return !!(res && res.ok);
             };
 
             const handleCertUpload = async () => {
                 setSaving(true);
+                let ok = false;
                 try {
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ certificates: certForm.cert, key: certForm.key, restart: certForm.restart, force: true })
                     });
-                    if (res && res.ok) { addToast('Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
+                    if (res && res.ok) { ok = true; addToast('Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
                     else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || 'Upload failed', 'error'); }
                 } catch (e) { addToast('Upload failed', 'error'); }
                 setSaving(false);
+                return ok;
             };
 
             const formatBytes = b => {
@@ -5462,8 +5529,12 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
-                            `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
-                            `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            // LW Nov 2026 - nothing below reads these two; the preview leaves them out, so a
+                            // read after a Save does not wait for sensors over SSH
+                            ...(crHw ? [] : [
+                                `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
+                                `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            ]),
                         ],
                         sensors: [  // #601 — dedicated load for the hardware tab (lm-sensors + temp history)
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
@@ -5486,8 +5557,11 @@
                     };
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
+                    // LW Nov 2026 - the preview keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
+                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph')) || (isCorpRedesigned && tab === 'tasks');
                     const results = await Promise.all(urls.map(u => u.endsWith('/dns')
                         ? authFetch(u).then(readNodeDns)
+                        : crKeep ? authFetch(u).then(crNdRead)
                         : authFetch(u).then(r => r && r.ok ? r.json() : null).catch(() => null)));
                     if (gen !== navGenRef.current || navKeyRef.current !== navKey || slotSeqRef.current[tab] !== seq) return;
                     // NS: Feb 2026 - Use functional setData to avoid stale closure bugs
@@ -5495,31 +5569,48 @@
                         const newData = { ...prev };
                         if (tab === 'summary') newData.summary = results[0];
                         else if (tab === 'performance') newData.performance = results[0];
-                        else if (tab === 'tasks') newData.tasks = results[0];
+                        else if (tab === 'tasks') {
+                            if (crKeep) newData.tasksRead = results[0];
+                            newData.tasks = crKeep && crNdFail(results[0]) ? null : results[0];
+                        }
                         else if (tab === 'network') newData.network = results[0];
                         else if (tab === 'system') {
-                            // a failed read stays null, so the next visit to the tab asks again
+                            // a failed read stays null, so the next visit to the tab asks again; the preview
+                            // keeps why the others failed and hands the classic fields what they had before
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.sysFail = { hosts: crNdFail(results[1]), time: crNdFail(results[2]), syslog: crNdFail(results[3]), certificates: crNdFail(results[4]) };
                             newData.dns = results[0].dns;
                             newData.dnsError = results[0].dnsError;
-                            newData.hosts = typeof results[1]?.data === 'string' ? results[1].data : null;
-                            newData.time = results[2] || {};
-                            newData.syslog = results[3] || [];
-                            newData.certificates = results[4] || [];
+                            newData.hosts = typeof got[1]?.data === 'string' ? got[1].data : null;
+                            newData.time = got[2] || {};
+                            newData.syslog = got[3] || [];
+                            newData.certificates = got[4] || [];
                         }
                         else if (tab === 'sensors') {  // #601
+                            if (crKeep) { newData.sensorsRead = results[0]; newData.sensorsAt = Date.now(); newData.tempsRead = results[1]; }
                             newData.sensors = (results[0] && Array.isArray(results[0].sensors)) ? results[0].sensors : null;
                             newData.tempHistory = (results[1] && Array.isArray(results[1].series)) ? results[1].series : null;
                         }
                         else if (tab === 'disks') {
-                            newData.disks = results[0] || [];
-                            newData.lvm = nodeLvmVgs(results[1]);
-                            newData.lvmthin = nodeThinPools(results[2]);
-                            newData.zfs = results[3] || [];
+                            // the tables below get null for a failed read, as before; the preview keeps the reasons
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.disksRead = results;
+                            newData.disks = got[0] || [];
+                            newData.lvm = nodeLvmVgs(got[1]);
+                            newData.lvmthin = nodeThinPools(got[2]);
+                            newData.zfs = got[3] || [];
                         }
-                        else if (tab === 'repos') newData.repos = results[0]?.repositories || [];
+                        else if (tab === 'repos') {
+                            // LW Nov 2026 - the classic table gets what it had; the preview keeps the answer or why it failed
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.reposRead = results[0];
+                            newData.repos = got[0]?.repositories || [];
+                        }
                         else if (tab === 'subscription') newData.subscription = results[0] || {};
                         else if (tab === 'ceph') {
-                            newData.ceph = { status: results[0], osd: results[1] || [], mon: results[2] || [], pools: results[3] || [], available: results[0] !== null };
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.cephRead = results;
+                            newData.ceph = { status: got[0], osd: got[1] || [], mon: got[2] || [], pools: got[3] || [], available: got[0] !== null };
                         }
                         return newData;
                     });
@@ -5539,10 +5630,11 @@
             useEffect(() => {
                 let cancelled = false;
                 setNodeIp('');
+                setNodeIpSource('');
                 authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ip`)
                     .then(r => r && r.ok ? r.json() : null)
                     .then(ipData => {
-                        if (!cancelled) setNodeIp(ipData?.ip || '');
+                        if (!cancelled) { setNodeIp(ipData?.ip || ''); setNodeIpSource(ipData?.source || ''); }
                     })
                     .catch(() => {
                         if (!cancelled) setNodeIp('');
@@ -5575,6 +5667,12 @@
             };
 
             const nodeVms = (clusterResources || []).filter(r => r.node === node && (r.type === 'qemu' || r.type === 'lxc'));
+            // LW Nov 2026 - the System sub tabs the preview draws itself for a PVE node
+            const crSys = crHw && ['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab);
+            // LW Nov 2026 - and these five from the disks, repos and ceph reads (cr_nodestore.js)
+            const crStore = crHw && ['lvm', 'lvmthin', 'zfs', 'repos', 'ceph'].includes(configSubTab);
+            // LW Nov 2026 - the disk list only reads (list, SMART, pool detail), so a standby keeps it open too
+            const crDisks = crHw && configSubTab === 'disks';
             const runningVms = nodeVms.filter(v => v.status === 'running').length;
 
             // LW: Feb 2026 - backend sends flat fields: cpu_percent, mem_used, mem_total, disk_used, disk_total
@@ -5590,9 +5688,78 @@
             const rootTotal = metrics.disk_total || 0;
             const rootPercent = rootTotal > 0 ? ((rootUsed / rootTotal) * 100).toFixed(1) : '0.0';
 
+            // the Actions menu of the header, shared with the header of Corporate Redesigned
+            const nodeActionsMenu = (
+                <div className="relative">
+                    <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
+                        {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
+                    </button>
+                    {showActionsMenu && (
+                        <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
+                            {!haReadOnly && (<>
+                            <button onClick={() => { if (!isMaint) { setMaintOptions({}); setShowMaintConfirm(true); setShowActionsMenu(false); return; } if(!confirm(`${isMaint ? 'Disable' : 'Enable'} maintenance mode on "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? t('disableMaintenance') || 'Disable Maintenance' : t('maintenance')}
+                            </button>
+                            <button onClick={() => { if(!confirm(`Reboot node "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.RefreshCw className="w-3.5 h-3.5" /> {t('rebootNode')}
+                            </button>
+                            <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
+                            </button>
+                            <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.Download className="w-3.5 h-3.5" /> {t('update') || 'Update'}
+                            </button>
+                            <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                            </>)}
+                            <button onClick={() => { onOpenNodeConfig(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.Settings className="w-3.5 h-3.5" /> {t('nodeSettings')}
+                            </button>
+                            {/* LW Apr 2026 (#250) - open PVE web UI on this cluster in a new tab.
+                                We use the cluster API host; PVE auto-routes to the right node. */}
+                            {clusterHost && (
+                                <button
+                                    onClick={() => {
+                                        const h = (clusterHost || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0];
+                                        if (!h) { addToast(t('noHostKnown') || 'No host known for this cluster', 'warning'); return; }
+                                        window.open(`https://${h}:8006/`, '_blank', 'noopener,noreferrer');
+                                        setShowActionsMenu(false);
+                                    }}
+                                    className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" /> {t('openWebUI') || 'Open Web UI'}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+            const nodeTabLabel = (tab) => (tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo'));
+
             return (
-                <div className="space-y-0">
+                <div className="space-y-0" ref={crRootRef}>
                     {/* Header Bar */}
+                    {isCorpRedesigned ? (
+                        <CrObjectHeader kind="node" icon={<Icons.Server />} name={node} onBack={() => crGuard(onBack)}
+                            status={<CrStateBadge state={isMaint ? 'maintenance' : nodeOnline ? 'online' : 'offline'} />}
+                            meta={[
+                                { key: 'cluster', label: t('cluster'), value: clusterName },
+                                { key: 'ip', label: t('ipAddress'), value: nodeIp, mono: true },
+                                { key: 'pve', label: t('pveVersion'), value: data.summary?.pveversion || metrics.pveversion },
+                                { key: 'cpu', label: t('cpu'), value: metrics.cpu_percent != null ? `${cpuPercent}%` : null },
+                                { key: 'mem', label: t('memory'), value: ramTotal > 0 ? `${ramPercent}% (${formatBytes(ramUsed)} / ${formatBytes(ramTotal)})` : null },
+                                { key: 'guests', label: t('guests'), value: `${runningVms}/${nodeVms.length} ${t('running').toLowerCase()}` },
+                                { key: 'uptime', label: t('uptime'), value: crUptime(data.summary?.uptime || metrics.uptime) },
+                            ]}
+                            actions={(
+                                <>
+                                    {proxmoxUrl && (
+                                        <button type="button" onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}>
+                                            <Icons.ExternalLink className="w-3 h-3" /> {t('openInProxmox')}
+                                        </button>
+                                    )}
+                                    {nodeActionsMenu}
+                                </>
+                            )} />
+                    ) : (
                     <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
                         <div className="flex items-center gap-2">
                             <button onClick={onBack} className="p-1 hover:text-white" style={{color: 'var(--corp-text-secondary)'}} title={t('backToList')}>
@@ -5616,58 +5783,24 @@
                             </span>
                         </div>
                         <div className="corp-toolbar flex items-center gap-1">
-                            <div className="relative">
-                                <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
-                                    {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
-                                </button>
-                                {showActionsMenu && (
-                                    <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
-                                        {!haReadOnly && (<>
-                                        <button onClick={() => { if (!isMaint) { setMaintOptions({}); setShowMaintConfirm(true); setShowActionsMenu(false); return; } if(!confirm(`${isMaint ? 'Disable' : 'Enable'} maintenance mode on "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? t('disableMaintenance') || 'Disable Maintenance' : t('maintenance')}
-                                        </button>
-                                        <button onClick={() => { if(!confirm(`Reboot node "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.RefreshCw className="w-3.5 h-3.5" /> {t('rebootNode')}
-                                        </button>
-                                        <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
-                                            <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
-                                        </button>
-                                        <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.Download className="w-3.5 h-3.5" /> {t('update') || 'Update'}
-                                        </button>
-                                        <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
-                                        </>)}
-                                        <button onClick={() => { onOpenNodeConfig(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                            <Icons.Settings className="w-3.5 h-3.5" /> {t('nodeSettings')}
-                                        </button>
-                                        {/* LW Apr 2026 (#250) — open PVE web UI on this cluster in a new tab.
-                                            We use the cluster API host; PVE auto-routes to the right node. */}
-                                        {clusterHost && (
-                                            <button
-                                                onClick={() => {
-                                                    const h = (clusterHost || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0];
-                                                    if (!h) { addToast(t('noHostKnown') || 'No host known for this cluster', 'warning'); return; }
-                                                    window.open(`https://${h}:8006/`, '_blank', 'noopener,noreferrer');
-                                                    setShowActionsMenu(false);
-                                                }}
-                                                className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
-                                                <Icons.ExternalLink className="w-3.5 h-3.5" /> {t('openWebUI') || 'Open Web UI'}
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
+                            {nodeActionsMenu}
                         </div>
                     </div>
+                    )}
 
                     {/* Tab Strip */}
+                    {isCorpRedesigned ? (
+                        <CrTabs id="node" active={activeDetailTab} onChange={tab => { if (tab !== activeDetailTab) crGuard(() => setActiveDetailTab(tab)); }} label={node}
+                            tabs={['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => ({ id: tab, label: nodeTabLabel(tab) }))} />
+                    ) : (
                     <div className="corp-tab-strip px-4">
                         {['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => (
                             <button key={tab} className={activeDetailTab === tab ? 'active' : ''} onClick={() => setActiveDetailTab(tab)}>
-                                {tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo')}
+                                {nodeTabLabel(tab)}
                             </button>
                         ))}
                     </div>
+                    )}
 
                     {/* Tab Content */}
                     <div className="p-4">
@@ -5677,8 +5810,27 @@
                             </div>
                         )}
 
+                        {/* LW Nov 2026 - the preview: the node's health from what the view holds (cr_node.js), for a
+                            PVE node the system information and the guests under it in the same cards (cr_nodecfg.js) */}
+                        {activeDetailTab === 'summary' && isCorpRedesigned && (
+                            <div className={crHw ? 'cr-nc-page' : undefined}>
+                                <CrBoundary key={navKey} id="node-health">
+                                    <CrNodeHealth node={node} clusterId={clusterId} metrics={clusterMetrics?.[node]} summary={data.summary}
+                                        hw={crHw ? { read: data.sensorsRead, readAt: data.sensorsAt, bmc: crBmc } : null} loading={loading}
+                                        onPerf={() => { setMonitorSubTab('performance'); setActiveDetailTab('monitor'); }}
+                                        onHardware={() => setActiveDetailTab('hardware')} onReload={() => loadTabData('summary')} />
+                                </CrBoundary>
+                                {crHw && (
+                                    <CrBoundary key={`${navKey}/sysinfo`} id="node-sysinfo">
+                                        <CrNodeSysInfo node={node} summary={data.summary} metrics={metrics} nodeIp={nodeIp} nodeIpSource={nodeIpSource}
+                                            network={data.network} guests={nodeVms} onOpenGuests={() => setActiveDetailTab('vms')}
+                                            onOpenNetwork={() => { setConfigSubTab('network'); setActiveDetailTab('configure'); }} />
+                                    </CrBoundary>
+                                )}
+                            </div>
+                        )}
                         {/* Summary Tab */}
-                        {activeDetailTab === 'summary' && (
+                        {activeDetailTab === 'summary' && !crHw && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                 {/* Host Details card */}
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
@@ -5699,7 +5851,8 @@
                                     </table>
                                 </div>
 
-                                {/* Capacity & Usage card */}
+                                {/* Capacity & Usage card - LW Nov 2026: the preview has these figures in its health tiles, with their limits */}
+                                {!isCorpRedesigned && (
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('capacityUsage')}</span>
@@ -5732,6 +5885,7 @@
                                         ))}
                                     </div>
                                 </div>
+                                )}
 
                                 {/* Hardware card */}
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
@@ -5741,9 +5895,9 @@
                                     <table className="corp-property-grid">
                                         <tbody>
                                             <tr><td>CPU</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
-                                            <tr><td>{t('totalRam')}</td><td>{formatBytes(ramTotal)}</td></tr>
+                                            <tr><td>{t('totalRam')}</td><td>{isCorpRedesigned && !(ramTotal > 0) ? '-' : formatBytes(ramTotal)}</td></tr>
                                             <tr><td>{t('networkInterfaces')}</td><td>{data.network ? (Array.isArray(data.network) ? data.network.length : '-') : '-'}</td></tr>
-                                            <tr><td>{t('rootFilesystem')}</td><td>{formatBytes(rootTotal)}</td></tr>
+                                            <tr><td>{t('rootFilesystem')}</td><td>{isCorpRedesigned && !(rootTotal > 0) ? '-' : formatBytes(rootTotal)}</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -5774,7 +5928,15 @@
                                     <button className={`corp-subnav-item ${monitorSubTab === 'timeline' ? 'active' : ''}`} onClick={() => setMonitorSubTab('timeline')} data-corp-node-timeline>{t('tlTab')}</button>
                                 </div>
                                 <div className="flex-1 pl-4">
-                                    {monitorSubTab === 'performance' && (
+                                    {/* LW Nov 2026 - the figures, the charts and their data quality of the preview (cr_perf.js) */}
+                                    {monitorSubTab === 'performance' && isCorpRedesigned && (
+                                        <CrBoundary key={navKey} id="node-perf">
+                                            <CrNodePerf node={node} clusterId={clusterId} kind={crKind} live={clusterMetrics?.[node]} summary={data.summary}
+                                                p={crPerf} loading={loading} range={perfTimeframe} onRange={handlePerfTimeframeChange}
+                                                onReload={() => loadTabData('performance')} zoom={perfZoom} authFetch={authFetch} />
+                                        </CrBoundary>
+                                    )}
+                                    {monitorSubTab === 'performance' && !isCorpRedesigned && (
                                         <div className="space-y-4">
                                             <div className="flex items-center justify-between">
                                                 <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('performance')}</span>
@@ -5819,7 +5981,13 @@
                                                 if (vm) onSelectVm(vm);
                                             } : undefined} />
                                     )}
-                                    {monitorSubTab === 'tasks' && (
+                                    {monitorSubTab === 'tasks' && (isCorpRedesigned ? (
+                                        // LW Nov 2026 - the preview: filters, search and the log of a task (cr_node.js)
+                                        <CrBoundary key={navKey} id="node-tasks">
+                                            <CrNodeTasks node={node} clusterId={clusterId} kind={crKind} read={data.tasksRead} loading={loading}
+                                                authFetch={authFetch} onReload={() => loadTabData('tasks')} guests={nodeVms} onOpenGuest={onSelectVm} />
+                                        </CrBoundary>
+                                    ) : (
                                         <div>
                                             <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('tasks')}</span>
                                             {loading && !data.tasks ? (
@@ -5841,7 +6009,7 @@
                                                 </table>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
                                 </div>
                             </div>
                         )}
@@ -5849,7 +6017,7 @@
                         {/* Configure Tab */}
                         {activeDetailTab === 'configure' && (
                             <div className="flex gap-0" style={{minHeight: '400px'}}>
-                                <div className="corp-subnav">
+                                <div className="corp-subnav" onClickCapture={crHw ? (e => crNcSubnavHold(e, crIsDirty, crAsk)) : undefined}>
                                     <div className="corp-subnav-header">{t('network')}</div>
                                     <button className={`corp-subnav-item ${configSubTab === 'network' ? 'active' : ''}`} onClick={() => setConfigSubTab('network')}>{t('network')}</button>
                                     <div className="corp-subnav-header">{t('systemInfo')}</div>
@@ -5868,16 +6036,54 @@
                                     <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (!data.ceph) loadTabData('ceph'); }}>Ceph</button>
                                 </div>
                                 <div className="flex-1 pl-4">
-                                    {configSubTab === 'dns' && data.dns === null && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
-                                    {configSubTab === 'hosts' && data.hosts === null && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                    {configSubTab === 'dns' && data.dns === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                    {configSubTab === 'hosts' && data.hosts === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                    {/* LW Nov 2026 - the preview draws these five of a PVE node in section cards (cr_nodecfg.js), outside
+                                        the fieldset so a standby can still read again; the writes take readOnly and the classic handlers */}
+                                    {crSys && (
+                                        <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-cfg">
+                                            <CrNodeSystemCfg tab={configSubTab} node={node} data={data} loading={loading} saving={saving} readOnly={haReadOnly}
+                                                onRetry={() => loadTabData('system')}
+                                                onSaveDns={form => handleSave('dns', form, 'DNS saved')}
+                                                onSaveHosts={text => handleSave('hosts', { data: text }, 'Hosts saved', 'POST')}
+                                                onSaveTime={tz => handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'))}
+                                                cert={{ open: showCertUpload, setOpen: setShowCertUpload, form: certForm, setForm: setCertForm, upload: handleCertUpload }}
+                                                onDirty={crOnDirty} />
+                                        </CrBoundary>
+                                    )}
+                                    {/* LW Nov 2026 - LVM, LVM-Thin, ZFS, Repositories and Ceph of a PVE node as cards; reads stay open on a
+                                        standby, the repository switch and apt update take readOnly and the classic handlers */}
+                                    {crStore && (
+                                        <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-store">
+                                            <CrNodeStoreCfg tab={configSubTab} node={node} clusterId={clusterId} data={data} loading={loading} saving={saving} readOnly={haReadOnly}
+                                                zfsPool={zfsPool} onZfsPool={setZfsPool}
+                                                onReloadDisks={() => loadTabData('disks')} onReloadRepos={() => loadTabData('repos')} onReloadCeph={() => loadTabData('ceph')}
+                                                onToggleRepo={handleRepoToggle}
+                                                onAptUpdate={handleAptUpdate} onDirty={crOnDirty} />
+                                        </CrBoundary>
+                                    )}
+                                    {crDisks && (
+                                        <CrNodeDisks key={navKey} node={node} clusterId={clusterId} read={data.disksRead} loading={loading}
+                                            authFetch={authFetch} onReload={() => loadTabData('disks')} />
+                                    )}
                                     <fieldset disabled={haReadOnly} className="contents">
-                                    {loading && !data.network && !data.dns && !data.disks ? (
+                                    {/* LW Nov 2026 - the preview keeps its network card (and an open Apply dialog) while a failed list is read again */}
+                                    {loading && !data.network && !data.dns && !data.disks && !crSys && !crStore && !crDisks
+                                        && !(crHw && configSubTab === 'network' && data.network === null) ? (
                                         <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
                                     ) : (
                                         <>
                                             {/* LW: Feb 2026 - full network editing like modern NodeModal */}
                                             {configSubTab === 'network' && (
                                                 <div>
+                                                    {/* LW Nov 2026 - the preview: by kind, what waits, Apply and Revert behind a summary (cr_node.js) */}
+                                                    {isCorpRedesigned && crKind === 'proxmox' ? (
+                                                        <CrNodeNetwork network={data.network} loading={loading} clusterId={clusterId} node={node}
+                                                            nodeIp={nodeIp} nodeIpSource={nodeIpSource} clusterHost={clusterHost} authFetch={authFetch} addToast={addToast}
+                                                            readOnly={haReadOnly} onReload={() => loadTabData('network')} onDelete={deleteNetIface}
+                                                            onEdit={iface => setData(prev => ({...prev, editIface: {...iface, isNew: false}}))}
+                                                            onCreate={ifType => setData(prev => ({...prev, editIface: { type: ifType, iface: '', isNew: true, autostart: 1 }}))} />
+                                                    ) : (<>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('network')}</span>
                                                         <div className="flex gap-1">
@@ -5920,11 +6126,7 @@
                                                                                 className="p-1 hover:bg-[#324f61]" title="Edit" style={{color: '#49afd9'}}>
                                                                                 <Icons.Cog className="w-3 h-3" />
                                                                             </button>
-                                                                            <button onClick={async () => {
-                                                                                    if (!confirm(`${t('delete')} ${iface.iface}?`)) return;
-                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE' });
-                                                                                    addToast(res && res.ok ? `${iface.iface} ${t('deleted')}` : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network');
-                                                                                }}
+                                                                            <button onClick={() => deleteNetIface(iface)}
                                                                                 className="p-1 hover:bg-[#324f61]" title="Delete" style={{color: '#e57373'}}>
                                                                                 <Icons.Trash className="w-3 h-3" />
                                                                             </button>
@@ -5935,6 +6137,7 @@
                                                             {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
                                                         </tbody>
                                                     </table>
+                                                    </>)}
                                                     {/* LW: Feb 2026 - edit/create interface modal */}
                                                     {data.editIface && (
                                                         <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{background: 'rgba(0,0,0,0.7)'}}>
@@ -6107,7 +6310,7 @@
                                                     )}
                                                 </div>
                                             )}
-                                            {configSubTab === 'dns' && (
+                                            {configSubTab === 'dns' && !crSys && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('dns')}</span>
@@ -6142,7 +6345,7 @@
                                                     )}
                                                 </div>
                                             )}
-                                            {configSubTab === 'hosts' && (
+                                            {configSubTab === 'hosts' && !crSys && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hostsFile')}</span>
@@ -6165,7 +6368,7 @@
                                                     )}
                                                 </div>
                                             )}
-                                            {configSubTab === 'time' && (
+                                            {configSubTab === 'time' && !crSys && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('timeConfig')}</span>
                                                     <table className="corp-property-grid">
@@ -6192,7 +6395,7 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'certs' && (
+                                            {configSubTab === 'certs' && !crSys && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('certificates')}</span>
@@ -6224,7 +6427,7 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'syslog' && (
+                                            {configSubTab === 'syslog' && !crSys && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('syslog')}</span>
@@ -6237,7 +6440,7 @@
                                                     </pre>
                                                 </div>
                                             )}
-                                            {configSubTab === 'disks' && (
+                                            {configSubTab === 'disks' && !crHw && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('disks')}</span>
                                                     <table className="corp-datagrid">
@@ -6256,7 +6459,7 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'lvm' && (
+                                            {configSubTab === 'lvm' && !crStore && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmStorage')}</span>
                                                     <table className="corp-datagrid">
@@ -6270,7 +6473,7 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'lvmthin' && (
+                                            {configSubTab === 'lvmthin' && !crStore && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmThinStorage')}</span>
                                                     <table className="corp-datagrid">
@@ -6284,11 +6487,11 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'repos' && (
+                                            {configSubTab === 'repos' && !crStore && (
                                                 <div>
                                                     <div className="flex items-center justify-between mb-3">
                                                         <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('repositories')}</span>
-                                                        <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' }); addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error'); }}
+                                                        <button onClick={handleAptUpdate}
                                                             className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
                                                             <Icons.RefreshCw className="w-3 h-3" /> apt update
                                                         </button>
@@ -6315,7 +6518,7 @@
                                                     </table>
                                                 </div>
                                             )}
-                                            {configSubTab === 'ceph' && (
+                                            {configSubTab === 'ceph' && !crStore && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>Ceph</span>
                                                     {data.ceph && !data.ceph.available ? (
@@ -6340,7 +6543,7 @@
                                     )}
                                     </fieldset>
                                     {/* LW Oct 2026 - the pools and the pool view only read: outside the standby lock */}
-                                    {configSubTab === 'zfs' && !(loading && !data.network && !data.dns && !data.disks) && (
+                                    {configSubTab === 'zfs' && !crStore && !(loading && !data.network && !data.dns && !data.disks) && (
                                         <div>
                                             <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('zfsStorage')}</span>
                                             <table className="corp-datagrid">
@@ -6370,7 +6573,12 @@
                         )}
 
                         {/* VMs Tab */}
-                        {activeDetailTab === 'vms' && (
+                        {activeDetailTab === 'vms' && (isCorpRedesigned ? (
+                            // LW Nov 2026 - the preview: search, filters and sorting of the node's guests (cr_node.js)
+                            <CrBoundary key={navKey} id="node-guests">
+                                <CrNodeGuests node={node} guests={nodeVms} onSelectVm={onSelectVm} />
+                            </CrBoundary>
+                        ) : (
                             <div>
                                 <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('vmsOnNode')} ({nodeVms.length})</span>
                                 <table className="corp-datagrid">
@@ -6396,16 +6604,23 @@
                                     </tbody>
                                 </table>
                             </div>
-                        )}
+                        ))}
 
                         {/* Hardware Tab (#609 in-band BMC) */}
                         {activeDetailTab === 'hardware' && (
                             <div className="space-y-6">
+                                {/* LW Nov 2026 - the preview: every sensor by kind with its limits and state, the history (cr_node.js) */}
+                                {crHw && (
+                                    <CrNodeHardware node={node} read={data.sensorsRead} temps={data.tempsRead} bmc={crBmc}
+                                        loading={loading} onReload={() => loadTabData('sensors')} />
+                                )}
+                                {crHw && <div data-cr-nh-bmc-anchor="" />}
                                 <fieldset disabled={haReadOnly} className="contents">
-                                    <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
+                                    <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders}
+                                        {...(crHw ? { onCrState: setCrBmc } : {})} />
                                 </fieldset>
                                 {/* #601 — lm-sensors panel + temperature chart (was fetched but never rendered on the Corporate node view) */}
-                                {data.sensors && data.sensors.length > 0 && (
+                                {!crHw && data.sensors && data.sensors.length > 0 && (
                                     <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                         <div className="flex items-center justify-between mb-3">
                                             <h4 className="font-medium text-white flex items-center gap-2">
@@ -6525,6 +6740,7 @@
                             onCancel={() => setShowMaintConfirm(false)}
                             onConfirm={() => { setShowMaintConfirm(false); onMaintenanceToggle(node, true, maintOptions); }} />
                     )}
+                    {crLeave && <CrNcLeave node={node} ids={Object.keys(crDirtyRef.current)} onKeep={() => setCrLeave(null)} onDiscard={crDiscard} />}
                 </div>
             );
         }

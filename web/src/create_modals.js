@@ -3468,7 +3468,7 @@
                                         <p className="text-xs text-gray-400 mb-3">
                                             {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
                                         </p>
-                                        <div className="grid grid-cols-3 gap-3">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                             {/* Modern layout card */}
                                             <button
                                                 onClick={async () => {
@@ -3540,6 +3540,49 @@
                                                 <div className="text-center">
                                                     <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
                                                     <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                </div>
+                                            </button>
+                                            {/* LW Oct 2026 - Corporate Redesigned (Preview): Corporate with the redesigned skin */}
+                                            <button
+                                                data-layout-pick="corporate-redesigned"
+                                                onClick={async () => {
+                                                    const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
+                                                    const result = await updatePreferences({ ui_layout: 'corporate-redesigned', theme: corpTheme });
+                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
+                                                }}
+                                                className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
+                                                    user?.ui_layout === 'corporate-redesigned'
+                                                        ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                        : 'border-proxmox-border hover:border-gray-500'
+                                                }`}
+                                            >
+                                                <div className="h-16 rounded mb-2 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                                    {/* preview: slim header, inventory rail, dense rows */}
+                                                    <div className="absolute left-0 right-0 top-0 h-2" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                                        <div className="absolute top-0.5 left-1 w-3 h-1" style={{ background: '#55b6d0' }} />
+                                                    </div>
+                                                    <div className="absolute left-0 top-2 bottom-0 w-5" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                                        <div className="mt-1 ml-1 space-y-1">
+                                                            <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                        </div>
+                                                    </div>
+                                                    <div className="absolute right-1.5 left-7 bottom-1.5 space-y-1" style={{ top: 14, background: '#20333e', border: '1px solid #293d47' }}>
+                                                        <div className="h-1" style={{ background: '#263c47' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                    </div>
+                                                    {user?.ui_layout === 'corporate-redesigned' && (
+                                                        <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
+                                                            <Icons.Check className="w-3 h-3 text-white" />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="text-center">
+                                                    <span className="text-xs font-medium inline-flex items-center justify-center gap-1 flex-wrap">{t('layoutCorporateRedesigned')} <span className="text-[8px] px-1 rounded uppercase" style={{ background: 'rgba(85,182,208,0.15)', color: '#55b6d0' }}>{t('preview')}</span></span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                                 </div>
                                             </button>
                                             {/* Cloud layout card (Preview) — NS 2026-06-05 */}
