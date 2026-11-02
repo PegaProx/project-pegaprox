@@ -1858,7 +1858,9 @@
             // esc to close
             React.useEffect(() => {
                 const onKey = (e) => {
-                    if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+                    // a menu that just closed is gone from the page before this listener is removed,
+                    // and its Escape belongs to whatever the menu opened (the task log of a row)
+                    if (e.key === 'Escape' && menuRef.current) { e.stopPropagation(); onClose(); }
                 };
                 document.addEventListener('keydown', onKey, true);
                 return () => document.removeEventListener('keydown', onKey, true);
