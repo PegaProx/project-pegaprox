@@ -1779,6 +1779,8 @@ def main(argv=None, env=None, transport=None, now=None, stdout=None):
                       + ' (the act job does that on ' + baseline['default_branch'] + ' with confirm UNFREEZE)'])
             write_env_file(env, 'GITHUB_STEP_SUMMARY', render_summary(ctx))
             if args.json:
+                if '..' in args.json:
+                    raise Exception('Invalid file path')
                 Path(args.json).write_text(json.dumps([f.as_dict() for f in rep.findings], indent=1) + '\n',
                                            encoding='utf-8')
         except Exception as e:
