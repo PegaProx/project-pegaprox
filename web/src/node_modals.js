@@ -18,6 +18,29 @@
             return { dns: null, dnsError: said || (res ? `HTTP ${res.status}` : '') };
         }
 
+        // LW Nov 2026 - PVE answers disks/lvm as a tree, { leaf, children: [{ name, size, free,
+        // children: [pv...] }] }, and every reader here wants a list of { vg, size, free }. Read
+        // as a list it was always empty: no volume group in either layout and none to pick when
+        // creating a thin pool.
+        function nodeLvmVgs(raw) {
+            if (Array.isArray(raw)) return raw;
+            const kids = raw && typeof raw === 'object' && Array.isArray(raw.children) ? raw.children : [];
+            return kids.filter(vg => vg && typeof vg === 'object')
+                .map(vg => ({ vg: vg.name, size: vg.size, free: vg.free, pvs: Array.isArray(vg.children) ? vg.children : [] }));
+        }
+
+        // disks/lvmthin carries used and lv_size in bytes (metadata_used / metadata_size beside them);
+        // usage is the share of the data used, in percent, left out when the read has no numbers
+        function nodeThinPools(raw) {
+            if (!Array.isArray(raw)) return [];
+            return raw.map(tp => {
+                if (!tp || typeof tp !== 'object') return tp;
+                const used = Number(tp.used), size = Number(tp.lv_size);
+                const usage = size > 0 && Number.isFinite(used) && tp.used !== null && tp.used !== '' ? Math.round(used / size * 1000) / 10 : undefined;
+                return usage === undefined ? tp : { ...tp, usage };
+            });
+        }
+
         // Node Shell Terminal Component using xterm.js with SSH
         function NodeShellTerminal({ node, clusterId, addToast }) {
             const { t } = useTranslation();
@@ -1631,8 +1654,8 @@
                     }
                     else if (tab === 'disks') {
                         newData.disks = results[0] || [];
-                        newData.lvm = results[1] || [];
-                        newData.lvmthin = results[2] || [];
+                        newData.lvm = nodeLvmVgs(results[1]);
+                        newData.lvmthin = nodeThinPools(results[2]);
                         newData.zfs = results[3] || [];
                     }
                     else if (tab === 'performance') newData.performance = results[0] || {};
@@ -5487,8 +5510,8 @@
                         }
                         else if (tab === 'disks') {
                             newData.disks = results[0] || [];
-                            newData.lvm = results[1] || [];
-                            newData.lvmthin = results[2] || [];
+                            newData.lvm = nodeLvmVgs(results[1]);
+                            newData.lvmthin = nodeThinPools(results[2]);
                             newData.zfs = results[3] || [];
                         }
                         else if (tab === 'repos') newData.repos = results[0]?.repositories || [];
@@ -6252,7 +6275,7 @@
                                                         <thead><tr><th>{t('pool')}</th><th>VG</th><th>{t('size')}</th><th>{t('usedSpace')}</th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.lvmthin) ? data.lvmthin : []).map((tp, i) => (
-                                                                <tr key={i}><td>{tp.lv || '-'}</td><td>{tp.vg || '-'}</td><td>{formatBytes(tp.lv_size)}</td><td>{tp.metadata_usage ? `${(tp.metadata_usage * 100).toFixed(1)}%` : '-'}</td></tr>
+                                                                <tr key={i}><td>{tp.lv || '-'}</td><td>{tp.vg || '-'}</td><td>{formatBytes(tp.lv_size)}</td><td>{tp.usage !== undefined ? `${tp.usage}%` : '-'}</td></tr>
                                                             ))}
                                                             {(!data.lvmthin || data.lvmthin.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No LVM-Thin pools</td></tr>}
                                                         </tbody>
