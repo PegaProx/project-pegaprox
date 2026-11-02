@@ -65,6 +65,24 @@ def test_sel_newest_first_and_severity():
     assert ev[0]['time'] == '07/14/2026 21:30:05'
 
 
+def test_sel_threshold_severity_follows_the_ipmi_order():
+    # threshold and severity descriptions as ipmitool prints them (include/ipmitool/ipmi_sel.h)
+    want = {
+        'Upper Non-critical going high': 'warning',
+        'Lower Non-critical going low': 'warning',
+        'Transition to Non-critical from OK': 'warning',
+        'Upper Critical going high': 'critical',
+        'Transition to Critical from less severe': 'critical',
+        'Upper Non-recoverable going high': 'critical',
+        'Transition to Non-recoverable': 'critical',
+        'Transition to OK': 'info',
+    }
+    sel = '\n'.join(f'{i} | 07/14/2026 | 21:30:05 | Temperature CPU1 Temp | {d} | Asserted'
+                    for i, d in enumerate(want, 1))
+    got = {e['description'].split(' — ')[0]: e['severity'] for e in bmc.parse_sel(sel)}
+    assert got == want
+
+
 def _full(sdr=SDR, chassis=CHASSIS, power=POWER, fru=FRU, sel=SEL):
     return (f"__PP_SENSORS__\n{sdr}\n__PP_CHASSIS__\n{chassis}\n"
             f"__PP_POWER__\n{power}\n__PP_FRU__\n{fru}\n__PP_SEL__\n{sel}\n")

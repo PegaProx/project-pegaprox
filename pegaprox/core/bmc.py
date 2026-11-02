@@ -363,7 +363,11 @@ def parse_sel(text, limit=25):
         desc = cols[4] if len(cols) > 4 else ''
         state = cols[5] if len(cols) > 5 else ''
         low = (desc + ' ' + state + ' ' + sensor).lower()
-        sev = 'critical' if any(w in low for w in ('fail', 'critical', 'fault', 'error', 'lost')) \
+        # IPMI thresholds run non-critical < critical < non-recoverable. 'non-critical'
+        # holds 'critical', so it comes out before the critical test.
+        hard = low.replace('non-critical', '')
+        sev = 'critical' if any(w in hard for w in ('fail', 'critical', 'non-recoverable',
+                                                    'fault', 'error', 'lost')) \
             else 'warning' if any(w in low for w in ('warn', 'non-critical', 'degrad', 'intrusion')) \
             else 'info'
         # MK Aug 2026 (#686) — track assert vs deassert so the health rollup can tell a
