@@ -345,6 +345,15 @@ def parse_fru(text):
     }
 
 
+# IPMI levels run non-critical < critical < non-recoverable. The threshold and severity
+# descriptions as ipmitool prints them (include/ipmitool/ipmi_sel.h): "Upper Non-critical
+# going high", "Transition to Critical from less severe", "Transition to OK", ...
+_SEL_LEVEL = re.compile(r'\b(?:lower|upper) (non-critical|critical|non-recoverable) going\b'
+                        r'|\btransition to (ok|non-critical|critical|non-recoverable)\b')
+_SEL_LEVEL_SEVERITY = {'ok': 'info', 'non-critical': 'warning', 'critical': 'critical',
+                       'non-recoverable': 'critical'}
+
+
 def parse_sel(text, limit=25):
     """`ipmitool sel elist` -> recent hardware events (newest first).
 
@@ -363,13 +372,18 @@ def parse_sel(text, limit=25):
         desc = cols[4] if len(cols) > 4 else ''
         state = cols[5] if len(cols) > 5 else ''
         low = (desc + ' ' + state + ' ' + sensor).lower()
-        # IPMI thresholds run non-critical < critical < non-recoverable. 'non-critical'
-        # holds 'critical', so it comes out before the critical test.
-        hard = low.replace('non-critical', '')
-        sev = 'critical' if any(w in hard for w in ('fail', 'critical', 'non-recoverable',
-                                                    'fault', 'error', 'lost')) \
-            else 'warning' if any(w in low for w in ('warn', 'non-critical', 'degrad', 'intrusion')) \
-            else 'info'
+        level = _SEL_LEVEL.search(desc.lower())
+        if level:
+            # a threshold or severity event names its own level; a sensor name with
+            # 'lost' in it does not make "Transition to Non-critical from OK" critical
+            sev = _SEL_LEVEL_SEVERITY[level.group(1) or level.group(2)]
+        else:
+            # 'non-critical' holds 'critical', so it comes out before the critical test
+            hard = low.replace('non-critical', '')
+            sev = 'critical' if any(w in hard for w in ('fail', 'critical', 'non-recoverable',
+                                                        'fault', 'error', 'lost')) \
+                else 'warning' if any(w in low for w in ('warn', 'non-critical', 'degrad', 'intrusion')) \
+                else 'info'
         # MK Aug 2026 (#686) — track assert vs deassert so the health rollup can tell a
         # currently-active fault from a months-old event that has since cleared.
         _st = state.lower()
