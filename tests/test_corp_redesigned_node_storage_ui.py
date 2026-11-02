@@ -154,7 +154,8 @@ def _sec(page, sid):
 
 
 def _kv(scope, k):
-    return scope.locator(f'[data-cr-nc-k="{k}"] dd').first.inner_text().strip()
+    # round 9 B2: a key value grid (dd) or a table cell; LVM, LVM-Thin, ZFS and the repositories are tables now
+    return scope.locator(f'[data-cr-nc-k="{k}"] > dd, td[data-cr-nc-k="{k}"], span[data-cr-nc-k="{k}"]').first.inner_text().strip()
 
 
 def _wait_sent(app, n=1):
@@ -295,7 +296,7 @@ def test_runtime_lvm_volume_groups_from_the_tree(open_app):
     # a plain share: allocation is not a warning by itself
     assert vg.locator('[data-cr-nv-usage]').get_attribute('data-cr-nv-tone') == 'info'
     assert vg.locator('[data-cr-nv-pv="/dev/nvme0n1p3"]').count() == 1 and _kv(vg, 'thin') == 'data'
-    assert '4 logical volumes' in vg.locator('.cr-nc-item-head').inner_text()
+    assert _kv(vg, 'lvs') == '4'
     assert _kv(sec.locator('[data-cr-nv-vg="ceph-5a1f"]'), 'thin') == 'none'
     # the disks read for all four sub tabs, as often as classic Corporate makes it
     page.wait_for_timeout(400)

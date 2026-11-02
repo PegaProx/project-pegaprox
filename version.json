@@ -309,6 +309,8 @@
     "web/src/cr_vmcfg.js",
     "web/src/cr_node.js",
     "web/src/cr_nodecfg.js",
+    "web/src/cr_nodemisc.js",
+    "web/src/cr_modules.js",
     "web/src/cr_nodestore.js",
     "web/src/cr_whatif.js",
     "web/src/create_modals.js",

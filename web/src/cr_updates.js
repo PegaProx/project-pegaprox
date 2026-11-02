@@ -4,11 +4,12 @@
         // reads three things: the server's copy of the last check (/updates-overview, it asks no
         // node), the rolling update of the cluster and its schedule. A check runs apt update on
         // every online node, so it only starts from its own button and dialog; nothing installs
-        // from this page except a rolling update started in its dialog or armed in the schedule.
+        // from this page except a rolling update started in its dialog or armed in the schedule,
+        // and one node or one backup server upgraded from its own dialog.
         // What the sources do not carry is said so: no security or critical class for Proxmox VE
-        // (the list has no suite), no "reboot required" (only "kernel package pending"), no guest
-        // packages, no package versions in the history. Unread, failed and missing are states,
-        // never a 0.
+        // (the list has no suite) unless a CVE scan of this session read it, no "reboot required"
+        // (only "kernel package pending", or the scan's word), no guest packages, no package
+        // versions in the history. Unread, failed and missing are states, never a 0.
         // ═══════════════════════════════════════════════════════════
 
         const CR_UPD = {
@@ -159,6 +160,60 @@
         const crUpdPve = (v) => { const m = /pve-manager\/([^/\s]+)/.exec(String(v || '')); return m ? m[1] : ''; };
         const crUpdKver = (v) => { const p = String(v || '').trim().split(/\s+/); return p[0] === 'Linux' && p[1] ? p[1] : (p[0] || ''); };
         const crUpdSecs = (s) => (s >= 3600 ? `${s / 3600} h` : `${Math.round(s / 60)} min`);
+
+        // --- one node or one backup server on its own -------------------------------------
+        // The upgrade of a single host as the classic section runs it: POST .../nodes/<n>/update
+        // {reboot} (again with force when the server asks for maintenance mode first) and
+        // POST /pbs/<id>/update {reboot}, then the task read every 5 s until it ends, at most
+        // 15 minutes. The task fields are manager.UpdateTask.to_dict and pbs get_update_status.
+        const CR_UPD_JOB = { poll: 5000, cap: 15 * 60 * 1000 };
+        const CR_UPD_JOB_ACTIVE = ['starting', 'updating', 'rebooting', 'waiting_online'];
+        const CR_UPD_JOB_KEY = { starting: 'crUpdJobStarting', updating: 'crUpdJobUpdating', rebooting: 'crUpdJobRebooting',
+                                 waiting_online: 'crUpdJobWaiting', completed: 'crUpdJobCompleted', failed: 'crUpdJobFailed' };
+        const crUpdJobTone = (s) => (s === 'completed' ? 'success' : s === 'failed' ? 'error' : CR_UPD_JOB_ACTIVE.includes(s) ? 'info' : 'neutral');
+        const crUpdJobOn = (j) => !!(j && j.task && CR_UPD_JOB_ACTIVE.includes(j.task.status));
+        // an output line is {timestamp, text} on an update task (#964), a bare string elsewhere
+        const crUpdLine = (l) => (l && typeof l === 'object' && l.text != null ? String(l.text) : String(l == null ? '' : l));
+        // the task stamps are the server's local time without a zone
+        const crUpdStamp = (v) => (typeof v === 'string' && v ? v.replace('T', ' ').slice(0, 19) : '');
+        // the classic retry: the server refuses a node outside maintenance mode with this German word
+        const crUpdNeedsForce = (msg) => typeof msg === 'string' && msg.includes('Wartungsmodus');
+        async function crUpdJobGet(authFetch, url) {
+            const r = await crDcGet(authFetch, url);
+            // a failed task answers 200 with its error: that is the task, not a failed read
+            if (r.code === 200 && r.body && typeof r.body === 'object') return { state: 'ok', task: r.body.status ? r.body : null, at: Date.now() };
+            return { ...r, at: Date.now() };
+        }
+
+        // What a CVE scan of this cluster in this session says per node. The scan reads
+        // apt-get -s with the suite of each package (manager.scan_node_packages), so it can tell
+        // a security update; the update list of the check has no suite. Only the scan's own
+        // figures, with its time: a node it did not read stays "not scanned".
+        function crUpdCveView(cve, cid) {
+            if (!cve || typeof cve !== 'object' || cve.cluster_id !== cid || !Array.isArray(cve.nodes)) return null;
+            const by = {};
+            let ok = 0, security = 0, critical = 0, reboot = 0;
+            cve.nodes.forEach(n => {
+                if (!n || typeof n.node !== 'string') return;
+                if (n.error) { by[n.node] = { ok: false, why: String(n.error) }; return; }
+                const pk = {};
+                (Array.isArray(n.packages) ? n.packages : []).forEach(p => { if (p && p.name) pk[p.name] = p; });
+                const list = Object.values(pk);
+                const sec = typeof n.security_count === 'number' ? n.security_count : list.filter(p => p.security).length;
+                const crit = list.filter(p => p.security && p.severity === 'critical').length;
+                by[n.node] = { ok: true, security: sec, critical: crit, reboot: n.reboot_required === true, pk };
+                ok += 1; security += sec; critical += crit;
+                if (n.reboot_required === true) reboot += 1;
+            });
+            return { at: cve.scanned_at || null, by, ok, n: cve.nodes.length, security, critical, reboot };
+        }
+        // the scan's word on one package of the list: only for the same available version
+        function crUpdPkgSec(cvNode, p) {
+            const s = cvNode && cvNode.ok && p ? cvNode.pk[p.Package] : null;
+            if (!s || !s.security) return null;
+            if (s.available && p.Version && s.available !== p.Version) return null;
+            return s.severity === 'critical' ? 'critical' : 'security';
+        }
 
         // --- what this browser holds for the session: the check answers and the headroom reads -------
 
@@ -1051,10 +1106,267 @@
 
         // --- the side panel of a node: its packages -----------------------------------------------------
 
-        function CrUpdNodeDetail({ row, chk, model, kind, may, authFetch, cid, nav, t }) {
+        // The pending packages of one host: installed and available version, origin and kind. A
+        // security mark only where a CVE scan of this session named the same version (cvNode)
+        function CrUpdPkgTable({ list, cvNode, t, id = '' }) {
+            const [all, setAll] = useState(false);
+            const shown = all ? list : list.slice(0, CR_UPD.rows);
+            return (
+                <>
+                    <div className="cr-upd-pkgs-wrap">
+                        <table className="cr-upd-pkgs" data-cr-upd-pkgs={id}>
+                            <thead>
+                                <tr>
+                                    <th scope="col">{t('package')}</th>
+                                    <th scope="col">{t('currentVersion')}</th>
+                                    <th scope="col">{t('newVersion')}</th>
+                                    <th scope="col">{t('crUpdOrigin')}</th>
+                                    <th scope="col">{t('crUpdKind')}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {shown.map((p, i) => {
+                                    const k = crUpdKernelKind(p && p.Package);
+                                    const sec = crUpdPkgSec(cvNode, p);
+                                    return (
+                                        <tr key={`${p.Package}-${i}`} data-cr-upd-pkg={p.Package || ''}>
+                                            <td className="cr-mono">{p.Package || '-'}</td>
+                                            <td className="cr-mono cr-upd-ver">{p.OldVersion || <span className="cr-muted" title={t('crUpdNewPkgHint')}>{t('crUpdNewPkg')}</span>}</td>
+                                            <td className="cr-mono cr-upd-ver">{p.Version || '-'}</td>
+                                            <td>{p.Origin || '-'}</td>
+                                            <td>
+                                                {sec && <span data-cr-upd-flag={sec}><CrBadge tone={sec === 'critical' ? 'error' : 'warning'} dot={false} title={t('crUpdSecPkgHint')}>
+                                                    {sec === 'critical' ? t('crUpdSecCritical') : t('crUpdSecShort')}</CrBadge></span>}
+                                                {k === 'image' && <span data-cr-upd-flag="kernel"><CrBadge tone="warning" dot={false} title={t('crUpdKernelHint')}>{t('crUpdKernelShort')}</CrBadge></span>}
+                                                {k === 'helper' && <span data-cr-upd-flag="helper"><CrBadge tone="neutral" dot={false}>{t('crUpdKernelHelper')}</CrBadge></span>}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                    {list.length > shown.length && (
+                        <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={() => setAll(true)} data-cr-upd-pkg-all="">
+                            {crFill(t('crUpdPkgAll'), { n: list.length })}
+                        </button>
+                    )}
+                </>
+            );
+        }
+
+        // The upgrade task of one host as the server holds it: state, phase, times, the packages it
+        // upgraded and the last lines of its output. Nothing held = no row, not a "never"
+        function CrUpdJob({ job, id, t }) {
+            if (!job) return null;
+            if (job.state === 'loading') return <p className="cr-upd-line cr-muted" role="status" data-cr-upd-job={id} data-state="loading">{t('crUpdReading')}</p>;
+            if (job.state !== 'ok') {
+                return <p className="cr-upd-line cr-upd-warn" data-cr-upd-job={id} data-state="unread">{crFill(t('crUpdJobUnread'), { why: crDcWhy(job, t) })}</p>;
+            }
+            const k = job.task;
+            if (!k) return <p className="cr-upd-line cr-muted" data-cr-upd-job={id} data-state="none">{t('crUpdJobNone')}</p>;
+            const lines = (Array.isArray(k.output_lines) ? k.output_lines : []).map(crUpdLine).filter(Boolean);
+            return (
+                <div className="cr-upd-job" data-cr-upd-job={id} data-state={k.status}>
+                    <div className="cr-upd-job-head">
+                        <CrBadge tone={crUpdJobTone(k.status)}>{CR_UPD_JOB_KEY[k.status] ? t(CR_UPD_JOB_KEY[k.status]) : String(k.status)}</CrBadge>
+                        {k.phase && CR_UPD_JOB_ACTIVE.includes(k.status) && <span className="cr-mono cr-muted">{k.phase}</span>}
+                        {job.capped && <span className="cr-upd-warn" data-cr-upd-job-capped="">{t('crUpdJobCapped')}</span>}
+                    </div>
+                    <dl className="cr-upd-dl">
+                        <dt>{t('crUpdStarted')}</dt>
+                        <dd className="cr-mono">{crUpdStamp(k.started_at) || <span className="cr-muted">{t('crUpdNotReported')}</span>}</dd>
+                        {k.completed_at && <><dt>{t('crUpdEnded')}</dt><dd className="cr-mono">{crUpdStamp(k.completed_at)}</dd></>}
+                        <dt>{t('crUpdRebootCol')}</dt>
+                        <dd>{k.reboot ? t('yes') : t('no')}</dd>
+                        {typeof k.packages_upgraded === 'number' && (k.status === 'completed' || k.packages_upgraded > 0) && (
+                            <><dt>{t('crUpdJobPkgs')}</dt><dd data-cr-upd-job-pkgs="">{k.packages_upgraded}</dd></>
+                        )}
+                    </dl>
+                    {k.error && <p className="cr-upd-line cr-upd-bad" role="alert" data-cr-upd-job-error="">{crDash(String(k.error))}</p>}
+                    {lines.length > 0 && <pre className="cr-hd-pre cr-upd-job-out" data-cr-upd-job-out="">{lines.map(crDash).join('\n')}</pre>}
+                    {k.status === 'completed' && <p className="cr-sb-fine" data-cr-upd-job-after="">{t('crUpdJobAfter')}</p>}
+                </div>
+            );
+        }
+
+        // Update one node: apt update and dist-upgrade on that node only, the reboot as chosen. The
+        // server asks for maintenance mode; without it the dialog asks again and sends force
+        function CrUpdNodeDialog({ row, canReboot, onCancel, onStart }) {
+            const { t } = useTranslation();
+            const [reboot, setReboot] = useState(!!row.kernel && canReboot);
+            const [step, setStep] = useState('ask');
+            const [busy, setBusy] = useState(false);
+            const [err, setErr] = useState('');
+            const go = async (force) => {
+                if (busy) return;
+                setBusy(true);
+                setErr('');
+                const r = await onStart(row.name, !!(reboot && canReboot), force);
+                setBusy(false);
+                if (r.needForce && !force) { setStep('force'); return; }
+                if (r.err) setErr(r.err);
+            };
+            const inMaint = !!(row.m && row.m.maintenance_mode);
+            return (
+                <CrUpdDialog id="node-update" title={crFill(t('crUpdNodeUpdTitle'), { node: row.name })} busy={busy} onCancel={onCancel}
+                    footer={(
+                        <>
+                            <CrButton onClick={onCancel} disabled={busy} data-cr-upd-cancel="">{t('cancel')}</CrButton>
+                            {step === 'ask' ? (
+                                <CrButton variant="primary" icon={busy ? <span className="cr-spinner" /> : <Icons.Download />} onClick={() => go(false)} disabled={busy}
+                                    data-cr-upd-confirm="node-update">{t('startUpdate')}</CrButton>
+                            ) : (
+                                <CrButton variant="danger" icon={busy ? <span className="cr-spinner" /> : <Icons.AlertTriangle />} onClick={() => go(true)} disabled={busy}
+                                    data-cr-upd-confirm="node-force">{t('crUpdNodeForce')}</CrButton>
+                            )}
+                        </>
+                    )}>
+                    <p className="cr-upd-text">{t('updateNodeDesc')}</p>
+                    <p className="cr-upd-line" data-cr-upd-node-count="">{crFill(t('crUpdNodeUpdCount'), { n: row.count })}</p>
+                    {row.kernel && (
+                        <CrUpdNote tone="warning" id="node-kernel"><p className="cr-strong">{t('kernelUpdateDetected')}</p><p>{t('rebootRecommended')}</p></CrUpdNote>
+                    )}
+                    {step === 'ask' && !inMaint && <p className="cr-sb-fine" data-cr-upd-node-maint="">{t('crUpdNodeNoMaint')}</p>}
+                    <label className={`cr-upd-opt${canReboot ? '' : ' cr-upd-opt-off'}`}>
+                        <input type="checkbox" checked={!!(reboot && canReboot)} disabled={!canReboot || busy || step === 'force'}
+                            onChange={e => setReboot(e.target.checked)} data-cr-upd-opt="node-reboot" />
+                        <span><span className="cr-strong">{t('rebootAfterUpdate')}</span>{!canReboot && <span className="cr-upd-hint">{t('crUpdWhyRebootPerm')}</span>}</span>
+                    </label>
+                    {step === 'force' && (
+                        <CrUpdNote tone="error" id="node-force">
+                            <p className="cr-strong">{t('nodeNotInMaintenance')}</p>
+                            <p>{t('forceUpdateWarning')}</p>
+                            <p>{t('continueAnyway')}</p>
+                        </CrUpdNote>
+                    )}
+                    {err && <p className="cr-upd-line cr-upd-bad" role="alert" data-cr-upd-dialog-error="">{crDash(err)}</p>}
+                </CrUpdDialog>
+            );
+        }
+
+        // Upgrade one backup server: apt dist-upgrade over SSH (the PBS API has none), reboot opt-in
+        function CrUpdPbsDialog({ pbs, onCancel, onStart }) {
+            const { t } = useTranslation();
+            const [reboot, setReboot] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [err, setErr] = useState('');
+            const go = async () => {
+                if (busy) return;
+                setBusy(true);
+                setErr('');
+                const r = await onStart(pbs, reboot);
+                setBusy(false);
+                if (r.err) setErr(r.err);
+            };
+            return (
+                <CrUpdDialog id="pbs-update" title={crFill(t('crUpdPbsUpdTitle'), { name: pbs.name })} busy={busy} onCancel={onCancel}
+                    footer={(
+                        <>
+                            <CrButton onClick={onCancel} disabled={busy} data-cr-upd-cancel="">{t('cancel')}</CrButton>
+                            <CrButton variant="primary" icon={busy ? <span className="cr-spinner" /> : <Icons.Download />} onClick={go} disabled={busy}
+                                data-cr-upd-confirm="pbs-update">{t('startUpdate')}</CrButton>
+                        </>
+                    )}>
+                    <p className="cr-upd-text">{`${pbs.count} ${t('updates')} ${t('willBeInstalled')}`}</p>
+                    <p className="cr-sb-fine">{t('crUpdPbsNotRolling')}</p>
+                    <label className="cr-upd-opt">
+                        <input type="checkbox" checked={reboot} disabled={busy} onChange={e => setReboot(e.target.checked)} data-cr-upd-opt="pbs-reboot" />
+                        <span><span className="cr-strong">{t('rebootAfter')}</span></span>
+                    </label>
+                    {err && <p className="cr-upd-line cr-upd-bad" role="alert" data-cr-upd-dialog-error="">{crDash(err)}</p>}
+                </CrUpdDialog>
+            );
+        }
+
+        // The backup servers in the same check: pending packages from the check answer of this session
+        // or read from the server when a row opens, the upgrade task, and the upgrade itself
+        function CrUpdPbsDetail({ p, chk, job, may, canUpgrade, why, authFetch, onUpgrade, t }) {
+            const held = chk && chk.answer && chk.answer.body && chk.answer.body.pbs ? chk.answer.body.pbs[p.name] : null;
+            const [live, setLive] = useState(null);
+            const canFetch = may && !held && !!p.pbs_id;
+            useEffect(() => {
+                if (!canFetch) return undefined;
+                let gone = false;
+                setLive({ busy: true });
+                crDcGet(authFetch, `${API_URL}/pbs/${encodeURIComponent(p.pbs_id)}/apt/updates`).then(r => { if (!gone) setLive({ r, at: Date.now() }); });
+                return () => { gone = true; };
+            }, [p.pbs_id, !!held]);
+            let list = null, why2 = '', src = 'none';
+            if (held) {
+                src = 'check';
+                if (held.success === false) why2 = held.error || t('checkFailed');
+                else list = Array.isArray(held.updates) ? held.updates : [];
+            } else if (live && live.r) {
+                src = 'server';
+                if (live.r.state === 'ok' && Array.isArray(live.r.body.updates)) list = live.r.body.updates;
+                else why2 = live.r.state === 'forbidden' ? t('crUpdPkgNoAccess') : crDcWhy(live.r, t);
+            }
+            const busy = crUpdJobOn(job);
+            return (
+                <div className="cr-upd-detail cr-upd-pbs-detail" data-cr-upd-pbs-detail={p.name}>
+                    <p className="cr-sb-fine" data-cr-upd-pkg-source={src}>
+                        {src === 'check' ? crFill(t('crUpdPkgFromCheck'), { time: crFmtTime(chk.answer.at), server: (chk.answer.body.summary || {}).checked_at || '-' })
+                            : src === 'server' ? crFill(t('crUpdPbsPkgFromServer'), { time: crFmtTime(live.at) })
+                            : !may ? t('crUpdPkgNoAccess') : live && live.busy ? t('crUpdReading') : t('crUpdPkgNone')}
+                    </p>
+                    {why2 && <p className="cr-upd-line cr-upd-bad" role="alert" data-cr-upd-pkg-error="">{crDash(why2)}</p>}
+                    {list && (list.length === 0 ? <p className="cr-upd-line" data-cr-upd-pkg-empty="">{t('crUpdPkgEmptyNode')}</p>
+                        : <CrUpdPkgTable list={list} t={t} id={`pbs-${p.name}`} />)}
+                    <h3 className="cr-hd-h">{t('crUpdJobTitle')}</h3>
+                    <CrUpdJob job={job} id={`pbs-${p.name}`} t={t} />
+                    {p.ok && p.count > 0 && (
+                        <div className="cr-upd-card-foot cr-upd-act">
+                            <CrButton variant="primary" icon={<Icons.Download />} onClick={() => onUpgrade(p)} disabled={!canUpgrade || busy}
+                                title={why || undefined} data-cr-upd-open="pbs-update">{t('crUpdPbsUpdate')}</CrButton>
+                            {why && <span className="cr-muted cr-upd-why" data-cr-upd-why="pbs">{why}</span>}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function CrUpdPbs({ model, chk, jobs, may, canUpgrade, why, authFetch, onUpgrade, t }) {
+            const [open, setOpen] = useState({});
+            const cols = [
+                { key: 'name', label: t('crUpdPbsCol'), flex: true, min: 120, text: p => p.name,
+                  render: p => <span className="cr-strong cr-mono" data-cr-upd-pbs-row={p.name}>{p.name}</span> },
+                { key: 'pending', label: t('crUpdPendingCol'), width: 132, align: 'right', sortValue: p => (p.ok ? p.count : 1e9),
+                  text: p => (p.ok ? (p.count > 0 ? String(p.count) : t('crUpdUpToDate')) : t('crUpdPendFailed')),
+                  render: p => (p.ok ? <span data-cr-upd-pbs-pending="ok" className={p.count > 0 ? 'cr-strong' : 'cr-muted'}>{p.count > 0 ? p.count : t('crUpdUpToDate')}</span>
+                      : <span data-cr-upd-pbs-pending="failed"><CrBadge tone="error">{t('crUpdPendFailed')}</CrBadge></span>) },
+                { key: 'channel', label: t('allUpdatesRepo'), width: 128, text: p => (p.channel ? crUpdChannel(t, p.channel) : ''),
+                  render: p => (p.channel ? <span>{crUpdChannel(t, p.channel)}{p.repo_warnings > 0 && <span className="cr-upd-warn"> ({p.repo_warnings})</span>}</span> : <span className="cr-muted">-</span>) },
+                { key: 'sub', label: t('allUpdatesSubscription'), width: 110, text: p => (p.subscription ? crUpdSub(t, p.subscription) : ''),
+                  render: p => (p.subscription ? crUpdSub(t, p.subscription) : <span className="cr-muted">-</span>) },
+                { key: 'job', label: t('crUpdJobCol'), width: 150, text: p => { const j = jobs[p.pbs_id]; return j && j.task ? String(j.task.status) : ''; },
+                  render: p => {
+                      const j = jobs[p.pbs_id];
+                      if (!j || j.state === 'loading') return <span className="cr-muted">-</span>;
+                      if (j.state !== 'ok') return <span className="cr-upd-warn" title={crDcWhy(j, t)}>{t('crUpdJobUnreadShort')}</span>;
+                      if (!j.task) return <span className="cr-muted">{t('crUpdJobNoneShort')}</span>;
+                      return <span data-cr-upd-pbs-job={j.task.status}><CrBadge tone={crUpdJobTone(j.task.status)}>{CR_UPD_JOB_KEY[j.task.status] ? t(CR_UPD_JOB_KEY[j.task.status]) : String(j.task.status)}</CrBadge></span>;
+                  } },
+            ];
+            return (
+                <section className="cr-panel cr-upd-pbs" data-cr-upd-pbs="" aria-label={t('crUpdPbsTitle')}>
+                    <header className="cr-upd-card-head">
+                        <span className="cr-ico" aria-hidden="true"><Icons.Shield /></span>
+                        <h3 className="cr-panel-title">{crFill(t('crUpdPbsTitle'), { n: model.pbs.length })}</h3>
+                    </header>
+                    <p className="cr-sb-fine">{t('crUpdPbsDesc')}</p>
+                    <CrTable id="upd-pbs" columns={cols} rows={model.pbs} rowKey={p => p.pbs_id || p.name} showCount={false} columnMenu={false}
+                        ariaLabel={t('crUpdPbsTitle')} expanded={open}
+                        onRowClick={p => setOpen(o => ({ ...o, [p.pbs_id || p.name]: !o[p.pbs_id || p.name] }))}
+                        renderExpanded={p => <CrUpdPbsDetail p={p} chk={chk} job={jobs[p.pbs_id]} may={may} canUpgrade={canUpgrade} why={why}
+                            authFetch={authFetch} onUpgrade={onUpgrade} t={t} />} />
+                </section>
+            );
+        }
+
+        function CrUpdNodeDetail({ row, chk, model, kind, may, authFetch, cid, nav, t, cv, job, onReadJob, canUpdate, whyNode, onUpdate }) {
             const held = chk && chk.answer && chk.answer.body && chk.answer.body.nodes ? chk.answer.body.nodes[row.name] : null;
             const [live, setLive] = useState(null);
-            const [all, setAll] = useState(false);
             const canFetch = may && !held && row.st !== 'offline' && row.st !== 'unlisted' && model.state !== 'confined' && kind !== 'esxi';
             useEffect(() => {
                 if (!canFetch) return undefined;
@@ -1064,7 +1376,12 @@
                     .then(r => { if (!gone) setLive({ r, at: Date.now() }); });
                 return () => { gone = true; };
             }, [row.name, !!held]);
+            // the update task the server holds for this node (one read when the panel opens)
+            useEffect(() => {
+                if (may && row.st !== 'unlisted' && model.state !== 'confined' && kind !== 'esxi' && onReadJob) onReadJob(row.name);
+            }, [row.name]);
             const m = row.m || {};
+            const cvNode = cv ? cv.by[row.name] || null : null;
             let src = null, list = null, why = '';
             if (held) {
                 src = 'check';
@@ -1075,9 +1392,13 @@
                 if (live.r.state === 'ok' && Array.isArray(live.r.body)) list = live.r.body;
                 else why = live.r.state === 'forbidden' ? t('crUpdPkgNoAccess') : crDcWhy(live.r, t);
             }
-            const shown = list ? (all ? list : list.slice(0, CR_UPD.rows)) : [];
             const proxmox = list ? list.filter(p => p && p.Origin === 'Proxmox').length : 0;
             const kernels = list ? list.filter(p => crUpdKernelKind(p && p.Package) === 'image').length : 0;
+            const secText = kind === 'xcpng' && row.h && typeof row.h.security === 'number' ? crFill(t('crUpdSecXcp'), { n: row.h.security })
+                : cvNode && cvNode.ok ? crFill(t(cvNode.critical ? 'crUpdSecNodeScanCrit' : 'crUpdSecNodeScan'), { n: cvNode.security, c: cvNode.critical, time: crFmtTime(cv.at) })
+                : cvNode ? crFill(t('crUpdSecNodeScanFailed'), { why: crDash(cvNode.why) })
+                : t('crUpdSecNotReported');
+            const showUpdate = kind !== 'esxi' && row.pending === 'ok' && row.count > 0;
             return (
                 <div className="cr-upd-detail" data-cr-upd-detail={row.name}>
                     <dl className="cr-hd-dl">
@@ -1095,8 +1416,21 @@
                         <dt>{t('crUpdPendingCol')}</dt>
                         <dd data-cr-upd-detail-pending={row.pending}>{crUpdPendingText(t, row, model)}</dd>
                         <dt>{t('crUpdSecurityCol')}</dt>
-                        <dd className="cr-muted">{kind === 'xcpng' && row.h && typeof row.h.security === 'number' ? crFill(t('crUpdSecXcp'), { n: row.h.security }) : t('crUpdSecNotReported')}</dd>
+                        <dd className={cvNode && cvNode.ok && cvNode.security > 0 ? 'cr-upd-warn' : 'cr-muted'} data-cr-upd-detail-sec={cvNode ? (cvNode.ok ? 'scan' : 'failed') : 'none'}>{secText}</dd>
+                        {cvNode && cvNode.ok && (
+                            <><dt>{t('crUpdRebootNeeded')}</dt>
+                                <dd data-cr-upd-detail-reboot={cvNode.reboot ? 'yes' : 'no'}>{crFill(t(cvNode.reboot ? 'crUpdRebootScanYes' : 'crUpdRebootScanNo'), { time: crFmtTime(cv.at) })}</dd></>
+                        )}
                     </dl>
+                    {showUpdate && (
+                        <div className="cr-upd-card-foot cr-upd-act" data-cr-upd-node-act="">
+                            <CrButton variant="primary" icon={<Icons.Download />} onClick={() => onUpdate(row)} disabled={!canUpdate} title={whyNode || undefined}
+                                data-cr-upd-open="node-update">{t('updateThisNode')}</CrButton>
+                            {whyNode && <span className="cr-muted cr-upd-why" data-cr-upd-why="node">{whyNode}</span>}
+                        </div>
+                    )}
+                    <h3 className="cr-hd-h">{t('crUpdJobTitle')}</h3>
+                    <CrUpdJob job={job} id={row.name} t={t} />
                     <h3 className="cr-hd-h">{t('crUpdPackages')}</h3>
                     <p className="cr-sb-fine" data-cr-upd-pkg-source={src || 'none'}>
                         {src === 'check' ? crFill(t('crUpdPkgFromCheck'), { time: crFmtTime(chk.answer.at), server: (chk.answer.body.summary || {}).checked_at || '-' })
@@ -1110,42 +1444,8 @@
                     ) : (
                         <>
                             <p className="cr-upd-line" data-cr-upd-pkg-counts="">{crFill(t('crUpdPkgCounts'), { n: list.length, pve: proxmox, kernel: kernels })}</p>
-                            <div className="cr-upd-pkgs-wrap">
-                                <table className="cr-upd-pkgs" data-cr-upd-pkgs="">
-                                    <thead>
-                                        <tr>
-                                            <th scope="col">{t('package')}</th>
-                                            <th scope="col">{t('currentVersion')}</th>
-                                            <th scope="col">{t('newVersion')}</th>
-                                            <th scope="col">{t('crUpdOrigin')}</th>
-                                            <th scope="col">{t('crUpdKind')}</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {shown.map((p, i) => {
-                                            const k = crUpdKernelKind(p && p.Package);
-                                            return (
-                                                <tr key={`${p.Package}-${i}`} data-cr-upd-pkg={p.Package || ''}>
-                                                    <td className="cr-mono">{p.Package || '-'}</td>
-                                                    <td className="cr-mono cr-upd-ver">{p.OldVersion || <span className="cr-muted" title={t('crUpdNewPkgHint')}>{t('crUpdNewPkg')}</span>}</td>
-                                                    <td className="cr-mono cr-upd-ver">{p.Version || '-'}</td>
-                                                    <td>{p.Origin || '-'}</td>
-                                                    <td>
-                                                        {k === 'image' && <span data-cr-upd-flag="kernel"><CrBadge tone="warning" dot={false} title={t('crUpdKernelHint')}>{t('crUpdKernelShort')}</CrBadge></span>}
-                                                        {k === 'helper' && <span data-cr-upd-flag="helper"><CrBadge tone="neutral" dot={false}>{t('crUpdKernelHelper')}</CrBadge></span>}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                            {list.length > shown.length && (
-                                <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={() => setAll(true)} data-cr-upd-pkg-all="">
-                                    {crFill(t('crUpdPkgAll'), { n: list.length })}
-                                </button>
-                            )}
-                            <p className="cr-sb-fine">{t('crUpdPkgFoot')}</p>
+                            <CrUpdPkgTable list={list} cvNode={cvNode} t={t} />
+                            <p className="cr-sb-fine">{cvNode && cvNode.ok ? crFill(t('crUpdPkgFootScan'), { time: crFmtTime(cv.at) }) : t('crUpdPkgFoot')}</p>
                         </>
                     ))}
                     {nav && nav.openNode && row.st !== 'unlisted' && (
@@ -1175,7 +1475,7 @@
 
         // --- the page ----------------------------------------------------------------------------------
 
-        function CrUpdates({ cluster, metrics, nav, authFetch }) {
+        function CrUpdates({ cluster, metrics, nav, authFetch, cve }) {
             const { t } = useTranslation();
             const { haReadOnly } = useAuth();
             const { holds, can } = crVmCan();
@@ -1194,6 +1494,9 @@
             const [act, setAct] = useState({ busy: false, err: '' });
             const [copyMsg, setCopyMsg] = useState('');
             const [refreshing, setRefreshing] = useState(false);
+            // the upgrade task of a single node / backup server, by node name / pbs_id
+            const [jobs, setJobs] = useState({});
+            const [pbsJobs, setPbsJobs] = useState({});
             const now = Date.now();
             const base = `${API_URL}/clusters/${encodeURIComponent(cid)}`;
 
@@ -1261,6 +1564,86 @@
                 setRefreshing(false);
             };
 
+            // --- one node or one backup server on its own: the classic requests -----------------------
+            const jobUrl = (name) => `${base}/nodes/${encodeURIComponent(name)}/update`;
+            const pbsUrl = (pid) => `${API_URL}/pbs/${encodeURIComponent(pid)}/update`;
+            const jobGone = useRef(false);
+            useEffect(() => () => { jobGone.current = true; }, []);
+            const putJob = (set, key, r, first) => set(j => {
+                const prev = j[key] || {};
+                // a failed poll keeps the task shown before; since is when it was first seen running here
+                if (r.state !== 'ok' && prev.task) return { ...j, [key]: { ...prev, pollErr: r } };
+                const on = r.state === 'ok' && r.task && CR_UPD_JOB_ACTIVE.includes(r.task.status);
+                return { ...j, [key]: { ...r, since: on ? (prev.since || first || Date.now()) : null, ended: !!(prev.ended || (crUpdJobOn(prev) && !on && r.state === 'ok')) } };
+            });
+            // one read per task at a time: a slow answer must not land after a newer one
+            const jobBusy = useRef({});
+            const readOnce = async (key, url, set, name) => {
+                if (jobBusy.current[key]) return;
+                jobBusy.current[key] = true;
+                try {
+                    const r = await crUpdJobGet(authFetch, url);
+                    if (!jobGone.current) putJob(set, name, r);
+                } finally { jobBusy.current[key] = false; }
+            };
+            const readJob = async (name) => {
+                if (!canView) return;
+                setJobs(j => (j[name] ? j : { ...j, [name]: { state: 'loading' } }));
+                await readOnce(`n:${name}`, jobUrl(name), setJobs, name);
+            };
+            const readPbsJob = (pid) => readOnce(`p:${pid}`, pbsUrl(pid), setPbsJobs, pid);
+            // every backup server of the check once, as the classic section reads them on open
+            const pbsIds = (ov && ov.state === 'ok' && ov.body && Array.isArray(ov.body.hosts)
+                ? ov.body.hosts.filter(h => h && h.kind === 'pbs' && h.cluster_id === cid && h.pbs_id).map(h => h.pbs_id) : []).join('|');
+            useEffect(() => {
+                if (!pbsIds) return;
+                pbsIds.split('|').forEach(pid => { setPbsJobs(j => (j[pid] ? j : { ...j, [pid]: { state: 'loading' } })); readPbsJob(pid); });
+            }, [pbsIds]);
+            // a running task is read every 5 s, for at most 15 minutes from when this page saw it start
+            const activeJobs = Object.keys(jobs).filter(k => crUpdJobOn(jobs[k]) && !jobs[k].capped).join('|');
+            const activePbs = Object.keys(pbsJobs).filter(k => crUpdJobOn(pbsJobs[k]) && !pbsJobs[k].capped).join('|');
+            useEffect(() => {
+                if (!activeJobs && !activePbs) return undefined;
+                const timer = setInterval(() => {
+                    if (typeof document !== 'undefined' && document.hidden) return;
+                    const stop = (set, key, j) => (j && j.since && Date.now() - j.since > CR_UPD_JOB.cap
+                        ? (set(x => ({ ...x, [key]: { ...x[key], capped: true } })), true) : false);
+                    (activeJobs ? activeJobs.split('|') : []).forEach(n => { if (!stop(setJobs, n, jobs[n])) readJob(n); });
+                    (activePbs ? activePbs.split('|') : []).forEach(pid => { if (!stop(setPbsJobs, pid, pbsJobs[pid])) readPbsJob(pid); });
+                }, CR_UPD_JOB.poll);
+                return () => clearInterval(timer);
+            }, [activeJobs, activePbs]);
+            // a task that ended here: the overview again (it asks no node); the check stays on its button
+            const ended = Object.keys(jobs).filter(k => jobs[k].ended).join('|') + '#' + Object.keys(pbsJobs).filter(k => pbsJobs[k].ended).join('|');
+            useEffect(() => { if (ended !== '#') readOverview(); }, [ended]);
+
+            const startNode = async (name, reboot, force) => {
+                const body = force ? { reboot, force: true } : { reboot };
+                const res = await authFetch(jobUrl(name), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                const d = res ? await res.json().catch(() => null) : null;
+                if (res && !res.ok && d && crUpdNeedsForce(d.error)) return { needForce: true };
+                if (res && (res.ok || (d && d.success))) {
+                    const at = Date.now();
+                    const task = d && d.task && typeof d.task === 'object' ? d.task : { status: 'starting', node: name, reboot };
+                    putJob(setJobs, name, { state: 'ok', task, at }, at);
+                    setDlg(null);
+                    return { ok: true };
+                }
+                return { err: (d && d.error) || (res ? `HTTP ${res.status}` : t('crDcNoAnswer')) };
+            };
+            const startPbs = async (p, reboot) => {
+                const res = await authFetch(pbsUrl(p.pbs_id), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reboot }) });
+                const d = res ? await res.json().catch(() => null) : null;
+                if (res && res.ok) {
+                    const at = Date.now();
+                    putJob(setPbsJobs, p.pbs_id, { state: 'ok', task: { status: (d && d.status) || 'starting', phase: d && d.phase, reboot }, at }, at);
+                    setDlg(null);
+                    readPbsJob(p.pbs_id);
+                    return { ok: true };
+                }
+                return { err: (d && d.error) || (res ? `HTTP ${res.status}` : t('crDcNoAnswer')) };
+            };
+
             const nodesRead = !!(nav && nav.listsRead && nav.listsRead(cid).nodes);
             const model = useMemo(() => crUpdModel({ cluster: c, metrics, ov, now, nodesRead }),
                 [c.id, c.cluster_type, metrics, ov, nodesRead, Math.floor(now / 60000)]);
@@ -1271,6 +1654,16 @@
             const mayUpdate = can('node.update') && !confined && kind !== 'esxi';
             const canReboot = can('node.reboot');
             const whyUpdate = mayUpdate ? '' : crUpdWhy(t, gate('node.update'));
+            const cv = useMemo(() => crUpdCveView(cve, cid), [cve, cid]);
+            const nodeGate = (row) => {
+                if (whyUpdate) return { ok: false, why: whyUpdate };
+                if (crUpdJobOn(jobs[row.name])) return { ok: false, why: t('crUpdJobBusy') };
+                if (row.st === 'offline') return { ok: false, why: t('crUpdPkgOffline') };
+                if (row.st === 'updating') return { ok: false, why: t('crUpdJobBusy') };
+                return { ok: true, why: '' };
+            };
+            const mayPbs = can('admin.settings');
+            const whyPbs = mayPbs ? '' : standby ? t('crUpdWhyStandby') : t('crUpdWhyPbsPerm');
             const r = run && run.run ? run.run : null;
             const view = crUpdRunView(r);
             const activeRun = !!(r && CR_UPD_ACTIVE.includes(r.status));
@@ -1314,6 +1707,9 @@
                 const dash = (id, label, title) => <CrStat key={id} id={id} label={label} value="-" sub={why} title={title} />;
                 const secTile = kind === 'xcpng' && model.security != null
                     ? <CrStat key="upd-security" id="upd-security" label={t('crUpdSecTile')} value={model.security} sub={t('crUpdSecXcpSub')} />
+                    : cv && cv.ok > 0
+                    ? <CrStat key="upd-security" id="upd-security" label={t('crUpdSecTile')} value={cv.security} tone={cv.critical > 0 ? 'error' : cv.security > 0 ? 'warning' : null}
+                        sub={crFill(t('crUpdSecScanSub'), { time: crFmtTime(cv.at), ok: cv.ok, n: cv.n })} title={t('crUpdSecScanHint')} />
                     : <CrStat key="upd-security" id="upd-security" label={t('crUpdSecTile')} value={t('crUpdNotReported')} sub={t('crUpdSecSub')} title={t('allUpdatesSecurityUnknown')} />;
                 if (st !== 'ok') {
                     return [dash('upd-total', t('crUpdTotalTile')), secTile, dash('upd-nodes', t('crUpdNodesTile')),
@@ -1347,11 +1743,31 @@
                   sortValue: r => (r.pending === 'ok' ? r.count : r.pending === 'failed' ? 1e9 : null),
                   text: r => crUpdPendingText(t, r, model),
                   render: r => (
-                      <span data-cr-upd-pending={r.pending} className={r.pending === 'failed' || r.pending === 'missing' ? 'cr-upd-warn' : r.pending === 'ok' && r.count > 0 ? 'cr-strong' : 'cr-muted'}
+                      <span data-cr-upd-pending={r.pending} className={r.pending === 'ok' && r.count > 0 ? 'cr-strong' : r.pending === 'failed' || r.pending === 'missing' ? '' : 'cr-muted'}
                           title={r.pending === 'failed' && chk && chk.answer && chk.answer.body.nodes[r.name] ? crDash(chk.answer.body.nodes[r.name].error || '') : r.pending === 'missing' ? t('crUpdPendMissingHint') : undefined}>
-                          {crUpdPendingText(t, r, model)}
+                          {r.pending === 'failed' ? <CrBadge tone="error">{crUpdPendingText(t, r, model)}</CrBadge>
+                              : r.pending === 'missing' ? <CrBadge tone="warning">{crUpdPendingText(t, r, model)}</CrBadge>
+                              : crUpdPendingText(t, r, model)}
                       </span>
                   ) },
+                // only with a CVE scan of this cluster in this session: the security updates it counted per node
+                cv && { key: 'sec', label: t('crUpdSecurityCol'), width: 104, align: 'right',
+                  sortValue: r => { const x = cv.by[r.name]; return x && x.ok ? x.security : null; },
+                  text: r => { const x = cv.by[r.name]; return x ? (x.ok ? String(x.security) : t('crUpdSecScanFailedShort')) : ''; },
+                  render: r => {
+                      const x = cv.by[r.name];
+                      if (!x) return <span className="cr-muted" data-cr-upd-sec="none" title={t('crUpdSecNotScanned')}>-</span>;
+                      if (!x.ok) return <span className="cr-upd-warn" data-cr-upd-sec="failed" title={crDash(x.why)}>{t('crUpdSecScanFailedShort')}</span>;
+                      return <span data-cr-upd-sec={x.security} className={x.critical ? 'cr-upd-bad cr-strong' : x.security ? 'cr-upd-warn cr-strong' : 'cr-muted'}
+                          title={x.critical ? crFill(t('crUpdSecCritN'), { n: x.critical }) : undefined}>{x.security}</span>;
+                  } },
+                { key: 'job', label: t('crUpdJobCol'), width: 120, hidden: !Object.keys(jobs).some(k => jobs[k].task),
+                  text: r => { const j = jobs[r.name]; return j && j.task ? String(j.task.status) : ''; },
+                  render: r => {
+                      const j = jobs[r.name];
+                      if (!j || !j.task) return '';
+                      return <span data-cr-upd-node-job={j.task.status}><CrBadge tone={crUpdJobTone(j.task.status)}>{CR_UPD_JOB_KEY[j.task.status] ? t(CR_UPD_JOB_KEY[j.task.status]) : String(j.task.status)}</CrBadge></span>;
+                  } },
                 { key: 'kernel', label: t('crUpdKernelCol'), width: 128, sortValue: r => (r.kernel == null ? null : r.kernel ? 1 : 0),
                   text: r => (r.kernel ? t('crUpdKernelShort') : ''),
                   render: r => (r.kernel ? <span data-cr-upd-kernel={r.name}><CrBadge tone="warning" dot={false} title={t('crUpdKernelHint')}>{t('crUpdKernelShort')}</CrBadge></span>
@@ -1439,7 +1855,7 @@
                                     title={t('crUpdRefreshHint')} data-cr-upd-refresh="">{t('crUpdRefresh')}</CrButton>
                             </>
                         )} />
-                    <p className="cr-cmp-hint">{t('crUpdIntro')}</p>
+                    <p className="cr-cmp-hint">{t('crUpdIntroHosts')}</p>
                     {copyMsg && <p className="cr-upd-line" role="status" data-cr-upd-copy-msg="">{copyMsg}</p>}
 
                     {standby && <CrUpdNote id="standby"><p>{t('crUpdStandby')}</p></CrUpdNote>}
@@ -1452,6 +1868,14 @@
 
                     <section className="cr-stat-row cr-upd-tiles" aria-label={t('crSummary')} data-cr-upd-tiles="">{tiles}</section>
                     <p className="cr-sb-fine" data-cr-upd-basis="tiles">{t('crUpdBasis')}</p>
+                    {kind === 'proxmox' && (
+                        <p className="cr-sb-fine cr-upd-secline" data-cr-upd-sec-source={cv ? 'scan' : 'none'}>
+                            <span>{cv ? crFill(t('crUpdSecFromScan'), { time: crFmtDate(cv.at), ok: cv.ok, n: cv.n }) : t('crUpdSecNoScan')}</span>
+                            {nav && nav.openReports && (
+                                <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={() => nav.openReports(cid, 'cve')} data-cr-upd-open-cve="">{t('crUpdOpenCve')}</button>
+                            )}
+                        </p>
+                    )}
 
                     <div className="cr-upd-cards">
                         <section className="cr-panel cr-upd-card" tabIndex={-1} data-cr-focus-home="" data-cr-upd-card="check" aria-label={t('crUpdCheckCard')}>
@@ -1508,13 +1932,11 @@
                             <CrTable id="upd-nodes" columns={columns} rows={model.rows} rowKey={x => x.name} searchable={model.rows.length > 12}
                                 onRowClick={x => setOpenNode(x.name)} selectedKey={openNode} ariaLabel={t('crUpdNodesTable')} maxHeight={520}
                                 emptyText={!canView ? t('crUpdOvNoAccess') : t('crUpdNoNodes')} initialSort={{ key: 'name', dir: 'asc' }} />
-                            {model.pbs.length > 0 && (
-                                <p className="cr-sb-fine" data-cr-upd-pbs="">
-                                    {crFill(t('crUpdPbs'), { list: model.pbs.map(p => `${p.name}: ${p.ok ? crFill(t('crUpdNPkgs'), { n: p.count }) : t('crUpdPendFailed')}`).join(', ') })}
-                                </p>
-                            )}
                             <p className="cr-sb-fine">{t('crUpdNodesFoot')}</p>
-                            <p className="cr-sb-fine" data-cr-upd-not-here="">{t('crUpdNotHere')}</p>
+                            {model.pbs.length > 0 && (
+                                <CrUpdPbs model={model} chk={chk} jobs={pbsJobs} may={canView} canUpgrade={mayPbs} why={whyPbs} authFetch={authFetch}
+                                    onUpgrade={(p) => setDlg({ kind: 'pbs', pbs: p })} t={t} />
+                            )}
                         </div>
                     )}
                     {tab === 'history' && (
@@ -1544,12 +1966,19 @@
                         onClose={() => setOpenNode(null)} focusKey={openNode}
                         returnFocus={() => document.querySelector('[data-cr-table="upd-nodes"] tbody tr[tabindex="0"]')}>
                         {openRow && <CrUpdNodeDetail key={openRow.name} row={openRow} chk={chk} model={model} kind={kind} may={canView}
-                            authFetch={authFetch} cid={cid} nav={nav} t={t} />}
+                            authFetch={authFetch} cid={cid} nav={nav} t={t} cv={cv} job={jobs[openRow.name]} onReadJob={readJob}
+                            canUpdate={nodeGate(openRow).ok} whyNode={nodeGate(openRow).why} onUpdate={(row) => setDlg({ kind: 'node', node: row.name })} />}
                     </CrSidePanel>
 
                     {dlg && dlg.kind === 'check' && (
                         <CrUpdCheckDialog cluster={c} nodes={model.rows} onCancel={() => setDlg(null)}
                             onConfirm={(force) => { setDlg(null); crUpdRunCheck(authFetch, cid, force, readOverview); }} />
+                    )}
+                    {dlg && dlg.kind === 'node' && model.rows.find(x => x.name === dlg.node) && (
+                        <CrUpdNodeDialog row={model.rows.find(x => x.name === dlg.node)} canReboot={canReboot} onCancel={() => setDlg(null)} onStart={startNode} />
+                    )}
+                    {dlg && dlg.kind === 'pbs' && (
+                        <CrUpdPbsDialog pbs={dlg.pbs} onCancel={() => setDlg(null)} onStart={startPbs} />
                     )}
                     {dlg && dlg.kind === 'start' && (
                         <CrUpdStartDialog cluster={c} model={model} canReboot={canReboot} authFetch={authFetch} holds={holds}
@@ -1588,7 +2017,6 @@
                     <div>
                         <h3 className="cr-panel-title">{t('updateManager')}</h3>
                         <p className="cr-muted">{t('crUpdLinkText')}</p>
-                        <p className="cr-muted" data-cr-upd-link-missing="">{t('crUpdNotHere')}</p>
                     </div>
                     <CrButton icon={<Icons.ArrowRight />} onClick={onOpen} data-cr-upd-link-open="">{t('crUpdLinkOpen')}</CrButton>
                 </section>

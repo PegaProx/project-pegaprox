@@ -348,6 +348,35 @@
 
         // --- the summary: system information and the guests of the node -----------------------------
 
+        // the processor rows of the summary read (cpuinfo), for the Summary and the Hardware tab
+        function crNcCpu(t, ci, miss) {
+            const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null));
+            const mhz = num(ci.mhz);
+            const hvm = ci.hvm === undefined || ci.hvm === null || ci.hvm === '' ? null : (ci.hvm === true || String(ci.hvm) === '1');
+            return {
+                rows: [
+                    { k: 'model', label: t('cpuModel'), value: ci.model, missing: miss },
+                    { k: 'sockets', label: t('cpuSockets'), value: num(ci.sockets) != null ? String(num(ci.sockets)) : '', missing: miss },
+                    { k: 'cores', label: t('cores'), value: num(ci.cores) != null ? String(num(ci.cores)) : '', missing: miss },
+                    { k: 'cpus', label: t('logicalProcessors'), value: num(ci.cpus) != null ? String(num(ci.cpus)) : '', missing: miss },
+                    { k: 'mhz', label: t('crNcCpuClock'), value: mhz > 0 ? crNnT(t, 'crNcMhz', { v: Math.round(mhz) }) : '', missing: miss },
+                    { k: 'hvm', label: t('crNcHvm'), value: hvm == null ? '' : t(hvm ? 'crNcHvmYes' : 'crNcHvmNo'), missing: miss },
+                ],
+                flags: typeof ci.flags === 'string' ? ci.flags.split(/\s+/).filter(Boolean) : [],
+            };
+        }
+
+        function CrNcCpuFlags({ flags }) {
+            const { t } = useTranslation();
+            if (!flags || !flags.length) return null;
+            return (
+                <details className="cr-nc-fold" data-cr-nsi-flags={flags.length}>
+                    <summary>{crNnT(t, 'crNcCpuFlags', { n: flags.length })}</summary>
+                    <p className="cr-mono cr-nc-flags">{flags.join(' ')}</p>
+                </details>
+            );
+        }
+
         // what the page already holds about the node: the summary read, the live metrics, the
         // address /ip gave, the interface list once Configure > Network read it, the cluster
         // resources. Status and uptime are in the header and the health card, and not again here
@@ -357,10 +386,7 @@
             const s = sum === 'ok' ? summary : null;
             const ci = s && s.cpuinfo && typeof s.cpuinfo === 'object' ? s.cpuinfo : {};
             const miss = sum === 'loading' ? t('crNcReadingShort') : sum === 'error' ? t('crNcSumFailedShort') : undefined;
-            const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null));
-            const mhz = num(ci.mhz);
-            const hvm = ci.hvm === undefined || ci.hvm === null || ci.hvm === '' ? null : (ci.hvm === true || String(ci.hvm) === '1');
-            const flags = typeof ci.flags === 'string' ? ci.flags.split(/\s+/).filter(Boolean) : [];
+            const cpu = crNcCpu(t, ci, miss);
             const standIn = /_fallback$/.test(nodeIpSource || '');
             const nics = Array.isArray(network) ? network.length : null;
             const list = Array.isArray(guests) ? guests : [];
@@ -378,20 +404,8 @@
                                 ]} />
                             </CrNcGroup>
                             <CrNcGroup id="cpu" title={t('crNcGrpCpu')}>
-                                <CrNcKv id="cpu" rows={[
-                                    { k: 'model', label: t('cpuModel'), value: ci.model, missing: miss },
-                                    { k: 'sockets', label: t('cpuSockets'), value: num(ci.sockets) != null ? String(num(ci.sockets)) : '', missing: miss },
-                                    { k: 'cores', label: t('cores'), value: num(ci.cores) != null ? String(num(ci.cores)) : '', missing: miss },
-                                    { k: 'cpus', label: t('logicalProcessors'), value: num(ci.cpus) != null ? String(num(ci.cpus)) : '', missing: miss },
-                                    { k: 'mhz', label: t('crNcCpuClock'), value: mhz > 0 ? crNnT(t, 'crNcMhz', { v: Math.round(mhz) }) : '', missing: miss },
-                                    { k: 'hvm', label: t('crNcHvm'), value: hvm == null ? '' : t(hvm ? 'crNcHvmYes' : 'crNcHvmNo'), missing: miss },
-                                ]} />
-                                {flags.length > 0 && (
-                                    <details className="cr-nc-fold" data-cr-nsi-flags={flags.length}>
-                                        <summary>{crNnT(t, 'crNcCpuFlags', { n: flags.length })}</summary>
-                                        <p className="cr-mono cr-nc-flags">{flags.join(' ')}</p>
-                                    </details>
-                                )}
+                                <CrNcKv id="cpu" rows={cpu.rows} />
+                                <CrNcCpuFlags flags={cpu.flags} />
                             </CrNcGroup>
                             <CrNcGroup id="net" title={t('network')}>
                                 <CrNcKv id="net" rows={[

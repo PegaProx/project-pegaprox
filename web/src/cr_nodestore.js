@@ -207,33 +207,46 @@
                     emptyText: m && m.state === 'empty' ? t('crNvLvmEmpty') : m && m.state === 'none' ? t('crNvLvmNone') : '' });
                 if (st) return st;
                 return (
-                    <ul className="cr-nc-items" aria-label={t('crNvVgs')}>
-                        {m.vgs.map(vg => (
-                            <li key={vg.name} className="cr-nc-item" data-cr-nv-vg={vg.name}>
-                                <div className="cr-nc-item-head">
-                                    <Icons.Layers className="w-3.5 h-3.5 cr-muted" />
-                                    <span className="cr-mono cr-nc-item-name">{vg.name}</span>
-                                    {vg.lvcount != null && <CrBadge tone="neutral" dot={false}>{crNnT(t, vg.lvcount === 1 ? 'crNvLvOne' : 'crNvLvN', { n: vg.lvcount })}</CrBadge>}
-                                </div>
-                                <CrNcKv id={`vg-${vg.name}`} rows={[
-                                    { k: 'size', label: t('crNvSize'), value: crNvBytes(vg.size) },
-                                    { k: 'free', label: t('crNvFree'), value: crNvBytes(vg.free) },
-                                    { k: 'alloc', label: t('crNvAllocated'), value: <CrNvUsage id={`vg-${vg.name}`} used={vg.used} total={vg.size} tone="info" label="crNvAllocOf" /> },
-                                    thinSlot.state === 'ok' ? { k: 'thin', label: t('crNvThinPools'), value: vg.thin.length ? <span className="cr-nc-chips">{vg.thin.map(n => <span key={n} className="cr-nn-chip cr-mono">{n}</span>)}</span> : null, missing: t('crNvNone') } : null,
-                                    { k: 'pvs', label: t('crNvPvs'), value: vg.pvs.length ? (
-                                        <ul className="cr-nv-pvs">
-                                            {vg.pvs.map(pv => (
-                                                <li key={pv.name} data-cr-nv-pv={pv.name}>
-                                                    <span className="cr-mono">{pv.name}</span>
-                                                    <span className="cr-muted">{crNnT(t, 'crNvPvSize', { size: crNvBytes(pv.size) || t('crNsNotReported'), free: crNvBytes(pv.free) || t('crNsNotReported') })}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    ) : null },
-                                ]} />
-                            </li>
-                        ))}
-                    </ul>
+                    <div className="cr-nn-scroll">
+                        <table className="corp-datagrid cr-table cr-nn-table cr-nv-table" aria-label={t('crNvVgs')}>
+                            <thead>
+                                <tr>
+                                    <th>{t('crNvVg')}</th><th className="cr-nh-num">{t('crNvSize')}</th><th className="cr-nh-num">{t('crNvFree')}</th>
+                                    <th>{t('crNvAllocated')}</th><th className="cr-nh-num">{t('crNvLvs')}</th>
+                                    {thinSlot.state === 'ok' && <th>{t('crNvThinPools')}</th>}<th>{t('crNvPvs')}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {m.vgs.map(vg => (
+                                    <tr key={vg.name} data-cr-nv-vg={vg.name}>
+                                        <td className="cr-mono cr-strong">{vg.name}</td>
+                                        <td className="cr-nh-num" data-cr-nc-k="size">{crNvBytes(vg.size) || <CrNcMissing />}</td>
+                                        <td className="cr-nh-num" data-cr-nc-k="free">{crNvBytes(vg.free) || <CrNcMissing />}</td>
+                                        <td data-cr-nc-k="alloc"><CrNvUsage id={`vg-${vg.name}`} used={vg.used} total={vg.size} tone="info" label="crNvAllocOf" /></td>
+                                        <td className="cr-nh-num" data-cr-nc-k="lvs">{vg.lvcount != null ? String(vg.lvcount) : <CrNcMissing />}</td>
+                                        {thinSlot.state === 'ok' && (
+                                            <td data-cr-nc-k="thin">
+                                                {vg.thin.length ? <span className="cr-nc-chips">{vg.thin.map(n => <span key={n} className="cr-nn-chip cr-mono">{n}</span>)}</span>
+                                                    : <CrNcMissing text={t('crNvNone')} />}
+                                            </td>
+                                        )}
+                                        <td data-cr-nc-k="pvs">
+                                            {vg.pvs.length ? (
+                                                <ul className="cr-nv-pvs">
+                                                    {vg.pvs.map(pv => (
+                                                        <li key={pv.name} data-cr-nv-pv={pv.name}>
+                                                            <span className="cr-mono">{pv.name}</span>
+                                                            <span className="cr-muted">{crNnT(t, 'crNvPvSize', { size: crNvBytes(pv.size) || t('crNsNotReported'), free: crNvBytes(pv.free) || t('crNsNotReported') })}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            ) : <CrNcMissing />}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 );
             };
             return (
@@ -257,22 +270,27 @@
                     emptyText: pools && !pools.length ? t('crNvThinEmpty') : '' });
                 if (st) return st;
                 return (
-                    <ul className="cr-nc-items" aria-label={t('crNvThinPools')}>
-                        {pools.map(p => (
-                            <li key={`${p.vg}/${p.lv}`} className="cr-nc-item" data-cr-nv-thin={`${p.vg}/${p.lv}`}>
-                                <div className="cr-nc-item-head">
-                                    <Icons.Database className="w-3.5 h-3.5 cr-muted" />
-                                    <span className="cr-mono cr-nc-item-name">{p.lv}</span>
-                                    {p.vg && <span className="cr-muted">{crNnT(t, 'crNvInVg', { vg: p.vg })}</span>}
-                                </div>
-                                <CrNcKv id={`thin-${p.vg}-${p.lv}`} rows={[
-                                    { k: 'size', label: t('crNvSize'), value: crNvBytes(p.size) },
-                                    { k: 'data', label: t('crNvThinData'), value: <CrNvUsage id={`thin-${p.lv}`} used={p.used} total={p.size} /> },
-                                    { k: 'meta', label: t('crNvThinMeta'), value: <CrNvUsage id={`thin-${p.lv}-meta`} used={p.metaUsed} total={p.metaSize} /> },
-                                ]} />
-                            </li>
-                        ))}
-                    </ul>
+                    <div className="cr-nn-scroll">
+                        <table className="corp-datagrid cr-table cr-nn-table cr-nv-table" aria-label={t('crNvThinPools')}>
+                            <thead>
+                                <tr>
+                                    <th>{t('crNvPool')}</th><th>{t('crNvVg')}</th><th className="cr-nh-num">{t('crNvSize')}</th>
+                                    <th>{t('crNvThinData')}</th><th>{t('crNvThinMeta')}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {pools.map(p => (
+                                    <tr key={`${p.vg}/${p.lv}`} data-cr-nv-thin={`${p.vg}/${p.lv}`}>
+                                        <td className="cr-mono cr-strong">{p.lv}</td>
+                                        <td className="cr-mono" data-cr-nc-k="vg">{p.vg || <CrNcMissing />}</td>
+                                        <td className="cr-nh-num" data-cr-nc-k="size">{crNvBytes(p.size) || <CrNcMissing />}</td>
+                                        <td data-cr-nc-k="data"><CrNvUsage id={`thin-${p.lv}`} used={p.used} total={p.size} /></td>
+                                        <td data-cr-nc-k="meta"><CrNvUsage id={`thin-${p.lv}-meta`} used={p.metaUsed} total={p.metaSize} /></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                 );
             };
             return (
@@ -297,37 +315,45 @@
                     emptyText: pools && !pools.length ? t('crNvZfsEmpty') : '' });
                 if (st) return st;
                 return (
-                    <ul className="cr-nc-items" aria-label={t('zfsStorage')}>
-                        {pools.map(p => {
-                            const open = pool === p.name;
-                            return (
-                                <li key={p.name} className={`cr-nc-item${open ? ' cr-nv-open' : ''}`} data-cr-nv-pool={p.name}>
-                                    <div className="cr-nc-item-head">
-                                        <Icons.HardDrive className="w-3.5 h-3.5 cr-muted" />
-                                        <span className="cr-mono cr-nc-item-name">{p.name}</span>
-                                        <span data-cr-nv-health={p.tone}>
-                                            {p.health
-                                                ? <CrBadge tone={p.tone} dot={p.tone !== 'neutral'}>{p.health}</CrBadge>
-                                                : <CrBadge tone="neutral" dot={false}>{t('crNvHealthNone')}</CrBadge>}
-                                        </span>
-                                        <span className="cr-nv-item-acts">
-                                            <CrButton className="cr-btn-xs" onClick={() => onPool(open ? null : p.name)} data-zfs-open={p.name}
-                                                aria-pressed={open} title={t('zfsPoolDetails')}>
-                                                {open ? t('crNvHideDetails') : t('details')}
-                                            </CrButton>
-                                        </span>
-                                    </div>
-                                    <CrNcKv id={`zfs-${p.name}`} rows={[
-                                        { k: 'size', label: t('crNvSize'), value: crNvBytes(p.size) },
-                                        { k: 'alloc', label: t('crNvAllocated'), value: <CrNvUsage id={`zfs-${p.name}`} used={p.alloc} total={p.size} label="crNvAllocOf" /> },
-                                        { k: 'free', label: t('crNvFree'), value: crNvBytes(p.free) },
-                                        { k: 'frag', label: t('crNvFrag'), value: p.frag != null ? `${p.frag}%` : null },
-                                        { k: 'dedup', label: t('crNvDedup'), value: p.dedup != null ? `${p.dedup.toFixed(2)}x` : null },
-                                    ]} />
-                                </li>
-                            );
-                        })}
-                    </ul>
+                    <div className="cr-nn-scroll">
+                        <table className="corp-datagrid cr-table cr-nn-table cr-nv-table" aria-label={t('zfsStorage')}>
+                            <thead>
+                                <tr>
+                                    <th>{t('crNvPool')}</th><th>{t('crNvHealth')}</th><th className="cr-nh-num">{t('crNvSize')}</th>
+                                    <th>{t('crNvAllocated')}</th><th className="cr-nh-num">{t('crNvFree')}</th>
+                                    <th className="cr-nh-num">{t('crNvFrag')}</th><th className="cr-nh-num">{t('crNvDedup')}</th><th aria-label={t('details')} />
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {pools.map(p => {
+                                    const open = pool === p.name;
+                                    return (
+                                        <tr key={p.name} className={open ? 'cr-nv-open' : undefined} data-cr-nv-pool={p.name}>
+                                            <td className="cr-mono cr-strong">{p.name}</td>
+                                            <td>
+                                                <span data-cr-nv-health={p.tone}>
+                                                    {p.health
+                                                        ? <CrBadge tone={p.tone} dot={p.tone !== 'neutral'}>{p.health}</CrBadge>
+                                                        : <CrBadge tone="neutral" dot={false}>{t('crNvHealthNone')}</CrBadge>}
+                                                </span>
+                                            </td>
+                                            <td className="cr-nh-num" data-cr-nc-k="size">{crNvBytes(p.size) || <CrNcMissing />}</td>
+                                            <td data-cr-nc-k="alloc"><CrNvUsage id={`zfs-${p.name}`} used={p.alloc} total={p.size} label="crNvAllocOf" /></td>
+                                            <td className="cr-nh-num" data-cr-nc-k="free">{crNvBytes(p.free) || <CrNcMissing />}</td>
+                                            <td className="cr-nh-num" data-cr-nc-k="frag">{p.frag != null ? `${p.frag}%` : <CrNcMissing />}</td>
+                                            <td className="cr-nh-num" data-cr-nc-k="dedup">{p.dedup != null ? `${p.dedup.toFixed(2)}x` : <CrNcMissing />}</td>
+                                            <td className="cr-nv-acts-cell">
+                                                <CrButton className="cr-btn-xs" onClick={() => onPool(open ? null : p.name)} data-zfs-open={p.name}
+                                                    aria-pressed={open} title={t('zfsPoolDetails')}>
+                                                    {open ? t('crNvHideDetails') : t('details')}
+                                                </CrButton>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
                 );
             };
             return (
@@ -360,31 +386,40 @@
             // LW Nov 2026 - the node refuses to switch an entry it does not have (400, manual setup), so
             // no switch is offered for one; one that already waits can still be undone
             const noSwitch = state === 'absent' && !waits;
+            const about = r.repo.description ? String(r.repo.description) : '';
             return (
-                <li className={`cr-nc-item${waits ? ' cr-nv-pending' : ''}`} data-cr-nr-repo={r.key} data-cr-nr-state={state}
+                <tr className={waits ? 'cr-nn-row-pending' : undefined} data-cr-nr-repo={r.key} data-cr-nr-state={state}
                     data-cr-nr-pending={waits ? '' : undefined}>
-                    <div className="cr-nc-item-head">
-                        <Icons.Package className="w-3.5 h-3.5 cr-muted" />
-                        <span className="cr-nc-item-name">{r.name || <CrNcMissing />}</span>
-                        <CrBadge tone={state === 'on' ? 'success' : 'neutral'} dot={state === 'on'}>{label}</CrBadge>
-                        {r.sub && <span className="cr-nn-chip" data-cr-nr-sub="">{t('crNrNeedsSub')}</span>}
-                        {r.other && <span className="cr-nn-chip" data-cr-nr-other="">{t('crNrOther')}</span>}
-                        {waits && <span className="cr-nn-pend" data-cr-nr-will="">{t(pending ? 'crNrWillEnable' : 'crNrWillDisable')}</span>}
-                        <span className="cr-nv-item-acts">
-                            <CrButton className="cr-btn-xs" onClick={onFlip} disabled={readOnly || busy || noSwitch} data-cr-nr-flip={r.key}
-                                title={noSwitch ? t('crNrAbsentNoSwitch') : undefined} aria-describedby={noSwitch ? CR_NR_WHY_ID : undefined}>
-                                {waits ? t('crNrUndo') : r.enabled ? t('disable') : t('enable')}
-                            </CrButton>
+                    <td className="cr-nr-name">
+                        <span className="cr-nr-title">
+                            <span className="cr-strong">{r.name || <CrNcMissing />}</span>
+                            {r.sub && <span className="cr-nn-chip" data-cr-nr-sub="">{t('crNrNeedsSub')}</span>}
+                            {r.other && <span className="cr-nn-chip" data-cr-nr-other="">{t('crNrOther')}</span>}
                         </span>
-                    </div>
-                    <CrNcKv id={`repo-${r.key}`} rows={[
-                        r.repo.description ? { k: 'desc', label: t('crNrAbout'), value: String(r.repo.description) } : null,
-                        r.exists ? { k: 'line', label: t('crNrLine'), value: r.line, mono: true } : null,
-                        r.exists ? { k: 'file', label: t('crNrFile'), value: r.file, mono: true,
-                                     note: r.index != null ? crNnT(t, 'crNrEntry', { n: r.index + 1 }) : '' } : null,
-                        !r.exists ? { k: 'line', label: t('crNrLine'), value: null, missing: t('crNrAbsentLine') } : null,
-                    ]} />
-                </li>
+                        {about && about !== r.name && <span className="cr-muted cr-nr-about" data-cr-nc-k="desc">{about}</span>}
+                    </td>
+                    <td className="cr-nr-state">
+                        <CrBadge tone={state === 'on' ? 'success' : 'neutral'} dot={state === 'on'}>{label}</CrBadge>
+                        {waits && <span className="cr-nn-pend" data-cr-nr-will="">{t(pending ? 'crNrWillEnable' : 'crNrWillDisable')}</span>}
+                    </td>
+                    <td className="cr-nr-src">
+                        <span className={r.exists ? 'cr-mono cr-nr-line' : 'cr-nr-line'} data-cr-nc-k="line">
+                            {r.exists ? (r.line || <CrNcMissing />) : <CrNcMissing text={t('crNrAbsentLine')} />}
+                        </span>
+                        {r.exists && (
+                            <span className="cr-nr-file" data-cr-nc-k="file">
+                                {r.file ? <span className="cr-mono">{r.file}</span> : <CrNcMissing />}
+                                {r.index != null && <span className="cr-nc-kv-note">{crNnT(t, 'crNrEntry', { n: r.index + 1 })}</span>}
+                            </span>
+                        )}
+                    </td>
+                    <td className="cr-nv-acts-cell">
+                        <CrButton className="cr-btn-xs" onClick={onFlip} disabled={readOnly || busy || noSwitch} data-cr-nr-flip={r.key}
+                            title={noSwitch ? t('crNrAbsentNoSwitch') : undefined} aria-describedby={noSwitch ? CR_NR_WHY_ID : undefined}>
+                            {waits ? t('crNrUndo') : r.enabled ? t('disable') : t('enable')}
+                        </CrButton>
+                    </td>
+                </tr>
             );
         }
 
@@ -433,13 +468,15 @@
                 return <CrBadge tone={s === 'on' ? 'success' : 'neutral'} dot={s === 'on'}>{s === 'absent' ? t('crNrAbsent') : s === 'on' ? t('crNrOn') : t('crNrOff')}</CrBadge>;
             };
             const channelText = { enterprise: 'crNrChanEnt', free: 'crNrChanFree', both: 'crNrChanBoth', none: 'crNrChanNone' }[m.channel];
+            // one row group per state, under a heading row like the sensor kinds of the Hardware tab
             const group = (id, title, rows) => (rows.length ? (
-                <CrNcGroup id={id} title={`${title} (${rows.length})`}>
-                    {id === 'absent' && <p className="cr-nc-note cr-muted" id={CR_NR_WHY_ID} data-cr-nr-why="">{t('crNrAbsentNoSwitch')}</p>}
-                    <ul className="cr-nc-items">
-                        {rows.map(r => <CrNrItem key={r.key} r={r} pending={has(pending, r) ? pending[r.key] : undefined} readOnly={readOnly} busy={busy || saving} onFlip={() => flip(r)} />)}
-                    </ul>
-                </CrNcGroup>
+                <tbody key={id} data-cr-nc-group={id}>
+                    <tr className="cr-nn-grow"><th colSpan={4} scope="rowgroup">{title} <span className="cr-muted">{rows.length}</span></th></tr>
+                    {id === 'absent' && (
+                        <tr className="cr-nr-why-row"><td colSpan={4}><p className="cr-nc-note cr-muted" id={CR_NR_WHY_ID} data-cr-nr-why="">{t('crNrAbsentNoSwitch')}</p></td></tr>
+                    )}
+                    {rows.map(r => <CrNrItem key={r.key} r={r} pending={has(pending, r) ? pending[r.key] : undefined} readOnly={readOnly} busy={busy || saving} onFlip={() => flip(r)} />)}
+                </tbody>
             ) : null);
             const body = () => {
                 if (repos === undefined) {
@@ -462,10 +499,15 @@
                             <CrNcState key={names.join('|')} id="repos-twice" kind="warning">{crNnT(t, 'crNrTwice', { names: names.join(', ') })}</CrNcState>
                         ))}
                         {readOnly && <p className="cr-nc-note cr-muted" data-cr-nr-ro="">{t('crNcReadOnly')}</p>}
-                        <div className="cr-nc-groups cr-nv-groups">
-                            {group('on', t('crNrOn'), m.groups.on)}
-                            {group('off', t('crNrOff'), m.groups.off)}
-                            {group('absent', t('crNrAbsentGroup'), m.groups.absent)}
+                        <div className="cr-nn-scroll">
+                            <table className="corp-datagrid cr-table cr-nn-table cr-nv-table cr-nr-table" aria-label={t('repositories')}>
+                                <thead>
+                                    <tr><th>{t('crNrRepo')}</th><th>{t('status')}</th><th>{t('crNrLine')}</th><th aria-label={t('actions')} /></tr>
+                                </thead>
+                                {group('on', t('crNrOn'), m.groups.on)}
+                                {group('off', t('crNrOff'), m.groups.off)}
+                                {group('absent', t('crNrAbsentGroup'), m.groups.absent)}
+                            </table>
                         </div>
                     </>
                 );

@@ -404,8 +404,13 @@ def test_the_classic_section_stays_and_the_preview_has_its_own_tab():
                  'allow_local_disks', 'migrate_templates', 'relax_anti_affinity'):
         assert f'{flag}: !!' in cr, flag
     assert "accept_quorum_risk: true" in cr and "write('POST', '/updates/rolling/resume')" in cr
-    # no single node install and no package list in the browser's storage
-    assert '/update`' not in cr and 'nodes/${encodeURIComponent(row.name)}/update' not in cr
+    # one node / one backup server on its own (round 9, full parity): the classic routes and bodies, only
+    # from their dialogs; force only after the server asked for maintenance mode
+    assert cr.count('/update`') == 2
+    assert "const body = force ? { reboot, force: true } : { reboot };" in cr
+    assert "body: JSON.stringify({ reboot }) });" in cr
+    assert cr.count('onStart={startNode}') == 1 and cr.count('onStart={startPbs}') == 1
+    # no package list in the browser's storage
     assert 'localStorage' not in cr and 'crWrite(' not in cr
     assert '\u2014' not in cr and '\u2013' not in cr
 
@@ -1357,15 +1362,18 @@ def test_runtime_a_click_beside_the_start_dialog_keeps_it(open_app):
     assert app.errors == []
 
 
-def test_runtime_the_page_says_what_this_layout_does_not_offer(open_app):
-    # R-07 (decision open): the single node update and the backup server upgrade are said, not silent
+def test_runtime_the_page_no_longer_sends_one_node_elsewhere(open_app):
+    # R-07 closed in round 9 (full parity): one node and one backup server are upgraded on this page, so
+    # neither the link card nor the page points to the classic layout for them
     app = open_app()
     page = app.page
     page.locator('.corp-tree-item', has_text='Testi').first.click()
     page.locator('[data-cr-tab="settings"]').click()
-    _need(page, '[data-cr-upd-link-missing]', 'the link card says what is not here')
-    assert 'updating one node on its own' in page.locator('[data-cr-upd-link-missing]').inner_text()
+    _need(page, '[data-cr-upd-link-open]', 'the Settings tab links to the Updates tab')
+    assert page.locator('[data-cr-upd-link-missing]').count() == 0
     page.locator('[data-cr-upd-link-open]').click()
-    _need(page, '[data-cr-upd-not-here]', 'the Updates page says it too')
+    _need(page, '[data-cr-upd-pbs]', 'the backup servers of the check are a table of their own')
+    assert page.locator('[data-cr-upd-not-here]').count() == 0
+    assert 'classic' not in page.locator('[data-cr-updates]').inner_text().lower()
     assert _upd(app, 'POST') == []
     assert app.errors == []

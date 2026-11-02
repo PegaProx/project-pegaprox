@@ -4699,10 +4699,13 @@
 
         // MK May 2026 — Network Topology Visualization. Plain SVG, no D3 dep.
         // Three rows: cluster → nodes → bridges → VMs (grouped under bridge).
-        function TopologyTab({ clusterId, authFetch, addToast, t }) {
+        function TopologyTab({ clusterId, authFetch, addToast, t, cluster, nav }) {
+            const { isCorpRedesigned } = useLayout();
             const [graph, setGraph] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [highlight, setHighlight] = React.useState(null);
+            // LW Nov 2026 - whether the last read came back; Corporate Redesigned says so, classic draws what it has
+            const [readErr, setReadErr] = React.useState(null);
 
             const refresh = async () => {
                 if (!clusterId) return;
@@ -4710,6 +4713,7 @@
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/topology`).then(x => x?.json()).catch(() => null);
                     if (r && r.nodes) setGraph(r);
+                    setReadErr(r && r.nodes ? null : { why: (r && typeof r.error === 'string' && r.error) || '' });
                 } finally { setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
@@ -4894,6 +4898,16 @@
                     (l.target === highlight && l.source === id)
                 );
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same read as node lanes and an interface table (cr_modules.js)
+            if (isCorpRedesigned) {
+                const own = graph && (!graph.cluster || !graph.cluster.id || graph.cluster.id === clusterId) ? graph : null;
+                return (
+                    <CrBoundary key={clusterId} id="net-topology">
+                        <CrNetTopo cluster={cluster || { id: clusterId }} graph={own} loading={loading} readErr={readErr} onRefresh={refresh} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5085,9 +5099,12 @@
 
         // MK May 2026 — Power & Carbon Tracking. Same shape as Cost Dashboard
         // (rates editor + summary + per-VM table) but in kWh / kg CO₂.
-        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5114,6 +5131,7 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
                 } finally { if (mine === asked.current) setLoading(false); }
             };
@@ -5382,6 +5400,21 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, rates and host profiles (cr_modules.js); every
+            // write is the handler above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="power">
+                        <CrPower cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onHosts={openHosts} hostForm={hostForm} setHost={setHost} onCloseHosts={() => setHostForm(null)} onSaveHosts={saveHosts}
+                            savingHosts={savingHosts} onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5702,9 +5735,12 @@
             );
         }
 
-        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5727,6 +5763,7 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
                 } finally { if (mine === asked.current) setLoading(false); }
             };
@@ -5917,6 +5954,19 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads and rates (cr_modules.js); the write is saveRates above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="costs">
+                        <CrCosts cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -7384,8 +7434,11 @@
                 default: return e.title || e.kind;
             }
         }
+        // what Corporate Redesigned's table (CrTimeline, cr_nodemisc.js) needs to say the same as this list
+        const TL_SHARED = Object.freeze({ kinds: TL_KINDS, ranges: TL_RANGES, views: TL_VIEWS, text: tlText, fill: tlFill });
 
         function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab, pick }) {
+            const { isCorpRedesigned } = useLayout();
             const [hours, setHours] = React.useState(24);
             // LW Nov 2026 - pick: a kind and a severity to start with ({kind, severity, seq}), taken again when seq changes
             const [kind, setKind] = React.useState((pick && pick.kind) || '');
@@ -7450,6 +7503,21 @@
             }, [load]);
 
             if (!clusterId) return null;
+            const evidence = !node && vmid == null ? (
+                <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
+                    getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
+            ) : null;
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, filters and pages as a table (cr_nodemisc.js)
+            if (isCorpRedesigned) {
+                return (
+                    <CrTimeline scope={vmid != null ? 'guest' : node ? 'node' : 'cluster'} node={node} hours={hours} kind={kind}
+                        severity={severity} onHours={setHours} onKind={setKind} onSeverity={setSeverity} rows={rows} next={next}
+                        sources={sources} linkWindow={linkWindow} loaded={loaded} failed={failed} loading={loading} leaderAway={leaderAway}
+                        open={open} onToggle={id => setOpen(o => ({ ...o, [id]: !o[id] }))} onRefresh={() => load(null)}
+                        onMore={b => load(b)} compact={compact} evidence={evidence} onOpenGuest={onOpenGuest}
+                        onOpenNode={onOpenNode} onOpenTab={onOpenTab} tl={TL_SHARED} />
+                );
+            }
             const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
             const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
             const before = (s) => s >= 60 ? tlFill(t, 'tlMinBefore', { m: Math.round(s / 60) }) : tlFill(t, 'tlSecBefore', { s });
@@ -7492,10 +7560,7 @@
                             </button>
                         </div>
                     </div>
-                    {!node && vmid == null && (
-                        <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
-                            getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
-                    )}
+                    {evidence}
                     {leaderAway && <div className="text-xs text-yellow-400" data-tl-leader-away>{t('pgHaLeaderAwayView')}</div>}
                     {failed && <div className="text-xs text-red-400" data-tl-error>{t('tlLoadError')}</div>}
                     {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
@@ -15829,8 +15894,11 @@
             // ============================================
             
             const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+            // LW Nov 2026 - why the last overview read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [snapshotsReadErr, setSnapshotsReadErr] = useState(null);
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
                 setSnapshotsLoading(true);
+                setSnapshotsReadErr(null);
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
@@ -15846,10 +15914,13 @@
                         const data = await res.json();
                         setGlobalSnapshots(data.snapshots ?? data ?? []);
                     } else {
+                        const d = res ? await res.json().catch(() => null) : null;
+                        setSnapshotsReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', res ? `HTTP ${res.status}` : ''].filter(Boolean).join(' - ') });
                         setGlobalSnapshots([]);
                     }
                 } catch (err) {
                     console.error('Snapshot fetch failed:', err);
+                    setSnapshotsReadErr({ why: err && err.message ? err.message : '' });
                     setGlobalSnapshots([]);
                 }
                 setSnapshotsLoading(false);
@@ -16353,20 +16424,29 @@
             // Cluster Affinity Rules Functions - NS Jan 2026
             // ============================================
             
+            // LW Nov 2026 - why the last read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [affinityReadErr, setAffinityReadErr] = useState(null);
+            const [affinityLoading, setAffinityLoading] = useState(false);
             const loadClusterAffinityRules = async (clusterId) => {
                 if (!clusterId) return;
+                setAffinityReadErr(null);
+                setAffinityLoading(true);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`);
                     if (response && response.ok) {
                         const data = await response.json();
                         setClusterAffinityRules(data.rules || []);
                     } else {
+                        const d = response ? await response.json().catch(() => null) : null;
+                        setAffinityReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', response ? `HTTP ${response.status}` : ''].filter(Boolean).join(' - ') });
                         setClusterAffinityRules([]);
                     }
                 } catch (err) {
                     console.error('Failed to load affinity rules:', err);
+                    setAffinityReadErr({ why: err && err.message ? err.message : '' });
                     setClusterAffinityRules([]);
                 }
+                setAffinityLoading(false);
             };
             
             const createClusterAffinityRule = async (ruleData) => {
@@ -16395,10 +16475,12 @@
                     });
                     if (response && response.ok) {
                         setClusterAffinityRules(prev => prev.filter(r => r.id !== ruleId));
+                        return true;
                     }
                 } catch (err) {
                     console.error('Failed to delete affinity rule:', err);
                 }
+                return false;  // classic ignores it, Corporate Redesigned says the rule is still there
             };
             
             // ============================================
@@ -22943,7 +23025,18 @@
                                                 )}
                                                 
                                                 {/* Snapshot Overview Sub-Tab @gyptazy */}
-                                                {resourcesSubTab === 'snapshots' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same list, read, filter, selection and deletes as a table */}
+                                                {resourcesSubTab === 'snapshots' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="snapshots">
+                                                        <CrSnapOverview cluster={selectedCluster} rows={globalSnapshots} loading={snapshotsLoading} readErr={snapshotsReadErr}
+                                                            filterDate={snapshotFilterDate} onFilterDate={setSnapshotFilterDate}
+                                                            onFilter={() => applySnapshotFilter(selectedCluster.id)} onRefresh={() => fetchGlobalSnapshots(selectedCluster.id)}
+                                                            canDelete={canDeleteSnaps} selected={selectedSnaps} onSelect={setSelectedSnaps} keyOf={snapKey}
+                                                            onDelete={(snap) => deleteGlobalSnapshot(snap, selectedCluster.id)}
+                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {resourcesSubTab === 'snapshots' && !isCorpRedesigned && (
                                                     <div className={isCorporate
                                                         ? 'corp-snap-overview'
                                                         : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-4'
@@ -23784,6 +23877,14 @@
 
                                                 {/* Affinity Sub-Tab */}
                                                 {automationSubTab === 'affinity' && (
+                                                    /* LW Nov 2026 - Corporate Redesigned: the same rules, dialog and DELETE as a table */
+                                                    isCorpRedesigned && selectedCluster?.id ? (
+                                                    <CrBoundary key={selectedCluster.id} id="affinity">
+                                                        <CrAffinity cluster={selectedCluster} rules={clusterAffinityRules} readErr={affinityReadErr} loading={affinityLoading} canEdit={!haReadOnly}
+                                                            onNew={() => setShowAffinityModal(true)} onDelete={deleteClusterAffinityRule}
+                                                            onRefresh={() => loadClusterAffinityRules(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                    ) : (
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-center">
                                                             <p className="text-sm text-gray-400">{t('affinityDesc') || 'Keep VMs together or separate across nodes'}</p>
@@ -23824,6 +23925,7 @@
                                                             </div>
                                                         )}
                                                     </div>
+                                                    )
                                                 )}
                                                 
                                                 {/* Custom Scripts Sub-Tab */}
@@ -24897,7 +24999,15 @@
                                                 )}
 
                                                 {/* CVE Scanner Sub-Tab */}
-                                                {reportSubTab === 'cve' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the scan state and the two POSTs of this tab, drawn as tiles and a node table */}
+                                                {reportSubTab === 'cve' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="cve">
+                                                    <CrCveScan cluster={selectedCluster} results={cveResults} loading={cveScanLoading} installing={debsecanInstalling}
+                                                        readOnly={haReadOnly} onScan={() => runCveScan()} onInstall={() => installDebsecan()}
+                                                        onOpenUpdates={() => setActiveTab('updates')} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {reportSubTab === 'cve' && !isCorpRedesigned && (
                                                     <div className="space-y-6">
                                                         <div className="flex justify-between items-center">
                                                             <div className="flex items-center gap-2">
@@ -25315,6 +25425,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -25327,6 +25439,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -25337,6 +25451,8 @@
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -25348,7 +25464,11 @@
                                                 )}
 
                                                 {/* MK May 2026 — API latency dashboard */}
-                                                {reportSubTab === 'api-health' && selectedCluster?.id && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same route and poll, with a state for no samples */}
+                                                {reportSubTab === 'api-health' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="api-health"><CrApiHealth cluster={selectedCluster} authFetch={authFetch} /></CrBoundary>
+                                                )}
+                                                {reportSubTab === 'api-health' && !isCorpRedesigned && selectedCluster?.id && (
                                                     <ApiLatencyDashboard
                                                         clusterId={selectedCluster.id}
                                                         authFetch={authFetch}
@@ -25571,10 +25691,11 @@
                                         })()}
 
                                         {/* LW Nov 2026 - the update manager of Corporate Redesigned, its own tab beside Settings:
-                                            the classic routes, nothing read from the nodes before a click */}
+                                            the classic routes, nothing read from the nodes before a click; a CVE scan of this
+                                            session lends it the security class the update list does not carry */}
                                         {activeTab === 'updates' && isCorpRedesigned && selectedCluster?.id && (
                                             <CrBoundary key={selectedCluster.id} id="updates">
-                                                <CrUpdates cluster={selectedCluster} metrics={clusterMetrics} nav={crTaskNav} authFetch={authFetch} />
+                                                <CrUpdates cluster={selectedCluster} metrics={clusterMetrics} nav={crTaskNav} authFetch={authFetch} cve={cveResults} />
                                             </CrBoundary>
                                         )}
 

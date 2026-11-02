@@ -910,7 +910,8 @@
             pts.sort((a, b) => a[0] - b[0]);
             if (!pts.length) return { state: 'empty', skipped };
             const vals = pts.map(p => p[1]);
-            return { state: 'ok', ts: pts.map(p => p[0]), vals, skipped, min: Math.min(...vals), max: Math.max(...vals), last: vals[vals.length - 1] };
+            return { state: 'ok', ts: pts.map(p => p[0]), vals, skipped, min: Math.min(...vals), max: Math.max(...vals), last: vals[vals.length - 1],
+                     avg: vals.reduce((a, b) => a + b, 0) / vals.length };
         }
 
         // --- disks ------------------------------------------------------------------------------
@@ -1124,7 +1125,7 @@
             return <span className="cr-muted cr-nh-none">{t('crNhNotReported')}</span>;
         }
 
-        function CrNodeHardware({ node, read, temps, bmc, loading, onReload }) {
+        function CrNodeHardware({ node, read, temps, bmc, loading, onReload, children }) {
             const { t } = useTranslation();
             const m = useMemo(() => crNhModel(read, bmc, node), [read, bmc, node]);
             const hist = useMemo(() => crNhTemps(temps), [temps]);
@@ -1265,6 +1266,7 @@
                                     <span>{crNnT(t, 'crNhHistNow', { v: hist.last.toFixed(1) })}</span>
                                     <span>{crNnT(t, 'crNhHistMin', { v: hist.min.toFixed(1) })}</span>
                                     <span>{crNnT(t, 'crNhHistMax', { v: hist.max.toFixed(1) })}</span>
+                                    <span data-cr-nh-hist-avg="">{crNnT(t, 'crNhHistAvg', { v: hist.avg.toFixed(1) })}</span>
                                     <span>{crNnT(t, 'crNhHistPoints', { n: hist.vals.length })}</span>
                                     {hist.skipped > 0 && <span data-cr-nh-hist-skipped="">{crNnT(t, 'crNhHistSkipped', { n: hist.skipped })}</span>}
                                 </p>
@@ -1272,8 +1274,242 @@
                         )}
                         <p className="cr-muted cr-nh-plain">{t('crNhHistNote')}</p>
                     </section>
+                    {children}
                     <h4 className="cr-nn-sub cr-nh-bmc-title">{t('crNhBmcTitle')}</h4>
                 </div>
+            );
+        }
+
+        // --- the hardware inventory: processor and memory, disk health, PCI devices ---------------
+
+        // memory and swap of the summary read (get_node_summary sends 0 where the node gave nothing,
+        // so a total of 0 is not a size); a swap total of 0 in an answer that has one is no swap space
+        function crNhMem(summary) {
+            const sum = crNsSummaryState(summary);
+            const s = sum === 'ok' ? summary : null;
+            const total = (o) => (o && crNhNum(o.total) && o.total > 0 ? o.total : null);
+            return { sum, mem: total(s && s.memory), swap: total(s && s.swap), swapNone: !!(s && s.swap && s.swap.total === 0) };
+        }
+
+        // the PCI class by the first byte of the code Proxmox VE sends ("0x030000")
+        const CR_NH_PCI_CLASS = { '01': 'crNhPciStorage', '02': 'crNhPciNetwork', '03': 'crNhPciDisplay', '04': 'crNhPciMedia',
+                                  '05': 'crNhPciMemory', '06': 'crNhPciBridge', '07': 'crNhPciComm', '08': 'crNhPciSystem',
+                                  '09': 'crNhPciInput', '0c': 'crNhPciSerial', '0d': 'crNhPciWireless', '10': 'crNhPciCrypto',
+                                  '12': 'crNhPciAccel' };
+        function crNhPciClass(code) {
+            const m = /^(?:0x)?([0-9a-f]{2})[0-9a-f]{0,4}$/i.exec(String(code == null ? '' : code).trim());
+            if (!m) return { base: '', key: '' };
+            const base = m[1].toLowerCase();
+            return { base, key: CR_NH_PCI_CLASS[base] || '' };
+        }
+
+        // GET .../hardware/pci as loadTabData kept it: loading, failed with why, empty or the devices.
+        // An IOMMU group below 0 (or none) is a device outside every group; mdev marks a device that
+        // offers mediated devices. The route answers [] for a node that refused, so empty is said
+        // with that doubt
+        function crNhPci(read) {
+            if (read === undefined) return { state: 'loading', rows: [] };
+            const f = crNdFail(read);
+            if (f) return { state: 'error', fail: f, rows: [] };
+            if (!Array.isArray(read)) {
+                return { state: 'error', fail: { status: 200, error: (read && typeof read.error === 'string') ? read.error : '', code: 'NOT_JSON' }, rows: [] };
+            }
+            const str = (v) => (typeof v === 'string' ? v.trim() : '');
+            const rows = read.filter(d => d && typeof d === 'object').map(d => {
+                const g = crNhNum(d.iommugroup) ? d.iommugroup
+                    : (typeof d.iommugroup === 'string' && /^\s*-?\d+\s*$/.test(d.iommugroup) ? parseInt(d.iommugroup, 10) : null);
+                const cls = crNhPciClass(d.class);
+                return {
+                    id: str(d.id), classCode: str(d.class), classBase: cls.base, classKey: cls.key,
+                    vendor: str(d.vendor_name), vendorId: str(d.vendor), device: str(d.device_name), deviceId: str(d.device),
+                    subVendor: str(d.subsystem_vendor_name), subDevice: str(d.subsystem_device_name),
+                    group: g != null && g >= 0 ? g : null, mdev: d.mdev === true || d.mdev === 1 || d.mdev === '1',
+                };
+            });
+            rows.sort((a, b) => a.id.localeCompare(b.id));
+            return { state: rows.length ? 'ok' : 'empty', rows, grouped: rows.filter(r => r.group != null).length };
+        }
+
+        function crNhPciMatch(r, { cls, q }) {
+            if (cls !== 'all' && r.classBase !== cls) return false;
+            const s = String(q || '').trim().toLowerCase();
+            if (!s) return true;
+            return [r.id, r.vendor, r.device, r.subVendor, r.subDevice, r.vendorId, r.deviceId, r.classCode]
+                .some(v => v && v.toLowerCase().includes(s));
+        }
+
+        window.PegaProxNodeInv = Object.freeze({ mem: crNhMem, pciClass: crNhPciClass, pci: crNhPci, pciMatch: crNhPciMatch });
+
+        // processor and memory from the summary read the view holds, and the health and wear that
+        // disks/list gives each disk (SMART detail, temperature and error counters stay on Configure > Disks)
+        function CrNodeHwBasics({ summary, disks, loading, onReadDisks, onOpenDisks }) {
+            const { t } = useTranslation();
+            const mem = crNhMem(summary);
+            const miss = mem.sum === 'loading' ? t('crNcReadingShort') : mem.sum === 'error' ? t('crNcSumFailedShort') : undefined;
+            const ci = mem.sum === 'ok' && summary.cpuinfo && typeof summary.cpuinfo === 'object' ? summary.cpuinfo : {};
+            const cpu = crNcCpu(t, ci, miss);
+            const dm = useMemo(() => crNdModel(disks, {}), [disks]);
+            const failed = dm.rows.filter(r => r.health.state === 'failed').length;
+            const unknown = dm.rows.filter(r => r.health.state === 'none').length;
+            const wear = (r) => {
+                if (r.wear.state === 'ok') return <span className="cr-mono" title={crNnT(t, 'crNdWearLeft', { n: r.wear.left })}>{crNnT(t, 'crNdWearUsed', { n: r.wear.used })}</span>;
+                if (r.wear.state === 'bad') return <span className="cr-nh-bad">{t('crNhUnreadable')}: <span className="cr-mono">{r.wear.raw}</span></span>;
+                return <CrNcMissing />;
+            };
+            let diskBody;
+            if (dm.state === 'loading') {
+                diskBody = disks === undefined && !loading
+                    ? <CrNcState id="hw-disks" kind="empty" onRetry={onReadDisks}>{t('crNcNotRead')}</CrNcState>
+                    : <CrNcState id="hw-disks" kind="loading" />;
+            } else if (dm.state === 'error') {
+                diskBody = <CrNcState id="hw-disks" kind="error" onRetry={onReadDisks} retryDisabled={loading}>{crNnT(t, 'crNcReadFailed', { reason: crNdWhy(t, dm.fail) })}</CrNcState>;
+            } else if (dm.state === 'empty') {
+                diskBody = <CrNcState id="hw-disks" kind="empty" onRetry={onReadDisks} retryDisabled={loading}>{t('crNhDiskEmpty')}</CrNcState>;
+            } else {
+                diskBody = (
+                    <div className="cr-nn-scroll">
+                        <table className="corp-datagrid cr-table cr-nn-table" aria-label={t('crNhDiskTitle')}>
+                            <thead><tr><th>{t('crNdDisk')}</th><th>{t('crNdTypeSize')}</th><th>{t('crNdHealth')}</th><th>{t('crNdWear')}</th></tr></thead>
+                            <tbody>
+                                {dm.rows.map(r => (
+                                    <tr key={r.dev || r.disk.devpath} data-cr-nh-disk={r.dev} className={r.health.state === 'failed' ? 'cr-nh-row-crit' : ''}>
+                                        <td>
+                                            <span className="cr-mono">{r.disk.devpath || <CrNcMissing />}</span>
+                                            {String(r.disk.model || '').trim() && <span className="cr-nd-ident cr-muted">{String(r.disk.model).trim()}</span>}
+                                        </td>
+                                        <td>
+                                            <span>{CR_ND_TYPES[r.type] || <span className="cr-muted">{t('crNdTypeUnknown')}</span>}</span>
+                                            <span className="cr-muted"> {crNhNum(r.size) && r.size > 0 ? formatBytes(r.size) : t('crNdSizeUnknown')}</span>
+                                        </td>
+                                        <td data-cr-nh-disk-cell="health"><CrNdHealth h={r.health} t={t} /></td>
+                                        <td data-cr-nh-disk-cell="wear">{wear(r)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                );
+            }
+            return (
+                <div className="cr-nc-cols cr-nh-basics" data-cr-nh-basics="">
+                    <CrNcSection id="hw-cpu" data-cr-nh-cpu={mem.sum} title={t('crNhCpuMemTitle')} desc={t('crNhCpuMemDesc')}>
+                        <div className="cr-nc-groups">
+                            <CrNcGroup id="hw-cpu" title={t('crNcGrpCpu')}>
+                                <CrNcKv id="hw-cpu" rows={cpu.rows} />
+                                <CrNcCpuFlags flags={cpu.flags} />
+                            </CrNcGroup>
+                            <CrNcGroup id="hw-mem" title={t('memory')}>
+                                <CrNcKv id="hw-mem" rows={[
+                                    { k: 'mem', label: t('crNhMemTotal'), value: mem.mem != null ? formatBytes(mem.mem) : '', missing: miss },
+                                    { k: 'swap', label: t('crNhSwapTotal'), value: mem.swap != null ? formatBytes(mem.swap) : mem.swapNone ? t('crNhSwapNone') : '', missing: miss },
+                                    { k: 'dimm', label: t('crNhDimms'), value: '', missing: t('crNhDimmsNone') },
+                                ]} />
+                            </CrNcGroup>
+                        </div>
+                    </CrNcSection>
+                    <CrNcSection id="hw-disks" data-cr-nh-disks={dm.state} title={t('crNhDiskTitle')} desc={t('crNhDiskDesc')}
+                        badge={dm.state === 'ok' ? (
+                            <>
+                                <span className="cr-muted cr-nn-count">{crNnT(t, 'crNdCount', { n: dm.rows.length })}</span>
+                                {failed > 0 && <span data-cr-nh-disks-failed=""><CrBadge tone="error">{crNnT(t, 'crNdFailedBadge', { n: failed })}</CrBadge></span>}
+                                {unknown > 0 && <CrBadge tone="neutral" dot={false}>{crNnT(t, 'crNdUnknownBadge', { n: unknown })}</CrBadge>}
+                            </>
+                        ) : null}
+                        actions={<CrButton className="cr-btn-xs" onClick={onOpenDisks} data-cr-nh-open-disks="">{t('crNhOpenDisks')}</CrButton>}>
+                        {diskBody}
+                    </CrNcSection>
+                </div>
+            );
+        }
+
+        // the PCI devices Proxmox VE lists for passthrough (it leaves out memory controllers,
+        // bridges and processors by default): one read per visit of the tab, filtered here
+        function CrNodePci({ read, loading, onReload }) {
+            const { t } = useTranslation();
+            const m = useMemo(() => crNhPci(read), [read]);
+            const [cls, setCls] = useState('all');
+            const [q, setQ] = useState('');
+            const classes = useMemo(() => {
+                const c = new Map();
+                for (const r of m.rows) c.set(r.classBase, (c.get(r.classBase) || 0) + 1);
+                return [...c.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+            }, [m.rows]);
+            const className = (r) => (r.classKey ? t(r.classKey) : r.classBase ? crNnT(t, 'crNhPciClassN', { c: r.classBase }) : t('crNhNotReported'));
+            const filter = useCallback((r) => crNhPciMatch(r, { cls, q }), [cls, q]);
+            const columns = useMemo(() => [
+                { key: 'id', label: t('crNhPciAddr'), width: 108, mono: true, sortValue: r => r.id || null,
+                  render: r => <span data-cr-nh-pci-row={r.id}>{r.id || <CrNcMissing />}</span> },
+                { key: 'class', label: t('crNhPciClass'), width: 168, sortValue: r => r.classBase || null,
+                  render: r => (
+                      <span className="cr-nh-pci-class" title={r.classCode || undefined}>
+                          {className(r)}{r.classCode && <span className="cr-muted cr-mono"> {r.classCode}</span>}
+                      </span>
+                  ) },
+                // vendor and device, the subsystem, then the IDs as lspci prints them ([vendor:device])
+                { key: 'device', label: t('crNhPciDevice'), flex: true, min: 180, sortValue: r => `${r.vendor} ${r.device}`.trim() || null,
+                  render: r => {
+                      const ids = r.vendorId || r.deviceId ? `${r.vendorId.replace(/^0x/i, '')}:${r.deviceId.replace(/^0x/i, '')}` : '';
+                      const sub = [r.subVendor, r.subDevice].filter(Boolean).join(' ');
+                      const name = [r.vendor, r.device].filter(Boolean).join(' ');
+                      return (
+                          <span className="cr-nh-pci-dev" title={[name, sub, ids && `[${ids}]`].filter(Boolean).join(' · ') || undefined}>
+                              <span>{name || <CrNcMissing />}</span>
+                              {sub && <span className="cr-muted"> · {sub}</span>}
+                              {ids && <span className="cr-muted cr-mono" data-cr-nh-pci-ids={ids}> [{ids}]</span>}
+                          </span>
+                      );
+                  } },
+                { key: 'group', label: t('crNhPciGroup'), width: 96, sortValue: r => r.group,
+                  render: r => (r.group != null ? <span className="cr-mono" data-cr-nh-pci-group={r.group}>{r.group}</span>
+                      : <span className="cr-muted" data-cr-nh-pci-group="none" title={t('crNhPciNoGroupHint')}>{t('crNhPciNoGroup')}</span>) },
+                { key: 'mdev', label: t('crNhPciMdev'), width: 112, title: t('crNhPciMdevHint'), sortValue: r => (r.mdev ? 1 : 0),
+                  render: r => (r.mdev ? <span data-cr-nh-pci-mdev="yes"><CrBadge tone="neutral" dot={false}>{t('crNhPciMdevYes')}</CrBadge></span>
+                      : <span className="cr-muted" data-cr-nh-pci-mdev="no">{t('crNhPciMdevNo')}</span>) },
+            ], [t]);
+            const active = (cls !== 'all' ? 1 : 0) + (q.trim() ? 1 : 0);
+            let body;
+            if (m.state === 'loading') {
+                body = loading ? <CrNcState id="pci" kind="loading" /> : <CrNcState id="pci" kind="empty" onRetry={onReload}>{t('crNcNotRead')}</CrNcState>;
+            } else if (m.state === 'error') {
+                body = <CrNcState id="pci" kind="error" onRetry={onReload} retryDisabled={loading}>{crNnT(t, 'crNcReadFailed', { reason: crNdWhy(t, m.fail) })}</CrNcState>;
+            } else if (m.state === 'empty') {
+                body = <CrNcState id="pci" kind="warning" onRetry={onReload} retryDisabled={loading}>{t('crNhPciEmpty')}</CrNcState>;
+            } else {
+                body = (
+                    <>
+                        {m.grouped === 0 && <CrNcState id="pci-iommu" kind="warning">{t('crNhPciNoIommu')}</CrNcState>}
+                        <CrTable id="node-pci" columns={columns} rows={m.rows} filter={filter} rowKey={r => r.id || `${r.vendorId}:${r.deviceId}`}
+                            ariaLabel={t('crNhPciTitle')} initialSort={{ key: 'id', dir: 'asc' }} emptyText={t('crNhPciNoMatch')} maxHeight={440}
+                            toolbar={(
+                                <div className="cr-tc-filters cr-nt-filters">
+                                    <select className="cr-select" value={cls} onChange={e => setCls(e.target.value)} data-cr-nh-pci-class=""
+                                        aria-label={t('crNhPciClass')}>
+                                        <option value="all">{crNnT(t, 'crNhPciAllClasses', { n: m.rows.length })}</option>
+                                        {classes.map(([c, n]) => {
+                                            const key = CR_NH_PCI_CLASS[c];
+                                            return <option key={c} value={c}>{`${key ? t(key) : crNnT(t, 'crNhPciClassN', { c: c || '?' })} (${n})`}</option>;
+                                        })}
+                                    </select>
+                                    <div className="cr-search-box">
+                                        <Icons.Search className="cr-search-ico" />
+                                        <input type="search" className="cr-input" value={q} data-cr-nh-pci-q="" placeholder={t('crNhPciSearch')}
+                                            aria-label={t('crNhPciSearch')} onChange={e => setQ(e.target.value)} />
+                                    </div>
+                                    {active > 0 && (
+                                        <button type="button" className="cr-btn cr-btn-ghost" data-cr-nh-pci-clear=""
+                                            onClick={() => { setCls('all'); setQ(''); }}>{t('crNgClear')}</button>
+                                    )}
+                                </div>
+                            )} />
+                    </>
+                );
+            }
+            return (
+                <CrNcSection id="pci" data-cr-nh-pci={m.state} title={t('crNhPciTitle')} desc={t('crNhPciDesc')}
+                    badge={m.state === 'ok' ? <span className="cr-muted cr-nn-count">{crNnT(t, m.rows.length === 1 ? 'crNhPciOne' : 'crNhPciN', { n: m.rows.length })}</span> : null}
+                    actions={<CrButton icon={<Icons.RotateCw />} onClick={onReload} disabled={loading && m.state === 'loading'} data-cr-nh-pci-reload="">{t('refresh')}</CrButton>}>
+                    {body}
+                </CrNcSection>
             );
         }
 

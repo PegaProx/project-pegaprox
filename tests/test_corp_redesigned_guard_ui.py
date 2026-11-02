@@ -648,6 +648,171 @@ GUESTS_PVE1 = [VM_AGENT, CT, VM_OFF,
                     mem_percent=0, uptime=0),
                dict(CT, vmid=105, name='ct02', status='stopped', cpu=0, cpu_percent=0, mem=0, mem_percent=0, uptime=0)]
 
+# round 9, B1: the node's Monitor > Timeline, a guest's Timeline, the node Shell and the node Subscription.
+# The subscription is what PVE's nodes/<node>/subscription answers (get_node_subscription passes its data on)
+NODE_SUB = {'status': 'active', 'serverid': '4A1B2C3D4E5F60718293A4B5C6D7E8F9', 'level': 'c',
+            'productname': 'Proxmox VE Community Subscription 1 CPU/year', 'key': 'pve1c-0a1b2c3d4e',
+            'regdate': '2026-01-15 00:00:00', 'nextduedate': '2027-01-15', 'checktime': FIXED - 86400,
+            'url': 'https://www.proxmox.com/en/proxmox-virtual-environment/pricing', 'message': ''}
+NODE_SUB_READS = {**NODE_BASE_READS, ('GET', '/api/clusters/c1/nodes/pve1/subscription'): (200, NODE_SUB)}
+
+# round 9, B3: the five classic Reports modules Corporate Redesigned draws anew (CVE Scanner, Cost Dashboard,
+# Power & Carbon, Network Topology, API Health), in the shapes pegaprox/api/reports.py, costs.py,
+# power.py, topology.py and clusters.py answer. The CVE scan is the POST the button sends
+REP_CVE = {
+    'cluster_id': 'c1', 'cluster_name': 'Testi', 'scanned_at': '2026-10-30T09:00:00+00:00',
+    'nodes': [
+        {'node': 'pve1', 'timestamp': '2026-10-30T08:59:40+00:00', 'os': 'Debian GNU/Linux 13 (trixie)',
+         'kernel': '6.14.8-2-pve', 'pve_version': 'pve-manager/9.0.10/0123456789abcdef (running kernel: 6.14.8-2-pve)',
+         'reboot_required': True, 'debsecan_available': True, 'suite': 'trixie', 'cve_mode': 'fixed', 'cve_total': 3,
+         'cve_truncated': False,
+         'cves': [
+             {'cve': 'CVE-2026-1001', 'package': 'openssl', 'urgency': 'high', 'status': 'fixed, remotely exploitable',
+              'fixed': True, 'remote': True, 'obsolete': False, 'first_seen': '2026-10-20T08:00:00', 'fix_type': 'apt'},
+             {'cve': 'CVE-2026-1002', 'package': 'pve-qemu-kvm', 'urgency': 'medium', 'status': 'fixed', 'fixed': True,
+              'remote': False, 'obsolete': False, 'first_seen': '2026-10-25T08:00:00', 'fix_type': 'pve_upgrade'},
+             {'cve': 'CVE-2025-0999', 'package': 'libxml2', 'urgency': 'low', 'status': '', 'fixed': False,
+              'remote': False, 'obsolete': False, 'first_seen': '2026-09-01T08:00:00', 'fix_type': 'none'}],
+         'packages': [
+             {'name': 'openssl', 'current': '3.5.1-1', 'available': '3.5.1-1+deb13u1',
+              'source': 'Debian-Security:13/stable-security [amd64]', 'security': True, 'severity': 'critical'},
+             {'name': 'curl', 'current': '8.14.1-2', 'available': '8.14.1-2+deb13u1',
+              'source': 'Debian-Security:13/stable-security [amd64]', 'security': True, 'severity': 'security'},
+             {'name': 'proxmox-widget-toolkit', 'current': '5.0.5', 'available': '5.0.6',
+              'source': 'Proxmox:bookworm/pve-no-subscription [all]', 'security': False, 'severity': 'normal'}],
+         'cve_count': 3, 'security_count': 2, 'total_count': 3},
+        {'node': 'pve2', 'error': 'Node offline'}],
+    'summary': {'nodes_scanned': 2, 'nodes_ok': 0, 'total_cves': 3, 'total_security': 2, 'total_updates': 3,
+                'debsecan_available': True}}
+REP_COST_RATES = {'cluster_id': 'c1', 'cpu_per_core_h': 0.012, 'mem_per_gb_h': 0.0035, 'storage_per_gb_month': 0.1,
+                  'currency': 'EUR', 'notes': '', 'updated_at': '2026-10-01 10:00:00', 'updated_by': 'admin'}
+REP_COST_ROWS = [
+    {'vmid': 100, 'name': 'web01', 'node': 'pve1', 'type': 'qemu', 'avg_cpu_pct': 12.4, 'avg_mem_pct': 48.0,
+     'running_ratio': 1.0, 'cores': 4, 'memory_gb': 8.0, 'disk_gb': 32.0, 'cost_cpu': 4.29, 'cost_memory': 9.68,
+     'cost_storage': 3.2, 'cost_total': 17.17, 'low_data': False, 'monthly_total': 17.17},
+    {'vmid': 101, 'name': 'ct01', 'node': 'pve1', 'type': 'lxc', 'avg_cpu_pct': 2.0, 'avg_mem_pct': 25.0,
+     'running_ratio': 1.0, 'cores': 1, 'memory_gb': 1.0, 'disk_gb': 8.0, 'cost_cpu': 0.17, 'cost_memory': 0.63,
+     'cost_storage': 0.8, 'cost_total': 1.6, 'low_data': False, 'monthly_total': 1.6},
+    {'vmid': 102, 'name': 'db01', 'node': 'pve2', 'type': 'qemu', 'avg_cpu_pct': 0.0, 'avg_mem_pct': 0.0,
+     'running_ratio': 0.0, 'cores': 2, 'memory_gb': 4.0, 'disk_gb': 64.0, 'cost_cpu': 0.0, 'cost_memory': 0.0,
+     'cost_storage': 6.4, 'cost_total': 6.4, 'low_data': True, 'monthly_total': 6.4}]
+REP_COST_SUMMARY = {'enough_data': True, 'cluster_id': 'c1', 'days': 30, 'snapshots_count': 720, 'rates': REP_COST_RATES,
+                    'total_window': 25.17, 'monthly_total': 25.17,
+                    'monthly_breakdown': {'cpu': 4.46, 'memory': 10.31, 'storage': 10.4},
+                    'by_node': {'pve1': 18.77, 'pve2': 6.4}, 'top_spenders': REP_COST_ROWS, 'vm_count': 3,
+                    'computed_at': '2026-10-30T08:58:00+00:00', 'refreshing': False}
+REP_POWER_RATES = {'cluster_id': 'c1', 'node_idle_w': 80.0, 'node_max_w': 300.0, 'mem_w_per_gb': 0.3, 'pue': 1.5,
+                   'kwh_price': 0.3, 'kg_co2_per_kwh': 0.4, 'currency': 'EUR', 'notes': ''}
+
+
+def _rep_money(kwh):
+    return {'kwh': kwh, 'cost': round(kwh * 0.3, 2), 'kg_co2': round(kwh * 0.4, 2)}
+
+
+def _rep_host(node, profile, idle, mx, kwh, unallocated, status='online'):
+    return {'node': node, 'status': status, 'profile': profile, 'idle_w': idle, 'max_w': mx, 'online_h': 720.0,
+            'avg_w': round(kwh * 1000 / 1.5 / 720, 1), 'monthly': _rep_money(kwh), 'monthly_unallocated': _rep_money(unallocated)}
+
+
+REP_POWER_SUMMARY = {
+    'enough_data': True, 'cluster_id': 'c1', 'days': 30, 'snapshots_count': 720, 'rates': REP_POWER_RATES,
+    'scoped': False, 'vm_count': 2,
+    'coverage': {'window_h': 720, 'covered_h': 600.0, 'missing_h': 120.0, 'node_estimated_vms': 1},
+    'window': _rep_money(150.0), 'monthly': _rep_money(150.0),
+    'by_node': {'pve1': _rep_money(40.0), 'pve2': _rep_money(110.0)}, 'top_consumers': [],
+    'hosts': [_rep_host('pve1', 'host', 9.0, 65.0, 40.0, 5.5), _rep_host('pve2', 'cluster', 80.0, 300.0, 110.0, 110.0, 'offline')],
+    'allocated': {'window': _rep_money(34.5), 'monthly': _rep_money(34.5)},
+    'unallocated': {'window': _rep_money(115.5), 'monthly': _rep_money(115.5)},
+    'computed_at': '2026-10-30T08:58:00+00:00', 'refreshing': False}
+REP_POWER_ROWS = [
+    {'vmid': '100', 'name': 'web01', 'node': 'pve1', 'type': 'qemu', 'avg_cpu_pct': 5.0, 'avg_mem_pct': 25.0,
+     'cores': 2, 'memory_gb': 4.0, 'running_h': 720.0, 'kwh': 30.0, 'cost': 9.0, 'kg_co2': 12.0, 'low_data': False,
+     'by_node': {'pve1': 20.0, 'pve2': 10.0}, 'node_estimated': True,
+     'monthly_kwh': 30.0, 'monthly_cost': 9.0, 'monthly_co2': 12.0},
+    {'vmid': '101', 'name': 'ct01', 'node': '', 'type': 'lxc', 'avg_cpu_pct': 1.0, 'avg_mem_pct': 104.0,
+     'cores': 1, 'memory_gb': 1.0, 'running_h': 300.0, 'kwh': 4.5, 'cost': 1.35, 'kg_co2': 1.8, 'low_data': True,
+     'by_node': {}, 'node_estimated': False, 'monthly_kwh': 4.5, 'monthly_cost': 1.35, 'monthly_co2': 1.8}]
+REP_POWER_HOSTS = {'cluster_id': 'c1', 'cluster_profile': {'idle_w': 80.0, 'max_w': 300.0}, 'hosts': [
+    {'node': 'pve1', 'in_cluster': True, 'status': 'online', 'cores': 8, 'memory_gb': 32.0, 'profile': 'host',
+     'idle_w': 9.0, 'max_w': 65.0, 'notes': 'Small box', 'updated_at': None, 'updated_by': 'root'},
+    {'node': 'pve2', 'in_cluster': True, 'status': 'offline', 'cores': 20, 'memory_gb': 64.0, 'profile': 'cluster',
+     'idle_w': 80.0, 'max_w': 300.0, 'notes': '', 'updated_at': None, 'updated_by': ''}]}
+REP_TOPOLOGY = {
+    'cluster': {'id': 'c1', 'name': 'Testi'},
+    'nodes': [
+        {'id': 'cluster:c1', 'kind': 'cluster', 'label': 'Testi'},
+        {'id': 'node:pve1', 'kind': 'node', 'label': 'pve1', 'parent_id': 'cluster:c1',
+         'meta': {'cpu_pct': 8.5, 'maxcpu': 16, 'mem_pct': 27.5, 'status': 'online'}},
+        {'id': 'node:pve2', 'kind': 'node', 'label': 'pve2', 'parent_id': 'cluster:c1',
+         'meta': {'cpu_pct': 0.0, 'maxcpu': 8, 'mem_pct': 0.0, 'status': 'offline'}},
+        {'id': 'br:pve1:vmbr0', 'kind': 'bridge', 'label': 'vmbr0', 'parent_id': 'node:pve1',
+         'meta': {'address': '10.0.0.11', 'type': 'bridge', 'vlan_aware': True, 'ports': 'bond0'}},
+        {'id': 'br:pve1:bond0', 'kind': 'bond', 'label': 'bond0', 'parent_id': 'node:pve1',
+         'meta': {'address': '', 'type': 'bond', 'vlan_aware': False, 'ports': 'eno1 eno2'}},
+        {'id': 'br:pve2:vmbr0', 'kind': 'bridge', 'label': 'vmbr0', 'parent_id': 'node:pve2',
+         'meta': {'address': '10.0.0.12', 'type': 'bridge', 'vlan_aware': False, 'ports': 'eno1'}},
+        {'id': 'sdn:vnet1', 'kind': 'sdn_vnet', 'label': 'vnet1', 'parent_id': 'cluster:c1',
+         'meta': {'zone': 'zone1', 'tag': 100, 'alias': 'tenant net'}},
+        {'id': 'vm:100', 'kind': 'vm', 'label': 'web01', 'parent_id': 'node:pve1', 'meta': {'vmid': 100, 'status': 'running', 'tags': 'web'}},
+        {'id': 'ct:101', 'kind': 'ct', 'label': 'ct01', 'parent_id': 'node:pve1', 'meta': {'vmid': 101, 'status': 'running', 'tags': ''}},
+        {'id': 'vm:102', 'kind': 'vm', 'label': 'db01', 'parent_id': 'node:pve2', 'meta': {'vmid': 102, 'status': 'stopped', 'tags': ''}}],
+    'links': [
+        {'source': 'cluster:c1', 'target': 'node:pve1', 'kind': 'tree'},
+        {'source': 'cluster:c1', 'target': 'node:pve2', 'kind': 'tree'},
+        {'source': 'node:pve1', 'target': 'br:pve1:vmbr0', 'kind': 'has-iface'},
+        {'source': 'node:pve1', 'target': 'br:pve1:bond0', 'kind': 'has-iface'},
+        {'source': 'node:pve2', 'target': 'br:pve2:vmbr0', 'kind': 'has-iface'},
+        {'source': 'cluster:c1', 'target': 'sdn:vnet1', 'kind': 'sdn'},
+        {'source': 'vm:100', 'target': 'br:pve1:vmbr0', 'kind': 'attached'},
+        {'source': 'ct:101', 'target': 'sdn:vnet1', 'kind': 'attached'}],
+    'counts': {'nodes': 2, 'bridges': 3, 'vms': 2, 'cts': 1}}
+_REP_MS = [22.0, 31.5, 18.2, 40.0, 1180.0, 25.1, 36.0, 210.4, 19.9, 44.2] * 3
+REP_API = {
+    'samples': 42, 'window_seconds': 300, 'p50': 38.2, 'p95': 210.4, 'p99': 640.1, 'avg': 61.7, 'max': 1180.0,
+    'error_rate': 4.8,
+    'recent': [{'ts': FIXED - (29 - i) * 10, 'duration_ms': ms, 'status': 500 if i in (4, 17) else 200, 'method': 'GET'}
+               for i, ms in enumerate(_REP_MS)],
+    'by_endpoint': [
+        {'endpoint': 'GET /nodes/{node}/qemu/{vmid}/status/current', 'count': 18, 'total_ms': 1450.2, 'max_ms': 1180.0,
+         'errors': 2, 'avg_ms': 80.6},
+        {'endpoint': 'GET /cluster/resources', 'count': 12, 'total_ms': 520.0, 'max_ms': 64.0, 'errors': 0, 'avg_ms': 43.3},
+        {'endpoint': 'GET /nodes/{node}/status', 'count': 12, 'total_ms': 380.4, 'max_ms': 40.0, 'errors': 0, 'avg_ms': 31.7}]}
+REP_READS = {
+    'rep_cve': {('POST', '/api/clusters/c1/reports/cve-scan'): (200, REP_CVE)},
+    'rep_costs': {('GET', '/api/clusters/c1/costs/summary'): (200, REP_COST_SUMMARY),
+                  ('GET', '/api/clusters/c1/costs/per-vm'): (200, {'enough_data': True, 'cluster_id': 'c1', 'days': 30,
+                                                                    'rates': REP_COST_RATES, 'rows': REP_COST_ROWS,
+                                                                    'computed_at': '2026-10-30T08:58:00+00:00', 'refreshing': False}),
+                  ('GET', '/api/cost/rates/c1'): (200, REP_COST_RATES)},
+    'rep_power': {('GET', '/api/clusters/c1/power/summary'): (200, REP_POWER_SUMMARY),
+                  ('GET', '/api/clusters/c1/power/per-vm'): (200, {'enough_data': True, 'cluster_id': 'c1', 'days': 30,
+                                                                    'rates': REP_POWER_RATES, 'rows': REP_POWER_ROWS}),
+                  ('GET', '/api/clusters/c1/power/hosts'): (200, REP_POWER_HOSTS),
+                  ('GET', '/api/power/rates/c1'): (200, REP_POWER_RATES)},
+    'rep_topology': {('GET', '/api/clusters/c1/topology'): (200, REP_TOPOLOGY)},
+    'rep_api': {('GET', '/api/clusters/c1/api-latency'): (200, REP_API)},
+}
+# round 9, B4: the snapshot overview of Resources as vms.snapshots_overview answers it (oldest first)
+RES_SNAPS = {'snapshots': [
+    {'vmid': 101, 'vm_name': 'db01', 'vm_type': 'qemu', 'node': 'pve1', 'snapshot_name': 'pre-upgrade',
+     'snapshot_date': '2026-08-02 06:10', 'snapshot_ts': 1785651000, 'age': '89 days', 'cluster_id': 'c1'},
+    {'vmid': 102, 'vm_name': 'ct01', 'vm_type': 'lxc', 'node': 'pve2', 'snapshot_name': 'before_php84',
+     'snapshot_date': '2026-10-28 21:45', 'snapshot_ts': 1793223900, 'age': '1 days', 'cluster_id': 'c1'},
+    {'vmid': 100, 'vm_name': 'web01', 'vm_type': 'qemu', 'node': 'pve1', 'snapshot_name': 'nightly',
+     'snapshot_date': '2026-10-30 07:00', 'snapshot_ts': 1793336400, 'age': '3 h', 'cluster_id': 'c1'}]}
+# and Automation > Affinity Rules as history.get_affinity_rules answers it
+AUTO_AFFINITY = {'rules': [
+    {'id': 'a1b2c3d4', 'name': 'db pair', 'type': 'separate', 'vms': [100, 101], 'vm_ids': [100, 101], 'enforce': True,
+     'enabled': True, 'created_at': '2026-10-12T14:03:11.204512'},
+    {'id': 'e5f6a7b8', 'name': 'web with cache', 'type': 'together', 'vms': [100, 999], 'vm_ids': [100, 999], 'enforce': False,
+     'enabled': True, 'created_at': '2026-10-20T08:30:00.000001'}]}
+RES_READS = {'res_snapshots': {('POST', '/api/snapshots/overview'): (200, RES_SNAPS)},
+             'auto_affinity': {('GET', '/api/clusters/c1/affinity-rules'): (200, AUTO_AFFINITY)}}
+# the Reports sub tab of each (classic label) and the Cloud nav entry that mounts the same component
+REP_TABS = {'rep_cve': ('CVE Scanner', None), 'rep_costs': ('Cost Dashboard', 'Costs'),
+            'rep_power': ('Power & Carbon', 'Power & Carbon'), 'rep_topology': ('Network Topology', 'Topology'),
+            'rep_api': ('API Health', None)}
+
 CFG_RAW = {'name': 'web01', 'tags': 'prod;web', 'description': 'Web front end\n\n**behind** the proxy',
            'cores': 2, 'sockets': 2, 'cpu': 'x86-64-v2-AES,flags=+aes;-pcid', 'memory': '8192', 'balloon': '2048',
            'numa': 1, 'bios': 'ovmf', 'machine': 'pc-q35-8.1', 'scsihw': 'virtio-scsi-single', 'vga': 'std',
@@ -687,7 +852,9 @@ VIEW_READS = {'config_general': CFG_READS, 'config_hardware': CFG_READS, 'config
               'node_summary': NODE_BASE_READS, 'node_network': NODE_NET_READS,
               'node_hardware': NODE_HW_READS, 'node_disks': NODE_DISK_READS,
               'node_tasks': NODE_TASK_READS, 'node_guests': NODE_BASE_READS,
-              **{v: NODE_SYS_READS for v in SYS_VIEWS}, **{v: NODE_STORE_READS for v in STORE_VIEWS}}
+              **{v: NODE_SYS_READS for v in SYS_VIEWS}, **{v: NODE_STORE_READS for v in STORE_VIEWS},
+              'node_timeline': {**NODE_BASE_READS, **TIMELINE_READS}, 'vm_timeline': TIMELINE_READS,
+              'node_shell': NODE_BASE_READS, 'node_subscription': NODE_SUB_READS, **REP_READS, **RES_READS}
 VIEW_CLUSTERS = {'alerts': [CLUSTER, ALERT_EDGE]}
 VIEW_RESOURCES = {'node_guests': GUESTS_PVE1}
 VIEW_STORAGE = {'updates': UPD_STORAGE}
@@ -710,7 +877,20 @@ NOT_IN = {('cloud', 'reports'): 'Cloud has no Reports summary (its Insights entr
           **{('modern', v): 'The Modern node dialog has no such Configure sub tab' for v in SYS_VIEWS},
           # B2: the storage, repository and Ceph sub tabs of the Corporate node view (Modern has its own dialog)
           **{('cloud', v): 'Cloud has no node configuration' for v in STORE_VIEWS},
-          **{('modern', v): 'The Modern node dialog has no such Configure sub tab' for v in STORE_VIEWS}}
+          **{('modern', v): 'The Modern node dialog has no such Configure sub tab' for v in STORE_VIEWS},
+          # round 9, B1: Cloud has no node or guest timeline (its cluster Timeline is guarded in timeline),
+          # no node shell and no node subscription; the Modern subscription tab is its own code, not touched
+          ('cloud', 'node_timeline'): 'Cloud has no node timeline (its cluster Timeline is guarded in timeline)',
+          ('cloud', 'vm_timeline'): 'Cloud has no guest timeline (its cluster Timeline is guarded in timeline)',
+          ('cloud', 'node_shell'): 'Cloud has no node shell',
+          ('cloud', 'node_subscription'): 'Cloud has no node subscription',
+          ('modern', 'node_subscription'): 'The Modern node dialog draws its own subscription tab (not this code)',
+          # round 9, B3: Cloud draws its own CVE page (CloudCVE) and mounts ApiLatencyDashboard itself (not touched)
+          ('cloud', 'rep_cve'): 'Cloud draws its own CVE page (CloudCVE, not this code)',
+          ('cloud', 'rep_api'): 'Cloud mounts ApiLatencyDashboard itself, the Reports call site is not on its path',
+          # round 9, B4: Cloud lists snapshots on its own page (not the Resources sub tab)
+          ('cloud', 'res_snapshots'): 'Cloud has no Resources snapshot overview (its own snapshot page is not this code)',
+          ('cloud', 'auto_affinity'): 'Cloud has no Automation tab (its affinity page is not this code)'}
 
 
 class _GuardServer(_ProfileServer):
@@ -840,7 +1020,9 @@ VIEWS = ['dashboard', 'node', 'vm', 'ct', 'config', 'config_general', 'config_ha
          'whatif', 'topology', 'settings', 'tasks', 'harden', 'alerts', 'timeline', 'datacenter', 'updates', 'perf',
          'vmperf', 'node_summary', 'node_network', 'node_hardware', 'node_disks', 'node_tasks', 'node_guests',
          'node_dns', 'node_hosts', 'node_time', 'node_certs', 'node_syslog',
-         'node_lvm', 'node_lvmthin', 'node_zfs', 'node_repos', 'node_ceph']
+         'node_lvm', 'node_lvmthin', 'node_zfs', 'node_repos', 'node_ceph',
+         'node_timeline', 'vm_timeline', 'node_shell', 'node_subscription',
+         'rep_cve', 'rep_costs', 'rep_power', 'rep_topology', 'rep_api', 'res_snapshots', 'auto_affinity']
 RUNS = {'corporate-dark': ('corporate', ''), 'corporate-light': ('corporate', 'light'),
         'modern': ('modern', ''), 'cloud': ('cloud', '')}
 
@@ -918,6 +1100,25 @@ def _reports_drawn(page):
     page.get_by_text('web01').first.wait_for(timeout=8000)
     page.get_by_text('48 data points', exact=False).first.wait_for(timeout=8000)
     page.wait_for_function('() => document.querySelectorAll("#report-summary-content canvas").length >= 2', timeout=8000)
+
+
+def _rep_drawn(page, view):
+    # round 9, B3: each classic module with its reads answered (the CVE scan started and pve1 opened)
+    if view == 'rep_cve':
+        page.locator('button', has_text=_exact('Scan All Nodes')).first.click()
+        page.locator('#cve-report-content button', has_text='pve1').first.click()
+        page.get_by_text('CVE-2026-1001').first.wait_for(timeout=8000)
+    elif view == 'rep_costs':
+        page.get_by_text('Cost by Node').first.wait_for(timeout=8000)
+        page.get_by_text('db01').first.wait_for(timeout=8000)
+    elif view == 'rep_power':
+        page.get_by_text('Per host').first.wait_for(timeout=8000)
+        page.get_by_text('ct01').first.wait_for(timeout=8000)
+    elif view == 'rep_topology':
+        page.locator('svg text', has_text='vnet1').first.wait_for(timeout=8000)
+    elif view == 'rep_api':
+        page.get_by_text('Top endpoints by total time').first.wait_for(timeout=8000)
+        page.get_by_text('/cluster/resources').first.wait_for(timeout=8000)
 
 
 def _insights_drawn(page):
@@ -1032,6 +1233,9 @@ def go(app, layout, view):
         elif view == 'updates':
             _cloud_nav(page, 'Update Manager')
             _updates_drawn(page)
+        elif view in REP_TABS:
+            _cloud_nav(page, REP_TABS[view][1])
+            _rep_drawn(page, view)
         elif view == 'vmperf':
             _cloud_nav(page, 'Virtual Machines')
             page.locator('.cloud-table-row', has_text='web01').first.locator('button').last.click()
@@ -1045,7 +1249,7 @@ def go(app, layout, view):
         return
     if corp:
         _corp_cluster(page)
-    elif view not in ('vm', 'ct', 'vmperf') and view not in CFG_TABS:
+    elif view not in ('vm', 'ct', 'vmperf', 'vm_timeline') and view not in CFG_TABS:
         _modern_cluster(page)
     if view == 'node':
         if corp:
@@ -1085,9 +1289,22 @@ def go(app, layout, view):
         else:
             page.locator('button', has_text=_exact('What-if')).first.click()
             _whatif_drawn(page)
+    elif view in REP_TABS:
+        page.locator('button', has_text=_exact('Reports')).first.click()
+        page.locator('button', has_text=_exact(REP_TABS[view][0])).first.click()
+        _rep_drawn(page, view)
     elif view == 'topology':
         page.locator('button', has_text=_exact('Resources')).first.click()
         page.locator('button', has_text=_exact('Topology')).first.click()
+    elif view == 'res_snapshots':
+        # round 9, B4: Resources > Snapshot Overview with its read answered
+        page.locator('button', has_text=_exact('Resources')).first.click()
+        page.locator('button', has_text='Snapshot').first.click()
+        page.get_by_text('before_php84').first.wait_for(timeout=8000)
+    elif view == 'auto_affinity':
+        page.locator('button', has_text=_exact('Automation')).first.click()
+        page.locator('button', has_text='Affinity').first.click()
+        page.get_by_text('web with cache').first.wait_for(timeout=8000)
     elif view == 'harden':
         _harden_drawn(page)
     elif view == 'alerts':
@@ -1176,6 +1393,45 @@ def go(app, layout, view):
         page.locator('.corp-tree-child', has_text='pve1').first.click()
         page.locator('.corp-tab-strip button', has_text=_exact('VMs')).first.click()
         page.get_by_text('tpl-debian').first.wait_for(timeout=8000)
+    elif view == 'node_timeline':
+        if corp:
+            page.locator('.corp-tree-child', has_text='pve1').first.click()
+            page.locator('.corp-tab-strip button', has_text=_exact('Monitor')).first.click()
+            page.locator('[data-corp-node-timeline]').first.click()
+        else:
+            _settled(page.locator('button[title="Node Configuration"]').first).click()
+            page.locator('button', has_text=_exact('Timeline')).last.click()
+        _timeline_drawn(page)
+    elif view == 'vm_timeline':
+        if corp:
+            page.locator('.corp-tree-child', has_text='web01').first.click()
+            page.locator('[data-corp-vm-timeline]').first.click()
+        else:
+            # the guest panel of the compact view carries it, opened on demand
+            _modern_cluster(page)
+            page.locator('button', has_text=_exact('Resources')).first.click()
+            page.get_by_text('web01').first.wait_for(timeout=8000)
+            page.locator('button[title="Compact View"]').first.click()
+            page.locator('div.cursor-pointer', has_text='web01').first.click()
+            toggle = page.locator('[data-vm-timeline-toggle]').first
+            toggle.wait_for(timeout=8000)
+            toggle.scroll_into_view_if_needed()
+            _settled(toggle).click()
+        _timeline_drawn(page)
+    elif view == 'node_shell':
+        # the terminal loads, asks for the login; the socket to the shell port finds nobody
+        if corp:
+            page.locator('.corp-tree-child', has_text='pve1').first.click()
+            page.locator('.corp-tab-strip button', has_text=_exact('Shell')).first.click()
+        else:
+            _settled(page.locator('button[title="Node Configuration"]').first).click()
+            page.locator('button', has_text=_exact('Shell')).last.click()
+        page.locator('[data-shell-login]').first.wait_for(timeout=8000)
+        page.locator('.xterm').first.wait_for(timeout=8000)
+    elif view == 'node_subscription':
+        page.locator('.corp-tree-child', has_text='pve1').first.click()
+        page.locator('.corp-tab-strip button', has_text=_exact('Subscription')).first.click()
+        page.get_by_text('Community Subscription', exact=False).first.wait_for(timeout=8000)
     elif view == 'tasks':
         page.locator('.pp-taskbar .cursor-pointer').first.click()
         page.get_by_text('VM Migration').first.wait_for(timeout=8000)

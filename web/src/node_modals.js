@@ -42,7 +42,7 @@
         }
 
         // Node Shell Terminal Component using xterm.js with SSH
-        function NodeShellTerminal({ node, clusterId, addToast }) {
+        function NodeShellTerminal({ node, clusterId, addToast, onStatus }) {
             const { t } = useTranslation();
             const terminalRef = useRef(null);
             const initRef = useRef(false);
@@ -68,6 +68,13 @@
                 statusRef.current = status;
             }, [status]);
 
+            // LW Nov 2026 - Corporate Redesigned's bar above the terminal shows the session's state, where it
+            // logs in and as whom (CrNodeShell, cr_nodemisc.js); nothing else passes onStatus
+            const sentUserRef = useRef('');
+            useEffect(() => {
+                if (onStatus) onStatus({ status, ip: nodeInfo.ip || '', port: sshPort, user: sentUserRef.current });
+            }, [status, nodeInfo.ip, sshPort]);
+
             // NS May 2026 — staging area for credentials submitted before the
             // WS finished opening. Air-gap users hit this when the dialog
             // shows up before the handshake (which is now intentional).
@@ -89,6 +96,7 @@
             };
 
             const sendCredentials = () => {
+                sentUserRef.current = credentials.username || '';
                 const authData = {
                     username: credentials.username,
                     password: credentials.authMethod === 'password' ? credentials.password : '',
@@ -4916,7 +4924,13 @@
                 catch (e) { console.error(e); return null; }
             };
 
-            const statusColor = (s) => s === 'critical' ? '#f54f47' : s === 'warning' ? '#efc006' : s === 'ok' ? '#60b515' : '#8b98a5';
+            // LW Nov 2026 - Corporate Redesigned hands onCrState down and gets the panel in its own tokens and buttons;
+            // every read, write and dialog stays the same
+            const cr = !!onCrState;
+            const statusColor = (s) => (cr
+                ? (s === 'critical' ? 'var(--cr-error)' : s === 'warning' ? 'var(--cr-warning)' : s === 'ok' ? 'var(--cr-success)' : 'var(--cr-text-secondary)')
+                : (s === 'critical' ? '#f54f47' : s === 'warning' ? '#efc006' : s === 'ok' ? '#60b515' : '#8b98a5'));
+            const crBtn = (kind, classic, style) => (cr ? { className: `cr-btn cr-btn-${kind}` } : { className: classic, style });
 
             const loadConsent = async () => {
                 const r = await hwFetch(`${API_URL}/hardware-monitoring/consent?lang=${encodeURIComponent(language || 'en')}`);
@@ -5040,12 +5054,16 @@
 
             const w = consent && consent.warning;
             const rw = rfConsent && rfConsent.warning;
-            const inputStyle = { background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)', color: 'var(--color-text, #e9ecef)' };
+            const inputStyle = cr ? { background: 'var(--cr-bg-sunken)', border: '1px solid var(--cr-border-primary)', color: 'var(--cr-text-primary)', borderRadius: 3 }
+                : { background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)', color: 'var(--color-text, #e9ecef)' };
             const ipmitoolMissing = hw && hw.available === false && /ipmitool/i.test(hw.reason || '');
-            const card = { border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.02)' };
-            const cardHead = { padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.10)' };
-            const txt = { color: 'var(--color-text, #e9ecef)' };
-            const sub = { color: 'var(--corp-text-secondary, #adbbc4)' };
+            const card = cr ? { border: '1px solid var(--cr-border-secondary)', background: 'var(--cr-bg-panel)', borderRadius: 3 }
+                : { border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.02)' };
+            const cardHead = cr ? { padding: '8px 12px', background: 'var(--cr-bg-sunken)', borderBottom: '1px solid var(--cr-border-secondary)' }
+                : { padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.10)' };
+            const txt = cr ? { color: 'var(--cr-text-primary)' } : { color: 'var(--color-text, #e9ecef)' };
+            const sub = cr ? { color: 'var(--cr-text-secondary)' } : { color: 'var(--corp-text-secondary, #adbbc4)' };
+            const healthWord = (h) => (h === 'ok' ? (t('healthy') || 'Healthy') : h === 'warning' ? (t('warning') || 'Warning') : (t('critical') || 'Critical'));
 
             if (loading) {
                 return (<div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>);
@@ -5061,8 +5079,7 @@
                                 <p className="text-[13px]" style={sub}>{t('hardwareMonitoringDisabledDesc') || 'In-band hardware monitoring (IPMI) is not enabled. It reads sensors, power, inventory and the hardware event log directly on the node — credential-free, read-only.'}</p>
                                 {haStandby ? <HaSettingsOnActive own /> : (
                                 <button onClick={openWarn}
-                                    className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5"
-                                    style={{background: '#49afd9', color: '#08131b'}}>
+                                    {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5', {background: '#49afd9', color: '#08131b'})}>
                                     <Icons.Cpu className="w-3.5 h-3.5" />{t('enableHardwareMonitoring') || 'Enable hardware monitoring'}
                                 </button>
                                 )}
@@ -5077,7 +5094,12 @@
                             <div className="flex items-center justify-between flex-wrap gap-2">
                                 <div className="flex items-center gap-2">
                                     <span className="text-[13px] font-medium" style={txt}>{t('hardwareMonitoring') || 'Hardware Monitoring'}</span>
-                                    {hw && hw.available && hw.health && (
+                                    {cr && hw && hw.available && hw.health && (
+                                        <span data-cr-nh-ib-health={hw.health}>
+                                            <CrBadge tone={hw.health === 'ok' ? 'success' : hw.health === 'warning' ? 'warning' : 'error'}>{healthWord(hw.health)}</CrBadge>
+                                        </span>
+                                    )}
+                                    {!cr && hw && hw.available && hw.health && (
                                         <span className="px-2 py-0.5 rounded text-xs flex items-center gap-1.5"
                                             style={{background: statusColor(hw.health) + '22', color: statusColor(hw.health)}}>
                                             <span className="w-2 h-2 rounded-full" style={{background: statusColor(hw.health)}}></span>
@@ -5087,7 +5109,9 @@
                                 </div>
                                 <div className="flex items-center gap-3">
                                     {consent.acknowledged_by && <span className="text-[11px]" style={sub}>{t('hwEnabledBy') || 'Enabled by'} {consent.acknowledged_by}</span>}
-                                    <button onClick={refresh} className="text-[12px] flex items-center gap-1" style={{color: '#49afd9'}}><Icons.RotateCw className="w-3 h-3" />{t('refresh') || 'Refresh'}</button>
+                                    {cr
+                                        ? <CrButton icon={<Icons.RotateCw />} onClick={refresh} data-cr-nh-ib-refresh="">{t('refresh')}</CrButton>
+                                        : <button onClick={refresh} className="text-[12px] flex items-center gap-1" style={{color: '#49afd9'}}><Icons.RotateCw className="w-3 h-3" />{t('refresh') || 'Refresh'}</button>}
                                 </div>
                             </div>
 
@@ -5097,7 +5121,7 @@
                                 <div className="flex items-start gap-1.5 text-[12px]" style={sub}>
                                     <Icons.AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{color: statusColor(hw.health)}} />
                                     <span>
-                                        {t('hwHealthCause') || 'Contributing'}:{' '}
+                                        {cr ? t('crNhIbCause') : (t('hwHealthCause') || 'Contributing')}:{' '}
                                         {hw.health_reasons.map((r, i) => (
                                             <span key={i}>
                                                 <span style={{color: statusColor(r.severity)}}>{r.label}</span>
@@ -5118,8 +5142,7 @@
                                             {t('hwInstallHint') || 'PegaProx will run apt-get install ipmitool on the node and may load the IPMI kernel modules. Read-only, local IPMI only.'}
                                         </div>
                                         <button onClick={install} disabled={installing}
-                                            className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
-                                            style={{background: '#49afd9', color: '#08131b'}}>
+                                            {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', {background: '#49afd9', color: '#08131b'})}>
                                             {installing ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Download className="w-3.5 h-3.5" />}
                                             {installing ? (t('hwInstalling') || 'Installing…') : (t('hwInstallIpmitool') || 'Install ipmitool')}
                                         </button>
@@ -5138,6 +5161,18 @@
                                     {/* System info (FRU) + power */}
                                     <div style={card}>
                                         <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSystemInfo') || 'System Information'}</span></div>
+                                        {cr ? (
+                                            <div className="cr-nh-ib-kv">
+                                                <CrNcKv id="hw-fru" rows={[
+                                                    { k: 'manufacturer', label: t('manufacturer'), value: hw.fru && hw.fru.manufacturer },
+                                                    { k: 'product', label: t('product'), value: hw.fru && hw.fru.product },
+                                                    { k: 'serial', label: t('serialNumber'), value: hw.fru && hw.fru.serial, mono: true },
+                                                    { k: 'part', label: t('partNumber'), value: hw.fru && hw.fru.part },
+                                                    { k: 'power', label: t('powerDraw'), value: typeof hw.power_w === 'number' ? `${hw.power_w} W` : '' },
+                                                    { k: 'intrusion', label: t('chassisIntrusion'), value: hw.chassis && hw.chassis.intrusion },
+                                                ]} />
+                                            </div>
+                                        ) : (
                                         <table className="w-full text-[12px]"><tbody>
                                             {hw.fru && hw.fru.manufacturer && <tr><td className="px-3 py-1.5" style={sub}>{t('manufacturer') || 'Manufacturer'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.manufacturer}</td></tr>}
                                             {hw.fru && hw.fru.product && <tr><td className="px-3 py-1.5" style={sub}>{t('product') || 'Product'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.product}</td></tr>}
@@ -5146,6 +5181,7 @@
                                             {typeof hw.power_w === 'number' && <tr><td className="px-3 py-1.5" style={sub}>{t('powerDraw') || 'Power draw'}</td><td className="px-3 py-1.5" style={txt}>{hw.power_w} W</td></tr>}
                                             {hw.chassis && hw.chassis.intrusion && <tr><td className="px-3 py-1.5" style={sub}>{t('chassisIntrusion') || 'Chassis intrusion'}</td><td className="px-3 py-1.5" style={txt}>{hw.chassis.intrusion}</td></tr>}
                                         </tbody></table>
+                                        )}
                                     </div>
 
                                     {/* Sensors */}
@@ -5169,10 +5205,10 @@
 
                                     {/* Event log (SEL) */}
                                     {hw.events && hw.events.length > 0 && (
-                                        <div style={card} className="lg:col-span-2">
+                                        <div style={card} className={cr ? undefined : 'lg:col-span-2'}>
                                             <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwEventLog') || 'Hardware event log (SEL)'} ({hw.events.length})</span></div>
                                             <div className="max-h-64 overflow-y-auto">
-                                                <table className="w-full text-[12px]"><tbody>
+                                                <table className={cr ? 'corp-datagrid cr-table cr-nn-table' : 'w-full text-[12px]'}><tbody>
                                                     {hw.events.map((e, i) => (
                                                         <tr key={i}>
                                                             <td className="px-2 py-1"><span className="inline-block w-2 h-2 rounded-full" style={{background: statusColor(e.severity)}} title={e.severity}></span></td>
@@ -5199,7 +5235,7 @@
                                     <React.Fragment>
                                         <p className="text-[13px]" style={sub}>{t('redfishOobDesc') || 'Read hardware health over the management network via the BMC Redfish API — a credential-based, out-of-band fallback when in-band IPMI is unavailable.'}</p>
                                         {haStandby ? <HaSettingsOnActive own /> : (
-                                        <button onClick={openRfWarn} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5" style={{background: '#efc006', color: '#08131b'}}>
+                                        <button onClick={openRfWarn} {...crBtn('default', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5', {background: '#efc006', color: '#08131b'})}>
                                             <Icons.Server className="w-3.5 h-3.5" />{t('enableRedfish') || 'Enable out-of-band monitoring'}
                                         </button>
                                         )}
@@ -5230,13 +5266,13 @@
                                             </div>
                                         )}
                                         <div className="flex items-center gap-2">
-                                            <button onClick={saveBmc} disabled={bmcSaving || !bmcForm.host} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50" style={{ background: '#49afd9', color: '#08131b' }}>
+                                            <button onClick={saveBmc} disabled={bmcSaving || !bmcForm.host} {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', { background: '#49afd9', color: '#08131b' })}>
                                                 {bmcSaving ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}{t('save') || 'Save'}
                                             </button>
-                                            <button onClick={testBmc} disabled={bmcTesting || !bmcForm.host} className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50" style={{ border: '1px solid rgba(255,255,255,0.2)', color: 'var(--color-text, #e9ecef)' }}>
+                                            <button onClick={testBmc} disabled={bmcTesting || !bmcForm.host} {...crBtn('default', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', { border: '1px solid rgba(255,255,255,0.2)', color: 'var(--color-text, #e9ecef)' })}>
                                                 {bmcTesting ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Activity className="w-3.5 h-3.5" />}{t('bmcTest') || 'Test'}
                                             </button>
-                                            {bmc && bmc.configured && <button onClick={removeBmc} className="px-3 py-1.5 text-sm" style={{ color: '#f54f47' }}>{t('remove') || 'Remove'}</button>}
+                                            {bmc && bmc.configured && <button onClick={removeBmc} {...crBtn('danger', 'px-3 py-1.5 text-sm', { color: '#f54f47' })}>{t('remove') || 'Remove'}</button>}
                                         </div>
                                     </div>
                                 )}
@@ -5547,6 +5583,8 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/zfs`,
                         ],
                         repos: [`${API_URL}/clusters/${clusterId}/nodes/${node}/repos`],
+                        // LW Nov 2026 - Corporate Redesigned's Hardware tab lists the PCI devices (the route the guest passthrough reads)
+                        pci: [`${API_URL}/clusters/${clusterId}/nodes/${node}/hardware/pci`],
                         subscription: [`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`],
                         ceph: [
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/status`,
@@ -5558,7 +5596,7 @@
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
                     // LW Nov 2026 - the preview keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
-                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph')) || (isCorpRedesigned && tab === 'tasks');
+                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks');
                     const results = await Promise.all(urls.map(u => u.endsWith('/dns')
                         ? authFetch(u).then(readNodeDns)
                         : crKeep ? authFetch(u).then(crNdRead)
@@ -5606,7 +5644,12 @@
                             if (crKeep) newData.reposRead = results[0];
                             newData.repos = got[0]?.repositories || [];
                         }
-                        else if (tab === 'subscription') newData.subscription = results[0] || {};
+                        else if (tab === 'pci') newData.pciRead = results[0];
+                        else if (tab === 'subscription') {
+                            // LW Nov 2026 - Corporate Redesigned keeps the answer or why it failed; the classic grid gets what it had
+                            if (crKeep) newData.subscriptionRead = results[0];
+                            newData.subscription = (crKeep && crNdFail(results[0]) ? null : results[0]) || {};
+                        }
                         else if (tab === 'ceph') {
                             const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
                             if (crKeep) newData.cephRead = results;
@@ -5660,6 +5703,14 @@
                 else if (activeDetailTab === 'hardware' && data.sensors === undefined) loadTabData('sensors');  // #601
                 else if (activeDetailTab === 'subscription' && !data.subscription) loadTabData('subscription');
             }, [activeDetailTab, configSubTab, monitorSubTab]);
+
+            // LW Nov 2026 - Corporate Redesigned's Hardware tab also shows the PCI devices and the disk health: one
+            // read each per visit of the node (the disks read is the one Configure > Disks makes)
+            useEffect(() => {
+                if (!crHw || activeDetailTab !== 'hardware') return;
+                if (data.pciRead === undefined) loadTabData('pci');
+                if (data.disksRead === undefined) loadTabData('disks');
+            }, [crHw, activeDetailTab]);
 
             const handlePerfTimeframeChange = (tf) => {
                 setPerfTimeframe(tf);
@@ -6608,14 +6659,25 @@
 
                         {/* Hardware Tab (#609 in-band BMC) */}
                         {activeDetailTab === 'hardware' && (
-                            <div className="space-y-6">
+                            <div className={crHw ? 'cr-nc-page cr-nh-page' : 'space-y-6'}>
                                 {/* LW Nov 2026 - the preview: every sensor by kind with its limits and state, the history (cr_node.js) */}
                                 {crHw && (
+                                    <CrBoundary key={`${navKey}-basics`} id="node-hw-basics">
+                                        <CrNodeHwBasics summary={data.summary} disks={data.disksRead} loading={loading}
+                                            onReadDisks={() => loadTabData('disks')}
+                                            onOpenDisks={() => { setConfigSubTab('disks'); setActiveDetailTab('configure'); }} />
+                                    </CrBoundary>
+                                )}
+                                {crHw && (
                                     <CrNodeHardware node={node} read={data.sensorsRead} temps={data.tempsRead} bmc={crBmc}
-                                        loading={loading} onReload={() => loadTabData('sensors')} />
+                                        loading={loading} onReload={() => loadTabData('sensors')}>
+                                        <CrBoundary key={`${navKey}-pci`} id="node-pci">
+                                            <CrNodePci read={data.pciRead} loading={loading} onReload={() => loadTabData('pci')} />
+                                        </CrBoundary>
+                                    </CrNodeHardware>
                                 )}
                                 {crHw && <div data-cr-nh-bmc-anchor="" />}
-                                <fieldset disabled={haReadOnly} className="contents">
+                                <fieldset disabled={haReadOnly} className={crHw ? 'contents cr-nh-inband' : 'contents'}>
                                     <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders}
                                         {...(crHw ? { onCrState: setCrBmc } : {})} />
                                 </fieldset>
@@ -6706,16 +6768,27 @@
 
                         {/* Shell Tab */}
                         {activeDetailTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}
-                        {activeDetailTab === 'shell' && !haConsolesElsewhere && (
+                        {activeDetailTab === 'shell' && !haConsolesElsewhere && (isCorpRedesigned ? (
+                            // LW Nov 2026 - Corporate Redesigned: the session's state above the one terminal (cr_nodemisc.js)
+                            <CrBoundary key={navKey} id="node-shell">
+                                <CrNodeShell node={node} clusterId={clusterId} addToast={addToast} />
+                            </CrBoundary>
+                        ) : (
                             // NS #727 — clip (not hidden) so Firefox's selection-autoscroll can't
                             // scroll this panel; hidden boxes stay programmatically scrollable, clip doesn't.
                             <div className="bg-black border border-proxmox-border" style={{height: '500px', overflow: 'clip'}}>
                                 <NodeShellTerminal node={node} clusterId={clusterId} addToast={addToast} />
                             </div>
-                        )}
+                        ))}
 
-                        {/* Subscription Tab */}
-                        {activeDetailTab === 'subscription' && (
+                        {/* Subscription Tab - LW Nov 2026: Corporate Redesigned draws what a Proxmox VE node reports (cr_nodemisc.js) */}
+                        {activeDetailTab === 'subscription' && crHw && (
+                            <CrBoundary key={navKey} id="node-subscription">
+                                <CrNodeSubscription node={node} read={data.subscriptionRead} loading={loading}
+                                    onReload={() => loadTabData('subscription')} />
+                            </CrBoundary>
+                        )}
+                        {activeDetailTab === 'subscription' && !crHw && (
                             <div>
                                 <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('subscriptionInfo')}</span>
                                 {loading && !data.subscription ? (

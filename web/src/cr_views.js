@@ -26,6 +26,11 @@
             return pct > CR_STORE_CRIT ? 'error' : pct >= CR_STORE_WARN ? 'warning' : 'success';
         }
         const crStoreScale = (t) => crFill(t('crStoreThresholds'), { warn: CR_STORE_WARN, crit: CR_STORE_CRIT });
+        // API health: the limits the classic latency page colours by, in ms and % of calls
+        const CR_LAT_WARN = 500;
+        const CR_LAT_CRIT = 1000;
+        const CR_ERR_WARN = 1;
+        const CR_ERR_CRIT = 5;
         const crPct = (v, digits = 0) => (Number.isFinite(v) ? `${v.toFixed(digits)}%` : '-');
         const crBytes = (b) => (Number.isFinite(b) ? formatBytes(b) : '-');
         const crFill = (s, vars) => Object.keys(vars).reduce((out, k) => out.split(`{${k}}`).join(vars[k]), s || '');
@@ -648,7 +653,8 @@
             const { t } = useTranslation();
             const map = {
                 running: ['success', t('running')], online: ['success', t('online')],
-                stopped: ['neutral', t('stopped')], paused: ['warning', t('paused')],
+                // LW Nov 2026 - 'stopped' is defined twice per language and the later, lower case one wins
+                stopped: ['neutral', t('crNgStopped')], paused: ['warning', t('paused')],
                 maintenance: ['warning', t('maintenance')], offline: ['error', t('offline')],
             };
             const [tone, label] = map[state] || ['neutral', state || '-'];
