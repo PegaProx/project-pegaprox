@@ -17121,9 +17121,18 @@
                 let isClosing = false;
                 let sseToken = null;
                 let tokenRefreshInterval = null;
+                // LW Nov 2026 - after a server restart the tab asked for a token several times a second until
+                // someone signed in again: a refused token left the old one in use, the stream answered 401 with
+                // it, and the health check started the backoff over every 10 s. Now our own 401 on the token
+                // ends it (sessionGone, the session overlay), a token request that may work later comes back
+                // with the backoff, and an answer without a token (a standby) still means "no stream, poll instead"
+                let sessionGone = false;
+                let tokenFailed = false;
+                let connecting = false;
                 
                 // Get SSE token (more secure than session ID in URL)
                 const getSseToken = async () => {
+                    tokenFailed = false;
                     try {
                         const resp = await authFetch(`${API_URL}/sse/token`, { method: 'POST' });
                         if (resp && resp.ok) {
@@ -17132,19 +17141,42 @@
                             console.log('SSE token obtained (expires in', data.expires_in, 's)');
                             return true;
                         }
+                        sseToken = null;
+                        // worth another try later: no answer, a busy or failing server. A 403 or 404 stays as it is
+                        tokenFailed = !resp || resp.status >= 500 || resp.status === 429;
+                        // authFetch leaves /sse alone, so the token read says it here
+                        const body = resp && resp.status === 401 ? await resp.json().catch(() => null) : null;
+                        if (PegaProxApiErrors.sessionLost(body)) {
+                            sessionGone = true;
+                            setSessionExpired(true);
+                        }
                     } catch (e) {
+                        tokenFailed = true;
                         console.warn('Failed to get SSE token, falling back to session:', e);
                     }
                     return false;
                 };
                 
+                // one retry at a time, with the backoff: the error handler, a failed token request and the
+                // health check all come through here
+                const scheduleRetry = () => {
+                    if (isClosing || sessionGone || reconnectTimeout) return;
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    reconnectAttempts++;
+                    console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+                    reconnectTimeout = setTimeout(() => { reconnectTimeout = null; connectSSE(); }, delay);
+                };
+                
                 const connectSSE = async () => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting) return;
                     
                     console.log('Connecting to SSE...');
                     
                     // Try to get SSE token first (preferred - doesn't expose session in logs)
+                    connecting = true;
                     await getSseToken();
+                    connecting = false;
+                    if (isClosing || sessionGone) return;
                     
                     // Use token if available, otherwise skip
                     let sseUrl;
@@ -17158,6 +17190,10 @@
                     } else {
                         // LW Mar 2026 - don't expose session ID in URL, just skip SSE
                         console.warn('SSE: Token unavailable, skipping SSE connection');
+                        // a refusal that will not change lets the closed stream go, or the health check
+                        // would ask again for it every round
+                        if (tokenFailed) scheduleRetry();
+                        else eventSource = null;
                         return;
                     }
                     
@@ -17531,17 +17567,8 @@
                             eventSource.close();
                         }
                         
-                        if (!isClosing) {
-                            // NS: Get fresh token before reconnecting
-                            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-                            reconnectAttempts++;
-                            console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
-                            reconnectTimeout = setTimeout(async () => {
-                                // Get fresh token first
-                                await getSseToken();
-                                connectSSE();
-                            }, delay);
-                        }
+                        // NS: Get fresh token before reconnecting (connectSSE asks for it)
+                        if (!isClosing) scheduleRetry();
                     };
                 };
                 
@@ -17551,17 +17578,18 @@
                 // NS May 2026 — also: if SSE looks "open" but no messages for >30s,
                 // server-side broadcast loop is stuck — force-reconnect anyway.
                 const healthCheckInterval = setInterval(() => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting || reconnectTimeout) return;
                     const sinceLast = Date.now() - (lastSseMessageAt.current || 0);
                     const looksClosed = eventSource?.readyState === EventSource.CLOSED;
                     const wedged = lastSseMessageAt.current > 0 && sinceLast > 30000;
                     if (looksClosed || wedged) {
                         console.log(`SSE: ${looksClosed ? 'closed' : 'wedged ('+Math.round(sinceLast/1000)+'s no msg)'}, reconnecting`);
-                        reconnectAttempts = 0;
                         if (eventSource) {
                             try { eventSource.close(); } catch (_) {}
                         }
-                        connectSSE();
+                        // a stream that went quiet while open starts over at once; a closed one keeps its backoff
+                        if (looksClosed) scheduleRetry();
+                        else { reconnectAttempts = 0; connectSSE(); }
                     }
                 }, 10000);
                 
