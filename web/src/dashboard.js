@@ -25064,7 +25064,7 @@
                                                                                             type: 'table',
                                                                                             title: `${node.node} — ${node.cve_count || 0} CVEs, ${node.total_count || 0} updates`,
                                                                                             columns: ['CVE', 'Package', 'Severity', 'Fix'],
-                                                                                            rows: node.cves.map(c => [c.cve_id || '-', c.package || '-', c.severity || '-', c.fix_type || '-'])
+                                                                                            rows: node.cves.map(c => [c.cve || '-', c.package || '-', c.urgency || '-', c.fix_type || '-'])
                                                                                         });
                                                                                     }
                                                                                 });
@@ -25272,7 +25272,8 @@
                                                                                                 <tbody>
                                                                                                     {node.cves.sort((a, b) => {
                                                                                                         const order = { high: 0, medium: 1, low: 2 };
-                                                                                                        return (order[a.urgency] || 1) - (order[b.urgency] || 1);
+                                                                                                        // high is 0, so || would file it with medium
+                                                                                                        return (order[a.urgency] ?? 1) - (order[b.urgency] ?? 1);
                                                                                                     }).map((cve, cIdx) => (
                                                                                                         <tr key={cIdx} className={`border-b border-proxmox-border/50 ${
                                                                                                             cve.urgency === 'high' ? 'bg-red-500/5' : ''
