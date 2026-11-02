@@ -2,7 +2,8 @@
 
 PVE has /nodes/{node}/disks/wipedisk as PUT only (pve-storage, PVE/API2/Disks.pm), so the
 POST the manager sent came back 501. The button before it sent the disk without the
-confirm_name the route asks for, so the route answered 400 first.
+confirm_name the route asks for, so the route answered 400 first. On XCP-ng the same
+button sends /dev/<name>, which the XCP-ng wipe has to take as well.
 """
 import os
 import re
@@ -43,9 +44,30 @@ def test_a_refused_wipe_is_reported():
         'success': False, 'error': 'disk /dev/sdb is used by LVM'}
 
 
-def test_the_wipe_button_sends_the_confirmation_the_route_asks_for():
+def _wipe_handler():
     with open(os.path.join(ROOT, 'web', 'src', 'node_modals.js'), encoding='utf-8') as f:
         src = f.read()
     i = src.index('/disks/wipe`')
-    call = src[i:src.index('});', i)]
+    return src[i:src.index("addToast('Error wiping disk'", i)]
+
+
+def test_the_wipe_button_sends_the_confirmation_the_route_asks_for():
+    handler = _wipe_handler()
+    call = handler[:handler.index('});')]
     assert re.search(r'confirm_name:\s*d\.devpath', call), call
+
+
+def test_a_started_pve_task_is_not_reported_as_a_finished_wipe():
+    handler = _wipe_handler()
+    assert "r.task ? 'Disk wipe started'" in handler, handler
+
+
+def test_xcpng_takes_the_devpath_the_disk_list_gives():
+    from pegaprox.core.xcpng import XcpngManager
+    mgr = MagicMock()
+    mgr._ssh_exec.return_value = (0, '', '')
+    assert XcpngManager.wipe_disk(mgr, 'xcp1', '/dev/sdb') == {'success': True, 'message': '/dev/sdb wiped'}
+    assert mgr._ssh_exec.call_args.args[1] == 'wipefs -a /dev/sdb'
+    assert XcpngManager.wipe_disk(mgr, 'xcp1', 'sdb')['success'] is True
+    for bad in ('/dev/../etc/passwd', '/dev/sdb; reboot', '/etc/sdb'):
+        assert XcpngManager.wipe_disk(mgr, 'xcp1', bad)['success'] is False, bad

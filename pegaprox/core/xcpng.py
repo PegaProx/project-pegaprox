@@ -4220,6 +4220,9 @@ echo DONE""",
         return {'success': False, 'error': err or 'sgdisk failed'}
 
     def wipe_disk(self, node, disk):
+        # the disk list gives devpath as /dev/<name>, and the Disks tab sends that
+        if disk.startswith('/dev/'):
+            disk = disk[len('/dev/'):]
         if not re.match(r'^(sd[a-z]+|nvme\d+n\d+|hd[a-z]+|vd[a-z]+)$', disk):
             return {'success': False, 'error': f'Invalid disk: {disk}'}
         rc, _, err = self._ssh_exec(node, f"wipefs -a /dev/{disk}", timeout=30)
