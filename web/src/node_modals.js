@@ -3275,10 +3275,12 @@
                                                                                                     method: 'POST',
                                                                                                     credentials: 'include',
                                                                                                     headers: { 'Content-Type': 'application/json' },
-                                                                                                    body: JSON.stringify({ disk: d.devpath })
+                                                                                                    body: JSON.stringify({ disk: d.devpath, confirm_name: d.devpath })
                                                                                                 });
                                                                                                 if(res.ok) {
-                                                                                                    addToast('Disk wiped successfully', 'success');
+                                                                                                    // PVE answers with the task it started, the wipe is not done yet
+                                                                                                    const r = await res.json().catch(() => ({}));
+                                                                                                    addToast(r.task ? t('diskWipeStarted') : t('diskWiped'), 'success');
                                                                                                     loadTabData('disks');
                                                                                                 } else {
                                                                                                     const err = await res.json();
