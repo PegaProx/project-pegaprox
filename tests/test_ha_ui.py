@@ -3631,6 +3631,9 @@ def test_runtime_a_console_window_on_a_standby_offers_the_active(open_app, role)
     here, the window offers the same console on the active."""
     app = open_app(role=role, layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if role == 'standby':
@@ -4214,6 +4217,9 @@ def test_runtime_a_console_window_on_a_serving_member(open_app, serve):
     app = open_app(role='standby', layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True,
                    serve_assigned=serve)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if serve:
