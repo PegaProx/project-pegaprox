@@ -33,8 +33,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # the Testing revision the preview landed on (it was built on b41902c4, the classic fixes since
 # then are in the base). A deliberate change to classic Corporate, Modern or Cloud differs from
 # it on purpose: once PEGAPROX_UI_SHOTS showed that only the intended views moved, set this to
-# the commit of that change (PEGAPROX_GUARD_BASE does it for one run)
-BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', '3a122e3a')
+# the commit of that change (PEGAPROX_GUARD_BASE does it for one run). fe7c2099 put the switch
+# and the frozen notice into every classic Corporate view, Modern and Cloud stayed the same
+BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', 'fe7c2099')
 
 # 2026-10-30 09:00:00 UTC, what Date.now() says in every guarded page
 FIXED = calendar.timegm((2026, 10, 30, 9, 0, 0))
