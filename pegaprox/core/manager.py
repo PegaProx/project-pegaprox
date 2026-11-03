@@ -19936,7 +19936,8 @@ echo "AGENT_INSTALLED_OK"
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/wipedisk"
-            response = self._api_post(url, data={'disk': disk})
+            # PVE has wipedisk as PUT only, a POST gets 501
+            response = self._api_put(url, data={'disk': disk})
             
             if response.status_code == 200:
                 return {'success': True, 'task': response.json().get('data')}
