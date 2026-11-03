@@ -5542,6 +5542,9 @@
                 return () => document.removeEventListener('click', close);
             }, [showActionsMenu]);
 
+            // negotiated speed in Mbit/s as the kernel reports it; none for a bridge, a NIC without link or a failed read
+            const fmtLinkSpeed = (mbps) => !mbps ? '-' : mbps >= 1000 ? `${+(mbps / 1000).toFixed(1)} Gbit/s` : `${mbps} Mbit/s`;
+
             // Fetch tab data
             const loadTabData = async (tab, tf) => {
                 // a save that finished after the switch reloads its own node, not this one
@@ -5595,6 +5598,16 @@
                     };
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
+                    // the link speeds of the classic Network table come over SSH and may take a while or fail: the list does not wait for them
+                    if (tab === 'network' && !crHw) {
+                        authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/link-speeds`)
+                            .then(r => r && r.ok ? r.json() : null).catch(() => null)
+                            .then(res => {
+                                if (gen !== navGenRef.current || navKeyRef.current !== navKey) return;
+                                const rows = res && Array.isArray(res.interfaces) ? res.interfaces : null;
+                                setData(prev => ({...prev, linkSpeeds: rows ? Object.fromEntries(rows.map(x => [x.iface, x.speed_mbps])) : null}));
+                            });
+                    }
                     // LW Nov 2026 - the preview keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
                     const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks');
                     const results = await Promise.all(urls.map(u => u.endsWith('/dns')
@@ -6163,7 +6176,7 @@
                                                         </div>
                                                     </div>
                                                     <table className="corp-datagrid">
-                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
+                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th>{t('linkSpeed') || 'Link Speed'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
                                                         <tbody>
                                                             {(Array.isArray(data.network) ? data.network : []).map((iface, i) => (
                                                                 <tr key={i}>
@@ -6172,6 +6185,7 @@
                                                                     <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{iface.cidr || iface.address || '-'}</td>
                                                                     <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{iface.gateway || '-'}</td>
                                                                     <td><span className="w-2 h-2 rounded-full inline-block" style={{background: iface.active ? '#60b515' : '#728b9a'}}></span></td>
+                                                                    <td style={{fontFamily: 'monospace', fontSize: '12px', whiteSpace: 'nowrap'}}>{data.linkSpeeds === undefined ? '…' : fmtLinkSpeed(data.linkSpeeds?.[iface.iface || iface.name])}</td>
                                                                     <td title={iface.comments || ''} style={{maxWidth: '240px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{iface.comments || ''}</td>
                                                                     <td>
                                                                         <div className="flex gap-1">
@@ -6187,7 +6201,7 @@
                                                                     </td>
                                                                 </tr>
                                                             ))}
-                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
+                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={8} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
                                                         </tbody>
                                                     </table>
                                                     </>)}

@@ -1136,6 +1136,8 @@ READ_SITES = [
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_redeploy_fence_agents.look', {'_ha_agent_ssh': 1}),
     ('pegaprox/core/manager.py', 'PegaProxManager.get_efficient_snapshots', {'_node_ssh_exec': 2}),
     ('pegaprox/core/manager.py', 'PegaProxManager.get_node_sensors', {'_ssh_read_output': 2}),
+    # the sysfs speed/operstate of each interface for the node's Network table
+    ('pegaprox/core/manager.py', 'PegaProxManager.get_node_link_speeds', {'_ssh_read_output': 1}),
     # the `echo OK` that finds a working address before the guests are stopped
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ssh_stop_vms_on_node',
      {'_ssh_run_command_output': 1, '_ssh_run_command_with_key_output': 1,

@@ -201,6 +201,27 @@ def get_node_netstats_api(cluster_id, node):
     return jsonify(result)
 
 
+# Negotiated link speed per interface (sysfs over SSH) for the node's Network table.
+# PVE's /network list has none. A cluster type without the read says so with a 200,
+# like the sensors.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/link-speeds', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_link_speeds_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_node_link_speeds'):
+        return jsonify({'error': 'Link speeds are not available for this cluster type'}), 200
+    result = mgr.get_node_link_speeds(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 404 if result.get('code') == 'NOT_A_MEMBER' else 502
+    return jsonify(result)
+
+
 # MK May 2026 — cluster health: corosync ring + pvecm quorum + service state.
 # /cluster/status gives "are we quorate" but not ring latency, per-service
 # uptime, or per-ring health — chasing a flapping cluster needs all three.

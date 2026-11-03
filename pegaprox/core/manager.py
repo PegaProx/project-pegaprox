@@ -19764,6 +19764,62 @@ echo "AGENT_INSTALLED_OK"
             ifaces.append(row)
         return {'interfaces': ifaces, 'count': len(ifaces)}
 
+    # One line per kernel interface: name, /sys/class/net/<if>/speed, operstate. A bridge, a
+    # NIC without a link or a virtual device has no speed: the read fails or answers -1.
+    _LINK_SPEED_PROBE = (
+        "for d in /sys/class/net/*; do [ -e \"$d\" ] || continue; "
+        "s=$(cat \"$d/speed\" 2>/dev/null); o=$(cat \"$d/operstate\" 2>/dev/null); "
+        "echo \"${d##*/} ${s:--} ${o:--}\"; done; exit 0"
+    )
+
+    def get_node_link_speeds(self, node: str) -> Dict[str, Any]:
+        # Link speed per interface for the Network table. PVE's /network carries the config
+        # only, never the negotiated speed, so it is read from sysfs over SSH like the NIC
+        # counters above.
+        _blocked = self.ssh_blocked_reason(node=node)
+        if _blocked:
+            why = ('SSH is switched off for this cluster' if _blocked == 'SSH_DISABLED'
+                   else 'this cluster has no SSH credentials (an API token is not one)')
+            return {'error': f'{why}, and link speeds are read over SSH', 'code': _blocked}
+        if not self.is_connected:
+            if not self.connect_to_proxmox():
+                return {'error': 'cluster not connected'}
+        # <node> comes from the URL and the SSH login below presents the cluster's stored
+        # credentials, so only a confirmed member is dialled. member_node_ip lets a name
+        # through when the member list is empty; here an unknown member list refuses too.
+        try:
+            members = self.nodes or {}
+        except Exception:
+            members = {}
+        if node not in members:
+            return {'error': f'{node} is not a member of this cluster', 'code': 'NOT_A_MEMBER'}
+        ip = self.member_node_ip(node)
+        if not ip:
+            return {'error': f'no SSH-reachable IP for node {node}'}
+        user = getattr(self.config, 'ssh_user', None) or 'root'
+        with ha.reading():
+            output = self._ssh_read_output(ip, user, self._LINK_SPEED_PROBE, timeout=8)
+        if output is None:
+            return {'error': f'no answer from node {node} over SSH'}
+        return {'interfaces': self._parse_link_speeds(output)}
+
+    @staticmethod
+    def _parse_link_speeds(output: str) -> List[Dict[str, Any]]:
+        rows = []
+        for line in (output or '').splitlines():
+            parts = line.split()
+            if len(parts) != 3:
+                continue
+            name, speed, state = parts
+            try:
+                mbps = int(speed)
+            except ValueError:
+                mbps = None
+            rows.append({'iface': name,
+                         'speed_mbps': mbps if mbps and mbps > 0 else None,
+                         'operstate': None if state == '-' else state})
+        return rows
+
     def get_node_lvmthin(self, node: str) -> List[Dict]:
         """Get LVM-Thin pools"""
         if not self.is_connected:
