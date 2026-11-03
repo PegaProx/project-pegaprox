@@ -72,6 +72,9 @@ SRC_FILES=(
     cr_datastore.js
     cr_drift.js
     cr_storage.js
+    cr_recovery.js
+    cr_sla.js
+    cr_isosync.js
     cr_vm.js
     cr_reports.js
     cr_whatif.js

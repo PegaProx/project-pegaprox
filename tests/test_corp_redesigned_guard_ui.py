@@ -164,6 +164,136 @@ BALANCE_READS = {
     ('GET', '/api/clusters/c1/storage-clusters/a1b2c3d4/status'): (200, SB_STATUS),
 }
 
+# Round 11 draws Restore tests anew in Corporate Redesigned (Datastore sub tab), so the classic panel is
+# guarded with every read it makes: the report, the assurance, the settings and the weekly run,
+# in the shapes pegaprox/api/pbs.py answers (times fixed to FIXED)
+
+
+def _rt_row(vmid, name, state, **kw):
+    r = {'vmid': vmid, 'name': name, 'type': 'qemu', 'node': 'pve1', 'tags': [], 'state': state,
+         'last_test_at': None, 'last_result': None, 'last_success_at': None, 'last_success_age_days': None,
+         'tested_backup_at': None, 'tested_backup_age_hours': None, 'measured_seconds': None, 'rto_seconds': None,
+         'rto_state': 'none', 'newest_backup_at': '2026-10-30T02:00:00', 'newest_backup_age_hours': 7.0,
+         'backup_count': 4, 'sla_hours': 24, 'rpo_state': 'ok', 'last_failure_at': None, 'last_failure_cause': None,
+         'cluster_id': 'c1', 'cluster_name': 'Testi'}
+    r.update(kw)
+    return r
+
+
+RT_ROWS = [
+    _rt_row(101, 'db01', 'failing', tags=['critical'], last_test_at='2026-10-29T04:10:00', last_result='failed',
+            last_failure_at='2026-10-29T04:10:00', last_failure_cause='port 5432: nothing listens',
+            rpo_state='breached', newest_backup_age_hours=30.0),
+    _rt_row(102, 'mail01', 'never', rpo_state='no_backup', backup_count=0, newest_backup_at=None,
+            newest_backup_age_hours=None),
+    _rt_row(100, 'web01', 'ok', tags=['critical', 'web'], last_test_at='2026-10-28T16:05:00',
+            last_success_at='2026-10-28T16:05:00', last_success_age_days=1.7, tested_backup_at='2026-10-28T02:00:00',
+            tested_backup_age_hours=55.0, measured_seconds=245.0, rto_seconds=600, rto_state='met', last_result='passed'),
+]
+RT_REPORT = {'cluster_id': 'c1', 'cluster_name': 'Testi', 'backups_read_at': '2026-10-30T08:55:00', 'backups_state': 'ok',
+             'sla_hours': 24, 'stale_days': 30, 'guests': RT_ROWS,
+             'summary': {'ok': 1, 'stale': 0, 'failing': 1, 'never': 1, 'rto_missed': 0, 'total': 3, 'rpo_breached': 1,
+                         'no_backup': 1},
+             'settings': {'rto_minutes': 10, 'isolation': 'link_down', 'test_bridge': '', 'test_storage': '',
+                          'boot_timeout': 180, 'agent': 'auto', 'ports': [], 'command': ''}}
+RT_SETTINGS = {'cluster': {'rto_minutes': 10, 'agent': 'auto', 'ports': [22], 'command': '', 'isolation': 'link_down',
+                           'test_bridge': '', 'test_storage': '', 'boot_timeout': 180, 'critical_tags': ['critical']},
+               'guests': [{'scope': 'guest', 'scope_key': '101', 'rto_minutes': 5, 'agent': None, 'ports': [5432],
+                           'command': 'pg_isready', 'updated_at': '2026-10-29T10:00:00', 'updated_by': 'admin'}],
+               'tags': [{'scope': 'tag', 'scope_key': 'web', 'rto_minutes': None, 'agent': 'require', 'ports': [443],
+                         'command': None, 'updated_at': '2026-10-29T10:00:00', 'updated_by': 'admin'}],
+               'can_edit': True, 'limits': {}}
+RT_GUESTS = [dict(r, critical='critical' in r['tags'], agent_ok=r['vmid'] == 100, app_ok=False,
+                  proof='not_proven', confirmation=None,
+                  missing=['application_check'] if r['vmid'] == 100 else ['restore_test', 'agent_check', 'application_check'],
+                  gaps={100: ['no_app_checks'], 101: ['app_failing', 'backup_old'], 102: ['no_backup']}[r['vmid']])
+             for r in RT_ROWS]
+RT_GUESTS[1]['confirmation'] = {'id': '0123456789abcdef', 'vmid': 102, 'text': 'Restored by hand', 'confirmed_by': 'admin',
+                                'confirmed_at': '2026-10-29T10:00:00', 'expires_at': '2026-11-29T10:00:00',
+                                'revoked_at': None, 'revoked_by': None, 'active': True}
+RT_ASSURANCE = {'cluster_id': 'c1', 'cluster_name': 'Testi', 'stale_days': 30, 'backups_state': 'ok',
+                'critical_tags': ['critical'],
+                'coverage': {'critical': {'total': 2, 'proven': 0, 'not_proven': 2, 'percent': 0.0},
+                             'all': {'total': 3, 'proven': 0, 'not_proven': 3, 'percent': 0.0}},
+                'gap_counts': {'app_failing': 1, 'no_app_checks': 1, 'backup_old': 1, 'no_backup': 1},
+                'gaps': [{'kind': k, 'vmid': g['vmid'], 'name': g['name'], 'critical': g['critical'], 'cluster_id': 'c1',
+                          'cluster_name': 'Testi'} for g in RT_GUESTS for k in g['gaps']],
+                'plan_gaps': [], 'gaps_truncated': False, 'guests': RT_GUESTS}
+RT_POLICY = {'enabled': True, 'weekly_count': 5, 'day': 'sun', 'hour': 4, 'scope': 'latest_per_vm', 'max_age_days': 30,
+             'max_backup_gb': 32, 'confirmed_at': FIXED - 30 * 86400}
+RT_STATUS = {'policy': RT_POLICY, 'next_run': '2026-11-01T04:00:00', 'running': False, 'timezone': 'Europe/Vienna',
+             'last_run': {'slot': '2026-10-25T04:00:00', 'state': 'done', 'started_at': FIXED - 5 * 86400 - 18000,
+                          'finished_at': FIXED - 5 * 86400 - 16200, 'reason': '',
+                          'picked': [{'cluster_id': 'c1', 'vmid': 101, 'volid': 'pbs:backup/vm/101/a'},
+                                     {'cluster_id': 'c1', 'vmid': 100, 'volid': 'pbs:backup/vm/100/a'}],
+                          'results': [{'cluster_id': 'c1', 'vmid': 103, 'name': 'big01', 'status': 'skipped',
+                                       'reason': 'too_large', 'size': 80 * _GIB, 'limit_gb': 32, 'cause': ''},
+                                      {'cluster_id': 'c1', 'vmid': 101, 'name': 'db01', 'status': 'failed',
+                                       'cause': 'port 5432: nothing listens', 'task_id': 't1', 'measured_seconds': None},
+                                      {'cluster_id': 'c1', 'vmid': 100, 'name': 'web01', 'status': 'passed', 'cause': '',
+                                       'task_id': 't2', 'measured_seconds': 245.0, 'rto_met': True}],
+                          'counts': {'picked': 2, 'passed': 1, 'failed': 1, 'skipped': 1}}}
+RT_READS = {
+    ('GET', '/api/clusters/c1/datastores'): (200, SB_DATASTORES),
+    ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
+    ('GET', '/api/clusters/c1/recovery-report'): (200, RT_REPORT),
+    ('GET', '/api/clusters/c1/recovery-assurance'): (200, RT_ASSURANCE),
+    ('GET', '/api/clusters/c1/recovery-settings'): (200, RT_SETTINGS),
+    ('GET', '/api/pbs/verify-schedule/status'): (200, RT_STATUS),
+    ('GET', '/api/pbs/verify-schedule'): (200, RT_POLICY),
+}
+
+# Round 11 draws Backup SLA anew in Corporate Redesigned (Datastore sub tab), so the classic sub tab is
+# guarded with its read in the shape pegaprox/api/clusters.py answers: one guest per state (expired,
+# missing, at risk, compliant), ages on the fixed clock
+
+
+def _sla_vm(vmid, name, status, age, source='pbs', vtype='vm', node='pve1', power='running'):
+    ts = FIXED - int(age * 3600) if age is not None else 0
+    return {'vmid': str(vmid), 'type': vtype, 'name': name, 'node': node, 'status': power, 'last_backup_ts': ts,
+            'age_hours': age, 'sla_status': status, 'backup_source': source if age is not None else None}
+
+
+SLA_VMS = [_sla_vm(101, 'db01', 'breached', 30.0), _sla_vm(102, 'mail01', 'no-backup', None, node='pve2', power='stopped'),
+           _sla_vm(103, 'proxy01', 'warning', 20.5, source='local', vtype='ct'), _sla_vm(100, 'web01', 'ok', 7.0)]
+SLA_REPORT = {'enabled': True, 'max_age_hours': 24, 'now': FIXED, 'cluster_id': 'c1',
+              'summary': {'total': 4, 'ok': 1, 'warning': 1, 'breached': 1, 'no_backup': 1, 'disabled': 0,
+                          'compliance_pct': 25.0},
+              'vms': SLA_VMS}
+SLA_READS = {
+    ('GET', '/api/clusters/c1/datastores'): (200, SB_DATASTORES),
+    ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
+    ('GET', '/api/clusters/c1/backup-sla'): (200, SLA_REPORT),
+}
+
+# Round 11 draws ISO Sync anew in Corporate Redesigned (Datastore sub tab), so the classic sub tab is
+# guarded with its read in the shape get_content_sync_status (pegaprox/core/manager.py) answers: the
+# online nodes, one file on every node, one missing on a node, one on a second storage
+SYNC_STATUS = {'nodes': ['pve1', 'pve2'],
+               'files': [{'name': 'debian-12.7.0-amd64-netinst.iso', 'storage': 'local', 'size': 658505728},
+                         {'name': 'ubuntu-24.04.1-live-server-amd64.iso', 'storage': 'local', 'size': 2773874688},
+                         {'name': 'virtio-win-0.1.262.iso', 'storage': 'isos', 'size': 739573760}],
+               'matrix': {'local:debian-12.7.0-amd64-netinst.iso': {'pve1': True, 'pve2': True},
+                          'local:ubuntu-24.04.1-live-server-amd64.iso': {'pve1': True, 'pve2': False},
+                          'isos:virtio-win-0.1.262.iso': {'pve1': False, 'pve2': True}}}
+# the storages of each node as /datastores lists them (pegaprox/api/vms.py): 'local' on both nodes,
+# 'isos' on pve2 only, one shared storage with images
+def _sync_local(name, content='iso,vztmpl,backup', **kw):
+    return dict({'storage': name, 'type': 'dir', 'content': content, 'total': 100 * _GIB, 'used': 40 * _GIB,
+                 'avail': 60 * _GIB, 'used_fraction': 0.4, 'active': 1, 'enabled': 1, 'shared': False,
+                 'path': f'/var/lib/{name}', 'nodes': ''}, **kw)
+
+
+SYNC_DATASTORES = {'shared': [_sb_store('nfs-iso', 'nfs', 500, 100, content='iso,images')],
+                   'local': {'pve1': [_sync_local('local')], 'pve2': [_sync_local('local'), _sync_local('isos', 'iso')]},
+                   'nodes': ['pve1', 'pve2'], 'offline_nodes': []}
+SYNC_READS = {
+    ('GET', '/api/clusters/c1/datastores'): (200, SYNC_DATASTORES),
+    ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
+    ('GET', '/api/clusters/c1/iso-sync/status'): (200, SYNC_STATUS),
+    ('GET', '/api/clusters/c1/iso-sync/last-result'): (200, {}),
+}
+
 # the Reports summary and the Insights sub tab of a cluster, in the shapes pegaprox/api/reports.py,
 # alerts.py and insights.py answer: a day of snapshots (times with the server's offset), the
 # top-vms list, a forecast with a storage, right-sizing with two flagged guests, top talkers and
@@ -846,7 +976,7 @@ CFG_TABS = {'config': ('Hardware', 'Sockets'), 'config_general': (None, 'behind'
 
 VIEW_READS = {'config_general': CFG_READS, 'config_hardware': CFG_READS, 'config_options': CFG_READS,
               'config_disks': CFG_READS, 'config_network': CFG_READS,
-              'balancing': BALANCE_READS, 'reports': REPORT_READS, 'insights': {**REPORT_READS, **INSIGHTS_READS},
+              'balancing': BALANCE_READS, 'recovery': RT_READS, 'sla': SLA_READS, 'sync': SYNC_READS, 'reports': REPORT_READS, 'insights': {**REPORT_READS, **INSIGHTS_READS},
               'whatif': {**REPORT_READS, **WHATIF_READS}, 'alerts': ALERT_READS, 'timeline': TIMELINE_READS,
               'datacenter': DC_READS, 'updates': UPD_READS, 'perf': PERF_READS, 'vmperf': PERF_READS,
               'node_summary': NODE_BASE_READS, 'node_network': NODE_NET_READS,
@@ -1016,7 +1146,7 @@ def browser():
 # --- the views ---------------------------------------------------------------------------------
 
 VIEWS = ['dashboard', 'node', 'vm', 'ct', 'config', 'config_general', 'config_hardware', 'config_options', 'config_disks',
-         'config_network', 'compliance', 'drift', 'balancing', 'reports', 'insights',
+         'config_network', 'compliance', 'drift', 'balancing', 'recovery', 'sla', 'sync', 'reports', 'insights',
          'whatif', 'topology', 'settings', 'tasks', 'harden', 'alerts', 'timeline', 'datacenter', 'updates', 'perf',
          'vmperf', 'node_summary', 'node_network', 'node_hardware', 'node_disks', 'node_tasks', 'node_guests',
          'node_dns', 'node_hosts', 'node_time', 'node_certs', 'node_syslog',
@@ -1081,6 +1211,33 @@ def _balancing_drawn(page):
     page.locator('div.cursor-pointer', has=page.locator('span', has_text=_exact('Ceph pools'))).first.click()
     page.get_by_text('40.5%').first.wait_for(timeout=8000)
     page.get_by_text('Balance: ceph-a').first.wait_for(timeout=8000)
+
+
+def _recovery_drawn(page):
+    # round 11: the classic Restore tests sub tab with every read answered: the weekly run, the
+    # assurance tiles, the settings with their rules and the guest table
+    page.locator('[data-rtest-tab]').first.click()
+    page.locator('[data-rtest-row="100"]').first.wait_for(timeout=8000)
+    page.locator('[data-rasr-tile="critical"]').first.wait_for(timeout=8000)
+    page.locator('[data-rtest-rule="tag:web"]').first.wait_for(timeout=8000)
+    page.locator('[data-rtest-skip="103"]').first.wait_for(timeout=8000)
+
+
+def _sla_drawn(page):
+    # round 11: the classic Backup SLA sub tab with its read answered: the target, the five tiles and
+    # one guest per state
+    page.locator('button', has_text=_exact('Backup SLA')).first.click()
+    page.get_by_text('no-backup', exact=True).first.wait_for(timeout=8000)
+    page.get_by_text('proxy01', exact=True).first.wait_for(timeout=8000)
+    page.get_by_text('25%', exact=True).first.wait_for(timeout=8000)
+
+
+def _sync_drawn(page):
+    # round 11: the classic ISO Sync sub tab with its read answered: the node columns, a file on every
+    # node, one missing on each node
+    page.locator('button', has_text=_exact('ISO Sync')).first.click()
+    page.get_by_text('virtio-win-0.1.262.iso', exact=True).first.wait_for(timeout=8000)
+    page.get_by_text('ubuntu-24.04.1-live-server-amd64.iso', exact=True).first.wait_for(timeout=8000)
 
 
 def _config_drawn(page, view='config'):
@@ -1212,6 +1369,15 @@ def go(app, layout, view):
         elif view == 'balancing':
             _cloud_nav(page, 'Storage Config')
             _balancing_drawn(page)
+        elif view == 'recovery':
+            _cloud_nav(page, 'Storage Config')
+            _recovery_drawn(page)
+        elif view == 'sla':
+            _cloud_nav(page, 'Storage Config')
+            _sla_drawn(page)
+        elif view == 'sync':
+            _cloud_nav(page, 'Storage Config')
+            _sync_drawn(page)
         elif view == 'insights':
             _cloud_nav(page, 'Insights')
             _insights_drawn(page)
@@ -1279,6 +1445,15 @@ def go(app, layout, view):
     elif view == 'balancing':
         page.locator('button', has_text=_exact('Datastore')).first.click()
         _balancing_drawn(page)
+    elif view == 'recovery':
+        page.locator('button', has_text=_exact('Datastore')).first.click()
+        _recovery_drawn(page)
+    elif view == 'sla':
+        page.locator('button', has_text=_exact('Datastore')).first.click()
+        _sla_drawn(page)
+    elif view == 'sync':
+        page.locator('button', has_text=_exact('Datastore')).first.click()
+        _sync_drawn(page)
     elif view in ('reports', 'insights', 'whatif'):
         page.locator('button', has_text=_exact('Reports')).first.click()
         if view == 'reports':

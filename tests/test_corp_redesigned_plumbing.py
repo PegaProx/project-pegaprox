@@ -20,7 +20,8 @@ SRC = os.path.join(ROOT, 'web', 'src')
 # the files of the preview, in build order
 CR_FILES = ('cr.js', 'cr_views.js', 'cr_topology.js', 'cr_compliance.js', 'cr_tasks.js', 'cr_datastore.js', 'cr_drift.js',
             'cr_storage.js', 'cr_vm.js', 'cr_reports.js', 'cr_whatif.js', 'cr_harden.js', 'cr_alerts.js', 'cr_datacenter.js',
-            'cr_updates.js', 'cr_perf.js', 'cr_vmcfg.js', 'cr_node.js', 'cr_nodecfg.js', 'cr_nodestore.js', 'cr_nodemisc.js', 'cr_modules.js')
+            'cr_updates.js', 'cr_perf.js', 'cr_vmcfg.js', 'cr_node.js', 'cr_nodecfg.js', 'cr_nodestore.js', 'cr_nodemisc.js', 'cr_modules.js',
+            'cr_recovery.js', 'cr_sla.js', 'cr_isosync.js')
 
 
 def _read(*parts):
@@ -142,7 +143,12 @@ def test_nothing_else_compares_the_layout_string():
 
 def test_the_new_file_is_built_and_shipped():
     build = _read('web', 'Dev', 'build.sh')
-    assert re.search(r'\n    cloud\.js\n    cr\.js\n    cr_views\.js\n    cr_topology\.js\n    cr_compliance\.js\n    cr_tasks\.js\n    cr_datastore\.js\n    cr_drift\.js\n    cr_storage\.js\n    cr_vm\.js\n    cr_reports\.js\n    cr_whatif\.js\n    cr_harden\.js\n    cr_alerts\.js\n    cr_datacenter\.js\n    cr_updates\.js\n    cr_perf\.js\n    cr_vmcfg\.js\n    cr_node\.js\n    cr_nodecfg\.js\n    cr_nodestore\.js\n    cr_nodemisc\.js\n    cr_modules\.js\n    dashboard\.js\n', build)
+    # every variant file once, between cloud.js and dashboard.js, its primitives first (round 11
+    # checks the property instead of the list, which grows with each module)
+    block = re.search(r'\n    cloud\.js\n((?:    cr[a-z_]*\.js\n)+)    dashboard\.js\n', build)
+    assert block, 'the variant files are built between cloud.js and dashboard.js'
+    built = re.findall(r'cr[a-z_]*\.js', block.group(1))
+    assert built[:2] == ['cr.js', 'cr_views.js'] and sorted(built) == sorted(CR_FILES), built
     files = json.loads(_read('version.json'))['update_files']
     assert all(f'web/src/{n}' in files for n in CR_FILES)
 

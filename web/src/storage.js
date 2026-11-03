@@ -33,6 +33,8 @@
             const [slaSaving, setSlaSaving] = useState(false);
             const [slaDraftHours, setSlaDraftHours] = useState(0);
             const [slaFilter, setSlaFilter] = useState('all'); // all, breached, no-backup, warning, ok
+            // LW Nov 2026 - why the last read failed; only Corporate Redesigned shows it
+            const [slaError, setSlaError] = useState('');
 
             const refreshSla = () => {
                 setSlaLoading(true);
@@ -42,9 +44,10 @@
                         if (d && !d.error) {
                             setSlaData(d);
                             setSlaDraftHours(d.max_age_hours || 0);
-                        }
+                            setSlaError('');
+                        } else setSlaError((d && d.error) || t('crSlaNoAnswer'));
                     })
-                    .catch(() => {})
+                    .catch(() => setSlaError(t('crSlaNoAnswer')))
                     .finally(() => setSlaLoading(false));
             };
 
@@ -68,6 +71,8 @@
                     if (r && r.ok) {
                         addToast(t('slaConfigSaved') || 'Backup SLA target saved', 'success');
                         refreshSla();
+                        // LW Nov 2026 - Corporate Redesigned closes its edit bar on a save that went through
+                        return true;
                     } else {
                         const err = await r?.json().catch(() => ({}));
                         addToast(err.error || (t('slaConfigSaveFailed') || 'Save failed'), 'error');
@@ -114,7 +119,9 @@
                 }, 3000);
             };
 
-            const triggerSync = async (sourceNode, storage, filename) => {
+            // LW Nov 2026 - crTracked === true: Corporate Redesigned follows the copy itself (by the
+            // time of the result, as long as scp runs) and only needs to know the server took it
+            const triggerSync = async (sourceNode, storage, filename, crTracked) => {
                 setSyncingFiles(prev => ({...prev, [filename]: true}));
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync`, {
@@ -123,6 +130,10 @@
                     });
                     if (r?.ok) {
                         addToast(`Syncing ${filename}...`, 'success');
+                        if (crTracked === true) {
+                            setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                            return true;
+                        }
                         _pollSyncResult(filename);
                     } else {
                         const d = await r?.json().catch(() => ({}));
@@ -135,7 +146,8 @@
                 }
             };
 
-            const triggerSyncAll = async () => {
+            // LW Nov 2026 - the classic button passes its click event, Corporate Redesigned passes true
+            const triggerSyncAll = async (crTracked) => {
                 setSyncingFiles({_all: true});
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/all`, {
@@ -144,6 +156,7 @@
                     });
                     if (r?.ok) {
                         addToast(t('syncAllStarted') || 'Syncing all missing files...', 'success');
+                        if (crTracked === true) { setSyncingFiles({}); return true; }
                         setTimeout(refreshSyncStatus, 10000);
                     } else {
                         const d = await r?.json().catch(() => ({}));
@@ -1153,8 +1166,9 @@
                                 <Icons.Zap style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>Storage Balancing</span>
                             </button>
+                            {/* LW Nov 2026 - Corporate Redesigned reads the sync status in CrIsoSync, once */}
                             <button onClick={() => {
-                                setActiveTab('sync'); refreshSyncStatus();
+                                setActiveTab('sync'); if (!isCorpRedesigned) refreshSyncStatus();
                             }} className={activeTab === 'sync' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.RefreshCw style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>{t('isoSync') || 'ISO Sync'}</span>
@@ -1223,7 +1237,12 @@
                     </div>
                     )}
                     
-                    {activeTab === 'sync' ? (
+                    {activeTab === 'sync' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the Sync and Sync All of the classic sub tab, drawn by CrIsoSync */
+                        <CrIsoSync key={clusterId} clusterId={clusterId} call={authFetch} datastores={datastores} dsLoading={loading}
+                            contentType={syncContentType} onContentType={setSyncContentType} canSync={hasPerm('storage.upload')}
+                            onSync={triggerSync} onSyncAll={triggerSyncAll} addToast={addToast} />
+                    ) : activeTab === 'sync' ? (
                         /* ISO/Template Sync Tab */
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                             <div className="flex items-center justify-between mb-4">
@@ -1320,6 +1339,11 @@
                                 </div>
                             )}
                         </div>
+                    ) : activeTab === 'sla' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the read, the draft and the Save of the classic sub tab, drawn by CrBackupSla */
+                        <CrBackupSla key={clusterId} clusterId={clusterId} data={slaData} loading={slaLoading} error={slaError} saving={slaSaving}
+                            draft={slaDraftHours} onDraft={setSlaDraftHours} onSave={saveSlaConfig} onRefresh={refreshSla}
+                            canConfig={hasPerm('cluster.config')} guests={guests} onOpenGuest={onOpenGuest} />
                     ) : activeTab === 'sla' ? (
                         /* MK May 2026 — Backup SLA Tracking sub-tab.
                            Configure max-age threshold + see compliance per VM/CT.
@@ -1442,6 +1466,9 @@
                                 </div>
                             )}
                         </div>
+                    ) : activeTab === 'recovery' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the same reads and writes, drawn by CrRestoreTests */
+                        <CrRestoreTests key={clusterId} clusterId={clusterId} addToast={addToast} />
                     ) : activeTab === 'recovery' ? (
                         <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
                     ) : activeTab === 'browse' && isCorpRedesigned ? (

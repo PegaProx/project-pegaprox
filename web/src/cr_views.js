@@ -56,8 +56,9 @@
         }
 
         // one tile of a summary strip. meterTone: the bar's colour where crTone's limits are not
-        // the ones (storage passes crStoreTone)
-        function CrStat({ id, label, value, unit, sub, tone, meter, meterTone, onClick, title }) {
+        // the ones (storage passes crStoreTone). pressed: a tile that is also a filter says
+        // whether it is the one applied (LW Nov 2026)
+        function CrStat({ id, label, value, unit, sub, tone, meter, meterTone, onClick, title, pressed }) {
             const body = (
                 <>
                     <span className="cr-stat-label">{label}</span>
@@ -72,7 +73,8 @@
             );
             const cls = `cr-stat${tone ? ' cr-stat-' + tone : ''}`;
             return onClick
-                ? <button type="button" className={`${cls} cr-stat-click`} data-cr-stat={id} onClick={onClick} title={title}>{body}</button>
+                ? <button type="button" className={`${cls} cr-stat-click${pressed ? ' cr-stat-pressed' : ''}`} data-cr-stat={id} onClick={onClick} title={title}
+                    aria-pressed={pressed === undefined ? undefined : !!pressed}>{body}</button>
                 : <div className={cls} data-cr-stat={id} title={title}>{body}</div>;
         }
 
