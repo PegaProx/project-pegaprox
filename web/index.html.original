@@ -1593,6 +1593,9 @@
         /* warning banner */
         body[data-corp-theme="light"] .corp-warning-banner { background: #fff3cd !important; color: #856404 !important; border-color: #ffc107 !important; }
         body[data-corp-theme="light"] .corp-warning-dismiss { color: #856404 !important; }
+        body[data-corp-theme="light"] .corp-info-banner { background: #e6f3f9; color: #1d5f7a; border-color: #8ccbe4; }
+        body[data-corp-theme="light"] .corp-info-banner button { color: #1d5f7a; border-color: #8ccbe4; }
+        body[data-corp-theme="light"] .corp-info-banner .corp-info-action { background: #1d7fa6; color: #fff; border-color: #1d7fa6; }
         /* context menu separator */
         body[data-corp-theme="light"] .corp-ctx-separator { border-color: #e0e0e0 !important; }
         /* sort icon */
@@ -2751,6 +2754,18 @@
             font-size: 11px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em;
         }
         .corp-warning-banner .corp-warning-dismiss:hover { background: rgba(239,192,6,0.2); }
+        /* LW Nov 2026 - the same bar in blue, for the notice that classic Corporate is frozen */
+        .corp-info-banner {
+            background: rgba(73,175,217,0.10); color: #9fd2e8; border: 1px solid rgba(73,175,217,0.3);
+            padding: 6px 16px; font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+        }
+        .corp-info-banner button {
+            background: none; border: 1px solid rgba(73,175,217,0.4); color: #49afd9; padding: 2px 8px;
+            font-size: 11px; cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap;
+        }
+        .corp-info-banner button:hover { background: rgba(73,175,217,0.18); }
+        .corp-info-banner .corp-info-action { background: #49afd9; color: #0e161b; border-color: #49afd9; }
+        .corp-info-banner .corp-info-action:hover { background: #6cc0e3; }
 
         /* LW: Feb 2026 - Thinner scrollbars */
         body[data-layout="corporate"] * { scrollbar-width: thin; }

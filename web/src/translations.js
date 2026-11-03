@@ -6815,6 +6815,9 @@
                 noZfsPools: 'Keine ZFS-Pools',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'Das klassische Corporate-Layout ist abgekündigt: Es bekommt ab jetzt nur noch Fehlerbehebungen und wird in einem künftigen Release durch Corporate Redesigned ersetzt. Zurückwechseln geht unter Mein Profil.',
+                corpClassicSwitchNow: 'Jetzt wechseln',
+                corpClassicSwitchTitle: 'Zu Corporate Redesigned wechseln',
                 layoutCorporateRedesignedDesc: 'Corporate, dichter und ruhiger',
                 crBreadcrumbs: 'Sie sind hier',
                 crCommandPalette: 'Befehlspalette',
@@ -17667,6 +17670,9 @@
                 hpDroppedNote: 'Controls of this profile this version does not have were skipped: {ids}',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'Classic Corporate is deprecated: it only gets fixes from now on and will be replaced by Corporate Redesigned in a future release. You can switch back in My Profile.',
+                corpClassicSwitchNow: 'Switch now',
+                corpClassicSwitchTitle: 'Switch to Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, denser and calmer',
                 crBreadcrumbs: 'You are here',
                 crCommandPalette: 'Command palette',
@@ -28069,6 +28075,9 @@
                 noZfsPools: '没有 ZFS 池',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: '经典企业布局已弃用：今后只提供修复，并将在未来的版本中由 Corporate Redesigned 取代。可以在“我的资料”中切换回来。',
+                corpClassicSwitchNow: '立即切换',
+                corpClassicSwitchTitle: '切换到 Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate,更紧凑、更平静',
                 crBreadcrumbs: '当前位置',
                 crCommandPalette: '命令面板',
@@ -38438,6 +38447,9 @@
                 hpDroppedNote: 'Pominięto kontrolki tego profilu, których ta wersja nie zna: {ids}',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'Klasyczny układ Korporacyjny jest przestarzały: od teraz otrzymuje tylko poprawki i w przyszłym wydaniu zostanie zastąpiony przez Corporate Redesigned. Wrócić można w sekcji Mój profil.',
+                corpClassicSwitchNow: 'Przełącz teraz',
+                corpClassicSwitchTitle: 'Przełącz na Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, gęstszy i spokojniejszy',
                 crBreadcrumbs: 'Jesteś tutaj',
                 crCommandPalette: 'Paleta poleceń',
@@ -49245,6 +49257,9 @@
                 noZfsPools: 'Aucun pool ZFS',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'Le Corporate classique est obsolète : il ne reçoit plus que des corrections et sera remplacé par Corporate Redesigned dans une future version. Vous pouvez revenir en arrière dans Mon profil.',
+                corpClassicSwitchNow: 'Changer maintenant',
+                corpClassicSwitchTitle: 'Passer à Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, plus dense et plus calme',
                 crBreadcrumbs: 'Vous êtes ici',
                 crCommandPalette: 'Palette de commandes',
@@ -60058,6 +60073,9 @@
                 noZfsPools: 'Sin pools ZFS',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'El diseño Corporativo clásico está obsoleto: a partir de ahora solo recibe correcciones y será sustituido por Corporate Redesigned en una versión futura. Puede volver atrás en Mi perfil.',
+                corpClassicSwitchNow: 'Cambiar ahora',
+                corpClassicSwitchTitle: 'Cambiar a Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, más denso y más sereno',
                 crBreadcrumbs: 'Está aquí',
                 crCommandPalette: 'Paleta de comandos',
@@ -70716,6 +70734,9 @@
                 noZfsPools: 'Nenhum pool ZFS',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'O layout Corporativo clássico está obsoleto: a partir de agora recebe apenas correções e será substituído pelo Corporate Redesigned em uma versão futura. Você pode voltar em Meu Perfil.',
+                corpClassicSwitchNow: 'Mudar agora',
+                corpClassicSwitchTitle: 'Mudar para Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, mais denso e mais sereno',
                 crBreadcrumbs: 'Você está aqui',
                 crCommandPalette: 'Paleta de comandos',
@@ -81603,6 +81624,9 @@
                 noZfsPools: 'ZFS 풀 없음',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: '클래식 기업형 레이아웃은 더 이상 개발되지 않습니다. 이제부터는 수정 사항만 제공되며 향후 릴리스에서 Corporate Redesigned로 대체됩니다. 내 프로필에서 다시 전환할 수 있습니다.',
+                corpClassicSwitchNow: '지금 전환',
+                corpClassicSwitchTitle: 'Corporate Redesigned로 전환',
                 layoutCorporateRedesignedDesc: 'Corporate, 더 촘촘하고 차분하게',
                 crBreadcrumbs: '현재 위치',
                 crCommandPalette: '명령 팔레트',
@@ -92378,6 +92402,9 @@
                 noZfsPools: 'Nessun pool ZFS',
                 // LW Oct 2026 - Corporate Layout - Redesigned (Preview)
                 layoutCorporateRedesigned: 'Corporate Redesigned',
+                corpClassicDeprecated: 'Il layout Aziendale classico è deprecato: da ora riceve solo correzioni e verrà sostituito da Corporate Redesigned in una versione futura. Puoi tornare indietro da Il mio profilo.',
+                corpClassicSwitchNow: 'Passa ora',
+                corpClassicSwitchTitle: 'Passa a Corporate Redesigned',
                 layoutCorporateRedesignedDesc: 'Corporate, più denso e più sobrio',
                 crBreadcrumbs: 'Ti trovi qui',
                 crCommandPalette: 'Riquadro comandi',

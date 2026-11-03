@@ -14243,6 +14243,11 @@
             const [showTaskBar, setShowTaskBar] = useState(true);  // localStorage.getItem('showTaskBar') !== 'false'
             const [actionLoading, setActionLoading] = useState({});
             const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
+            // LW Nov 2026 - classic Corporate only gets fixes from now on. The bar under its header
+            // says so until it is closed in this browser, the header button stays
+            const [corpClassicNoticeClosed, setCorpClassicNoticeClosed] = useState(() => {
+                try { return localStorage.getItem('corp-classic-notice') === 'closed'; } catch (_) { return false; }
+            });
             // LW Nov 2026 - the kind and severity the alert strip of Corporate Redesigned opens the Timeline with
             const [crTimelinePick, setCrTimelinePick] = useState(null);
             // LW: Feb 2026 - corporate sidebar resize
@@ -20978,6 +20983,23 @@
                     )}
                 </div>
             );
+            // not under a pinned Corporate: the server refuses the switch there (#1189)
+            const offerCorpRedesigned = isCorporate && !isCorpRedesigned && !layoutLocked;
+            // the palette stays, the redesign is Corporate underneath. useLayout paints it again
+            // for the new layout from corp-theme, so a 'system' choice survives the switch
+            const switchToCorpRedesigned = async () => {
+                const result = await updatePreferences({ ui_layout: 'corporate-redesigned' });
+                if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
+                else addToast(result.error || t('saveError'), 'error');
+            };
+            const hdrCorpSwitch = offerCorpRedesigned && (
+                <button type="button" data-corp-switch="" onClick={switchToCorpRedesigned}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded border border-proxmox-border text-[12px] text-gray-300 hover:text-white hover:border-proxmox-orange/50 transition-colors whitespace-nowrap"
+                    title={t('corpClassicSwitchTitle')}>
+                    {t('layoutCorporateRedesigned')}
+                    <Icons.ArrowRight className="w-3.5 h-3.5" />
+                </button>
+            );
             const hdrThemeToggle = isCorporate && (
                 <button
                     onClick={() => {
@@ -21363,6 +21385,8 @@
                                 <div className={`flex items-center pp-header-actions ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
                                     {/* NS: Global Search - now with tag search + ctrl+k, LW: fixed width in corporate */}
                                     {hdrSearch}
+
+                                    {hdrCorpSwitch}
                                     
                                     {/* light/dark toggle for corporate */}
                                     {hdrThemeToggle}
@@ -21448,6 +21472,26 @@
                             <CrAlertStrip clusters={clusters} status={allClusterMetrics} selectedId={selectedCluster?.id || null}
                                 nodes={clusterMetrics} sideData={sidebarClusterData} haAlerts={nodeAlerts} live={wsConnected} nav={crTaskNav} />
                         </CrBoundary>
+                    )}
+
+                    {offerCorpRedesigned && !corpClassicNoticeClosed && (
+                        <div className="corp-info-banner" data-corp-classic-notice="">
+                            <div className="flex items-center gap-2">
+                                <Icons.Info className="w-4 h-4 flex-shrink-0" />
+                                <span>{t('corpClassicDeprecated')}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                                <button type="button" className="corp-info-action" onClick={switchToCorpRedesigned}>
+                                    {t('corpClassicSwitchNow')}
+                                </button>
+                                <button type="button" className="corp-info-dismiss" onClick={() => {
+                                    setCorpClassicNoticeClosed(true);
+                                    try { localStorage.setItem('corp-classic-notice', 'closed'); } catch (_) {}
+                                }}>
+                                    {t('dismiss') || 'DISMISS'}
+                                </button>
+                            </div>
+                        </div>
                     )}
 
                     {/* LW: Feb 2026 - corporate warning banner */}
