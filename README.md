@@ -68,6 +68,10 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
   <a href="https://www.occentus.net/">
     <img src="images/sponsors/occentus.png" alt="Occentus Network" width="500"/>
   </a>
+  &nbsp;&nbsp;&nbsp;
+  <a href="https://www.factorfx.com/">
+    <img src="images/sponsors/factorfx.png" alt="FactorFX" width="440"/>
+  </a>
 </p>
 
 ### 🥇 Gold
