@@ -1312,7 +1312,7 @@
                 4: 'https://netzware.at/',  // Netzware - Platinum
                 5: 'https://www.occentus.net/',  // Occentus Network - Platinum
 
-                6: null,
+                6: 'https://www.factorfx.com/',  // FactorFX - Platinum
                 7: null,
                 8: null
             };
