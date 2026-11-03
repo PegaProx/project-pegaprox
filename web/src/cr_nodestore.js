@@ -194,10 +194,362 @@
             return <CrButton icon={<Icons.RotateCw />} onClick={onClick} disabled={loading} data-cr-nv-refresh={id}>{t('refresh')}</CrButton>;
         }
 
+        // --- disk and storage actions (round 10) ----------------------------------------------------
+        // What the classic node dialog (NodeModal) can do with the disks of a Proxmox VE node, with its
+        // requests: Initialize GPT and Wipe on a disk PVE lists as unused, and a new LVM volume group,
+        // LVM-Thin pool, directory or ZFS pool. A create shows what it will send before it goes, a
+        // destructive one names the disk and waits for its device name typed in. Every write takes
+        // storage.config on the server and none runs on a read-only standby. After an answer the
+        // disks read is made again (disks, lvm, lvmthin, zfs once each); nothing is drawn before then.
+
+        // the form the classic dialog opens with (openDiskModal)
+        const CR_DO_FORM = { device: '', name: '', vgname: '', devices: [], raidlevel: 'single', compression: 'on', ashift: 12,
+                             filesystem: 'ext4', add_storage: true };
+        // PVE takes at least this many disks for a level (the classic dialog says the same in its hint)
+        const CR_DO_RAID_MIN = { single: 1, mirror: 2, raid10: 4, raidz: 3, raidz2: 4, raidz3: 5 };
+        const CR_DO_RAID = [['single', 'Single'], ['mirror', 'Mirror'], ['raid10', 'RAID10'], ['raidz', 'RAIDZ'], ['raidz2', 'RAIDZ2'], ['raidz3', 'RAIDZ3']];
+        const CR_DO_COMP = [['on', 'On (LZ4)'], ['off', 'Off'], ['lz4', 'LZ4'], ['zstd', 'ZSTD'], ['gzip', 'GZIP'], ['lzjb', 'LZJB']];
+        const CR_DO_ASHIFT = [[9, '9 (512B)'], [12, '12 (4K)'], [13, '13 (8K)']];
+        const CR_DO_FS = [['ext4', 'ext4'], ['xfs', 'XFS']];
+        const CR_DO_TYPES = {
+            lvm: { title: 'crDoNewLvmTitle', label: 'crDoLvm', btn: 'crDoNewLvm', what: 'crDoWhatLvm', name: 'myvg' },
+            lvmthin: { title: 'crDoNewThinTitle', label: 'crDoThin', btn: 'crDoNewThin', what: 'crDoWhatThin', name: 'data' },
+            directory: { title: 'crDoNewDirTitle', label: 'crDoDir', btn: 'crDoNewDir', what: 'crDoWhatDir', name: 'storage' },
+            zfs: { title: 'crDoNewZfsTitle', label: 'crDoZfs', btn: 'crDoNewZfs', what: 'crDoWhatZfs', name: 'tank' },
+        };
+        const CR_DO_DANGER = {
+            initgpt: { endpoint: 'disks/initgpt', title: 'crDoGptTitle', lost: 'crDoGptLost', go: 'crDoGptGo', busy: 'crDoGptBusy', what: 'crDoWhatGpt' },
+            wipe: { endpoint: 'disks/wipe', title: 'crDoWipeTitle', lost: 'crDoWipeLost', go: 'crDoWipeGo', busy: 'crDoWipeBusy', what: 'crDoWhatWipe' },
+        };
+
+        // --- rules ---
+
+        // a disk the classic dialog offers for Initialize GPT, Wipe and as a device of a new storage
+        const crDoIsUnused = (d) => !!d && typeof d === 'object' && (d.used === 'unused' || !d.used);
+        const crDoUnused = (list) => (Array.isArray(list) ? list.filter(crDoIsUnused).filter(d => d.devpath) : []);
+
+        // the request createDisk of the classic dialog sends for a type, from its form
+        function crDoBody(type, f) {
+            if (type === 'lvm') return { endpoint: 'disks/lvm', body: { device: f.device, name: f.name, add_storage: f.add_storage } };
+            if (type === 'lvmthin') return { endpoint: 'disks/lvmthin', body: { device: f.vgname, name: f.name, add_storage: f.add_storage } };
+            if (type === 'zfs') {
+                return { endpoint: 'disks/zfs', body: { devices: f.devices, name: f.name, raidlevel: f.raidlevel, compression: f.compression,
+                                                         ashift: f.ashift, add_storage: f.add_storage } };
+            }
+            if (type === 'directory') return { endpoint: 'disks/directory', body: { device: f.device, name: f.name, filesystem: f.filesystem, add_storage: f.add_storage } };
+            return null;
+        }
+
+        // the classic Create button: a name, and the device, the volume group or one disk
+        function crDoValid(type, f) {
+            if (!f || !f.name) return false;
+            if (type === 'lvm' || type === 'directory') return !!f.device;
+            if (type === 'lvmthin') return !!f.vgname;
+            if (type === 'zfs') return Array.isArray(f.devices) && f.devices.length > 0;
+            return false;
+        }
+
+        // Initialize GPT sends the classic { disk }. The wipe route refuses a body without
+        // confirm_name equal to the disk (datacenter.py), which is what the typed name confirms
+        const crDoDiskBody = (kind, devpath) => (kind === 'wipe' ? { disk: devpath, confirm_name: devpath } : { disk: devpath });
+
+        // who may change the disks: the routes take storage.config, a read-only standby changes nothing
+        function useCrDoGate() {
+            const { t } = useTranslation();
+            const { user, isAdmin, haReadOnly } = useAuth();
+            return useMemo(() => {
+                const perms = Array.isArray(user && user.permissions) ? user.permissions : [];
+                if (haReadOnly) return { ok: false, kind: 'standby', why: t('crDoWhyStandby') };
+                if (!isAdmin && !perms.includes('storage.config')) return { ok: false, kind: 'perm', why: t('crDoWhyPerm') };
+                return { ok: true, kind: '', why: '' };
+            }, [user, isAdmin, haReadOnly, t]);
+        }
+
+        // one write at a time per card: the open dialog, the request and its answer. A refusal stays
+        // in the dialog with what the server said; an accepted one closes it and says so on the card
+        function useCrDoOps({ clusterId, node, authFetch, onReload }) {
+            const [dlg, setDlg] = useState(null);     // { kind: create|initgpt|wipe, type, disk, fail }
+            const [busy, setBusy] = useState(false);
+            const [done, setDone] = useState(null);   // { what, task } of the last accepted write
+            const alive = useRef(true);
+            useEffect(() => () => { alive.current = false; }, []);
+            const base = `${API_URL}/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node)}`;
+            const open = (d) => { setDone(null); setDlg({ ...d, fail: null }); };
+            const close = () => { if (!busy) setDlg(null); };
+            const send = async (what, endpoint, body) => {
+                setBusy(true);
+                setDlg(d => (d ? { ...d, fail: null } : d));
+                const ans = await crNdRead(await authFetch(`${base}/${endpoint}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
+                if (!alive.current) return;
+                const fail = crNdFail(ans);
+                setBusy(false);
+                if (fail) setDlg(d => (d ? { ...d, fail } : d));
+                else {
+                    setDlg(null);
+                    setDone({ what, task: ans && typeof ans.task === 'string' ? ans.task : '' });
+                }
+                if (onReload) onReload();
+            };
+            return { dlg, busy, done, open, close, send, dismiss: () => setDone(null) };
+        }
+
+        // --- parts ---
+
+        // why the writes of a card are off, said once under its actions
+        function CrDoGate({ gate }) {
+            if (!gate || gate.ok) return null;
+            return <p className="cr-nc-note cr-muted cr-do-gate" data-cr-do-gate={gate.kind}>{gate.why}</p>;
+        }
+
+        // the answer of an accepted write: PVE runs it as a task, the lists show it when that is done
+        function CrDoDone({ done, onDismiss }) {
+            const { t } = useTranslation();
+            if (!done) return null;
+            return (
+                <div className="cr-callout cr-nc-callout cr-do-done" role="status" data-cr-do-done="">
+                    <Icons.CheckCircle className="w-4 h-4" />
+                    <div>
+                        <p className="cr-strong">{crNnT(t, 'crDoDone', { what: done.what })}</p>
+                        <p className="cr-muted">
+                            {done.task ? <>{t('crDoTask')} <span className="cr-mono cr-do-upid" data-cr-do-task="">{done.task}</span></> : t('crDoNoTask')}
+                        </p>
+                        <p className="cr-muted">{t('crDoReread')}</p>
+                    </div>
+                    <button type="button" className="cr-btn cr-btn-xs" onClick={onDismiss} data-cr-do-dismiss="">{t('close')}</button>
+                </div>
+            );
+        }
+
+        function CrDoRefused({ fail }) {
+            const { t } = useTranslation();
+            if (!fail) return null;
+            return (
+                <div className="cr-callout cr-callout-error" role="alert" data-cr-do-error="">
+                    <Icons.AlertCircle className="w-4 h-4" />
+                    <div>{crNnT(t, 'crDoRefused', { why: crNdWhy(t, fail) })}</div>
+                </div>
+            );
+        }
+
+        const crDoDiskLine = (d) => `${d.devpath} - ${crNvBytes(d.size) || '?'} (${d.type || 'hdd'})`;
+
+        // Initialize GPT or Wipe of one disk: what is lost, and the device name typed in before it arms
+        function CrDoDiskDialog({ kind, node, disk, busy, fail, onCancel, onSend }) {
+            const { t } = useTranslation();
+            const [typed, setTyped] = useState('');
+            const k = CR_DO_DANGER[kind];
+            const dev = crNdDev(disk.devpath);
+            const armed = !!dev && typed.trim() === dev;
+            const ident = [disk.model, disk.serial].map(x => String(x || '').trim()).filter(Boolean).join(' · ');
+            const what = crNnT(t, k.what, { disk: disk.devpath });
+            return (
+                <CrNcConfirm id={`do-${kind}`} title={crNnT(t, k.title, { disk: disk.devpath, node })} goLabel={t(k.go)} busyLabel={t(k.busy)}
+                    busy={busy} goDisabled={!armed} onCancel={onCancel} onConfirm={() => onSend(what, k.endpoint, crDoDiskBody(kind, disk.devpath))}>
+                    <CrNcKv id={`do-${kind}`} rows={[
+                        { k: 'disk', label: t('crNdDisk'), value: disk.devpath, mono: true },
+                        { k: 'ident', label: t('crDoIdent'), value: ident },
+                        { k: 'size', label: t('crNvSize'), value: crNvBytes(disk.size) },
+                        { k: 'used', label: t('crNdUsedBy'), value: t('crDoUnusedPve') },
+                    ]} />
+                    <div className="cr-callout cr-callout-error" role="note" data-cr-do-lost={kind}>
+                        <Icons.AlertTriangle className="w-4 h-4" />
+                        <div>
+                            <p className="cr-strong">{crNnT(t, 'crDoLostTitle', { disk: disk.devpath, node })}</p>
+                            <p>{crNnT(t, k.lost, { disk: disk.devpath })}</p>
+                        </div>
+                    </div>
+                    <CrDoRefused fail={fail} />
+                    <label className="cr-nn-typename" data-cr-do-typename="">
+                        <span>{crNnT(t, 'crDoTypeName', { dev })}</span>
+                        <input type="text" className="cr-input cr-nc-mono-input" value={typed} onChange={e => setTyped(e.target.value)} disabled={busy}
+                            autoComplete="off" spellCheck={false} data-cr-do-typename-input="" aria-label={crNnT(t, 'crDoTypeName', { dev })} />
+                    </label>
+                </CrNcConfirm>
+            );
+        }
+
+        // a new LVM volume group, LVM-Thin pool, directory or ZFS pool: the classic form, then what
+        // will be created, then the classic request
+        function CrDoCreateDialog({ type, node, disks, disksWhy, vgs, busy, fail, onCancel, onSend }) {
+            const { t } = useTranslation();
+            const [f, setF] = useState(() => ({ ...CR_DO_FORM, devices: [] }));
+            const [step, setStep] = useState('form');
+            const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+            const kind = CR_DO_TYPES[type];
+            const unused = crDoUnused(disks);
+            const ok = crDoValid(type, f);
+            const req = crDoBody(type, f);
+            const min = CR_DO_RAID_MIN[f.raidlevel] || 1;
+            const raidName = (CR_DO_RAID.find(x => x[0] === f.raidlevel) || [])[1] || f.raidlevel;
+            const devWhat = type === 'zfs' ? f.devices.join(', ') : type === 'lvmthin' ? f.vgname : f.device;
+            const what = crNnT(t, kind.what, { name: f.name, dev: devWhat, raid: raidName, fs: f.filesystem });
+            const noDisks = disks == null
+                ? crNnT(t, 'crDoDisksNotRead', { node, why: disksWhy || t('crNdNoAnswer') })
+                : crNnT(t, 'crDoNoUnused', { node });
+            const devField = (
+                <CrNcField id="do-device" label={t('crDoDevice')} hint={unused.length ? undefined : noDisks} hintTone={unused.length ? undefined : 'warning'}>
+                    <select id="cr-nc-do-device" className="cr-select" value={f.device} disabled={busy} onChange={e => set('device', e.target.value)} data-cr-do-field="device">
+                        <option value="">{t('crDoPickDisk')}</option>
+                        {unused.map(d => <option key={d.devpath} value={d.devpath}>{crDoDiskLine(d)}</option>)}
+                    </select>
+                </CrNcField>
+            );
+            const form = (
+                <div className="cr-nc-form" data-cr-do-form={type}>
+                    {(type === 'lvm' || type === 'directory') && devField}
+                    {type === 'lvmthin' && (
+                        <CrNcField id="do-vg" label={t('crDoVg')} hint={vgs && vgs.length ? undefined : crNnT(t, 'crDoNoVg', { node })} hintTone={vgs && vgs.length ? undefined : 'warning'}>
+                            <select id="cr-nc-do-vg" className="cr-select" value={f.vgname} disabled={busy} onChange={e => set('vgname', e.target.value)} data-cr-do-field="vgname">
+                                <option value="">{t('crDoPickVg')}</option>
+                                {(vgs || []).map(v => (
+                                    <option key={v.name} value={v.name}>{crNnT(t, 'crDoVgLine', { vg: v.name, free: crNvBytes(v.free) || '?', size: crNvBytes(v.size) || '?' })}</option>
+                                ))}
+                            </select>
+                        </CrNcField>
+                    )}
+                    {type === 'zfs' && (
+                        <CrNcField id="do-devices" label={t('crDoDevices')} wide
+                            hint={!unused.length ? noDisks : f.devices.length && f.devices.length < min ? crNnT(t, 'crDoRaidMin', { level: raidName, n: min, k: f.devices.length }) : undefined}
+                            hintTone={!unused.length || (f.devices.length && f.devices.length < min) ? 'warning' : undefined}>
+                            <div className="cr-do-devs" role="group" aria-label={t('crDoDevices')} data-cr-do-field="devices">
+                                {unused.map(d => (
+                                    <label key={d.devpath} className="cr-nn-ack cr-do-dev">
+                                        <input type="checkbox" checked={f.devices.includes(d.devpath)} disabled={busy} data-cr-do-dev={crNdDev(d.devpath)}
+                                            onChange={e => set('devices', e.target.checked ? [...f.devices, d.devpath] : f.devices.filter(x => x !== d.devpath))} />
+                                        <span className="cr-mono">{d.devpath}</span>
+                                        <span className="cr-muted">{crNvBytes(d.size) || '?'}, {d.type || 'hdd'}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </CrNcField>
+                    )}
+                    <CrNcField id="do-name" label={type === 'lvmthin' || type === 'zfs' ? t('crDoPoolName') : t('crDoName')}>
+                        <input id="cr-nc-do-name" type="text" className="cr-input cr-nc-mono-input" value={f.name} placeholder={kind.name} disabled={busy}
+                            autoComplete="off" spellCheck={false} onChange={e => set('name', e.target.value)} data-cr-do-field="name" />
+                    </CrNcField>
+                    {type === 'zfs' && (
+                        <>
+                            <CrNcField id="do-raid" label={t('crDoRaid')}>
+                                <select id="cr-nc-do-raid" className="cr-select" value={f.raidlevel} disabled={busy} onChange={e => set('raidlevel', e.target.value)} data-cr-do-field="raidlevel">
+                                    {CR_DO_RAID.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                                </select>
+                            </CrNcField>
+                            <CrNcField id="do-comp" label={t('crDoCompression')}>
+                                <select id="cr-nc-do-comp" className="cr-select" value={f.compression} disabled={busy} onChange={e => set('compression', e.target.value)} data-cr-do-field="compression">
+                                    {CR_DO_COMP.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                                </select>
+                            </CrNcField>
+                            <CrNcField id="do-ashift" label="ashift" hint={t('crDoAshiftHint')}>
+                                <select id="cr-nc-do-ashift" className="cr-select" value={f.ashift} disabled={busy} onChange={e => set('ashift', parseInt(e.target.value, 10))} data-cr-do-field="ashift">
+                                    {CR_DO_ASHIFT.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                                </select>
+                            </CrNcField>
+                        </>
+                    )}
+                    {type === 'directory' && (
+                        <CrNcField id="do-fs" label={t('crDoFs')}>
+                            <select id="cr-nc-do-fs" className="cr-select" value={f.filesystem} disabled={busy} onChange={e => set('filesystem', e.target.value)} data-cr-do-field="filesystem">
+                                {CR_DO_FS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                            </select>
+                        </CrNcField>
+                    )}
+                    <label className="cr-nn-ack cr-nc-field-wide" data-cr-do-field="add_storage">
+                        <input type="checkbox" checked={f.add_storage} disabled={busy} onChange={e => set('add_storage', e.target.checked)} />
+                        <span>{t('crDoAddStorage')}</span>
+                    </label>
+                </div>
+            );
+            const rows = [
+                { k: 'what', label: t('crDoWhat'), value: t(kind.label) },
+                { k: 'node', label: t('node'), value: node },
+                type === 'lvmthin' ? { k: 'vg', label: t('crDoVg'), value: f.vgname, mono: true }
+                    : { k: 'device', label: type === 'zfs' ? t('crDoDevices') : t('crDoDevice'), value: devWhat, mono: true },
+                { k: 'name', label: type === 'lvmthin' || type === 'zfs' ? t('crDoPoolName') : t('crDoName'), value: f.name, mono: true },
+                type === 'zfs' && { k: 'raid', label: t('crDoRaid'), value: raidName },
+                type === 'zfs' && { k: 'compression', label: t('crDoCompression'), value: (CR_DO_COMP.find(x => x[0] === f.compression) || [])[1] || f.compression },
+                type === 'zfs' && { k: 'ashift', label: 'ashift', value: String(f.ashift) },
+                type === 'directory' && { k: 'fs', label: t('crDoFs'), value: f.filesystem },
+                { k: 'storage', label: t('crDoStorage'), value: f.add_storage ? crNnT(t, 'crDoStorageYes', { name: f.name }) : t('crDoStorageNo') },
+            ];
+            const review = (
+                <div className="cr-nc-confirm" data-cr-do-review={type}>
+                    <p>{crNnT(t, 'crDoReviewLead', { node })}</p>
+                    <CrNcKv id="do-review" rows={rows} />
+                    {type !== 'lvmthin' && (
+                        <div className="cr-callout cr-callout-warning" role="note" data-cr-do-format="">
+                            <Icons.AlertTriangle className="w-4 h-4" />
+                            <div>{crNnT(t, type === 'zfs' && f.devices.length > 1 ? 'crDoFormatN' : 'crDoFormatOne', { dev: devWhat })}</div>
+                        </div>
+                    )}
+                    {type === 'zfs' && f.devices.length < min && (
+                        <p className="cr-nc-hint cr-nc-hint-warning" data-cr-do-raidmin="">{crNnT(t, 'crDoRaidMin', { level: raidName, n: min, k: f.devices.length })}</p>
+                    )}
+                    <CrDoRefused fail={fail} />
+                </div>
+            );
+            return (
+                <CrUpdDialog id={`do-new-${type}`} title={crNnT(t, kind.title, { node })} sub={step === 'review' ? t('crDoReviewSub') : undefined}
+                    busy={busy} onCancel={onCancel} sticky
+                    footer={step === 'form' ? (
+                        <>
+                            <CrButton onClick={onCancel} data-cr-do-cancel="">{t('cancel')}</CrButton>
+                            <CrButton variant="primary" onClick={() => setStep('review')} disabled={!ok} data-cr-do-next="">{t('crDoReview')}</CrButton>
+                        </>
+                    ) : (
+                        <>
+                            <CrButton onClick={() => setStep('form')} disabled={busy} data-cr-do-back="">{t('crDoBack')}</CrButton>
+                            <CrButton variant="primary" onClick={() => onSend(what, req.endpoint, req.body)} disabled={busy || !ok} data-cr-do-go="">
+                                {busy ? t('crDoCreating') : t('crDoCreate')}
+                            </CrButton>
+                        </>
+                    )}>
+                    {step === 'form' ? form : review}
+                </CrUpdDialog>
+            );
+        }
+
+        // the dialog a card has open, if any
+        function CrDoDialogs({ ops, node, disks, disksWhy, vgs }) {
+            const d = ops.dlg;
+            if (!d) return null;
+            if (d.kind === 'create') {
+                return <CrDoCreateDialog type={d.type} node={node} disks={disks} disksWhy={disksWhy} vgs={vgs} busy={ops.busy} fail={d.fail}
+                    onCancel={ops.close} onSend={ops.send} />;
+            }
+            return <CrDoDiskDialog kind={d.kind} node={node} disk={d.disk} busy={ops.busy} fail={d.fail} onCancel={ops.close} onSend={ops.send} />;
+        }
+
+        // the button that opens a create dialog; off with why where the gate is closed
+        function CrDoNew({ type, ops, gate, variant = 'default', short }) {
+            const { t } = useTranslation();
+            return (
+                <CrButton variant={variant} icon={<Icons.Plus />} onClick={() => ops.open({ kind: 'create', type })} disabled={!gate.ok || ops.busy}
+                    title={gate.ok ? undefined : gate.why} data-cr-do-new={type}>
+                    {t(short ? CR_DO_TYPES[type].label : CR_DO_TYPES[type].btn)}
+                </CrButton>
+            );
+        }
+
+        // the disks and the volume groups a create dialog offers, from the one disks read
+        function crDoLists(read, t) {
+            const ds = crNvSlot(read, 0);
+            const ls = crNvSlot(read, 1);
+            return {
+                disks: ds.state === 'ok' && Array.isArray(ds.body) ? ds.body : null,
+                disksWhy: ds.state === 'failed' ? crNdWhy(t, ds.fail) : ds.state === 'unread' ? t('crNcNotRead') : '',
+                vgs: ls.state === 'ok' ? crNvLvm(ls.body, []).vgs : [],
+            };
+        }
+
+        window.PegaProxNodeDiskOps = Object.freeze({ body: crDoBody, valid: crDoValid, unused: crDoUnused, diskBody: crDoDiskBody, raidMin: CR_DO_RAID_MIN });
+
         // --- LVM ----------------------------------------------------------------------------------
 
-        function CrNodeLvm({ read, loading, onReload }) {
+        function CrNodeLvm({ clusterId, node, read, loading, onReload, authFetch }) {
             const { t } = useTranslation();
+            const gate = useCrDoGate();
+            const ops = useCrDoOps({ clusterId, node, authFetch, onReload });
             const slot = crNvSlot(read, 1);
             const thinSlot = crNvSlot(read, 2);
             const thins = thinSlot.state === 'ok' ? crNvThin(thinSlot.body) : [];
@@ -252,17 +604,22 @@
             return (
                 <CrNcSection id="lvm" title={t('lvmStorage')} desc={t('crNvLvmDesc')}
                     badge={m && m.vgs.length ? <span className="cr-muted cr-nn-count">{crNnT(t, m.vgs.length === 1 ? 'crNvVgOne' : 'crNvVgN', { n: m.vgs.length })}</span> : null}
-                    actions={<CrNvRefresh id="lvm" loading={loading} onClick={onReload} />}>
+                    actions={<><CrDoNew type="lvm" ops={ops} gate={gate} /><CrNvRefresh id="lvm" loading={loading} onClick={onReload} /></>}>
+                    <CrDoGate gate={gate} />
+                    <CrDoDone done={ops.done} onDismiss={ops.dismiss} />
                     {body()}
                     {m && m.vgs.length > 0 && <p className="cr-nc-note cr-muted" data-cr-nv-note="lvm">{t('crNvAllocNote')}</p>}
+                    <CrDoDialogs ops={ops} node={node} {...crDoLists(read, t)} />
                 </CrNcSection>
             );
         }
 
         // --- LVM-Thin -----------------------------------------------------------------------------
 
-        function CrNodeLvmThin({ read, loading, onReload }) {
+        function CrNodeLvmThin({ clusterId, node, read, loading, onReload, authFetch }) {
             const { t } = useTranslation();
+            const gate = useCrDoGate();
+            const ops = useCrDoOps({ clusterId, node, authFetch, onReload });
             const slot = crNvSlot(read, 2);
             const pools = slot.state === 'ok' ? crNvThin(slot.body) : null;
             const body = () => {
@@ -296,17 +653,22 @@
             return (
                 <CrNcSection id="lvmthin" title={t('lvmThinStorage')} desc={t('crNvThinDesc')}
                     badge={pools && pools.length ? <span className="cr-muted cr-nn-count">{crNnT(t, pools.length === 1 ? 'crNvPoolOne' : 'crNvPoolN', { n: pools.length })}</span> : null}
-                    actions={<CrNvRefresh id="lvmthin" loading={loading} onClick={onReload} />}>
+                    actions={<><CrDoNew type="lvmthin" ops={ops} gate={gate} /><CrNvRefresh id="lvmthin" loading={loading} onClick={onReload} /></>}>
+                    <CrDoGate gate={gate} />
+                    <CrDoDone done={ops.done} onDismiss={ops.dismiss} />
                     {body()}
                     {pools && pools.length > 0 && <p className="cr-nc-note cr-muted" data-cr-nv-note="lvmthin">{t('crNvThinNote')}</p>}
+                    <CrDoDialogs ops={ops} node={node} {...crDoLists(read, t)} />
                 </CrNcSection>
             );
         }
 
         // --- ZFS ----------------------------------------------------------------------------------
 
-        function CrNodeZfs({ clusterId, node, read, loading, onReload, pool, onPool }) {
+        function CrNodeZfs({ clusterId, node, read, loading, onReload, pool, onPool, authFetch }) {
             const { t } = useTranslation();
+            const gate = useCrDoGate();
+            const ops = useCrDoOps({ clusterId, node, authFetch, onReload });
             const slot = crNvSlot(read, 3);
             const pools = slot.state === 'ok' ? crNvZfs(slot.body) : null;
             const bad = pools ? pools.filter(p => p.tone === 'warning' || p.tone === 'error').length : 0;
@@ -364,10 +726,13 @@
                             {bad > 0 && <span data-cr-nv-zfs-bad=""><CrBadge tone="warning">{crNnT(t, 'crNvZfsBad', { n: bad })}</CrBadge></span>}
                         </>
                     ) : null}
-                    actions={<CrNvRefresh id="zfs" loading={loading} onClick={onReload} />}>
+                    actions={<><CrDoNew type="zfs" ops={ops} gate={gate} /><CrNvRefresh id="zfs" loading={loading} onClick={onReload} /></>}>
+                    <CrDoGate gate={gate} />
+                    <CrDoDone done={ops.done} onDismiss={ops.dismiss} />
                     {body()}
                     {/* the pool picked above, in full: the shared detail view (its own read per click) */}
                     {pool && <ZfsPoolDetail corporate clusterId={clusterId} node={node} pool={pool} onClose={() => onPool(null)} />}
+                    <CrDoDialogs ops={ops} node={node} {...crDoLists(read, t)} />
                 </CrNcSection>
             );
         }
@@ -709,14 +1074,15 @@
         }
 
         // the storage, repository and Ceph sub tabs of Configure, each from the read the view keeps
-        function CrNodeStoreCfg({ tab, node, clusterId, data, loading, saving, readOnly, zfsPool, onZfsPool,
+        // authFetch: the fetch of CorporateNodeDetailView, for the classic disk writes (round 10)
+        function CrNodeStoreCfg({ tab, node, clusterId, data, loading, saving, readOnly, zfsPool, onZfsPool, authFetch,
                                   onReloadDisks, onReloadRepos, onReloadCeph, onToggleRepo, onAptUpdate, onDirty }) {
+            const disk = { clusterId, node, read: data.disksRead, loading, onReload: onReloadDisks, authFetch };
             return (
                 <div className="cr-nc-page" data-cr-nc-tab={tab}>
-                    {tab === 'lvm' && <CrNodeLvm read={data.disksRead} loading={loading} onReload={onReloadDisks} />}
-                    {tab === 'lvmthin' && <CrNodeLvmThin read={data.disksRead} loading={loading} onReload={onReloadDisks} />}
-                    {tab === 'zfs' && <CrNodeZfs clusterId={clusterId} node={node} read={data.disksRead} loading={loading} onReload={onReloadDisks}
-                        pool={zfsPool} onPool={onZfsPool} />}
+                    {tab === 'lvm' && <CrNodeLvm {...disk} />}
+                    {tab === 'lvmthin' && <CrNodeLvmThin {...disk} />}
+                    {tab === 'zfs' && <CrNodeZfs {...disk} pool={zfsPool} onPool={onZfsPool} />}
                     {tab === 'repos' && <CrNodeRepos node={node} repos={data.reposRead === undefined ? undefined : data.repos} fail={crNdFail(data.reposRead)}
                         loading={loading} saving={saving} readOnly={readOnly} onToggle={onToggleRepo} onAptUpdate={onAptUpdate} onReload={onReloadRepos} onDirty={onDirty} />}
                     {tab === 'ceph' && <CrNodeCeph read={data.cephRead} loading={loading} onReload={onReloadCeph} />}

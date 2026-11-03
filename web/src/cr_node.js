@@ -1533,6 +1533,11 @@
             useEffect(() => () => { alive.current = false; }, []);
             const m = useMemo(() => crNdModel(read, zfs), [read, zfs]);
             const base = `${API_URL}/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node)}`;
+            // LW Nov 2026 - round 10: the disk writes of the classic node dialog (cr_nodestore.js)
+            const gate = useCrDoGate();
+            const ops = useCrDoOps({ clusterId, node, authFetch, onReload });
+            const lists = crDoLists(read, t);
+            const unused = m.state === 'ok' ? m.rows.filter(r => crDoIsUnused(r.disk)) : [];
 
             const readSmart = async (d) => {
                 const dev = crNdDev(d.devpath);
@@ -1638,7 +1643,8 @@
                     </span>
                 ));
                 if (r.zfsState) out.push(<span key="zs" className="cr-nd-use cr-muted" data-cr-nd-use="zfs-open">{t({ unread: 'crNdZfsUnread', failed: 'crNdZfsFailed', nomatch: 'crNdZfsNoMatch', nopool: 'crNdZfsNoPool' }[r.zfsState])}</span>);
-                if (r.usedText && !r.uses.length && !r.zfsState) out.push(<span key="ut" className="cr-nd-use" data-cr-nd-use="pve">{crNnT(t, 'crNdUsePve', { used: r.usedText })}</span>);
+                // round 10: 'unused' is how the classic dialog knows a free disk, not a use
+                if (r.usedText && !crDoIsUnused(r.disk) && !r.uses.length && !r.zfsState) out.push(<span key="ut" className="cr-nd-use" data-cr-nd-use="pve">{crNnT(t, 'crNdUsePve', { used: r.usedText })}</span>);
                 if (!out.length) return <span className="cr-muted cr-nh-none">{t('crNdUseNone')}</span>;
                 return <span className="cr-nd-uses">{out}</span>;
             };
@@ -1667,6 +1673,7 @@
                             <span data-cr-nd-io="">{t('crNdIoNote')}</span>
                         </p>
                     )}
+                    <CrDoDone done={ops.done} onDismiss={ops.dismiss} />
                     {sideFail.map(([k, key]) => (
                         <CrNcState key={k} id={`disks-${k}`} kind="warning" data-cr-nd-side={k}>
                             {crNnT(t, 'crNdSideFailed', { what: t(key), why: crNdWhy(t, m.side[k]) })}
@@ -1709,7 +1716,24 @@
                                                 <td data-cr-nd-cell="errors">{errCell(r)}</td>
                                                 <td data-cr-nd-cell="use">{useCell(r)}</td>
                                                 <td className="cr-nn-rowacts">
-                                                    <CrButton className="cr-btn-xs" onClick={() => openSmart(r)} data-cr-nd-smart={r.dev}>{t('crNdSmart')}</CrButton>
+                                                    <span className="cr-do-rowacts">
+                                                        <CrButton className="cr-btn-xs" onClick={() => openSmart(r)} data-cr-nd-smart={r.dev}>{t('crNdSmart')}</CrButton>
+                                                        {/* as in the classic dialog: Initialize GPT and Wipe only for a disk PVE lists as unused */}
+                                                        {crDoIsUnused(d) ? (
+                                                            <span className="cr-do-danger-acts" data-cr-do-acts={r.dev}>
+                                                                {/* icons as in the classic table, so the column stays as wide as SMART; the name is the label */}
+                                                                <CrButton variant="danger" className="cr-btn-xs cr-do-ico" icon={<Icons.Plus />} disabled={!gate.ok || ops.busy}
+                                                                    title={gate.ok ? crNnT(t, 'crDoGptOn', { disk: d.devpath }) : gate.why} aria-label={crNnT(t, 'crDoGptOn', { disk: d.devpath })}
+                                                                    onClick={() => ops.open({ kind: 'initgpt', disk: d })} data-cr-do-gpt={r.dev} />
+                                                                <CrButton variant="danger" className="cr-btn-xs cr-do-ico" icon={<Icons.Trash />} disabled={!gate.ok || ops.busy}
+                                                                    title={gate.ok ? crNnT(t, 'crDoWipeOn', { disk: d.devpath }) : gate.why} aria-label={crNnT(t, 'crDoWipeOn', { disk: d.devpath })}
+                                                                    onClick={() => ops.open({ kind: 'wipe', disk: d })} data-cr-do-wipe={r.dev} />
+                                                            </span>
+                                                        ) : (
+                                                            <span className="cr-muted cr-do-inuse" data-cr-do-inuse={r.dev}
+                                                                title={crNnT(t, 'crDoInUseHint', { used: r.usedText || t('crDoInUseSome') })}>{t('crDoInUse')}</span>
+                                                        )}
+                                                    </span>
                                                 </td>
                                             </tr>
                                         );
@@ -1718,7 +1742,22 @@
                             </table>
                         </div>
                     )}
+                    {m.state === 'ok' && (
+                        <CrNcGroup id="do-create" title={t('crDoCreateTitle')}>
+                            <div className="cr-do-create" data-cr-do-create="">
+                                <p className="cr-muted" data-cr-do-unused={unused.length}>
+                                    {unused.length ? crNnT(t, unused.length === 1 ? 'crDoUnusedOne' : 'crDoUnusedN', { n: unused.length, list: unused.map(r => r.dev).join(', ') })
+                                        : crNnT(t, 'crDoNoUnused', { node })}
+                                </p>
+                                <div className="cr-do-create-acts">
+                                    {['lvm', 'lvmthin', 'directory', 'zfs'].map(ty => <CrDoNew key={ty} type={ty} ops={ops} gate={gate} short />)}
+                                </div>
+                            </div>
+                        </CrNcGroup>
+                    )}
+                    <CrDoGate gate={gate} />
                     {modal && <SmartModal modal={modal} onClose={() => setModal(null)} formatBytes={formatBytes} />}
+                    <CrDoDialogs ops={ops} node={node} {...lists} />
                 </CrNcSection>
             );
         }

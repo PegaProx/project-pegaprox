@@ -163,15 +163,17 @@
             );
         }
 
-        // the short confirmation of a write that replaces a whole file or restarts a service
-        function CrNcConfirm({ id, title, goLabel, busy, onCancel, onConfirm, children }) {
+        // the short confirmation of a write that replaces a whole file or restarts a service.
+        // goDisabled keeps the button off until the dialog is answered (a typed name), busyLabel
+        // says what runs while the request is out
+        function CrNcConfirm({ id, title, goLabel, busy, goDisabled, busyLabel, onCancel, onConfirm, children }) {
             const { t } = useTranslation();
             return (
                 <CrUpdDialog id={`nc-${id}`} title={title} busy={busy} onCancel={onCancel}
                     footer={(
                         <>
                             <CrButton onClick={onCancel} disabled={busy} data-cr-nc-confirm-cancel={id}>{t('cancel')}</CrButton>
-                            <CrButton variant="danger" onClick={onConfirm} disabled={busy} data-cr-nc-confirm-go={id}>{busy ? t('crNcSaving') : goLabel}</CrButton>
+                            <CrButton variant="danger" onClick={onConfirm} disabled={busy || !!goDisabled} data-cr-nc-confirm-go={id}>{busy ? (busyLabel || t('crNcSaving')) : goLabel}</CrButton>
                         </>
                     )}>
                     <div className="cr-nc-confirm" data-cr-nc-confirm={id}>{children}</div>

@@ -5722,7 +5722,8 @@
             const crSys = crHw && ['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab);
             // LW Nov 2026 - and these five from the disks, repos and ceph reads (cr_nodestore.js)
             const crStore = crHw && ['lvm', 'lvmthin', 'zfs', 'repos', 'ceph'].includes(configSubTab);
-            // LW Nov 2026 - the disk list only reads (list, SMART, pool detail), so a standby keeps it open too
+            // LW Nov 2026 - the disk list sits outside the standby lock: its reads (list, SMART, pool detail) stay
+            // open there, its writes (Initialize GPT, Wipe, a new storage) are off on a standby on their own
             const crDisks = crHw && configSubTab === 'disks';
             const runningVms = nodeVms.filter(v => v.status === 'running').length;
 
@@ -6103,11 +6104,12 @@
                                         </CrBoundary>
                                     )}
                                     {/* LW Nov 2026 - LVM, LVM-Thin, ZFS, Repositories and Ceph of a PVE node as cards; reads stay open on a
-                                        standby, the repository switch and apt update take readOnly and the classic handlers */}
+                                        standby, the repository switch and apt update take readOnly and the classic handlers, the
+                                        disk writes the classic requests of NodeModal (cr_nodestore.js, off on a standby) */}
                                     {crStore && (
                                         <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-store">
                                             <CrNodeStoreCfg tab={configSubTab} node={node} clusterId={clusterId} data={data} loading={loading} saving={saving} readOnly={haReadOnly}
-                                                zfsPool={zfsPool} onZfsPool={setZfsPool}
+                                                zfsPool={zfsPool} onZfsPool={setZfsPool} authFetch={authFetch}
                                                 onReloadDisks={() => loadTabData('disks')} onReloadRepos={() => loadTabData('repos')} onReloadCeph={() => loadTabData('ceph')}
                                                 onToggleRepo={handleRepoToggle}
                                                 onAptUpdate={handleAptUpdate} onDirty={crOnDirty} />

@@ -3,8 +3,9 @@
 The variant draws the rules the dashboard reads when the sub tab opens (GET .../affinity-rules) as a
 table: type, enforced, the guests by name (an id the cluster does not list is marked), state and
 creation time. New Rule opens the classic dialog (POST .../affinity-rules), Delete is the classic
-DELETE .../affinity-rules/<id> without a confirm, as in every layout; a refused delete is said. A
-failed read is an error, not "no rules". Classic Corporate, Modern and Cloud keep their markup
+DELETE .../affinity-rules/<id>; since round 10 it asks first in the variant (the rule, its type and
+its guests, Delete in danger style) and the DELETE goes only after that, classic Corporate deletes at
+once as before. A refused delete is said. A failed read is an error, not "no rules". Classic Corporate, Modern and Cloud keep their markup
 (tests/test_corp_redesigned_guard_ui.py, view "auto_affinity"). PEGAPROX_CR_BUNDLE=<file> serves
 another bundle (the counterproof). LW Nov 2026
 """
@@ -122,16 +123,22 @@ def test_runtime_new_rule_opens_the_classic_dialog_and_sends_its_body(open_app):
     assert app.errors == []
 
 
+def _confirm(page, rid):
+    page.locator(f'[data-cr-aff-del="{rid}"]').click()
+    _need(page, '[data-cr-upd-dialog="nc-aff-del"]', 'Delete asks first')
+    page.locator('[data-cr-nc-confirm-go="aff-del"]').click()
+
+
 def test_runtime_delete_sends_the_classic_request_and_a_refusal_is_said(open_app):
     app = open_app()
     page = _open_tab(app)
     assert 'cr-btn-danger' in page.locator('[data-cr-aff-del="a1b2c3d4"]').get_attribute('class')
-    page.locator('[data-cr-aff-del="a1b2c3d4"]').click()
+    _confirm(page, 'a1b2c3d4')
     _poll(lambda: any(r[0] == 'DELETE' for r in app.server.reqs), page)
     assert [r[:2] for r in app.server.reqs if r[0] == 'DELETE'] == [('DELETE', '/api/clusters/c1/affinity-rules/a1b2c3d4')]
     page.wait_for_function('() => !document.querySelector("[data-cr-aff-rule=a1b2c3d4]")', timeout=5000)
     app.server.delete_status = 404
-    page.locator('[data-cr-aff-del="e5f6a7b8"]').click()
+    _confirm(page, 'e5f6a7b8')
     _need(page, '[data-cr-aff-del-error]', 'a refused delete is said')
     assert 'web with cache' in page.locator('[data-cr-aff-del-error]').inner_text()
     assert page.locator('[data-cr-aff-rule="e5f6a7b8"]').count() == 1
@@ -150,10 +157,46 @@ def test_runtime_the_variant_deletes_what_classic_deletes(open_app):
     want = [r for r in classic.server.reqs if r[0] == 'DELETE']
     app = open_app()
     page = _open_tab(app)
-    page.locator('[data-cr-aff-del="a1b2c3d4"]').click()
+    _confirm(page, 'a1b2c3d4')
     _poll(lambda: any(r[0] == 'DELETE' for r in app.server.reqs), page)
     assert [r for r in app.server.reqs if r[0] == 'DELETE'] == want
     assert app.errors == [] and classic.errors == []
+
+
+@pytest.mark.parametrize('rid,name,kind,guests', [('a1b2c3d4', 'db pair', 'Separate (different hosts), Enforced', ['web01', 'ct01']),
+                                                   ('e5f6a7b8', 'web with cache', 'Together (same host)', ['web01', '999'])])
+def test_runtime_delete_asks_first_with_the_rule_its_type_and_guests(open_app, rid, name, kind, guests):
+    app = open_app()
+    page = _open_tab(app)
+    page.locator(f'[data-cr-aff-del="{rid}"]').click()
+    _need(page, '[data-cr-upd-dialog="nc-aff-del"]', 'Delete opens a confirmation')
+    dlg = page.locator('[data-cr-upd-dialog="nc-aff-del"]')
+    assert name in dlg.locator('h2').inner_text()
+    assert dlg.locator('[data-cr-nc-k="type"] dd').inner_text().strip() == kind
+    said = dlg.locator('[data-cr-nc-k="guests"] dd').inner_text()
+    for g in guests:
+        assert g in said, (g, said)
+    assert 'Nothing moves now' in dlg.inner_text()
+    go = dlg.locator('[data-cr-nc-confirm-go="aff-del"]')
+    assert 'cr-btn-danger' in go.get_attribute('class') and go.inner_text().strip() == 'Delete'
+    # nothing is sent while it asks, Cancel and Escape send nothing
+    page.wait_for_timeout(300)
+    assert not [r for r in app.server.reqs if r[0] == 'DELETE']
+    dlg.locator('[data-cr-nc-confirm-cancel="aff-del"]').click()
+    page.wait_for_function('() => !document.querySelector("[data-cr-upd-dialog]")', timeout=5000)
+    page.locator(f'[data-cr-aff-del="{rid}"]').click()
+    _need(page, '[data-cr-upd-dialog="nc-aff-del"]', 'Delete asks again')
+    page.keyboard.press('Escape')
+    page.wait_for_function('() => !document.querySelector("[data-cr-upd-dialog]")', timeout=5000)
+    assert not [r for r in app.server.reqs if r[0] == 'DELETE'] and page.locator(f'[data-cr-aff-rule="{rid}"]').count() == 1
+    _confirm(page, rid)
+    _poll(lambda: any(r[0] == 'DELETE' for r in app.server.reqs), page)
+    page.wait_for_timeout(300)
+    assert [r[:2] for r in app.server.reqs if r[0] == 'DELETE'] == [('DELETE', f'/api/clusters/c1/affinity-rules/{rid}')]
+    page.wait_for_function(f'() => !document.querySelector("[data-cr-aff-rule={rid}]")', timeout=5000)
+    assert page.locator('[data-cr-upd-dialog]').count() == 0
+    assert 'asks first' in page.locator('[data-cr-aff-foot]').inner_text()
+    assert app.errors == []
 
 
 def test_runtime_a_standby_only_lists(open_app):
@@ -196,4 +239,7 @@ def test_runtime_it_fits_without_sideways_scroll(open_app, engine, size):
     assert over <= 0, (engine, size, over)
     b = page.locator('[data-cr-aff-new]').bounding_box()
     assert b['x'] + b['width'] <= size[0], (engine, size, b)
+    page.locator('[data-cr-aff-del="a1b2c3d4"]').click()
+    _need(page, '[data-cr-upd-dialog="nc-aff-del"]', 'Delete asks first')
+    assert page.evaluate('() => document.documentElement.scrollWidth - window.innerWidth') <= 0, (engine, size, 'confirm')
     assert app.errors == []

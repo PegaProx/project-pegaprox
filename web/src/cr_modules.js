@@ -1156,7 +1156,8 @@
 
         // --- Automation > Affinity rules ------------------------------------------------
         // The rules of the cluster as GET .../affinity-rules lists them (read when the sub tab opens).
-        // New Rule opens the classic dialog, Delete is the classic DELETE (no confirm there either).
+        // New Rule opens the classic dialog, Delete is the classic DELETE. LW Nov 2026 - round 10:
+        // Delete asks first (the rule, its type and its guests); the DELETE goes only after that.
         // A guest id the cluster does not list is said so; a failed read is an error, not "no rules".
         function CrAffinity({ cluster, rules, readErr, loading, canEdit, onNew, onDelete, onRefresh, nav }) {
             const { t } = useTranslation();
@@ -1165,14 +1166,17 @@
             const guests = nav && nav.guestsOf ? nav.guestsOf(cid) : null;
             const [busy, setBusy] = useState({});
             const [err, setErr] = useState('');
+            const [ask, setAsk] = useState(null);   // the rule the confirmation is open for
             const del = async (r) => {
                 setBusy(b => ({ ...b, [r.id]: true }));
                 setErr('');
                 const ok = await onDelete(r.id);
                 setBusy(b => ({ ...b, [r.id]: false }));
+                setAsk(null);
                 if (!ok) setErr(crFill(t('crAffDelFailed'), { name: r.name || r.id }));
             };
             const ids = (r) => (Array.isArray(r.vm_ids) ? r.vm_ids : Array.isArray(r.vms) ? r.vms : []);
+            const typeText = (r) => (r.type === 'together' ? t('together') : t('separate'));
             const state = readErr ? 'error' : loading && !list.length ? 'loading' : list.length ? 'ok' : 'empty';
             const cols = [
                 { key: 'name', label: t('crAffRule'), flex: true, min: 140, text: r => r.name || r.id,
@@ -1197,7 +1201,7 @@
                 canEdit && { key: 'act', label: t('crSnapAction'), width: 86, align: 'right', text: () => '',
                   render: r => (
                       <button type="button" className="cr-btn cr-btn-danger cr-btn-xs" disabled={!!busy[r.id]}
-                          onClick={e => { e.stopPropagation(); del(r); }} data-cr-aff-del={r.id}>
+                          onClick={e => { e.stopPropagation(); setAsk(r); }} data-cr-aff-del={r.id}>
                           <span className="cr-ico" aria-hidden="true">{busy[r.id] ? <span className="cr-spinner" /> : <Icons.Trash />}</span>{t('delete')}
                       </button>
                   ) },
@@ -1225,7 +1229,27 @@
                             ariaLabel={t('affinityRules')} maxHeight={520} searchable={list.length > 12}
                             emptyText={t('noAffinityCluster')} initialSort={{ key: 'name', dir: 'asc' }} />
                     )}
-                    <p className="cr-sb-fine" data-cr-aff-foot="">{canEdit ? t('crAffFoot') : t('crAffFootRead')}</p>
+                    <p className="cr-sb-fine" data-cr-aff-foot="">{canEdit ? t('crAffFootAsk') : t('crAffFootRead')}</p>
+                    {ask && (
+                        <CrNcConfirm id="aff-del" title={crFill(t('crAffDelTitle'), { name: ask.name || ask.id })} goLabel={t('delete')}
+                            busyLabel={t('crAffDeleting')} busy={!!busy[ask.id]} onCancel={() => setAsk(null)} onConfirm={() => del(ask)}>
+                            <CrNcKv id="aff-del" rows={[
+                                { k: 'rule', label: t('crAffRule'), value: ask.name || ask.id },
+                                { k: 'type', label: t('type'), value: ask.enforce ? `${typeText(ask)}, ${t('enforced')}` : typeText(ask) },
+                                { k: 'guests', label: t('crAffGuests'), value: ids(ask).length ? (
+                                    <span className="cr-aff-guests" data-cr-aff-del-guests="">
+                                        {ids(ask).map(v => {
+                                            const g = crMdGuestOf(guests, v);
+                                            return g
+                                                ? <span key={v} data-cr-aff-del-guest={v}><span className="cr-strong">{g.name || v}</span> <span className="cr-muted cr-mono">{v}</span></span>
+                                                : <span key={v} className="cr-upd-warn" title={t('crAffGuestGone')} data-cr-aff-del-guest={v}>{v}</span>;
+                                        })}
+                                    </span>
+                                ) : '' },
+                            ]} />
+                            <p data-cr-aff-del-what="">{t(ask.type === 'together' ? 'crAffDelWhatTogether' : 'crAffDelWhatApart')}</p>
+                        </CrNcConfirm>
+                    )}
                 </div>
             );
         }
