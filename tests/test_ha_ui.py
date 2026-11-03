@@ -1788,7 +1788,8 @@ def test_the_corporate_node_view_shows_but_does_not_change_on_a_standby():
     # the sub navigation reads and stays outside the disabled part
     assert configure.index('corp-subnav-item') < configure.index('<fieldset disabled={haReadOnly} className="contents">')
     hw = body[body.index("{activeDetailTab === 'hardware' && ("):]
-    assert hw.index('<fieldset disabled={haReadOnly} className="contents">') < hw.index('<HardwareMonitoringPanel')
+    # Corporate Redesigned gives the same fieldset a class of its own
+    assert hw.index('<fieldset disabled={haReadOnly} className=') < hw.index('<HardwareMonitoringPanel')
 
 
 def test_no_efficient_snapshot_refresh_from_a_standby():
