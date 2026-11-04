@@ -33,7 +33,7 @@ def open_app(browser):
 
 def _add_cluster(app, layout):
     page = app.page
-    if layout == 'corporate':
+    if layout.startswith('corporate'):
         page.locator('button[title="Add Cluster"]').first.click()
     else:
         page.locator('button', has_text='Add Cluster').first.click()
@@ -51,7 +51,7 @@ def _drag(page, start, end):
     page.wait_for_timeout(300)
 
 
-@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+@pytest.mark.parametrize('layout', ['modern', 'corporate', 'corporate-redesigned'])
 def test_runtime_selecting_text_out_onto_the_backdrop_keeps_add_cluster_open(open_app, layout):
     app = open_app(layout=layout)
     page = app.page
