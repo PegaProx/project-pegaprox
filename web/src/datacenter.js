@@ -11,7 +11,12 @@
         const PVA_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
         const PVA_PATH_RE = /^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/;
         const pvaPathOk = (p) => PVA_PATH_RE.test(p || '') && !String(p).split('/').includes('..');
-        const pvaDate = (ts) => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : '';
+        // the date input is in local time, so the date shown is the local one too
+        const pvaDate = (ts) => {
+            if (!ts) return '';
+            const d = new Date(ts * 1000);
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        };
 
         function PvaDialog({ title, onClose, onSave, problem, busy, t, children, wide }) {
             return (
@@ -51,17 +56,22 @@
                 body: body ? JSON.stringify(body) : undefined,
             });
 
+            // a load for a cluster the admin already switched away from must not land on the new one
+            const loadSeq = useRef(0);
             const load = async () => {
+                const seq = ++loadSeq.current;
                 setError('');
                 try {
                     const r = await call('');
                     const d = await r.json().catch(() => ({}));
+                    if (seq !== loadSeq.current) return;
                     if (r.ok) setData(d); else { setData(null); setError(d.error || t('operationFailed')); }
                 } catch (e) {
+                    if (seq !== loadSeq.current) return;
                     setData(null); setError(t('connectionError'));
                 }
             };
-            useEffect(() => { setData(null); load(); }, [clusterId]);
+            useEffect(() => { setData(null); setDialog(null); setPrivFilter(''); load(); }, [clusterId]);
 
             const run = async (path, method, body, okKey) => {
                 setBusy(true);
@@ -99,8 +109,11 @@
             };
             const saveUser = () => {
                 const f = dialog.form, u = dialog.item;
-                const expire = f.expire ? Math.floor(new Date(f.expire + 'T23:59:59').getTime() / 1000) : 0;
+                // an unchanged date keeps the exact time Proxmox has
+                const expire = !f.expire ? 0 : (u && f.expire === pvaDate(u.expire)) ? u.expire
+                    : Math.floor(new Date(f.expire + 'T23:59:59').getTime() / 1000);
                 const body = { firstname: f.firstname, lastname: f.lastname, email: f.email, comment: f.comment, groups: f.groups, enable: f.enable, expire };
+                if (u && u.protected) { delete body.expire; delete body.enable; }
                 if (u) return run(`/users/${enc(u.userid)}`, 'PUT', body);
                 return run('/users', 'POST', { ...body, userid: f.userid, password: f.password || undefined });
             };
@@ -124,7 +137,7 @@
                                 <div>{label('pvaFirstName')}<input value={f.firstname} onChange={e => setForm({ firstname: e.target.value })} className={input} /></div>
                                 <div>{label('pvaLastName')}<input value={f.lastname} onChange={e => setForm({ lastname: e.target.value })} className={input} /></div>
                                 <div>{label('pvaEmail')}<input value={f.email} onChange={e => setForm({ email: e.target.value.trim() })} className={input} /></div>
-                                <div>{label('pvaExpire')}<input type="date" value={f.expire} onChange={e => setForm({ expire: e.target.value })} className={input} /></div>
+                                <div>{label('pvaExpire')}<input type="date" value={f.expire} onChange={e => setForm({ expire: e.target.value })} disabled={dialog.item && dialog.item.protected} className={`${input} disabled:opacity-50`} /></div>
                             </div>
                             <div>{label('comment')}<input value={f.comment} onChange={e => setForm({ comment: e.target.value })} className={input} /></div>
                             <div>{label('pvaGroups')}

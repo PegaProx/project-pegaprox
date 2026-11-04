@@ -100,6 +100,9 @@ def test_create_user_with_groups_and_password(pve):
 @pytest.mark.parametrize('body,why', [
     ({'userid': 'ivan'}, 'name@realm'),
     ({'userid': 'a/b@pve'}, 'name@realm'),
+    ({'userid': 'ivan@pve\n'}, 'name@realm'),
+    ({'userid': 'ivan@pve', 'enable': 'yes'}, 'true or false'),
+    ({'userid': 'ivan@pve', 'expire': float('inf')}, 'Unix time'),
     ({'userid': 'ivan@pam', 'password': 'Secret123!'}, 'pve realm'),
     ({'userid': 'ivan@pve', 'password': 'short'}, '8 to 256'),
     ({'userid': 'ivan@pve', 'groups': ['../x']}, 'group list'),
@@ -124,7 +127,11 @@ def test_update_clears_emptied_fields(pve):
 def test_root_is_protected(pve):
     admin, calls, _ = pve
     assert admin.delete(f'{B}/users/root@pam').status_code == 400
+    assert admin.delete(f'{B}/users/root@pam%0A').status_code == 400
     assert admin.put(f'{B}/users/root@pam', json={'enable': 0}).status_code == 400
+    assert admin.put(f'{B}/users/root@pam', json={'expire': 1}).status_code == 400
+    r = admin.put(f'{B}/acl', json={'path': '/', 'roles': ['Administrator'], 'users': ['root@pam\n'], 'delete': True})
+    assert r.status_code == 400
     r = admin.put(f'{B}/acl', json={'path': '/', 'roles': ['Administrator'], 'users': ['root@pam'], 'delete': True})
     assert r.status_code == 400
     assert calls == []
@@ -168,7 +175,7 @@ def test_acl_grant_and_remove(pve):
     assert r.status_code == 200 and calls[-1][2]['delete'] == 1
 
 
-@pytest.mark.parametrize('path', ['vms/100', '/vms/../x', '/vms/1 00', '', '/a//b'])
+@pytest.mark.parametrize('path', ['vms/100', '/vms/../x', '/vms/1 00', '', '/a//b', '/vms/100\n'])
 def test_acl_path_is_checked(pve, path):
     admin, calls, _ = pve
     r = admin.put(f'{B}/acl', json={'path': path, 'roles': ['PVEAuditor'], 'users': ['anna@pve']})
@@ -190,3 +197,68 @@ def test_not_for_other_cluster_types(api, pve):
     admin, _, _ = pve
     api.set_manager('x1', api.make_fake_manager('x1', cluster_type='xcpng'))
     assert admin.get('/api/clusters/x1/pve-access').status_code == 400
+
+
+def test_the_user_pegaprox_signs_in_as_is_protected(pve):
+    admin, calls, _ = pve
+    from pegaprox.api import pve_access
+    mgr = pve_access.get_connected_manager('c1')[0]
+    mgr.config.user = 'pegaprox@pve!panel'
+    mgr.config.api_token_user = None
+    assert admin.delete(f'{B}/users/pegaprox@pve').status_code == 400
+    assert admin.put(f'{B}/users/pegaprox@pve', json={'enable': False}).status_code == 400
+    r = admin.put(f'{B}/acl', json={'path': '/', 'roles': ['Administrator'], 'tokens': ['pegaprox@pve!panel'],
+                                    'delete': True})
+    assert r.status_code == 400 and 'signs in' in r.get_json()['error']
+    assert not [c for c in calls if c[0] != 'get']
+    assert [u for u in admin.get(B).get_json()['users'] if u['userid'] == 'root@pam'][0]['protected']
+    assert admin.put(f'{B}/users/anna@pve', json={'enable': False}).status_code == 200
+
+
+@pytest.mark.parametrize('flags,sent', [
+    ({'propagate': 0}, {'propagate': 0}),
+    ({'propagate': 'false'}, {'propagate': 0}),
+    ({'propagate': True}, {'propagate': 1}),
+    ({'delete': 'false'}, {'propagate': 1}),
+    ({'delete': 1}, {'propagate': 1, 'delete': 1}),
+])
+def test_acl_flags_are_read_as_booleans(pve, flags, sent):
+    admin, calls, _ = pve
+    r = admin.put(f'{B}/acl', json={'path': '/vms/100', 'roles': ['PVEVMUser'], 'users': ['anna@pve'], **flags})
+    assert r.status_code == 200, r.get_json()
+    assert calls[-1][2] == {'path': '/vms/100', 'roles': 'PVEVMUser', 'users': 'anna@pve', **sent}
+
+
+@pytest.mark.parametrize('flags', [{'propagate': 'no'}, {'delete': 'maybe'}, {'delete': 2}])
+def test_unclear_acl_flags_are_refused(pve, flags):
+    admin, calls, _ = pve
+    r = admin.put(f'{B}/acl', json={'path': '/vms/100', 'roles': ['PVEVMUser'], 'users': ['anna@pve'], **flags})
+    assert r.status_code == 400 and 'true or false' in r.get_json()['error']
+    assert calls == []
+
+
+@pytest.mark.parametrize('method,url', [
+    ('post', '/users'), ('put', '/users/anna@pve'), ('put', '/users/anna@pve/password'), ('post', '/groups'),
+    ('put', '/groups/ops'), ('post', '/roles'), ('put', '/roles/Backup'), ('put', '/acl'),
+])
+def test_a_body_that_is_not_an_object_is_a_bad_request(pve, method, url):
+    admin, calls, _ = pve
+    r = getattr(admin, method)(f'{B}{url}', json=[1])
+    assert r.status_code == 400, (url, r.status_code)
+    assert not [c for c in calls if c[0] != 'get']
+
+
+def test_a_broken_answer_from_proxmox_is_not_success(pve, monkeypatch):
+    admin, calls, _ = pve
+    monkeypatch.setattr(_Resp, 'json', lambda self: (_ for _ in ()).throw(ValueError('not json')))
+    r = admin.get(B)
+    assert r.status_code == 502, r.get_json()
+    r = admin.post(f'{B}/groups', json={'groupid': 'dev'})
+    assert r.status_code == 502
+
+
+def test_a_failed_read_is_the_clusters_fault(pve):
+    admin, _, state = pve
+    state['fail'] = (500, 'cfs lock timeout')
+    r = admin.get(B)
+    assert r.status_code == 502 and 'cfs lock' in r.get_json()['error']

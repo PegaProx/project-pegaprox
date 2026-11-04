@@ -11,6 +11,7 @@ the shape Proxmox itself allows before it is used, and percent-encoded on the wa
 """
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote
 
 from flask import Blueprint, jsonify, request
@@ -23,12 +24,15 @@ from pegaprox.api.helpers import (get_connected_manager, check_cluster_access, s
 
 bp = Blueprint('pve_access', __name__)
 
-# user@realm: Proxmox refuses whitespace, ':' and '/' in the name, and names realms like ids
-USERID_RE = re.compile(r'^[^\s:/@]{1,60}@[A-Za-z][A-Za-z0-9._-]{0,31}$')
-ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
-PRIV_RE = re.compile(r'^[A-Za-z][A-Za-z0-9.]{0,63}$')
+# user@realm: Proxmox refuses whitespace, ':' and '/' in the name, and names realms like ids.
+# \Z, not $: $ also matches before a trailing newline (as in sanitization.py)
+_USERID = r'[^\s:/@]{1,60}@[A-Za-z][A-Za-z0-9._-]{0,31}'
+USERID_RE = re.compile(r'^' + _USERID + r'\Z')
+TOKENID_RE = re.compile(r'^' + _USERID + r'![A-Za-z][A-Za-z0-9._-]{0,63}\Z')
+ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z')
+PRIV_RE = re.compile(r'^[A-Za-z][A-Za-z0-9.]{0,63}\Z')
 # /, /vms/100, /storage/local, /pool/x, /sdn/zones/z, /mapping/dir/m ...
-PATH_RE = re.compile(r'^/(?:[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)?$')
+PATH_RE = re.compile(r'^/(?:[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*)?\Z')
 TEXT_MAX = 256
 PROTECTED_USERS = ('root@pam',)
 
@@ -56,24 +60,71 @@ def _url(manager, path):
     return f"https://{manager.host}:{manager.api_port}/api2/json/access/{path}"
 
 
-def _pve(manager, method, path, data=None, params=None):
-    """(data, None) on success, else (None, error response)."""
+def _call(manager, method, path, data=None, params=None):
+    """(data, None) on success, else (None, (status, message)). No Flask in here: it also runs
+    in the worker threads of the read."""
     session = manager._create_session()
     resp = getattr(session, method)(_url(manager, path), data=data, params=params, timeout=15)
     if resp.status_code != 200:
         msg = parse_pve_error(resp.text, 'Proxmox refused the request')
-        # PVE answers a bad parameter or an id that exists with 400 or 500: the request's fault.
-        # 401/403 are the stored credentials (UPSTREAM_AUTH); anything else is a broken upstream.
+        # A change PVE refuses (bad parameter, an id that exists) comes back as 400 or 500: the
+        # request's fault. A read that fails is the cluster's. 401/403 are the stored credentials
+        # (UPSTREAM_AUTH); anything else is a broken upstream.
         code = resp.status_code
         if code in (400, 500):
-            code = 400
+            code = 502 if method == 'get' else 400
         elif code not in (401, 403):
             code = 502
-        return None, upstream_failure(code, msg)
+        return None, (code, msg)
     try:
-        return resp.json().get('data'), None
+        body = resp.json()
     except ValueError:
-        return None, None
+        body = None
+    if not isinstance(body, dict) or 'data' not in body:
+        return None, (502, 'Proxmox sent an answer that is not the JSON it should be')
+    return body['data'], None
+
+
+def _pve(manager, method, path, data=None, params=None):
+    """(data, None) on success, else (None, error response)."""
+    data, err = _call(manager, method, path, data=data, params=params)
+    return (None, upstream_failure(*err)) if err else (data, None)
+
+
+def _json():
+    """The request body as a dict, or None when it is not a JSON object"""
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    return data if isinstance(data, dict) else None
+
+
+def _flag(data, key, default):
+    """(bool, None) for a real true/false (or 1/0) in data[key], else (None, message)"""
+    value = data.get(key, default)
+    if value is None:
+        return default, None
+    if value is True or value is False:
+        return value, None
+    if value in (0, 1, '0', '1') and not isinstance(value, float):
+        return str(value) == '1', None
+    if isinstance(value, str) and value.lower() in ('true', 'false'):
+        return value.lower() == 'true', None
+    return None, f'{key} must be true or false'
+
+
+def _protected(manager):
+    """The users this section must not lock out: root@pam, and the user PegaProx itself signs
+    in to the cluster as (its password login or the owner of its API token). Without those the
+    cluster, and this section, are out of PegaProx's reach."""
+    users, tokens = set(PROTECTED_USERS), set()
+    cfg = getattr(manager, 'config', None)
+    for value in (getattr(cfg, 'user', None), getattr(cfg, 'api_token_user', None)):
+        if isinstance(value, str) and value:
+            users.add(value.split('!', 1)[0])
+            if '!' in value:
+                tokens.add(value)
+    return users, tokens
 
 
 def _text(value, name):
@@ -112,13 +163,18 @@ def get_pve_access(cluster_id):
     if err:
         return err
     try:
+        reads = (('users', 'users', {'full': 1}), ('groups', 'groups', None), ('roles', 'roles', None),
+                 ('acl', 'acl', None), ('realms', 'domains', None))
+        # five independent reads of the cluster: at once, not one after the other
+        with ThreadPoolExecutor(max_workers=len(reads)) as ex:
+            done = [ex.submit(_call, manager, 'get', path, None, params) for _key, path, params in reads]
+            results = [f.result() for f in done]
         out = {}
-        for key, path, params in (('users', 'users', {'full': 1}), ('groups', 'groups', None),
-                                  ('roles', 'roles', None), ('acl', 'acl', None), ('realms', 'domains', None)):
-            data, err = _pve(manager, 'get', path, params=params)
+        for (key, _path, _params), (data, err) in zip(reads, results):
             if err:
-                return err
-            out[key] = data or []
+                return upstream_failure(*err)
+            out[key] = data if isinstance(data, list) else []
+        protected, _tokens = _protected(manager)
         users = []
         for u in out['users']:
             groups = u.get('groups') or []
@@ -130,7 +186,7 @@ def get_pve_access(cluster_id):
                 'lastname': u.get('lastname') or '', 'email': u.get('email') or '',
                 'comment': u.get('comment') or '', 'groups': groups, 'realm_type': u.get('realm-type') or '',
                 'tokens': [t.get('tokenid') for t in (u.get('tokens') or []) if t.get('tokenid')],
-                'protected': u.get('userid') in PROTECTED_USERS,
+                'protected': u.get('userid') in protected,
             })
         roles = []
         privileges = set()
@@ -184,11 +240,14 @@ def _user_fields(data, new):
             return None, why
         out['groups'] = groups
     if 'enable' in data:
-        out['enable'] = 1 if data.get('enable') in (True, 1, '1') else 0
+        enable, why = _flag(data, 'enable', True)
+        if why:
+            return None, why
+        out['enable'] = 1 if enable else 0
     if 'expire' in data:
         try:
             out['expire'] = max(0, int(data.get('expire') or 0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None, 'expire is a Unix time, 0 for never'
     return out, None
 
@@ -200,7 +259,7 @@ def create_pve_user(cluster_id):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    fields, why = _user_fields(request.get_json(silent=True), new=True)
+    fields, why = _user_fields(_json(), new=True)
     if why:
         return _bad(why)
     body = {k: v for k, v in fields.items() if k != 'groups' and v not in ('', None)}
@@ -230,11 +289,14 @@ def update_pve_user(cluster_id, userid):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    fields, why = _user_fields(request.get_json(silent=True), new=False)
+    fields, why = _user_fields(_json(), new=False)
     if why:
         return _bad(why)
-    if userid in PROTECTED_USERS and fields.get('enable') == 0:
+    protected, _tokens = _protected(manager)
+    if userid in protected and fields.get('enable') == 0:
         return _bad(f'{userid} cannot be disabled from here')
+    if userid in protected and fields.get('expire'):
+        return _bad(f'{userid} cannot be given an expiry date from here')
     body, delete = {}, []
     for k, v in fields.items():
         if k == 'groups':
@@ -269,6 +331,8 @@ def delete_pve_user(cluster_id, userid):
     manager, err = _manager(cluster_id)
     if err:
         return err
+    if userid in _protected(manager)[0]:
+        return _bad(f'{userid} is the user PegaProx signs in to this cluster as and cannot be deleted from here')
     try:
         _data, err = _pve(manager, 'delete', f'users/{_q(userid)}')
         if err:
@@ -287,7 +351,9 @@ def set_pve_user_password(cluster_id, userid):
         return _bad('Invalid user id')
     if not userid.endswith('@pve'):
         return _bad('Only users of the pve realm have a password Proxmox keeps')
-    data = request.get_json(silent=True) or {}
+    data = _json()
+    if data is None:
+        return _bad('Expected a JSON object')
     password = data.get('password')
     if not isinstance(password, str) or len(password) < 8 or len(password) > 256:
         return _bad('The password must be 8 to 256 characters')
@@ -313,7 +379,9 @@ def create_pve_group(cluster_id):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    data = request.get_json(silent=True) or {}
+    data = _json()
+    if data is None:
+        return _bad('Expected a JSON object')
     groupid = data.get('groupid')
     if not isinstance(groupid, str) or not ID_RE.match(groupid):
         return _bad('Invalid group id: letters, digits, dot, dash and underscore')
@@ -342,7 +410,10 @@ def update_pve_group(cluster_id, groupid):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    comment, why = _text((request.get_json(silent=True) or {}).get('comment'), 'comment')
+    data = _json()
+    if data is None:
+        return _bad('Expected a JSON object')
+    comment, why = _text(data.get('comment'), 'comment')
     if why:
         return _bad(why)
     try:
@@ -377,7 +448,9 @@ def delete_pve_group(cluster_id, groupid):
 # --- roles -------------------------------------------------------------------------------
 
 def _privs(data):
-    privs, why = _id_list((data or {}).get('privs'), PRIV_RE, 'privilege list')
+    if data is None:
+        return None, 'Expected a JSON object'
+    privs, why = _id_list(data.get('privs'), PRIV_RE, 'privilege list')
     if why:
         return None, why
     return sorted(set(privs)), None
@@ -401,7 +474,9 @@ def create_pve_role(cluster_id):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    data = request.get_json(silent=True) or {}
+    data = _json()
+    if data is None:
+        return _bad('Expected a JSON object')
     roleid = data.get('roleid')
     if not isinstance(roleid, str) or not ID_RE.match(roleid):
         return _bad('Invalid role id: letters, digits, dot, dash and underscore')
@@ -428,7 +503,7 @@ def update_pve_role(cluster_id, roleid):
     manager, err = _manager(cluster_id)
     if err:
         return err
-    privs, why = _privs(request.get_json(silent=True))
+    privs, why = _privs(_json())
     if why:
         return _bad(why)
     try:
@@ -489,16 +564,26 @@ def update_pve_acl(cluster_id):
     groups, why = _id_list(data.get('groups'), ID_RE, 'group list')
     if why:
         return _bad(why)
-    token_re = re.compile(USERID_RE.pattern[:-1] + r'![A-Za-z][A-Za-z0-9._-]{0,63}$')
-    tokens, why = _id_list(data.get('tokens'), token_re, 'token list')
+    tokens, why = _id_list(data.get('tokens'), TOKENID_RE, 'token list')
     if why:
         return _bad(why)
     if not (users or groups or tokens):
         return _bad('Name at least one user, group or API token')
-    delete = bool(data.get('delete'))
+    delete, why = _flag(data, 'delete', False)
+    if why:
+        return _bad(why)
+    propagate, why = _flag(data, 'propagate', True)
+    if why:
+        return _bad(why)
     if delete and 'root@pam' in users and path == '/':
         return _bad('The permissions of root@pam on / cannot be removed from here')
-    body = {'path': path, 'roles': ','.join(roles), 'propagate': 0 if data.get('propagate') is False else 1}
+    if delete:
+        protected, own_tokens = _protected(manager)
+        own = sorted((set(users) & (protected - set(PROTECTED_USERS))) | (set(tokens) & own_tokens))
+        if own:
+            return _bad(f"PegaProx signs in to this cluster as {', '.join(own)}; "
+                        'its permissions cannot be removed from here')
+    body = {'path': path, 'roles': ','.join(roles), 'propagate': 1 if propagate else 0}
     if users:
         body['users'] = ','.join(users)
     if groups:
