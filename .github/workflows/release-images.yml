@@ -235,14 +235,17 @@ jobs:
                 # that is the check working - confirm the new artifact before bumping.
                 wget https://cdn.gyptazy.com/debian/python3-flask-sock/python3-flask-sock_0.7.1_all.deb
                 wget https://cdn.gyptazy.com/debian/python3-xenapi/python3-xenapi_26.8.1_all.deb
+                wget https://cdn.gyptazy.com/debian/python3-sqlcipher3/python3-sqlcipher3_0.6.4_all.deb
                 cat > /tmp/deb.sha256 <<'SUMS'
                 125ec5a4e2bbc10c57b7b9e3ab05aecda5edf1b8f6646aff4131cab441b53c24  python3-flask-sock_0.7.1_all.deb
                 db36397c5db4448459dee349fc2a0b6f147ddf4b346dc8480687903c38fc822e  python3-xenapi_26.8.1_all.deb
+                6f6c099beecc54f53808d94ed43c43d41e872a572ba3aff3b83c7a035f5e06c2  python3-sqlcipher3_0.6.4_all.deb
                 SUMS
                 sed -i 's/^[[:space:]]*//' /tmp/deb.sha256
                 sha256sum -c /tmp/deb.sha256
                 dpkg -i python3-flask-sock_0.7.1_all.deb
                 dpkg -i python3-xenapi_26.8.1_all.deb
+                dpkg -i python3-sqlcipher3_0.6.4_all.deb
                 install -d -m 0755 /etc/apt/keyrings
                 curl -fsSL https://git.gyptazy.com/api/packages/gyptazy/debian/repository.key \\
                   -o /etc/apt/keyrings/gyptazy.asc
