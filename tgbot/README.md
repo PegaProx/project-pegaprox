@@ -64,8 +64,13 @@ The bot refuses to start with `PEGAPROX_VERIFY_TLS=false` for anything but a loo
 since every request carries the user's API token.
 
 The service runs with `ProtectSystem=strict`, so only `/var/lib/pegaprox-tg-bot` is writable.
-For another `TG_DATA_DIR`, run `sudo systemctl edit pegaprox-tg-bot`, add
-`[Service]` / `ReadWritePaths=/path/to/data`, and restart the service.
+For another `TG_DATA_DIR`, create the directory for the bot user first, then allow writes to it:
+
+```bash
+sudo install -d -m 0700 -o pegaprox-tg-bot -g pegaprox-tg-bot /path/to/data
+sudo systemctl edit pegaprox-tg-bot    # add: [Service]  ReadWritePaths=/path/to/data
+sudo systemctl restart pegaprox-tg-bot
+```
 
 The HTTP client is `requests`, so the standard `HTTPS_PROXY` / `NO_PROXY` variables work in the
 same file if `api.telegram.org` is only reachable through a proxy. Keep the PegaProx address in
