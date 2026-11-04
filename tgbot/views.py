@@ -17,9 +17,9 @@ def size(n):
         n = float(n)
     except (TypeError, ValueError):
         return '?'
-    for unit in ('Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'):
-        if abs(n) < 1024 or unit == 'ПБ':
-            return f'{n:.0f} {unit}' if unit == 'Б' else f'{n:.1f} {unit}'
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB', 'PB'):
+        if abs(n) < 1024 or unit == 'PB':
+            return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
         n /= 1024
 
 
@@ -38,7 +38,7 @@ def uptime(sec):
     d, rem = divmod(sec, 86400)
     h, rem = divmod(rem, 3600)
     m = rem // 60
-    return f'{d} д {h} ч' if d else f'{h} ч {m} мин'
+    return f'{d}d {h}h' if d else f'{h}h {m}m'
 
 
 def when(ts):
@@ -67,24 +67,24 @@ def node_line(n):
     cpu = n.get('cpu')
     cpu_s = f'{float(cpu) * 100:.0f}%' if isinstance(cpu, (int, float)) else '?'
     return (f"{icon} <b>{e(name)}</b>  CPU {cpu_s}, RAM {pct(n.get('mem'), n.get('maxmem'))}"
-            f" ({size(n.get('mem'))} из {size(n.get('maxmem'))})")
+            f" ({size(n.get('mem'))} of {size(n.get('maxmem'))})")
 
 
 def node_text(n):
     name = n.get('node') or n.get('name')
-    lines = [f"🖥 Нода <b>{e(name)}</b>",
-             f"Статус: {e(n.get('status', '?'))}"]
+    lines = [f"🖥 Node <b>{e(name)}</b>",
+             f"Status: {e(n.get('status', '?'))}"]
     if n.get('status') == 'online':
         cpu = n.get('cpu')
         if isinstance(cpu, (int, float)):
-            lines.append(f"CPU: {float(cpu) * 100:.0f}% из {e(n.get('maxcpu', '?'))} ядер")
-        lines.append(f"RAM: {size(n.get('mem'))} из {size(n.get('maxmem'))} ({pct(n.get('mem'), n.get('maxmem'))})")
+            lines.append(f"CPU: {float(cpu) * 100:.0f}% of {e(n.get('maxcpu', '?'))} cores")
+        lines.append(f"RAM: {size(n.get('mem'))} of {size(n.get('maxmem'))} ({pct(n.get('mem'), n.get('maxmem'))})")
         if n.get('maxdisk'):
-            lines.append(f"Диск: {size(n.get('disk'))} из {size(n.get('maxdisk'))}")
+            lines.append(f"Disk: {size(n.get('disk'))} of {size(n.get('maxdisk'))}")
         if n.get('uptime'):
-            lines.append(f"Аптайм: {uptime(n.get('uptime'))}")
+            lines.append(f"Uptime: {uptime(n.get('uptime'))}")
     if n.get('maintenance_mode') or n.get('maintenance'):
-        lines.append('🛠 На обслуживании')
+        lines.append('🛠 In maintenance')
     return '\n'.join(lines)
 
 
@@ -96,33 +96,33 @@ def guest_button(v):
 def guest_text(v, cname):
     icon = STATUS_ICON.get(v.get('status'), '⚪')
     return (f"{icon} <b>{e(v.get('name') or '')}</b> ({TYPE_LABEL.get(v.get('type'), e(v.get('type')))} {e(v.get('vmid'))})\n"
-            f"Кластер: {e(cname)}\nНода: {e(v.get('node'))}\nСостояние: {e(v.get('status', '?'))}")
+            f"Cluster: {e(cname)}\nNode: {e(v.get('node'))}\nState: {e(v.get('status', '?'))}")
 
 
 def task_line(t):
-    status = t.get('status') or ('выполняется' if not t.get('endtime') else '?')
+    status = t.get('status') or ('running' if not t.get('endtime') else '?')
     ok = status == 'OK'
     icon = '✅' if ok else ('⏳' if not t.get('endtime') else '❌')
     target = t.get('id') or ''
     return (f"{icon} {when(t.get('starttime'))} <b>{e(t.get('type', '?'))}</b> {e(target)} "
-            f"на {e(t.get('node', '?'))} ({e(t.get('user', ''))}){'' if ok else ': ' + e(status)}")
+            f"on {e(t.get('node', '?'))} ({e(t.get('user', ''))}){'' if ok else ': ' + e(status)}")
 
 
 def alert_text(a, cname=None):
     icon = SEV_ICON.get((a.get('severity') or '').lower(), '⚠️')
-    lines = [f"{icon} <b>{e(a.get('message') or a.get('metric') or 'Оповещение')}</b>"]
+    lines = [f"{icon} <b>{e(a.get('message') or a.get('metric') or 'Alert')}</b>"]
     if cname:
-        lines.append(f"Кластер: {e(cname)}")
+        lines.append(f"Cluster: {e(cname)}")
     target = ' '.join(x for x in (a.get('target_type'), a.get('target_name')) if x)
     if target:
-        lines.append(f"Объект: {e(target)}")
+        lines.append(f"Target: {e(target)}")
     if a.get('metric'):
         val = a.get('current_value')
         thr = a.get('threshold')
-        lines.append(f"{e(a.get('metric'))}: {e(val)}" + (f" (порог {e(a.get('operator') or '')} {e(thr)})" if thr not in (None, '') else ''))
-    lines.append(f"С {when(a.get('triggered_at'))}")
+        lines.append(f"{e(a.get('metric'))}: {e(val)}" + (f" (threshold {e(a.get('operator') or '')} {e(thr)})" if thr not in (None, '') else ''))
+    lines.append(f"Since {when(a.get('triggered_at'))}")
     if a.get('acked_at'):
-        lines.append(f"Подтверждено: {e(a.get('acked_by') or '')}")
+        lines.append(f"Acknowledged by: {e(a.get('acked_by') or '')}")
     return '\n'.join(lines)
 
 
@@ -134,11 +134,11 @@ def fw_rule_line(r):
     if r.get('proto'):
         parts.append(r['proto'])
     if r.get('source'):
-        parts.append('из ' + r['source'])
+        parts.append('from ' + r['source'])
     if r.get('dest'):
-        parts.append('в ' + r['dest'])
+        parts.append('to ' + r['dest'])
     if r.get('dport'):
-        parts.append('порт ' + str(r['dport']))
+        parts.append('port ' + str(r['dport']))
     if r.get('iface'):
         parts.append(r['iface'])
     text = ' '.join(str(p) for p in parts if p)

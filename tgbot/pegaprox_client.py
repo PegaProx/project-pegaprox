@@ -44,7 +44,7 @@ class PegaProx:
                          'X-Requested-With': 'XMLHttpRequest'},
                 verify=self.verify, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as e:
-            raise ApiError(0, f'PegaProx недоступен: {e.__class__.__name__}')
+            raise ApiError(0, f'PegaProx is unreachable: {e.__class__.__name__}')
         try:
             body = r.json()
         except ValueError:
@@ -151,3 +151,28 @@ class PegaProx:
 
     def ack_alert(self, cid, fired_id):
         return self.post(f'/api/clusters/{_q(cid)}/active-alerts/{_q(fired_id)}/ack')
+
+    # -- PegaProx's own users (needs the admin.users permission) ----------------
+    def panel_users(self):
+        data = self.get('/api/users')
+        return data if isinstance(data, list) else []
+
+    def panel_roles(self):
+        data = self.get('/api/roles')
+        return data if isinstance(data, list) else []
+
+    def create_panel_user(self, username, password, role, display_name='', email=''):
+        return self.post('/api/users', {'username': username, 'password': password, 'role': role,
+                                        'display_name': display_name or username, 'email': email})
+
+    def update_panel_user(self, username, fields):
+        return self.request('PUT', f'/api/users/{_q(username)}', json=fields)
+
+    def set_panel_password(self, username, password):
+        return self.request('PUT', f'/api/users/{_q(username)}/password', json={'password': password})
+
+    def reset_panel_2fa(self, username):
+        return self.request('DELETE', f'/api/users/{_q(username)}/2fa')
+
+    def delete_panel_user(self, username):
+        return self.request('DELETE', f'/api/users/{_q(username)}')

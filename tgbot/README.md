@@ -20,6 +20,11 @@ PegaProx itself and can run on the PegaProx host or on any other host that reach
 - Firewall: datacenter (on/off, rules on/off) and the rules of a single VM/CT.
 - Storage and the latest cluster tasks.
 - Alerts: list active ones, acknowledge, and the bot pushes new ones (`/notify off` turns it off).
+- PegaProx users (`/users` or the "👥 Users" button): list, create, change role, enable and
+  disable, set a new password, reset 2FA, delete. Needs the `admin.users` permission; PegaProx's
+  own limits (tenants, no role above your own, no deleting yourself or the last admin) apply as
+  in the web UI. Passwords are taken only in a private chat, and the bot deletes the message
+  right away.
 - `/api METHOD /api/path [JSON]`: any PegaProx API call when the buttons are not enough,
   for example `/api GET /api/clusters/<id>/ha/status`.
 
@@ -84,5 +89,5 @@ the user loses a permission, the bot loses it at once, since PegaProx checks eve
 
 ```bash
 python -m tgbot --env /etc/pegaprox-tg-bot.env --debug
-python -m pytest tests/test_tgbot.py tests/test_tgbot_against_pegaprox.py tests/test_ha_exits.py
+python -m pytest tests/test_tgbot.py tests/test_tgbot_users.py tests/test_tgbot_against_pegaprox.py tests/test_ha_exits.py
 ```

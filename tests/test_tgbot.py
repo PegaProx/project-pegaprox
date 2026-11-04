@@ -56,7 +56,7 @@ class FakeApi:
 
     def clusters(self):
         self._rec('clusters')
-        return [{'id': 'c1', 'name': 'pve', 'display_name': 'Дом', 'connected': True}]
+        return [{'id': 'c1', 'name': 'pve', 'display_name': 'Home', 'connected': True}]
 
     def nodes(self, cid):
         self._rec('nodes', cid)
@@ -137,7 +137,7 @@ def test_login_links_the_account_and_deletes_the_token_message(env):
     bot.handle_update(msg(f'/login {TOKEN}', mid=55))
     assert (UID, 55) in tg.deleted
     assert bot.store.token(UID) == TOKEN
-    assert any('Аккаунт подключён' in t for _, t, _ in tg.sent)
+    assert any('Account linked' in t for _, t, _ in tg.sent)
     # the token is not stored in clear text
     raw = open(os.path.join(cfg.data_dir, 'accounts.json'), encoding='utf-8').read()
     assert TOKEN not in raw
@@ -149,7 +149,7 @@ def test_a_wrong_token_is_refused(env):
     bot, tg, _, _, _ = env
     bot.handle_update(msg('/login pgx_ab12_' + 'y' * 43))
     assert bot.store.get(UID) is None
-    assert 'не принял токен' in tg.sent[-1][1]
+    assert 'did not accept the token' in tg.sent[-1][1]
 
 
 def test_a_token_is_never_taken_in_a_group(env):
@@ -157,13 +157,13 @@ def test_a_token_is_never_taken_in_a_group(env):
     bot.handle_update(msg(f'/login {TOKEN}', chat_type='group', mid=7))
     assert (UID, 7) in tg.deleted
     assert bot.store.get(UID) is None
-    assert 'личном чате' in tg.sent[-1][1]
+    assert 'private chat' in tg.sent[-1][1]
 
 
 def test_commands_need_a_linked_account(env):
     bot, tg, calls, _, _ = env
     bot.handle_update(msg('/menu'))
-    assert 'Сначала подключите' in tg.sent[-1][1]
+    assert 'Link your PegaProx account first' in tg.sent[-1][1]
     assert calls == []
 
 
@@ -172,7 +172,7 @@ def test_allowlist_keeps_strangers_out(env):
     cfg.allowed_ids = {1}
     bot.handle_update(msg(f'/login {TOKEN}'))
     assert bot.store.get(UID) is None
-    assert 'Доступ к боту закрыт' in tg.sent[-1][1]
+    assert 'Access to this bot is closed' in tg.sent[-1][1]
 
 
 def test_menu_to_guest_action_uses_the_users_token(env):
@@ -180,15 +180,15 @@ def test_menu_to_guest_action_uses_the_users_token(env):
     link(bot, tg)
     bot.handle_update(msg('/menu'))
     text, kb = last_screen(tg)
-    press(bot, find_button(kb, 'Дом'))
-    press(bot, find_button(last_screen(tg)[1], 'VM и CT'))
+    press(bot, find_button(kb, 'Home'))
+    press(bot, find_button(last_screen(tg)[1], 'VMs and CTs'))
     press(bot, find_button(last_screen(tg)[1], '101 web'))
     text, kb = last_screen(tg)
     assert 'web' in text and 'pve1' in text
-    press(bot, find_button(kb, 'Перезагрузить'))
+    press(bot, find_button(kb, 'Reboot'))
     # a reboot asks first
     assert not any(c[1] == 'vm_action' for c in calls)
-    press(bot, find_button(last_screen(tg)[1], 'Да'))
+    press(bot, find_button(last_screen(tg)[1], 'Yes'))
     act = [c for c in calls if c[1] == 'vm_action']
     assert act == [(TOKEN, 'vm_action', 'c1', 'pve1', 'qemu', 101, 'reboot')]
     assert 'UPID:pve1:0001' in last_screen(tg)[0]
@@ -200,20 +200,20 @@ def test_a_refused_permission_is_shown_not_hidden(env):
     deny.add('vm_action')
     bot.handle_update(msg('/find db'))
     press(bot, find_button(tg.sent[-1][2], '200 db'))
-    press(bot, find_button(last_screen(tg)[1], 'Запустить'))
-    assert 'Недостаточно прав' in last_screen(tg)[0]
+    press(bot, find_button(last_screen(tg)[1], 'Start'))
+    assert 'Permission denied' in last_screen(tg)[0]
 
 
 def test_buttons_of_another_user_do_nothing(env):
     bot, tg, calls, _, _ = env
     link(bot, tg)
     bot.handle_update(msg('/menu'))
-    b = find_button(last_screen(tg)[1], 'Дом')
+    b = find_button(last_screen(tg)[1], 'Home')
     bot.store.link(777, TOKEN)
     n = len(calls)
     press(bot, b, uid=777)
     assert len(calls) == n
-    assert tg.answers[-1][1] == 'Кнопка устарела, откройте /menu'
+    assert tg.answers[-1][1] == 'This button has expired, open /menu'
 
 
 def test_migration_goes_live_for_a_running_vm(env):
@@ -221,9 +221,9 @@ def test_migration_goes_live_for_a_running_vm(env):
     link(bot, tg)
     bot.handle_update(msg('/find web'))
     press(bot, find_button(tg.sent[-1][2], '101 web'))
-    press(bot, find_button(last_screen(tg)[1], 'Миграция'))
+    press(bot, find_button(last_screen(tg)[1], 'Migrate'))
     press(bot, find_button(last_screen(tg)[1], 'pve2'))
-    press(bot, find_button(last_screen(tg)[1], 'Перенести'))
+    press(bot, find_button(last_screen(tg)[1], 'Migrate'))
     assert [c for c in calls if c[1] == 'migrate'] == [(TOKEN, 'migrate', 'c1', 'pve1', 'qemu', 101, 'pve2', True)]
 
 
@@ -235,11 +235,11 @@ def test_snapshot_name_typed_in_chat(env):
     g = None
     # straight to the "new snapshot" prompt
     for b in buttons(last_screen(tg)[1]):
-        if 'Снапшоты' in b['text']:
+        if 'Snapshots' in b['text']:
             g = bot.cb.get(b['callback_data'])[2]['g']
     bot.cb_snap_new(UID, UID, None, g)
     bot.handle_update(msg('bad name!'))
-    assert 'латиница' in tg.sent[-1][1]
+    assert 'Latin letters' in tg.sent[-1][1]
     bot.handle_update(msg('before_update'))
     assert [c for c in calls if c[1] == 'snapshot'] == [(TOKEN, 'snapshot', 'c1', 101, 'before_update')]
 
@@ -252,7 +252,7 @@ def test_new_alerts_are_sent_once(env):
     bot.poll_alerts()
     alerts = [t for _, t, _ in tg.sent if t.startswith('🔔')]
     assert len(alerts) == 1 and 'CPU high' in alerts[0]
-    press(bot, find_button(tg.sent[-1][2], 'Подтвердить'))
+    press(bot, find_button(tg.sent[-1][2], 'Acknowledge'))
     assert (TOKEN, 'ack', 'c1', 7) in calls
 
 
@@ -269,7 +269,7 @@ def test_raw_api_command_checks_its_input(env):
     bot, tg, calls, _, _ = env
     link(bot, tg)
     bot.handle_update(msg('/api GET /etc/passwd'))
-    assert 'Формат' in tg.sent[-1][1]
+    assert 'Usage' in tg.sent[-1][1]
 
 
 def test_client_sends_the_bearer_token():

@@ -17,43 +17,45 @@ from collections import OrderedDict
 
 from . import views as v
 from .pegaprox_client import ApiError, PegaProx
+from .panel_users import PanelUsersMixin
 
 log = logging.getLogger('tgbot')
 
 PAGE = 8
 GUEST_ACTIONS = {
-    'start': ('▶️ Запустить', False, 'Запуск'),
-    'shutdown': ('⏻ Выключить', True, 'Корректное выключение'),
-    'reboot': ('🔄 Перезагрузить', True, 'Перезагрузка'),
-    'stop': ('⏹ Стоп (жёстко)', True, 'Жёсткая остановка'),
-    'reset': ('⚡ Reset', True, 'Сброс'),
-    'suspend': ('⏸ Пауза', False, 'Пауза'),
-    'resume': ('⏯ Продолжить', False, 'Продолжение'),
+    'start': ('▶️ Start', False, 'Start'),
+    'shutdown': ('⏻ Shutdown', True, 'Shutdown'),
+    'reboot': ('🔄 Reboot', True, 'Reboot'),
+    'stop': ('⏹ Stop (hard)', True, 'Hard stop'),
+    'reset': ('⚡ Reset', True, 'Reset'),
+    'suspend': ('⏸ Suspend', False, 'Suspend'),
+    'resume': ('⏯ Resume', False, 'Resume'),
 }
 TOKEN_RE = re.compile(r'^pgx_[0-9a-f]{4}_[A-Za-z0-9_\-]{20,}$')
 SNAP_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_\-]{1,39}$')
 
 HELP = (
-    "<b>Управление Proxmox через PegaProx</b>\n\n"
-    "Бот работает от имени вашего пользователя PegaProx и с теми же правами.\n\n"
-    "<b>Как подключиться</b>\n"
-    "1. В PegaProx откройте «Мой профиль → API-токены» и создайте токен.\n"
-    "2. Пришлите его сюда в личном чате: <code>/login pgx_...</code>\n"
-    "   Сообщение с токеном бот сразу удалит.\n\n"
-    "<b>Команды</b>\n"
-    "/menu: главное меню (кластеры, ноды, VM и контейнеры)\n"
-    "/find <i>текст</i>: найти VM/CT по имени или номеру\n"
-    "/alerts: активные оповещения\n"
-    "/notify on|off: присылать новые оповещения\n"
-    "/whoami: ваша роль и права\n"
-    "/api <i>METHOD /api/путь [JSON]</i>: любой запрос к API PegaProx\n"
-    "/logout: отвязать аккаунт\n"
+    "<b>Proxmox management through PegaProx</b>\n\n"
+    "The bot acts as your PegaProx user, with the same permissions.\n\n"
+    "<b>How to connect</b>\n"
+    "1. In PegaProx open \"My Profile → API Tokens\" and create a token.\n"
+    "2. Send it here in a private chat: <code>/login pgx_...</code>\n"
+    "   The bot deletes the message with the token right away.\n\n"
+    "<b>Commands</b>\n"
+    "/menu: main menu (clusters, nodes, VMs and containers)\n"
+    "/find <i>text</i>: find a VM/CT by name or ID\n"
+    "/users: PegaProx users and their roles\n"
+    "/alerts: active alerts\n"
+    "/notify on|off: push new alerts\n"
+    "/whoami: your role and permissions\n"
+    "/api <i>METHOD /api/path [JSON]</i>: any PegaProx API call\n"
+    "/logout: unlink the account\n"
 )
 
 COMMANDS = [
-    ('menu', 'Главное меню'), ('find', 'Найти VM/CT'), ('alerts', 'Активные оповещения'),
-    ('notify', 'Уведомления вкл/выкл'), ('whoami', 'Мои права'), ('login', 'Подключить аккаунт'),
-    ('logout', 'Отвязать аккаунт'), ('api', 'Запрос к API'), ('help', 'Справка'),
+    ('menu', 'Main menu'), ('find', 'Find a VM/CT'), ('users', 'PegaProx users'), ('alerts', 'Active alerts'),
+    ('notify', 'Notifications on/off'), ('whoami', 'My permissions'), ('login', 'Link an account'),
+    ('logout', 'Unlink the account'), ('api', 'API request'), ('help', 'Help'),
 ]
 
 
@@ -78,7 +80,7 @@ class Callbacks:
             return self._items.get(key)
 
 
-class Bot:
+class Bot(PanelUsersMixin):
     def __init__(self, cfg, tg, store, api_factory=None):
         self.cfg = cfg
         self.tg = tg
@@ -129,7 +131,7 @@ class Bot:
         chat = msg['chat']['id']
         text = msg['text'].strip()
         if not self.allowed(uid):
-            return self.tg.send(chat, f'Доступ к боту закрыт. Ваш Telegram id: <code>{uid}</code>')
+            return self.tg.send(chat, f'Access to this bot is closed. Your Telegram id: <code>{uid}</code>')
         if text.startswith('/'):
             cmd, _, arg = text.partition(' ')
             cmd = cmd[1:].split('@', 1)[0].lower()
@@ -137,16 +139,16 @@ class Bot:
             self.pending.pop(uid, None)
             handler = getattr(self, f'cmd_{cmd}', None)
             if handler is None:
-                return self.tg.send(chat, 'Неизвестная команда. /help')
+                return self.tg.send(chat, 'Unknown command. /help')
             if cmd not in ('start', 'help', 'login') and not self.store.get(uid):
-                return self.tg.send(chat, 'Сначала подключите аккаунт PegaProx: /login <i>токен</i>. Подробнее: /help')
+                return self.tg.send(chat, 'Link your PegaProx account first: /login <i>token</i>. More: /help')
             return handler(msg, uid, chat, arg)
         pend = self.pending.pop(uid, None)
         if pend:
             return self.on_input(msg, uid, chat, text, pend)
         if TOKEN_RE.match(text):  # a token pasted without /login
             return self.cmd_login(msg, uid, chat, text)
-        return self.tg.send(chat, 'Откройте /menu или посмотрите /help')
+        return self.tg.send(chat, 'Open /menu or see /help')
 
     def cmd_start(self, msg, uid, chat, arg):
         if self.store.get(uid):
@@ -160,29 +162,29 @@ class Bot:
         if arg:
             self.tg.delete(chat, msg['message_id'])
         if msg['chat'].get('type') != 'private':
-            return self.tg.send(chat, 'Токен можно присылать только в личном чате с ботом. '
-                                      'Если вы отправили его здесь, отзовите токен в PegaProx.')
+            return self.tg.send(chat, 'Send the token only in a private chat with the bot. '
+                                      'If you sent it here, revoke the token in PegaProx.')
         token = arg.strip()
         if not TOKEN_RE.match(token):
-            return self.tg.send(chat, 'Пришлите API-токен PegaProx: <code>/login pgx_...</code>\n'
-                                      'Создать его можно в «Мой профиль → API-токены».')
+            return self.tg.send(chat, 'Send a PegaProx API token: <code>/login pgx_...</code>\n'
+                                      'You can create one under "My Profile → API Tokens".')
         try:
             me = self._api_factory(token).me()
         except ApiError as err:
             if err.status in (401, 403):
-                return self.tg.send(chat, '❌ PegaProx не принял токен: он неверный, отозван или истёк.')
-            return self.tg.send(chat, f'❌ Не удалось проверить токен: {v.e(err.message)}')
+                return self.tg.send(chat, '❌ PegaProx did not accept the token: it is wrong, revoked or expired.')
+            return self.tg.send(chat, f'❌ Could not check the token: {v.e(err.message)}')
         self.store.link(uid, token, {'role': me.get('effective_role') or me.get('role'),
                                      'tg_name': msg['from'].get('username') or msg['from'].get('first_name')})
         log.info('Telegram user %s linked (role %s)', uid, me.get('role'))
-        self.tg.send(chat, f"✅ Аккаунт подключён. Роль в PegaProx: <b>{v.e(me.get('effective_role') or me.get('role'))}</b>.\n"
-                           'Новые оповещения буду присылать сюда (/notify off, чтобы выключить).')
+        self.tg.send(chat, f"✅ Account linked. PegaProx role: <b>{v.e(me.get('effective_role') or me.get('role'))}</b>.\n"
+                           'New alerts will be sent here (/notify off to stop).')
         return self.cmd_menu(msg, uid, chat, '')
 
     def cmd_logout(self, msg, uid, chat, arg):
         self.store.unlink(uid)
-        return self.tg.send(chat, 'Аккаунт отвязан. Сам токен по-прежнему действует: '
-                                  'отзовите его в PegaProx («Мой профиль → API-токены»).')
+        return self.tg.send(chat, 'Account unlinked. The token itself still works: '
+                                  'revoke it in PegaProx ("My Profile → API Tokens").')
 
     def cmd_whoami(self, msg, uid, chat, arg):
         try:
@@ -190,14 +192,14 @@ class Bot:
         except ApiError as err:
             return self.error(chat, err)
         perms = me.get('permissions') or []
-        return self.tg.send(chat, f"Роль: <b>{v.e(me.get('effective_role') or me.get('role'))}</b>\n"
-                                  f"Тенант: {v.e(me.get('tenant_id'))}\n"
-                                  f"Права ({len(perms)}): <code>{v.e(', '.join(sorted(perms))[:3500])}</code>")
+        return self.tg.send(chat, f"Role: <b>{v.e(me.get('effective_role') or me.get('role'))}</b>\n"
+                                  f"Tenant: {v.e(me.get('tenant_id'))}\n"
+                                  f"Permissions ({len(perms)}): <code>{v.e(', '.join(sorted(perms))[:3500])}</code>")
 
     def cmd_notify(self, msg, uid, chat, arg):
-        on = arg.lower() not in ('off', 'выкл', '0', 'no')
+        on = arg.lower() not in ('off', '0', 'no')
         self.store.set_notify(uid, on)
-        return self.tg.send(chat, 'Уведомления об оповещениях включены.' if on else 'Уведомления выключены.')
+        return self.tg.send(chat, 'Alert notifications are on.' if on else 'Notifications are off.')
 
     def cmd_menu(self, msg, uid, chat, arg):
         return self.show_clusters(uid, chat)
@@ -208,21 +210,21 @@ class Bot:
     def cmd_find(self, msg, uid, chat, arg):
         if not arg:
             self.pending[uid] = {'kind': 'find'}
-            return self.tg.send(chat, 'Введите имя или номер VM/CT:')
+            return self.tg.send(chat, 'Type a VM/CT name or ID:')
         return self.find(uid, chat, arg)
 
     def cmd_api(self, msg, uid, chat, arg):
         parts = arg.split(None, 2)
         if len(parts) < 2 or parts[0].upper() not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') \
                 or not parts[1].startswith('/api/'):
-            return self.tg.send(chat, 'Формат: <code>/api GET /api/clusters</code>\n'
-                                      'или <code>/api POST /api/путь {"key": "value"}</code>')
+            return self.tg.send(chat, 'Usage: <code>/api GET /api/clusters</code>\n'
+                                      'or <code>/api POST /api/path {"key": "value"}</code>')
         body = None
         if len(parts) == 3:
             try:
                 body = json.loads(parts[2])
             except ValueError:
-                return self.tg.send(chat, 'Тело запроса должно быть JSON.')
+                return self.tg.send(chat, 'The request body must be JSON.')
         try:
             res = self.api(uid).request(parts[0], parts[1], json=body)
         except ApiError as err:
@@ -234,16 +236,18 @@ class Bot:
 
     def on_input(self, msg, uid, chat, text, pend):
         kind = pend['kind']
+        if kind.startswith('pp_'):
+            return self.pp_input(msg, uid, chat, text, pend)
         if kind == 'find':
             return self.find(uid, chat, text)
         if kind == 'snapname':
             if not SNAP_RE.match(text):
                 self.pending[uid] = pend
-                return self.tg.send(chat, 'Имя снапшота: латиница, цифры, _ и -, начинается с буквы. Ещё раз:')
+                return self.tg.send(chat, 'Snapshot name: Latin letters, digits, _ and -, starting with a letter. Try again:')
             g = pend['g']
             return self._do(uid, chat, None, lambda a: a.create_snapshot(g['cid'], g['node'], g['type'], g['vmid'], text,
                                                                           'Telegram'),
-                            f"Снапшот <b>{v.e(text)}</b> создаётся", back=('snaps', {'g': g}))
+                            f"Creating snapshot <b>{v.e(text)}</b>", back=('snaps', {'g': g}))
 
     # ------------------------------------------------------------------ callbacks
     def on_callback(self, q):
@@ -253,10 +257,10 @@ class Bot:
         mid = msg.get('message_id')
         item = self.cb.get(q.get('data') or '')
         if not item or item[0] != uid:
-            self.tg.answer(q['id'], 'Кнопка устарела, откройте /menu', alert=True)
+            self.tg.answer(q['id'], 'This button has expired, open /menu', alert=True)
             return
         if not self.allowed(uid) or not self.store.get(uid):
-            self.tg.answer(q['id'], 'Аккаунт не подключён: /login', alert=True)
+            self.tg.answer(q['id'], 'No account linked: /login', alert=True)
             return
         _, action, ctx = item
         self.tg.answer(q['id'])
@@ -270,17 +274,17 @@ class Bot:
 
     def error(self, chat, err, mid=None, kb=None):
         if err.status == 401:
-            text = '❌ PegaProx отклонил токен (отозван или истёк). Подключитесь заново: /login'
+            text = '❌ PegaProx rejected the token (revoked or expired). Link again: /login'
         elif err.status == 403:
-            text = f'⛔ Недостаточно прав: {v.e(err.message)}'
+            text = f'⛔ Permission denied: {v.e(err.message)}'
         else:
-            text = f'❌ Ошибка: {v.e(err.message)}'
+            text = f'❌ Error: {v.e(err.message)}'
         return self.screen(chat, mid, text, kb) if mid else self.tg.send(chat, text, kb)
 
     def _do(self, uid, chat, mid, call, done_text, back=None):
         kb = None
         if back:
-            kb = [[self.btn(uid, '« Назад', back[0], **back[1])]]
+            kb = [[self.btn(uid, '« Back', back[0], **back[1])]]
         try:
             res = call(self.api(uid))
         except ApiError as err:
@@ -289,7 +293,7 @@ class Bot:
         if isinstance(res, dict):
             task = res.get('task') or res.get('upid') or res.get('data')
             if isinstance(task, str) and task.startswith('UPID'):
-                detail = f'\nЗадача: <code>{v.e(task)}</code>'
+                detail = f'\nTask: <code>{v.e(task)}</code>'
             elif res.get('message'):
                 detail = f"\n{v.e(res['message'])}"
         return self.screen(chat, mid, f'✅ {done_text}{detail}', kb)
@@ -301,10 +305,11 @@ class Bot:
         except ApiError as err:
             return self.error(chat, err, mid)
         if not clusters:
-            return self.screen(chat, mid, 'Нет доступных кластеров.', None)
+            return self.screen(chat, mid, 'No clusters available.', None)
         kb = [[self.btn(uid, v.cluster_line(c), 'cluster', cid=c['id'], cname=v.cluster_name(c))] for c in clusters]
-        kb.append([self.btn(uid, '🔔 Оповещения', 'all_alerts'), self.btn(uid, '🔍 Поиск', 'ask_find')])
-        return self.screen(chat, mid, '<b>Кластеры</b>', kb)
+        kb.append([self.btn(uid, '🔔 Alerts', 'all_alerts'), self.btn(uid, '🔍 Search', 'ask_find')])
+        kb.append([self.btn(uid, '👥 Users', 'users')])
+        return self.screen(chat, mid, '<b>Clusters</b>', kb)
 
     def cb_clusters(self, uid, chat, mid):
         return self.show_clusters(uid, chat, mid)
@@ -315,21 +320,21 @@ class Bot:
         try:
             nodes = api.nodes(cid)
             online = sum(1 for n in nodes if n.get('status') == 'online')
-            lines.append(f'Ноды: {online} из {len(nodes)} в сети')
+            lines.append(f'Nodes: {online} of {len(nodes)} online')
         except ApiError as err:
-            lines.append(f'Ноды: {v.e(err.message)}')
+            lines.append(f'Nodes: {v.e(err.message)}')
         try:
             vms = api.vms(cid)
             running = sum(1 for x in vms if x.get('status') == 'running')
-            lines.append(f'Гости: {running} из {len(vms)} запущены')
+            lines.append(f'Guests: {running} of {len(vms)} running')
         except ApiError:
             pass
         c = dict(cid=cid, cname=cname)
         kb = [
-            [self.btn(uid, '🖥 Ноды', 'nodes', **c), self.btn(uid, '📦 VM и CT', 'guests', page=0, **c)],
-            [self.btn(uid, '📋 Задачи', 'tasks', **c), self.btn(uid, '🔔 Оповещения', 'alerts', **c)],
-            [self.btn(uid, '🛡 Firewall', 'fw', **c), self.btn(uid, '💽 Хранилища', 'storage', **c)],
-            [self.btn(uid, '🔄 Обновить', 'cluster', **c), self.btn(uid, '« Кластеры', 'clusters')],
+            [self.btn(uid, '🖥 Nodes', 'nodes', **c), self.btn(uid, '📦 VMs and CTs', 'guests', page=0, **c)],
+            [self.btn(uid, '📋 Tasks', 'tasks', **c), self.btn(uid, '🔔 Alerts', 'alerts', **c)],
+            [self.btn(uid, '🛡 Firewall', 'fw', **c), self.btn(uid, '💽 Storage', 'storage', **c)],
+            [self.btn(uid, '🔄 Refresh', 'cluster', **c), self.btn(uid, '« Clusters', 'clusters')],
         ]
         return self.screen(chat, mid, '\n'.join(lines), kb)
 
@@ -340,10 +345,10 @@ class Bot:
         except ApiError as err:
             return self.error(chat, err, mid)
         c = dict(cid=cid, cname=cname)
-        lines = [f'<b>{v.e(cname)}: ноды</b>'] + [v.node_line(n) for n in nodes]
+        lines = [f'<b>{v.e(cname)}: nodes</b>'] + [v.node_line(n) for n in nodes]
         kb = [[self.btn(uid, n.get('node') or n.get('name'), 'node', node=n.get('node') or n.get('name'), **c)]
               for n in nodes]
-        kb.append([self.btn(uid, '« Назад', 'cluster', **c)])
+        kb.append([self.btn(uid, '« Back', 'cluster', **c)])
         return self.screen(chat, mid, '\n'.join(lines), kb)
 
     def cb_node(self, uid, chat, mid, cid, cname, node):
@@ -353,22 +358,22 @@ class Bot:
             return self.error(chat, err, mid)
         n = next((x for x in nodes if (x.get('node') or x.get('name')) == node), {'node': node, 'status': '?'})
         c = dict(cid=cid, cname=cname, node=node)
-        kb = [[self.btn(uid, '🔄 Перезагрузить', 'confirm_node', act='reboot', **c),
-               self.btn(uid, '⏻ Выключить', 'confirm_node', act='shutdown', **c)],
-              [self.btn(uid, '🔄 Обновить', 'node', **c), self.btn(uid, '« Ноды', 'nodes', cid=cid, cname=cname)]]
-        return self.screen(chat, mid, v.node_text(n) + '\n\nPegaProx разрешает перезагрузку и выключение '
-                                                        'только ноды в режиме обслуживания.', kb)
+        kb = [[self.btn(uid, '🔄 Reboot', 'confirm_node', act='reboot', **c),
+               self.btn(uid, '⏻ Shutdown', 'confirm_node', act='shutdown', **c)],
+              [self.btn(uid, '🔄 Refresh', 'node', **c), self.btn(uid, '« Nodes', 'nodes', cid=cid, cname=cname)]]
+        return self.screen(chat, mid, v.node_text(n) + '\n\nPegaProx allows reboot and shutdown '
+                                                        'only for a node in maintenance mode.', kb)
 
     def cb_confirm_node(self, uid, chat, mid, cid, cname, node, act):
         c = dict(cid=cid, cname=cname, node=node)
-        word = 'Перезагрузить' if act == 'reboot' else 'Выключить'
-        kb = [[self.btn(uid, f'✅ Да, {word.lower()}', 'node_do', act=act, **c),
-               self.btn(uid, 'Отмена', 'node', **c)]]
-        return self.screen(chat, mid, f'{word} ноду <b>{v.e(node)}</b>?', kb)
+        word = 'Reboot' if act == 'reboot' else 'Shut down'
+        kb = [[self.btn(uid, f'✅ Yes, {word.lower()}', 'node_do', act=act, **c),
+               self.btn(uid, 'Cancel', 'node', **c)]]
+        return self.screen(chat, mid, f'{word} node <b>{v.e(node)}</b>?', kb)
 
     def cb_node_do(self, uid, chat, mid, cid, cname, node, act):
         return self._do(uid, chat, mid, lambda a: a.node_action(cid, node, act),
-                        f"Нода {v.e(node)}: {'перезагрузка' if act == 'reboot' else 'выключение'} запущено",
+                        f"Node {v.e(node)}: {'reboot' if act == 'reboot' else 'shutdown'} started",
                         back=('node', dict(cid=cid, cname=cname, node=node)))
 
     # guests --------------------------------------------------------------------
@@ -389,8 +394,8 @@ class Bot:
             nav.append(self.btn(uid, '›', 'guests', page=page + 1, **c))
         if nav:
             kb.append(nav)
-        kb.append([self.btn(uid, '🔍 Поиск', 'ask_find'), self.btn(uid, '« Назад', 'cluster', **c)])
-        return self.screen(chat, mid, f'<b>{v.e(cname)}: VM и контейнеры</b> ({len(vms)}), стр. {page + 1}/{pages}', kb)
+        kb.append([self.btn(uid, '🔍 Search', 'ask_find'), self.btn(uid, '« Back', 'cluster', **c)])
+        return self.screen(chat, mid, f'<b>{v.e(cname)}: VMs and containers</b> ({len(vms)}), page {page + 1}/{pages}', kb)
 
     @staticmethod
     def _g(cid, cname, x):
@@ -410,8 +415,8 @@ class Bot:
         except ApiError as err:
             return self.error(chat, err, mid)
         if not x:
-            return self.screen(chat, mid, f"Гость {g['vmid']} не найден.",
-                               [[self.btn(uid, '« Назад', 'guests', cid=g['cid'], cname=g['cname'], page=0)]])
+            return self.screen(chat, mid, f"Guest {g['vmid']} not found.",
+                               [[self.btn(uid, '« Back', 'guests', cid=g['cid'], cname=g['cname'], page=0)]])
         g = self._g(g['cid'], g['cname'], x)
         st = x.get('status')
         acts = ['start'] if st == 'stopped' else (['resume', 'stop'] if st in ('paused', 'suspended')
@@ -428,17 +433,17 @@ class Bot:
                 row = []
         if row:
             kb.append(row)
-        kb += [[self.btn(uid, '📸 Снапшоты', 'snaps', g=g), self.btn(uid, '💾 Бэкапы', 'backups', g=g)],
-               [self.btn(uid, '🚚 Миграция', 'migrate', g=g), self.btn(uid, '🛡 Firewall', 'vmfw', g=g)],
-               [self.btn(uid, '🔄 Обновить', 'guest', g=g),
-                self.btn(uid, '« Список', 'guests', cid=g['cid'], cname=g['cname'], page=0)]]
+        kb += [[self.btn(uid, '📸 Snapshots', 'snaps', g=g), self.btn(uid, '💾 Backups', 'backups', g=g)],
+               [self.btn(uid, '🚚 Migrate', 'migrate', g=g), self.btn(uid, '🛡 Firewall', 'vmfw', g=g)],
+               [self.btn(uid, '🔄 Refresh', 'guest', g=g),
+                self.btn(uid, '« List', 'guests', cid=g['cid'], cname=g['cname'], page=0)]]
         return self.screen(chat, mid, v.guest_text(x, g['cname']), kb)
 
     def cb_guest_act(self, uid, chat, mid, g, act, ok=False):
         label, needs_confirm, word = GUEST_ACTIONS[act]
         if needs_confirm and not ok:
-            kb = [[self.btn(uid, f'✅ Да: {word.lower()}', 'guest_act', g=g, act=act, ok=True),
-                   self.btn(uid, 'Отмена', 'guest', g=g)]]
+            kb = [[self.btn(uid, f'✅ Yes: {word.lower()}', 'guest_act', g=g, act=act, ok=True),
+                   self.btn(uid, 'Cancel', 'guest', g=g)]]
             return self.screen(chat, mid, f"{word}: <b>{v.e(g['name'])}</b> ({g['vmid']})?", kb)
         return self._do(uid, chat, mid, lambda a: a.vm_action(g['cid'], g['node'], g['type'], g['vmid'], act),
                         f"{word}: {v.e(g['name'])} ({g['vmid']})", back=('guest', {'g': g}))
@@ -449,62 +454,62 @@ class Bot:
             snaps = [s for s in self.api(uid).snapshots(g['cid'], g['node'], g['type'], g['vmid'])
                      if s.get('name') != 'current']
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'guest', g=g)]])
-        lines = [f"<b>Снапшоты {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.snapshot_line(s) for s in snaps] or ['Нет снапшотов'])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'guest', g=g)]])
+        lines = [f"<b>Snapshots of {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.snapshot_line(s) for s in snaps] or ['No snapshots'])
         kb = [[self.btn(uid, f"↩️ {s['name']}", 'snap', g=g, snap=s['name'])] for s in snaps[-10:]]
-        kb.append([self.btn(uid, '➕ Создать', 'snap_new', g=g), self.btn(uid, '« Назад', 'guest', g=g)])
+        kb.append([self.btn(uid, '➕ Create', 'snap_new', g=g), self.btn(uid, '« Back', 'guest', g=g)])
         return self.screen(chat, mid, '\n'.join(lines), kb)
 
     def cb_snap(self, uid, chat, mid, g, snap):
-        kb = [[self.btn(uid, '↩️ Откатить', 'snap_do', g=g, snap=snap, op='rollback'),
-               self.btn(uid, '🗑 Удалить', 'snap_do', g=g, snap=snap, op='delete')],
-              [self.btn(uid, '« Снапшоты', 'snaps', g=g)]]
-        return self.screen(chat, mid, f"Снапшот <b>{v.e(snap)}</b> у {v.e(g['name'])} ({g['vmid']})", kb)
+        kb = [[self.btn(uid, '↩️ Roll back', 'snap_do', g=g, snap=snap, op='rollback'),
+               self.btn(uid, '🗑 Delete', 'snap_do', g=g, snap=snap, op='delete')],
+              [self.btn(uid, '« Snapshots', 'snaps', g=g)]]
+        return self.screen(chat, mid, f"Snapshot <b>{v.e(snap)}</b> of {v.e(g['name'])} ({g['vmid']})", kb)
 
     def cb_snap_do(self, uid, chat, mid, g, snap, op, ok=False):
-        word = 'Откатить на' if op == 'rollback' else 'Удалить'
+        word = 'Roll back to' if op == 'rollback' else 'Delete'
         if not ok:
-            kb = [[self.btn(uid, '✅ Да', 'snap_do', g=g, snap=snap, op=op, ok=True),
-                   self.btn(uid, 'Отмена', 'snap', g=g, snap=snap)]]
-            warn = '\nТекущее состояние гостя будет потеряно.' if op == 'rollback' else ''
-            return self.screen(chat, mid, f'{word} снапшот <b>{v.e(snap)}</b>?{warn}', kb)
+            kb = [[self.btn(uid, '✅ Yes', 'snap_do', g=g, snap=snap, op=op, ok=True),
+                   self.btn(uid, 'Cancel', 'snap', g=g, snap=snap)]]
+            warn = '\nThe current state of the guest will be lost.' if op == 'rollback' else ''
+            return self.screen(chat, mid, f'{word} snapshot <b>{v.e(snap)}</b>?{warn}', kb)
         if op == 'rollback':
             call = lambda a: a.rollback_snapshot(g['cid'], g['node'], g['type'], g['vmid'], snap)
         else:
             call = lambda a: a.delete_snapshot(g['cid'], g['node'], g['type'], g['vmid'], snap)
         return self._do(uid, chat, mid, call,
-                        f"{'Откат на' if op == 'rollback' else 'Удаление'} снапшот {v.e(snap)}",
+                        f"{'Rollback to' if op == 'rollback' else 'Deleting'} snapshot {v.e(snap)}",
                         back=('snaps', {'g': g}))
 
     def cb_snap_new(self, uid, chat, mid, g):
         self.pending[uid] = {'kind': 'snapname', 'g': g}
         default = time.strftime('tg_%Y%m%d_%H%M')
-        kb = [[self.btn(uid, f'Создать «{default}»', 'snap_auto', g=g, name=default)],
-              [self.btn(uid, 'Отмена', 'snaps', g=g)]]
-        return self.screen(chat, mid, 'Введите имя нового снапшота или нажмите кнопку:', kb)
+        kb = [[self.btn(uid, f'Create "{default}"', 'snap_auto', g=g, name=default)],
+              [self.btn(uid, 'Cancel', 'snaps', g=g)]]
+        return self.screen(chat, mid, 'Type a name for the new snapshot or press the button:', kb)
 
     def cb_snap_auto(self, uid, chat, mid, g, name):
         self.pending.pop(uid, None)
         return self._do(uid, chat, mid, lambda a: a.create_snapshot(g['cid'], g['node'], g['type'], g['vmid'], name,
                                                                      'Telegram'),
-                        f'Снапшот <b>{v.e(name)}</b> создаётся', back=('snaps', {'g': g}))
+                        f'Creating snapshot <b>{v.e(name)}</b>', back=('snaps', {'g': g}))
 
     # backups ---------------------------------------------------------------------
     def cb_backups(self, uid, chat, mid, g):
         try:
             items = self.api(uid).backups(g['cid'], g['node'], g['type'], g['vmid'])
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'guest', g=g)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'guest', g=g)]])
         items = sorted(items, key=lambda b: b.get('ctime') or 0, reverse=True)
-        lines = [f"<b>Бэкапы {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.backup_line(b) for b in items[:10]] or ['Бэкапов нет'])
-        kb = [[self.btn(uid, '➕ Сделать бэкап', 'backup_store', g=g), self.btn(uid, '« Назад', 'guest', g=g)]]
+        lines = [f"<b>Backups of {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.backup_line(b) for b in items[:10]] or ['No backups'])
+        kb = [[self.btn(uid, '➕ Back up now', 'backup_store', g=g), self.btn(uid, '« Back', 'guest', g=g)]]
         return self.screen(chat, mid, '\n'.join(lines), kb)
 
     def cb_backup_store(self, uid, chat, mid, g):
         try:
             ds = self.api(uid).datastores(g['cid'])
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'backups', g=g)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'backups', g=g)]])
         names = []
         shared = ds.get('shared') or []
         if isinstance(shared, dict):
@@ -514,43 +519,43 @@ class Bot:
             if 'backup' in (s.get('content') or '') and s.get('storage') not in names:
                 names.append(s.get('storage'))
         if not names:
-            return self.screen(chat, mid, 'Нет хранилищ для бэкапов, доступных этой ноде.',
-                               [[self.btn(uid, '« Назад', 'backups', g=g)]])
+            return self.screen(chat, mid, 'No backup storage available on this node.',
+                               [[self.btn(uid, '« Back', 'backups', g=g)]])
         kb = [[self.btn(uid, f'💽 {n}', 'backup_do', g=g, storage=n)] for n in names]
-        kb.append([self.btn(uid, 'Отмена', 'backups', g=g)])
-        return self.screen(chat, mid, 'Куда сохранить бэкап (режим snapshot, сжатие zstd)?', kb)
+        kb.append([self.btn(uid, 'Cancel', 'backups', g=g)])
+        return self.screen(chat, mid, 'Where to store the backup (snapshot mode, zstd)?', kb)
 
     def cb_backup_do(self, uid, chat, mid, g, storage):
         return self._do(uid, chat, mid, lambda a: a.create_backup(g['cid'], g['node'], g['type'], g['vmid'], storage),
-                        f"Бэкап {v.e(g['name'])} в {v.e(storage)} запущен", back=('backups', {'g': g}))
+                        f"Backup of {v.e(g['name'])} to {v.e(storage)} started", back=('backups', {'g': g}))
 
     # migration -------------------------------------------------------------------
     def cb_migrate(self, uid, chat, mid, g):
         try:
             nodes = self.api(uid).nodes(g['cid'])
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'guest', g=g)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'guest', g=g)]])
         targets = [n.get('node') or n.get('name') for n in nodes
                    if n.get('status') == 'online' and (n.get('node') or n.get('name')) != g['node']]
         if not targets:
-            return self.screen(chat, mid, 'Нет других нод в сети для миграции.',
-                               [[self.btn(uid, '« Назад', 'guest', g=g)]])
+            return self.screen(chat, mid, 'No other online node to migrate to.',
+                               [[self.btn(uid, '« Back', 'guest', g=g)]])
         kb = [[self.btn(uid, f'➡️ {t}', 'migrate_do', g=g, target=t)] for t in targets]
-        kb.append([self.btn(uid, 'Отмена', 'guest', g=g)])
-        return self.screen(chat, mid, f"Перенести <b>{v.e(g['name'])}</b> с {v.e(g['node'])} на:", kb)
+        kb.append([self.btn(uid, 'Cancel', 'guest', g=g)])
+        return self.screen(chat, mid, f"Migrate <b>{v.e(g['name'])}</b> from {v.e(g['node'])} to:", kb)
 
     def cb_migrate_do(self, uid, chat, mid, g, target, ok=False):
         if not ok:
-            kb = [[self.btn(uid, '✅ Перенести', 'migrate_do', g=g, target=target, ok=True),
-                   self.btn(uid, 'Отмена', 'guest', g=g)]]
-            return self.screen(chat, mid, f"Перенести <b>{v.e(g['name'])}</b> ({g['vmid']}) на <b>{v.e(target)}</b>?", kb)
+            kb = [[self.btn(uid, '✅ Migrate', 'migrate_do', g=g, target=target, ok=True),
+                   self.btn(uid, 'Cancel', 'guest', g=g)]]
+            return self.screen(chat, mid, f"Migrate <b>{v.e(g['name'])}</b> ({g['vmid']}) to <b>{v.e(target)}</b>?", kb)
         try:
             x = self._fresh(uid, g)
         except ApiError as err:
             return self.error(chat, err, mid)
         online = bool(x and x.get('status') == 'running')
         return self._do(uid, chat, mid, lambda a: a.migrate(g['cid'], g['node'], g['type'], g['vmid'], target, online),
-                        f"Миграция {v.e(g['name'])} на {v.e(target)} запущена",
+                        f"Migration of {v.e(g['name'])} to {v.e(target)} started",
                         back=('guests', dict(cid=g['cid'], cname=g['cname'], page=0)))
 
     # firewall --------------------------------------------------------------------
@@ -561,13 +566,13 @@ class Bot:
             opts = api.dc_firewall_options(cid)
             rules = api.dc_firewall_rules(cid)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'cluster', **c)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'cluster', **c)]])
         on = str(opts.get('enable', 0)) in ('1', 'True', 'true')
-        lines = [f"<b>Firewall датацентра {v.e(cname)}</b>",
-                 f"Состояние: {'✅ включён' if on else '⛔ выключен'}",
-                 f"Политика входящих: {v.e(opts.get('policy_in', 'DROP'))}, исходящих: {v.e(opts.get('policy_out', 'ACCEPT'))}",
-                 ''] + ([v.fw_rule_line(r) for r in rules[:30]] or ['Правил нет'])
-        kb = [[self.btn(uid, '⛔ Выключить firewall' if on else '✅ Включить firewall', 'fw_toggle', on=not on, **c)]]
+        lines = [f"<b>Datacenter firewall of {v.e(cname)}</b>",
+                 f"State: {'✅ enabled' if on else '⛔ disabled'}",
+                 f"Policy in: {v.e(opts.get('policy_in', 'DROP'))}, out: {v.e(opts.get('policy_out', 'ACCEPT'))}",
+                 ''] + ([v.fw_rule_line(r) for r in rules[:30]] or ['No rules'])
+        kb = [[self.btn(uid, '⛔ Disable firewall' if on else '✅ Enable firewall', 'fw_toggle', on=not on, **c)]]
         row = []
         for r in rules[:20]:
             r_on = str(r.get('enable', 0)) in ('1', 'True', 'true')
@@ -577,32 +582,32 @@ class Bot:
                 row = []
         if row:
             kb.append(row)
-        kb.append([self.btn(uid, '🔄 Обновить', 'fw', **c), self.btn(uid, '« Назад', 'cluster', **c)])
-        return self.screen(chat, mid, '\n'.join(lines) + '\n\nКнопки #N включают или выключают правило.', kb)
+        kb.append([self.btn(uid, '🔄 Refresh', 'fw', **c), self.btn(uid, '« Back', 'cluster', **c)])
+        return self.screen(chat, mid, '\n'.join(lines) + '\n\nThe #N buttons turn a rule on or off.', kb)
 
     def cb_fw_toggle(self, uid, chat, mid, cid, cname, on, ok=False):
         c = dict(cid=cid, cname=cname)
         if not ok:
-            kb = [[self.btn(uid, '✅ Да', 'fw_toggle', on=on, ok=True, **c), self.btn(uid, 'Отмена', 'fw', **c)]]
-            warn = ('\nУбедитесь, что есть правила, разрешающие доступ к веб-интерфейсу и SSH, '
-                    'иначе можно потерять доступ.') if on else ''
-            return self.screen(chat, mid, f"{'Включить' if on else 'Выключить'} firewall датацентра?{warn}", kb)
+            kb = [[self.btn(uid, '✅ Yes', 'fw_toggle', on=on, ok=True, **c), self.btn(uid, 'Cancel', 'fw', **c)]]
+            warn = ('\nMake sure there are rules that allow the web UI and SSH, '
+                    'or you may lock yourself out.') if on else ''
+            return self.screen(chat, mid, f"{'Enable' if on else 'Disable'} the datacenter firewall?{warn}", kb)
         return self._do(uid, chat, mid, lambda a: a.set_dc_firewall_enabled(cid, on),
-                        f"Firewall {'включён' if on else 'выключен'}", back=('fw', c))
+                        f"Firewall {'enabled' if on else 'disabled'}", back=('fw', c))
 
     def cb_fw_rule(self, uid, chat, mid, cid, cname, pos, on):
         try:
             self.api(uid).set_dc_firewall_rule(cid, pos, on)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'fw', cid=cid, cname=cname)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'fw', cid=cid, cname=cname)]])
         return self.cb_fw(uid, chat, mid, cid, cname)
 
     def cb_vmfw(self, uid, chat, mid, g):
         try:
             rules = self.api(uid).vm_firewall_rules(g['cid'], g['node'], g['type'], g['vmid'])
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'guest', g=g)]])
-        lines = [f"<b>Firewall {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.fw_rule_line(r) for r in rules[:30]] or ['Правил нет'])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'guest', g=g)]])
+        lines = [f"<b>Firewall {v.e(g['name'])} ({g['vmid']})</b>"] + ([v.fw_rule_line(r) for r in rules[:30]] or ['No rules'])
         kb, row = [], []
         for r in rules[:20]:
             r_on = str(r.get('enable', 0)) in ('1', 'True', 'true')
@@ -612,14 +617,14 @@ class Bot:
                 row = []
         if row:
             kb.append(row)
-        kb.append([self.btn(uid, '🔄 Обновить', 'vmfw', g=g), self.btn(uid, '« Назад', 'guest', g=g)])
+        kb.append([self.btn(uid, '🔄 Refresh', 'vmfw', g=g), self.btn(uid, '« Back', 'guest', g=g)])
         return self.screen(chat, mid, '\n'.join(lines), kb)
 
     def cb_vmfw_rule(self, uid, chat, mid, g, pos, on):
         try:
             self.api(uid).set_vm_firewall_rule(g['cid'], g['node'], g['type'], g['vmid'], pos, on)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'vmfw', g=g)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'vmfw', g=g)]])
         return self.cb_vmfw(uid, chat, mid, g)
 
     # storage, tasks --------------------------------------------------------------
@@ -628,30 +633,30 @@ class Bot:
         try:
             ds = self.api(uid).datastores(cid)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'cluster', **c)]])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'cluster', **c)]])
         shared = ds.get('shared') or []
         if isinstance(shared, dict):
             shared = list(shared.values())
-        lines = [f'<b>Хранилища {v.e(cname)}</b>']
+        lines = [f'<b>Storage of {v.e(cname)}</b>']
         for s in shared:
             lines.append(f"🌐 <b>{v.e(s.get('storage'))}</b> ({v.e(s.get('type'))}) "
-                         f"{v.size(s.get('used'))} из {v.size(s.get('total'))} ({v.pct(s.get('used'), s.get('total'))})")
+                         f"{v.size(s.get('used'))} of {v.size(s.get('total'))} ({v.pct(s.get('used'), s.get('total'))})")
         for node, items in (ds.get('local') or {}).items():
             for s in items:
                 lines.append(f"🖥 {v.e(node)}/<b>{v.e(s.get('storage'))}</b> ({v.e(s.get('type'))}) "
-                             f"{v.size(s.get('used'))} из {v.size(s.get('total'))} ({v.pct(s.get('used'), s.get('total'))})")
+                             f"{v.size(s.get('used'))} of {v.size(s.get('total'))} ({v.pct(s.get('used'), s.get('total'))})")
         return self.screen(chat, mid, '\n'.join(lines),
-                           [[self.btn(uid, '🔄 Обновить', 'storage', **c), self.btn(uid, '« Назад', 'cluster', **c)]])
+                           [[self.btn(uid, '🔄 Refresh', 'storage', **c), self.btn(uid, '« Back', 'cluster', **c)]])
 
     def cb_tasks(self, uid, chat, mid, cid, cname):
         c = dict(cid=cid, cname=cname)
         try:
             tasks = self.api(uid).tasks(cid, limit=15)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'cluster', **c)]])
-        lines = [f'<b>Последние задачи {v.e(cname)}</b>'] + ([v.task_line(t) for t in tasks[:15]] or ['Задач нет'])
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'cluster', **c)]])
+        lines = [f'<b>Latest tasks of {v.e(cname)}</b>'] + ([v.task_line(t) for t in tasks[:15]] or ['No tasks'])
         return self.screen(chat, mid, '\n'.join(lines),
-                           [[self.btn(uid, '🔄 Обновить', 'tasks', **c), self.btn(uid, '« Назад', 'cluster', **c)]])
+                           [[self.btn(uid, '🔄 Refresh', 'tasks', **c), self.btn(uid, '« Back', 'cluster', **c)]])
 
     # alerts ------------------------------------------------------------------------
     def cb_alerts(self, uid, chat, mid, cid, cname):
@@ -659,11 +664,11 @@ class Bot:
         try:
             alerts = self.api(uid).active_alerts(cid)
         except ApiError as err:
-            return self.error(chat, err, mid, [[self.btn(uid, '« Назад', 'cluster', **c)]])
-        text = f'<b>Оповещения {v.e(cname)}</b>\n\n' + ('\n\n'.join(v.alert_text(a) for a in alerts[:10]) or 'Активных оповещений нет ✅')
-        kb = [[self.btn(uid, f"✔️ Подтвердить #{a['id']}", 'ack', cid=cid, cname=cname, fid=a['id'])]
+            return self.error(chat, err, mid, [[self.btn(uid, '« Back', 'cluster', **c)]])
+        text = f'<b>Alerts of {v.e(cname)}</b>\n\n' + ('\n\n'.join(v.alert_text(a) for a in alerts[:10]) or 'No active alerts ✅')
+        kb = [[self.btn(uid, f"✔️ Acknowledge #{a['id']}", 'ack', cid=cid, cname=cname, fid=a['id'])]
               for a in alerts[:10] if not a.get('acked_at')]
-        kb.append([self.btn(uid, '🔄 Обновить', 'alerts', **c), self.btn(uid, '« Назад', 'cluster', **c)])
+        kb.append([self.btn(uid, '🔄 Refresh', 'alerts', **c), self.btn(uid, '« Back', 'cluster', **c)])
         return self.screen(chat, mid, text, kb)
 
     def cb_ack(self, uid, chat, mid, cid, cname, fid, back='alerts'):
@@ -672,7 +677,7 @@ class Bot:
         except ApiError as err:
             return self.error(chat, err, mid)
         if back == 'none':
-            return self.screen(chat, mid, f'✔️ Оповещение #{v.e(fid)} подтверждено', None)
+            return self.screen(chat, mid, f'✔️ Alert #{v.e(fid)} acknowledged', None)
         return self.cb_alerts(uid, chat, mid, cid, cname)
 
     def cb_all_alerts(self, uid, chat, mid):
@@ -691,13 +696,13 @@ class Bot:
                     blocks.append(v.alert_text(a, v.cluster_name(c)))
             except ApiError:
                 continue
-        text = '<b>Активные оповещения</b>\n\n' + ('\n\n'.join(blocks[:15]) or 'Активных оповещений нет ✅')
-        return self.screen(chat, mid, text, [[self.btn(uid, '« Кластеры', 'clusters')]])
+        text = '<b>Active alerts</b>\n\n' + ('\n\n'.join(blocks[:15]) or 'No active alerts ✅')
+        return self.screen(chat, mid, text, [[self.btn(uid, '« Clusters', 'clusters')]])
 
     # search ------------------------------------------------------------------------
     def cb_ask_find(self, uid, chat, mid):
         self.pending[uid] = {'kind': 'find'}
-        return self.screen(chat, mid, 'Введите имя или номер VM/CT:', None)
+        return self.screen(chat, mid, 'Type a VM/CT name or ID:', None)
 
     def find(self, uid, chat, query):
         api = self.api(uid)
@@ -715,10 +720,10 @@ class Bot:
             except ApiError:
                 continue
         if not found:
-            return self.tg.send(chat, f'Ничего не найдено по «{v.e(query)}».')
+            return self.tg.send(chat, f'Nothing found for "{v.e(query)}".')
         kb = [[self.btn(uid, f'{v.guest_button(x)} @ {v.cluster_name(c)}'[:60], 'guest',
                         g=self._g(c['id'], v.cluster_name(c), x))] for c, x in found[:20]]
-        return self.tg.send(chat, f'Найдено: {len(found)}', kb)
+        return self.tg.send(chat, f'Found: {len(found)}', kb)
 
     # alert notifications -------------------------------------------------------------
     def _alert_loop(self):
@@ -749,6 +754,6 @@ class Bot:
                           if not a.get('acked_at') and not a.get('muted_until')}
                 for key in self.store.mark_seen(uid, list(by_key)):
                     a = by_key[key]
-                    kb = [[self.btn(uid, '✔️ Подтвердить', 'ack', cid=c['id'], cname=v.cluster_name(c),
+                    kb = [[self.btn(uid, '✔️ Acknowledge', 'ack', cid=c['id'], cname=v.cluster_name(c),
                                     fid=a['id'], back='none')]]
                     self.tg.send(uid, '🔔 ' + v.alert_text(a, v.cluster_name(c)), kb)
