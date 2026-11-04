@@ -48,11 +48,15 @@ chip or host key - not even root can read it directly without unsealing.
 
 ### Inspecting the active tier
 
+Run it as the service user from the directory the service runs in, because
+`config/` is relative to it (`/opt/PegaProx` for deploy.sh, `/var/lib/pegaprox` for the
+Debian package):
+
 ```bash
-sudo -u pegaprox python3 pegaprox_multi_cluster.py --keystore-status
+cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --keystore-status
 ```
 
-JSON output:
+It only reads: where it finds no key it says so instead of creating one. JSON output:
 
 ```json
 {
@@ -60,6 +64,7 @@ JSON output:
     "ok": true,
     "source": "/etc/pegaprox/secret.key",
     "source_path": "/etc/pegaprox/secret.key",
+    "config_dir": "/opt/PegaProx/config",
     "is_legacy": false,
     "tier": 4,
     "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted..."
@@ -67,13 +72,19 @@ JSON output:
   "db": {
     "backend": "sqlcipher",
     "encrypted_at_rest": true,
-    "cipher": "AES-256-CBC / HMAC-SHA512 (SQLCipher v4)"
+    "cipher": "AES-256-CBC + HMAC-SHA512 (SQLCipher 4)",
+    "files": {
+      "/opt/PegaProx/config/pegaprox.db": "encrypted",
+      "/opt/PegaProx/config/syslog.db": "encrypted"
+    },
+    "note": "Full database encryption is active."
   }
 }
 ```
 
-A green pill in the admin UI's *Security* card consumes the same data via
-`GET /api/security/keystore-status`.
+`files` comes from each file's first 16 bytes (a plain SQLite file starts with
+`SQLite format 3`), so it shows a database that is still plain even where SQLCipher is
+installed; `encrypted_at_rest` is true only when every database found is encrypted.
 
 ---
 
