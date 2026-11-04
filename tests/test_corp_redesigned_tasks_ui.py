@@ -817,7 +817,8 @@ def test_runtime_the_filters_work_and_survive_a_reload(open_app):
     assert len(_rows(page)) == 2
     page.locator('[data-cr-filter="failed"]').click()
     stored = json.loads(page.evaluate('() => localStorage.getItem("cr-tc-filters")'))
-    assert stored == {'status': 'failed', 'type': '', 'cluster': '', 'q': '102'}, stored
+    # LW Nov 2026 - the Today filter is kept with the others
+    assert stored == {'status': 'failed', 'type': '', 'cluster': '', 'q': '102', 'today': False}, stored
     page.reload()
     app.wait_for_app()
     _pick_testi(page)

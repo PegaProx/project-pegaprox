@@ -1,6 +1,6 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): Reports > What-if - LW Oct 2026
-        // Mounted instead of the classic WhatIfTab, in the preview only. The same three routes:
+        // Corporate Redesigned: Reports > What-if - LW Oct 2026
+        // Mounted instead of the classic WhatIfTab, in the redesign only. The same three routes:
         // the options on open, a scenario and the ranking only on a click, one at a time. The
         // engine's report is shown as it comes, each statement with what it rests on; a report
         // with guests it could not judge or configs it did not read says it is incomplete,

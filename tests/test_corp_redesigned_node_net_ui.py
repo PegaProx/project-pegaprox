@@ -630,7 +630,8 @@ def test_runtime_the_list_states(open_app):
     app = open_app(net=(200, []))
     _open_network(app.page)
     app.page.locator('[data-cr-nn-list="empty"]').wait_for(timeout=8000)
-    assert 'can be a failed read' in app.page.locator('[data-cr-nn-list="empty"]').inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert app.page.locator('[data-cr-nn-list="empty"]').inner_text().strip() == 'The answer lists no interfaces.'
     app2 = open_app(net=(500, {'error': 'boom'}))
     page = app2.page
     _open_network(page)

@@ -21,10 +21,10 @@
                               synced: 'crIsoSynced', unknown: 'crIsoUnknown' };
         // one file on one node
         const CR_ISO_CELL_TONE = { present: 'success', missing: 'warning', nostore: 'neutral', running: 'info', pending: 'neutral',
-                                   failed: 'error', offline: 'neutral', unlisted: 'neutral' };
+                                   failed: 'error', offline: 'neutral', unlisted: 'neutral', unread: 'error' };
         const CR_ISO_CELL_WORD = { present: 'crIsoCellPresent', missing: 'crIsoCellMissing', nostore: 'crIsoCellNoStore',
                                    running: 'crIsoRunning', pending: 'crIsoPending', failed: 'crIsoFailed',
-                                   offline: 'crIsoCellOffline', unlisted: 'crIsoCellUnlisted' };
+                                   offline: 'crIsoCellOffline', unlisted: 'crIsoCellUnlisted', unread: 'crIsoCellUnread' };
         const CR_ISO_LACK = ['missing', 'nostore', 'running', 'pending', 'failed'];
         const CR_ISO_TILES = ['synced', 'missing', 'pending', 'running', 'failed'];
         const CR_ISO_CHIPS = ['all', 'attention', 'synced', 'missing', 'pending', 'running', 'failed'];
@@ -51,14 +51,18 @@
             const offline = new Set(ds && Array.isArray(ds.offline_nodes) ? ds.offline_nodes : []);
             const local = ds && ds.local && typeof ds.local === 'object' ? ds.local : null;
             const on = new Set(listed);
+            // LW Nov 2026 - an online node the server could not read, with its reason; it is left out of the matrix
+            const unread = status && status.unread && typeof status.unread === 'object' && !Array.isArray(status.unread) ? status.unread : {};
             const names = [...known, ...listed.filter(n => !known.includes(n))];
+            Object.keys(unread).forEach(n => { if (!names.includes(n)) names.push(n); });
             return names.map(name => {
                 const list = local && Array.isArray(local[name]) ? local[name] : null;
                 const fit = list ? list.filter(s => s && !s.shared && crIsoHas(s, ct)) : null;
                 // the tab keeps the storages of an offline node marked node_offline (its sorted copy
                 // of the answer drops offline_nodes)
                 const away = offline.has(name) || (!!list && list.length > 0 && list.every(s => s && s.node_offline));
-                return { name, state: on.has(name) ? 'listed' : away ? 'offline' : 'unlisted',
+                return { name, state: on.has(name) ? 'listed' : crHas(unread, name) ? 'unread' : away ? 'offline' : 'unlisted',
+                         why: crHas(unread, name) ? String(unread[name] || '') : '',
                          stores: fit ? fit.filter(s => !!s.active && !s.node_offline).map(s => s.storage) : null,
                          idle: fit ? fit.filter(s => !s.active || s.node_offline).map(s => s.storage) : [] };
             });
@@ -306,28 +310,37 @@
             );
         }
 
-        // Auto-sync after an upload: the server has no such setting. The classic checkbox keeps a
-        // flag in this browser that nothing reads, so it is shown, never offered
-        function CrIsoAuto({ clusterId }) {
+        // Auto-sync after an upload: the flag of the classic checkbox, kept in this browser. With it on,
+        // an ISO or template uploaded from the Datastore tab of this layout to the storage of one node
+        // is copied to the other nodes once its upload task ended well (DatastoreTab crQueueAutoSync);
+        // the server has no such setting. The copy is the Sync of one file, so it takes storage.upload
+        function CrIsoAuto({ clusterId, canSync, why, waiting }) {
             const { t } = useTranslation();
-            let flag = null;
-            try { flag = localStorage.getItem(`autosync-${clusterId}`); } catch (_) {}
+            const key = `autosync-${clusterId}`;
+            const [on, setOn] = useState(() => { try { return localStorage.getItem(key) === 'true'; } catch (_) { return false; } });
+            const [kept, setKept] = useState(true);
+            const flip = (v) => {
+                try { localStorage.setItem(key, String(v)); setOn(v); setKept(true); } catch (_) { setKept(false); }
+            };
             return (
-                <CrNcSection id="iso-auto" title={t('crIsoAutoTitle')} desc={t('crIsoAutoDesc')}
-                    badge={<CrBadge tone="neutral" dot={false}>{t('crIsoAutoNoneShort')}</CrBadge>}>
-                    <CrNcKv id="iso-auto" label={t('crIsoAutoTitle')} rows={[
-                        { k: 'server', label: t('crIsoAutoServer'), value: '', missing: t('crIsoAutoNone'), wide: true },
-                        { k: 'browser', label: t('crIsoAutoBrowser'), value: flag === 'true' ? t('crIsoOn') : t('crIsoOff'),
-                          note: t('crIsoAutoBrowserNote'), wide: true },
-                        { k: 'instead', label: t('crIsoAutoInstead'), value: t('crIsoAutoInsteadText'), wide: true },
-                    ]} />
+                <CrNcSection id="iso-auto" title={t('crIsoAutoTitle')} desc={t('crIsoAutoDescOn')}
+                    badge={<CrBadge tone={on ? 'info' : 'neutral'} dot={false}><span data-cr-iso-auto-state={on ? 'on' : 'off'}>{on ? t('crIsoOn') : t('crIsoOff')}</span></CrBadge>}>
+                    <label className={`cr-upd-opt${!canSync ? ' cr-upd-opt-off' : ''}`} title={!canSync ? why : undefined}>
+                        <input type="checkbox" checked={on} disabled={!canSync} onChange={e => flip(e.target.checked)} data-cr-iso-auto="" />
+                        <span><span className="cr-strong">{t('crIsoAutoTitle')}</span><span className="cr-upd-hint">{t('crIsoAutoHow')}</span></span>
+                    </label>
+                    {!canSync && <p className="cr-iso-fine" data-cr-iso-auto-why="">{why}</p>}
+                    {waiting && <p className="cr-iso-fine" role="status" data-cr-iso-auto-waiting="">{t('crIsoAutoWaitingNote')}</p>}
+                    {!kept && <p className="cr-iso-fine cr-tone-text cr-tone-error" role="alert" data-cr-iso-auto-unsaved="">{t('crIsoAutoNotKept')}</p>}
+                    <p className="cr-iso-fine">{t('crIsoAutoScope')}</p>
                 </CrNcSection>
             );
         }
 
         // --- the page ------------------------------------------------------------------------------
 
-        function CrIsoSync({ clusterId, call, datastores, dsLoading, contentType, onContentType, canSync, onSync, onSyncAll, addToast }) {
+        // dsFail: the last read of the datastore list failed ({ msg, hasData }); the storages of the nodes come from it
+        function CrIsoSync({ clusterId, call, datastores, dsLoading, dsFail, onDsRetry, autoSyncWaiting, contentType, onContentType, canSync, onSync, onSyncAll, addToast }) {
             const { t } = useTranslation();
             const { haReadOnly } = useAuth();
             const ct = contentType === 'vztmpl' ? 'vztmpl' : 'iso';
@@ -559,6 +572,7 @@
                 { key: 'name', label: t('node'), flex: true, min: 110, render: r => <span className="cr-mono" data-cr-iso-node={r.name}>{r.name}</span> },
                 { key: 'state', label: t('crIsoColNodeState'), width: 130, sortValue: r => (r.state === 'listed' ? 0 : 1),
                   render: r => (r.state === 'listed' ? <CrBadge tone="success">{t('crIsoNodeListed')}</CrBadge>
+                      : r.state === 'unread' ? <CrBadge tone="error" title={r.why || undefined}><span data-cr-iso-node-unread={r.name}>{t('crIsoCellUnread')}</span></CrBadge>
                       : <CrBadge tone="neutral">{t(r.state === 'offline' ? 'crIsoCellOffline' : 'crIsoCellUnlisted')}</CrBadge>) },
                 { key: 'here', label: t('crIsoColHere'), width: 90, sortValue: r => (r.state === 'listed' ? r.here : null),
                   render: r => (r.state === 'listed' ? crFill(t('crIsoOnOf'), { n: r.here, total: rows.length }) : <CrNcMissing />) },
@@ -615,6 +629,17 @@
                             {t('crIsoUnlisted')}
                         </CrNcState>
                     )}
+                    {mine && nodes.some(x => x.state === 'unread') && (
+                        <CrNcState id="iso-unread" kind="error" onRetry={() => loadStatus(ct)} retryDisabled={read.loading} data-cr-iso-unread-nodes="">
+                            {crFill(t('crIsoUnreadNodes'), { n: nodes.filter(x => x.state === 'unread').length,
+                                list: nodes.filter(x => x.state === 'unread').map(x => `${x.name}${x.why ? ` (${x.why})` : ''}`).join('; ') })}
+                        </CrNcState>
+                    )}
+                    {dsFail && (
+                        <CrNcState id="iso-ds" kind={dsFail.hasData ? 'warning' : 'error'} onRetry={onDsRetry} data-cr-iso-ds-failed={dsFail.hasData ? 'stale' : 'unread'}>
+                            {crFill(t(dsFail.hasData ? 'crIsoDsStale' : 'crIsoDsFailed'), { why: dsFail.msg || '-' })}
+                        </CrNcState>
+                    )}
 
                     <h2 className="cr-iso-h">{t('crIsoSecOverview')}</h2>
                     <div className="cr-stat-row cr-iso-stats" role="group" aria-label={t('crIsoSecOverview')}>
@@ -641,7 +666,7 @@
                     <h2 className="cr-iso-h">{t('crIsoSecActivity')}</h2>
                     <div className="cr-iso-cols">
                         <CrIsoActivity runs={runs} last={last} lastErr={lastErr} onDrop={drop} />
-                        <CrIsoAuto clusterId={clusterId} />
+                        <CrIsoAuto clusterId={clusterId} canSync={canSync && !haReadOnly} why={why} waiting={!!autoSyncWaiting} />
                     </div>
 
                     <h2 className="cr-iso-h" ref={tableRef}>{t('crIsoSecFiles')}</h2>

@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview) - LW Oct 2026
+        // Corporate Layout - Redesigned - LW Oct 2026
         // The pieces of the redesigned Corporate skin. Only rendered where
         // useLayout().isCorpRedesigned holds, so classic Corporate, Modern and
         // Cloud never mount any of it. The look lives in the one cr-* block at
@@ -31,7 +31,7 @@
             return v && v !== key ? v : fallback;
         }
 
-        // LW Nov 2026 - what a module store of the preview holds was read by one account. A logout
+        // LW Nov 2026 - what a module store of the redesign holds was read by one account. A logout
         // does not reload the page and the next account may see less, so each store says how it
         // empties itself and its hook asks crSessionFor(user) before the store is read. gen tells
         // an answer that comes back for the account before; it is dropped
@@ -59,7 +59,7 @@
             if (home) home.focus({ preventScroll: true });
         }
 
-        // the sidebar of the preview: its own keys, so switching layouts never moves the classic one
+        // the sidebar of the redesign: its own keys, so switching layouts never moves the classic one
         // liveRows: up to this many tree rows the sidebar follows the drag live
         const CR_SIDEBAR = { min: 180, max: 520, def: 264, rail: 44, liveRows: 1500 };
         function crSidebarWidth() {
@@ -67,7 +67,7 @@
             return Number.isFinite(n) ? crClamp(n, CR_SIDEBAR.min, CR_SIDEBAR.max) : CR_SIDEBAR.def;
         }
 
-        // LW Nov 2026 - numbers and dates of the preview go by the UI language, not by the browser:
+        // LW Nov 2026 - numbers and dates of the redesign go by the UI language, not by the browser:
         // a German browser must not put "17,4 Mrd." next to "7.1 TB" in an English page. crLocale()
         // is the one place that turns a UI language into its BCP 47 tag, every toLocale*String and
         // Intl formatter of the cr files is handed it. PegaProxDashboard tells the language it draws
@@ -140,7 +140,7 @@
         }
 
         // --- CrBoundary ---------------------------------------------------------
-        // Around a page of the preview: an answer of a shape the page does not expect stops that
+        // Around a page of the redesign: an answer of a shape the page does not expect stops that
         // page with a note, not the whole app. Retry draws it again from the same props.
         function CrBoundaryNote({ id, error, onRetry }) {
             const { t } = useTranslation();
@@ -170,7 +170,7 @@
         }
 
         // --- CrSidePanel --------------------------------------------------------
-        // The detail panel on the right, one for every module of the preview. It sits between the
+        // The detail panel on the right, one for every module of the redesign. It sits between the
         // header and the bottom bars, so the task bar stays reachable, and it is not modal: the
         // page behind stays usable and the next row opens in the same panel. Opening moves the
         // focus into it (again when focusKey changes), closing hands it back to where it came from
@@ -259,7 +259,7 @@
         }
 
         // --- CrTable ------------------------------------------------------------
-        // A dense table for every list of the preview. Columns:
+        // A dense table for every list of the redesign. Columns:
         //   { key, label, menuLabel, width, min, flex, align, mono, sortable, resizable,
         //     hidden, sortValue(row), text(row), render(row), title }
         // Widths and hidden columns are kept per id in localStorage. Above 200 rows only the
@@ -627,7 +627,7 @@
             );
         }
 
-        // The compact header of the preview. The search, the theme switch, the settings and
+        // The compact header of the redesign. The search, the theme switch, the settings and
         // task buttons and the user menu are the very elements the classic header renders
         // (built once in the dashboard), only laid out differently here. Like classic Corporate
         // it has no language switcher (that lives in My Profile) and no cluster picker, the
@@ -777,8 +777,10 @@
             );
         }
 
-        // the folded sidebar: a rail with the view switcher, a way back and the filter
-        function CrSidebarRail({ views, active, onView, onExpand }) {
+        // the folded sidebar: a rail with the view switcher, a way back and the filter.
+        // LW Nov 2026 - and the global views of the Tools section ({id, icon, label, active, onClick}),
+        // which open from here without unfolding the sidebar
+        function CrSidebarRail({ views, active, onView, onExpand, tools }) {
             const { t } = useTranslation();
             const focusFilter = () => {
                 onExpand();
@@ -805,6 +807,18 @@
                         aria-label={t('filterSidebar')} title={t('filterSidebar')}>
                         <Icons.Search className="w-4 h-4" />
                     </button>
+                    {tools && tools.length > 0 && (
+                        <>
+                            <span className="cr-rail-sep" aria-hidden="true" />
+                            {tools.map(tool => (
+                                <button key={tool.id} type="button" className={`cr-rail-btn${tool.active ? ' active' : ''}`}
+                                    aria-pressed={!!tool.active} aria-label={tool.label} title={tool.label} data-cr-rail-tool={tool.id}
+                                    onClick={tool.onClick}>
+                                    <tool.icon className="w-4 h-4" />
+                                </button>
+                            ))}
+                        </>
+                    )}
                 </div>
             );
         }

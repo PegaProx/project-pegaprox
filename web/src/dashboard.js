@@ -5105,6 +5105,7 @@
             const { isCorpRedesigned } = useLayout();
             // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
             const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5133,6 +5134,8 @@
                     if (s && !s.error) setSummary(s);
                     setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, days]);
@@ -5407,7 +5410,7 @@
                 const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
                 return (
                     <CrBoundary key={clusterId} id="power">
-                        <CrPower cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr}
+                        <CrPower cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
                             days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
                             showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
                             onHosts={openHosts} hostForm={hostForm} setHost={setHost} onCloseHosts={() => setHostForm(null)} onSaveHosts={saveHosts}
@@ -5741,6 +5744,7 @@
             const { isCorpRedesigned } = useLayout();
             // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
             const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5765,6 +5769,8 @@
                     if (s && !s.error) setSummary(s);
                     setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
 
@@ -5960,7 +5966,7 @@
                 const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
                 return (
                     <CrBoundary key={clusterId} id="costs">
-                        <CrCosts cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr}
+                        <CrCosts cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
                             days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
                             showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
                             onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
@@ -10625,23 +10631,55 @@
 
             const sshReason = (info) => ({
                 SSH_NO_CREDENTIALS: [t('sshNoCredentials'), t('sshNoCredentialsHint')],
+                // LW Nov 2026 - SSH switched off for the cluster, and a node list that could not be read
+                SSH_DISABLED:       [t('cmpSshOff'),        t('cmpSshOffHint')],
+                NODES_UNREAD:       [t('cmpNodesUnread').replace('{code}', info?.error ? `HTTP ${info.error}` : t('crAlNoAnswer')), t('cmpNodesUnreadHint')],
                 NODE_BACKOFF:       [t('sshNodeBackoff'),   t('sshNodeBackoffHint')],
                 SSH_FAILED:         [t('sshFailed'),        t('sshFailedHint')],
             }[info?.code] || [info?.error, info?.hint]);
 
             // Fetch hardening data for one cluster (all nodes)
+            // LW Nov 2026 - each check is an SSH audit of one node: CMP_PARALLEL run at a time and the page
+            // gets every answer as it comes (in node order), with how many are in. A cause that is the
+            // whole cluster's (no credentials, SSH switched off) stops asking the rest. A node list that
+            // could not be read is said as such, not drawn as a cluster nobody checked. A newer run (another
+            // profile, Refresh) makes the answers of the one before go nowhere
+            const CMP_PARALLEL = 6;
+            const cmpRun = useRef({});
+            const [cmpProgress, setCmpProgress] = useState(null);  // {cid, done, total}
             const fetchCluster = async (cluster) => {
                 if (!cluster) return;
-                setLoadingCluster(cluster.id);
+                const cid = cluster.id;
+                const run = (cmpRun.current[cid] || 0) + 1;
+                cmpRun.current[cid] = run;
+                const current = () => cmpRun.current[cid] === run;
+                setLoadingCluster(cid);
                 try {
-                    const nodesRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes`);
-                    if (!nodesRes || !nodesRes.ok) return;
-                    const nodesData = await nodesRes.json();
-                    const nodes = (nodesData?.data || nodesData || []).map(n => n.node).filter(Boolean);
+                    const nodesRes = await authFetch(`${API_URL}/clusters/${cid}/nodes`);
+                    if (!current()) return;
+                    const nodesData = nodesRes && nodesRes.ok ? await nodesRes.json().catch(() => null) : null;
+                    const list = nodesData && (Array.isArray(nodesData) ? nodesData : nodesData.data);
+                    if (!Array.isArray(list)) {
+                        setResults(prev => ({ ...prev, [cid]: { _cluster: { error: nodesRes ? nodesRes.status : '', code: 'NODES_UNREAD' } } }));
+                        setCmpProgress(null);
+                        return;
+                    }
+                    const nodes = list.map(n => n && n.node).filter(Boolean);
                     const perNode = {};
-                    for (const n of nodes) {
+                    let stop = null;
+                    let done = 0;
+                    const publish = () => {
+                        if (!current()) return;
+                        const ordered = {};
+                        nodes.forEach(n => { if (perNode[n]) ordered[n] = perNode[n]; });
+                        if (stop) ordered._cluster = stop;
+                        setResults(prev => ({ ...prev, [cid]: ordered }));
+                        setCmpProgress({ cid, done, total: nodes.length });
+                    };
+                    setCmpProgress({ cid, done: 0, total: nodes.length });
+                    const checkOne = async (n) => {
                         try {
-                            const r = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
+                            const r = await authFetch(`${API_URL}/clusters/${cid}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
                             if (!r || !r.ok) {
                                 // #717 — the reason is in the body. Carry it so the node shows a
                                 // sentence rather than "err 502", and when the cause is the whole
@@ -10651,14 +10689,11 @@
                                 try {
                                     const body = r ? await r.json() : null;
                                     if (body) info = { error: body.error || info.error, code: body.code,
-                                                       hint: body.hint, clusterWide: !!body.cluster_wide };
+                                                       hint: body.hint, clusterWide: !!body.cluster_wide || body.code === 'SSH_DISABLED' };
                                 } catch (_) {}
                                 perNode[n] = info;
-                                if (info.clusterWide) {
-                                    setResults(prev => ({ ...prev, [cluster.id]: { ...perNode, _cluster: info } }));
-                                    return;
-                                }
-                                continue;
+                                if (info.clusterWide && !stop) stop = info;
+                                return;
                             }
                             const d = await r.json();
                             const ctrls = d.controls || {};
@@ -10670,11 +10705,22 @@
                         } catch (e) {
                             perNode[n] = { error: String(e) };
                         }
-                    }
-                    setResults(prev => ({ ...prev, [cluster.id]: perNode }));
-                    setCheckedAt(Date.now());
+                    };
+                    let next = 0;
+                    const worker = async () => {
+                        while (next < nodes.length && !stop && current()) {
+                            const n = nodes[next++];
+                            await checkOne(n);
+                            done++;
+                            publish();
+                        }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(CMP_PARALLEL, nodes.length) }, worker));
+                    if (!current()) return;
+                    publish();
+                    if (!stop) setCheckedAt(Date.now());
                 } finally {
-                    setLoadingCluster(null);
+                    if (current()) setLoadingCluster(l => (l === cid ? null : l));
                 }
             };
 
@@ -11366,6 +11412,7 @@
                         customProfiles={customProfiles} customSel={customSel}
                         perNode={selectedCluster ? results[selectedCluster.id] : null}
                         loading={!!selectedCluster && loadingCluster === selectedCluster.id} checkedAt={checkedAt}
+                        progress={cmpProgress && selectedCluster && cmpProgress.cid === selectedCluster.id ? cmpProgress : null}
                         frameworks={frameworks} frameworkScore={frameworkScore} verdictOf={verdictOf} sshReason={sshReason}
                         titles={allTitles} overallScore={overallScore} onRefresh={() => setRefreshTick(x => x + 1)}
                         onReport={downloadFrameworkReport} auditCounts={auditCounts} />
@@ -13746,7 +13793,7 @@
             // (capped admins included), the server folds that into this flag for us
             const canAutoInstall = !!user?.autoinstall_access;
             const { isCorporate, isCorpRedesigned, isCloud, layoutLocked } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
-            // LW Nov 2026 - the preview formats numbers and dates in the language drawn here (cr.js)
+            // LW Nov 2026 - the redesign formats numbers and dates in the language drawn here (cr.js)
             if (isCorpRedesigned) crUiLocale(language);
             const [clusters, setClusters] = useState([]);
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
@@ -13769,6 +13816,15 @@
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
+            // LW Nov 2026 - how the last /datastores read of each cluster ended ({ ok, at, msg }), Corporate Redesigned says a failed one.
+            // The ref has every read (its time decides against the Datastore tab's own read), the state only a change, so a
+            // poll that ends as the one before draws nothing
+            const [crDsReads, setCrDsReads] = useState({});
+            const crDsReadsRef = useRef({});
+            const crNoteDsRead = (cid, next) => {
+                crDsReadsRef.current = { ...crDsReadsRef.current, [cid]: next };
+                setCrDsReads(prev => (prev[cid] && prev[cid].ok === next.ok && prev[cid].msg === next.msg ? prev : { ...prev, [cid]: next }));
+            };
             const [clusterNetworks, setClusterNetworks] = useState([]); // NS: Mar 2026 - network view
             const [loadingNetworks, setLoadingNetworks] = useState(false);
             const [lastUpdate, setLastUpdate] = useState(null);
@@ -14480,10 +14536,13 @@
             const [cveScanLoading, setCveScanLoading] = useState(false);
             const [cveExpandedNodes, setCveExpandedNodes] = useState({});
             const [debsecanInstalling, setDebsecanInstalling] = useState(false);
+            // LW Nov 2026 - why the last scan failed ({ code, reason }); Corporate Redesigned shows it with a retry
+            const [cveError, setCveError] = useState(null);
 
             // MK: clear stale CVE results when switching clusters
             useEffect(() => {
                 setCveResults(null);
+                setCveError(null);
                 setCveScanLoading(false);
                 setCveExpandedNodes({});
                 setDebsecanInstalling(false);
@@ -15268,8 +15327,10 @@
                 const sharedStores = (cDatastores.shared || []).sort((a, b) => (a.storage || '').localeCompare(b.storage || ''));
                 const localByNode = Object.entries(cDatastores.local || {}).sort(([a], [b]) => a.localeCompare(b));
                 const sharedNames = new Set(sharedStores.map(s => s.storage)); // avoid dupes under node sections
+                // LW Nov 2026 - Corporate Redesigned: a failed read is said with a retry, never "No datastores"
+                const crDsFail = isCorpRedesigned && crDsReads[clusterId] && crDsReads[clusterId].ok === false ? crDsReads[clusterId] : null;
 
-                if (sharedStores.length === 0 && localByNode.length === 0) {
+                if (sharedStores.length === 0 && localByNode.length === 0 && !crDsFail) {
                     return (
                         <div className="ml-5 py-1 text-[12px]" style={{color: '#728b9a', fontStyle: 'italic'}}>
                             {t('noDatastores') || 'No datastores'}
@@ -15280,7 +15341,7 @@
                 // LW Oct 2026 - Corporate Redesigned: the same rows and the same way in, with meter and state
                 if (isCorpRedesigned) {
                     return <CrDsTree clusterId={clusterId} shared={sharedStores} local={localByNode} skip={sharedNames}
-                        picked={selectedSidebarDatastore}
+                        picked={selectedSidebarDatastore} fail={crDsFail} onRetry={() => fetchClusterDatastores(clusterId)}
                         onOpen={(store, node) => {
                             if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
                             setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
@@ -16325,11 +16386,14 @@
                 } catch (e) { setActiveAlerts([]); }
             };
             const crAutoAlerts = crUseAlertsStore(isCorpRedesigned && activeTab === 'automation' ? (selectedCluster?.id || null) : null);
+            // LW Nov 2026 - a failed read of them is said above the list (with Retry) instead of an empty list
+            const [crAutoAlertsUnread, setCrAutoAlertsUnread] = useState(null);
             useEffect(() => {
-                if (!crAutoAlerts) return;
+                if (!crAutoAlerts) { setCrAutoAlertsUnread(null); return; }
                 const v = crAlAutomationView(crAutoAlerts);
                 setActiveAlertsAway(v.away);
                 setActiveAlerts(v.rows);
+                setCrAutoAlertsUnread(v.unread);
             }, [crAutoAlerts]);
             const ackAlert = async (firedId) => {
                 if (!selectedCluster?.id) return;
@@ -16587,6 +16651,7 @@
 
                 setCveScanLoading(true);
                 setCveResults(null);
+                setCveError(null);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/cve-scan`, {
                         method: 'POST'
@@ -16595,12 +16660,15 @@
                         const data = await response.json();
                         setCveResults(data);
                     } else {
-                        const errData = await response?.json().catch(() => null);
-                        const reason = errData?.error || errData?.message || `HTTP ${response?.status}`;
+                        // authFetch answers null for a lost or aborted connection: no status to name
+                        const errData = response ? await response.json().catch(() => null) : null;
+                        const reason = errData?.error || errData?.message || (response ? `HTTP ${response.status}` : t('cveScanNoAnswer'));
+                        setCveError({ code: response ? response.status : 0, reason });
                         addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + reason, 'error');
                     }
                 } catch (err) {
                     console.error('CVE scan error:', err);
+                    setCveError({ code: 0, reason: err.message || t('cveScanNoAnswer') });
                     addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + err.message, 'error');
                 }
                 setCveScanLoading(false);
@@ -19345,11 +19413,19 @@
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`, { timeout: POLL_TIMEOUT_MS });
                     if (res && res.ok) {
                         const dsData = await res.json();
+                        crNoteDsRead(clusterId, { ok: true, at: Date.now() });
                         setSidebarClusterData(prev => ({ ...prev, [clusterId]: { ...(prev[clusterId] || {}), datastores: dsData } }));
                         if (selectedClusterRef.current?.id !== clusterId) return;
                         setClusterDatastores(dsData);
+                    } else {
+                        const body = res ? await res.json().catch(() => null) : null;
+                        const msg = res ? [body && typeof body.error === 'string' ? body.error : '', `HTTP ${res.status}`].filter(Boolean).join(' - ') : t('crDriftOffline');
+                        crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg });
                     }
-                } catch (e) { /* not critical for sidebar */ }
+                } catch (e) {
+                    /* not critical for sidebar */
+                    crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg: t('crLoadFailed') });
+                }
             };
 
             // NS: keep storage fresh for clusters expanded in the sidebar (not just the
@@ -21168,7 +21244,7 @@
                 setSelectedSidebarVm(null); setSelectedSidebarNode(null);
                 setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(null);
             };
-            // the task center of the preview: where a row leads (out of every global view into its
+            // the task center of the redesign: where a row leads (out of every global view into its
             // cluster) and the inventory it checks first. Lists are what the server let this user see
             const crIntoCluster = (cid) => {
                 const cl = clusters.find(c => c.id === cid);
@@ -21236,7 +21312,11 @@
             if (isCorpRedesigned) {
                 crCrumbs.push({ key: 'all', label: t('breadcrumbAll') || 'All', icon: <Icons.Database />, onClick: crGoAll });
                 if (crGlobalView) crCrumbs.push({ key: 'view', label: crGlobalView });
-                if (selectedGroup) crCrumbs.push({ key: 'group', label: selectedGroup.name, icon: <Icons.Folder /> });
+                // LW Nov 2026 - the group stays in the state when the sidebar picks a cluster or server elsewhere:
+                // it is in the trail only on its own overview or above one of its clusters
+                if (selectedGroup && !crServer && (!selectedCluster || selectedCluster.group_id === selectedGroup.id)) {
+                    crCrumbs.push({ key: 'group', label: selectedGroup.name, icon: <Icons.Folder /> });
+                }
                 if (crServer) crCrumbs.push({ key: crServer.kind, label: crServer.name, icon: crServer.kind === 'pbs' ? <Icons.Shield /> : <Icons.Cloud /> });
                 if (selectedCluster) {
                     crCrumbs.push({ key: 'cluster', label: clusterLabel(selectedCluster), icon: <Icons.Server />,
@@ -21561,6 +21641,15 @@
                                 {/* LW Oct 2026 - Corporate Redesigned: folded to a rail of icons */}
                                 {isCorpRedesigned && crSidebarFolded && (
                                     <CrSidebarRail active={sidebarViewMode} onView={setSidebarViewMode} onExpand={() => crFoldSidebar(false)}
+                                        // LW Nov 2026 - the Tools section of the unfolded sidebar, same conditions
+                                        tools={clusters.length > 0 ? [
+                                            { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests, icon: Icons.Monitor },
+                                            { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology, icon: Icons.Network },
+                                            { id: 'worldmap', show: true, active: sidebarWorldmap, label: t('worldMap') || 'World Map', onClick: openWorldmap, icon: Icons.Globe },
+                                            { id: 'autoinstall', show: canAutoInstall && !haStandby, active: sidebarAutoInstall, label: t('autoInstall'), onClick: () => openAutoInstall(), icon: Icons.Disc },
+                                            { id: 'xhm', show: hasXhmPair, active: sidebarXHM, label: t('xhmTitle') || 'Hypervisor Migration', onClick: openXhm, icon: Icons.FolderInput },
+                                            { id: 'mcevpn', show: clusters.length >= 2, active: sidebarMultiSdn, label: t('mcevpnTitle') || 'Multi-Cluster EVPN', onClick: openMultiSdn, icon: Icons.Layers },
+                                        ].filter(tool => tool.show) : []}
                                         views={[
                                             { id: 'tree', icon: Icons.Server, label: t('treeView') || 'Hosts & VMs' },
                                             { id: 'pools', icon: Icons.Folder, label: t('poolView') || 'Pools' },
@@ -23572,6 +23661,7 @@
                                             <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} initialPick={selectedSidebarDatastore} sharedDatastoreData={clusterDatastores}
                                                 guests={isCorpRedesigned ? clusterResources : undefined}
                                                 crTasks={isCorpRedesigned ? tasks : undefined}
+                                                sharedDatastoreRead={isCorpRedesigned ? crDsReadsRef.current[selectedCluster.id] : undefined}
                                                 crSub={isCorpRedesigned ? crDsSub : undefined} onCrSubShown={isCorpRedesigned ? () => setCrDsSub(null) : undefined}
                                                 onOpenGuest={isCorpRedesigned ? (g) => crTaskNav.openGuest(selectedCluster.id, g) : undefined} />
                                         )}
@@ -23766,6 +23856,18 @@
                                                             <div data-ha-leader-away="alerts" className="flex items-center gap-2 p-3 rounded-lg border border-proxmox-border bg-proxmox-dark text-sm text-gray-400">
                                                                 <Icons.AlertTriangle className="w-4 h-4 text-gray-500 shrink-0" />
                                                                 <span>{t('pgHaLeaderAwayView')}</span>
+                                                            </div>
+                                                        )}
+                                                        {isCorpRedesigned && crAutoAlertsUnread && (
+                                                            <div data-cr-auto-alerts-unread={crAutoAlertsUnread.code || 0} role="alert" className="flex items-center gap-2 p-3 rounded-lg border border-proxmox-border bg-proxmox-dark text-sm text-gray-400">
+                                                                <Icons.AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                                                                <span className="min-w-0">{t('crAutoAlertsUnread').replace('{code}', crAutoAlertsUnread.code && crAutoAlertsUnread.code < 300 && crAutoAlertsUnread.error ? crAutoAlertsUnread.error : crAutoAlertsUnread.code ? `HTTP ${crAutoAlertsUnread.code}` : t('crAlNoAnswer'))}</span>
+                                                                {selectedCluster?.id && (
+                                                                    <button type="button" onClick={() => loadActiveAlerts(selectedCluster.id, true)} data-cr-auto-alerts-retry=""
+                                                                        className="ml-auto px-3 py-1.5 text-xs bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg shrink-0">
+                                                                        {t('retry')}
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         )}
                                                         {activeAlerts.length > 0 && (
@@ -25046,7 +25148,7 @@
                                                 {/* LW Nov 2026 - Corporate Redesigned: the scan state and the two POSTs of this tab, drawn as tiles and a node table */}
                                                 {reportSubTab === 'cve' && isCorpRedesigned && selectedCluster?.id && (
                                                     <CrBoundary key={selectedCluster.id} id="cve">
-                                                    <CrCveScan cluster={selectedCluster} results={cveResults} loading={cveScanLoading} installing={debsecanInstalling}
+                                                    <CrCveScan cluster={selectedCluster} results={cveResults} error={cveError} loading={cveScanLoading} installing={debsecanInstalling}
                                                         readOnly={haReadOnly} onScan={() => runCveScan()} onInstall={() => installDebsecan()}
                                                         onOpenUpdates={() => setActiveTab('updates')} nav={crTaskNav} />
                                                     </CrBoundary>
@@ -25555,6 +25657,12 @@
                                                         setSelectedSidebarNode({ name, clusterId: selectedCluster.id });
                                                     }}
                                                     onOpenTab={(tab, ev) => {
+                                                        // LW Nov 2026 - Corporate Redesigned keeps the update manager on its own tab, a run opens its history
+                                                        if (isCorpRedesigned && ev && ev.kind === 'rolling_update') {
+                                                            crUpdWantTab(selectedCluster.id, 'history');
+                                                            setActiveTab('updates');
+                                                            return;
+                                                        }
                                                         setActiveTab(tab);
                                                         if (isCorpRedesigned && ev && ev.kind === 'drift' && ev.source) {
                                                             setComplianceSubTab('drift');
@@ -25613,7 +25721,7 @@
                                                 {complianceSub === 'drift' && (
                                                     <DriftTab
                                                         clusterId={selectedCluster?.id}
-                                                        clusterName={selectedCluster?.name}
+                                                        clusterName={selectedCluster ? clusterLabel(selectedCluster) : undefined}
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
@@ -30318,6 +30426,7 @@
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                         onOpenGuests={openGuests}
+                                        onOpenTopology={isCorpRedesigned ? openTopology : undefined}
                                         recentEvents={corpEventLog}
                                         canAudit={holds('admin.audit')}
                                         authFetch={authFetch}
@@ -31388,6 +31497,17 @@
                             })()}
                             <div className="corp-status-bar-item">
                                 {(() => {
+                                    // LW Nov 2026 - Corporate Redesigned on All Clusters: the guests of every cluster with a
+                                    // current status, as the dashboard tiles count them (no cluster is selected, so the list
+                                    // below would say 0/0)
+                                    if (isCorpRedesigned && !selectedCluster) {
+                                        const s = crInventory(clusters, allClusterMetrics, { now: Date.now() }).sum;
+                                        if (!s.vms && !s.cts) return <span data-cr-status-guests="">- VMs</span>;
+                                        const run = (s.vms ? s.vms.running : 0) + (s.cts ? s.cts.running : 0);
+                                        const all = (s.vms ? s.vms.total : 0) + (s.cts ? s.cts.total : 0);
+                                        return <span data-cr-status-guests="" title={s.uncounted.length ? crFill(t('crDashUncountedHint'), { clusters: s.uncounted.join(', ') }) : undefined}>
+                                            <strong>{run}</strong>/{all} VMs{s.uncounted.length ? ' *' : ''}</span>;
+                                    }
                                     const vms = clusterResources.filter(r => r.type === 'qemu' || r.type === 'lxc');
                                     const running = vms.filter(r => r.status === 'running').length;
                                     return <span><strong>{running}</strong>/{vms.length} VMs</span>;
@@ -33146,7 +33266,7 @@
 
             return (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100] p-4">
-                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl shadow-2xl">
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-3xl shadow-2xl">
                         <div className="p-6">
                             <div className="flex items-center gap-3 mb-2">
                                 <div className="p-2 bg-proxmox-orange/20 rounded-lg">
@@ -33160,7 +33280,7 @@
                                 {t('layoutSelectionDesc') || 'Choose your preferred interface style. You can change this anytime under My Profile \u2192 Layout Style.'}
                             </p>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                                 {/* Modern */}
                                 <button
                                     onClick={() => pickLayout('modern')}
@@ -33218,6 +33338,40 @@
                                     <div className="text-center">
                                         <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
                                         <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                    </div>
+                                </button>
+                                {/* LW Nov 2026 - Corporate Redesigned, offered from the first login on as under My Profile */}
+                                <button
+                                    onClick={() => pickLayout('corporate-redesigned')}
+                                    disabled={saving}
+                                    data-layout-pick="corporate-redesigned"
+                                    className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
+                                        user?.ui_layout === 'corporate-redesigned'
+                                            ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                            : 'border-proxmox-border hover:border-gray-500'
+                                    } disabled:opacity-60`}
+                                >
+                                    <div className="h-20 rounded mb-3 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                        <div className="absolute left-0 right-0 top-0 h-2.5" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                            <div className="absolute top-0.5 left-1.5 w-4 h-1" style={{ background: '#55b6d0' }} />
+                                        </div>
+                                        <div className="absolute left-0 top-2.5 bottom-0 w-6" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                            <div className="mt-1.5 ml-1.5 space-y-1">
+                                                <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                            </div>
+                                        </div>
+                                        <div className="absolute right-2 left-8 bottom-2 space-y-1" style={{ top: 16, background: '#20333e', border: '1px solid #293d47' }}>
+                                            <div className="h-1.5" style={{ background: '#263c47' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                        </div>
+                                    </div>
+                                    <div className="text-center">
+                                        <span className="text-sm font-medium text-white">{t('layoutCorporateRedesigned')}</span>
+                                        <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                     </div>
                                 </button>
                                 {/* LW Oct 2026 - Cloud, offered from the first login on as under My Profile */}

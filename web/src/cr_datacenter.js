@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): Datacenter > Summary - LW Nov 2026
+        // Corporate Layout - Redesigned: Datacenter > Summary - LW Nov 2026
         // The state of one cluster at a glance, from what the page holds already: the datacenter
         // status the dashboard polls every 30 s (kept per cluster, so a cluster switch never shows
         // the one before), the node list and the guests of the selected cluster (stream and 15 s

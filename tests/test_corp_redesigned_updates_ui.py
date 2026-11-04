@@ -410,8 +410,10 @@ def test_the_classic_section_stays_and_the_preview_has_its_own_tab():
     assert "const body = force ? { reboot, force: true } : { reboot };" in cr
     assert "body: JSON.stringify({ reboot }) });" in cr
     assert cr.count('onStart={startNode}') == 1 and cr.count('onStart={startPbs}') == 1
-    # no package list in the browser's storage
-    assert 'localStorage' not in cr and 'crWrite(' not in cr
+    # no package list in the browser's storage: nothing is written, the one read is the copy a classic
+    # check left there, for Copy as text
+    assert 'localStorage.setItem' not in cr and 'crWrite(' not in cr
+    assert re.findall(r'localStorage\.\w+\([^)]*\)', cr) == ["localStorage.getItem(`updateCheck_${cid}`)"]
     assert '\u2014' not in cr and '\u2013' not in cr
 
 
@@ -958,11 +960,13 @@ def test_runtime_a_finished_run_with_a_failed_node_is_not_green(open_app):
     assert page.locator('[data-cr-upd-run-ok]').count() == 0
     assert 'Node update failed' in page.locator('[data-cr-upd-run-failed]').inner_text()
     assert 'Run a check to see what is left' in page.locator('[data-cr-upd-run-recheck]').inner_text()
-    # no check of its own after the run, hiding it is local
+    # no check of its own after the run; Hide clears the run on the server as classic does,
+    # and this fake has no such route, so the run is hidden here only
     page.wait_for_timeout(1000)
     page.locator('[data-cr-upd-run-dismiss]').click()
     assert page.locator('[data-cr-upd-run]').count() == 0
-    assert _writes(app) == []
+    _poll(app, lambda: _writes(app))
+    assert _writes(app) == [('POST', '/api/clusters/c1/updates/rolling/clear')]
     assert app.errors == []
 
 
@@ -984,7 +988,8 @@ def test_runtime_the_schedule_card_and_its_dialog(open_app):
     _need(page, '[data-cr-upd-dialog="schedule"]', 'the schedule dialog opens')
     sopt = lambda k: page.locator(f'[data-cr-upd-sopt="{k}"]')
     assert sopt('enabled').is_checked() and sopt('include_reboot').is_checked()
-    assert page.locator('[data-cr-upd-dialog="schedule"]').get_by_text('Wait until a rebooted node is back').count() == 0
+    # the switch of the classic dialog, with the stored value (none stored: the route's true)
+    assert sopt('wait_for_reboot').is_checked()
     sopt('include_reboot').uncheck()
     sopt('day').select_option('daily')
     sopt('time').fill('04:15')
@@ -1260,7 +1265,8 @@ def test_runtime_the_next_account_of_the_tab_sees_no_check_of_the_one_before(ope
     page = _tab(app)
     page.wait_for_timeout(300)
     assert page.locator('[data-cr-upd-check-state]').count() == 0, 'no check answer of the account before'
-    assert page.locator('[data-cr-upd-copy]').is_disabled()
+    # Copy works from the server's overview now, never from the check of the account before
+    assert page.locator('[data-cr-upd-copy]').get_attribute('data-cr-upd-copy') == 'model'
     page.locator('[data-cr-table="upd-nodes"] tbody tr', has_text='pve1').first.click()
     _need(page, '[data-cr-upd-pkg-source="node"]', 'the panel reads the node, the check of the account before is gone')
     assert len(_upd(app, 'POST', '/updates/check')) == 1

@@ -1,7 +1,7 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the network of a node - LW Nov 2026
+        // Corporate Redesigned: the network of a node - LW Nov 2026
         // CorporateNodeDetailView (node_modals.js) keeps its reads, the create and edit dialogs and
-        // their saves. For a Proxmox VE node in the preview the Configure > Network sub tab is drawn
+        // their saves. For a Proxmox VE node in the redesign the Configure > Network sub tab is drawn
         // here: the interfaces by kind with what each is built from, what waits for Apply (the diff
         // Proxmox VE keeps for interfaces.new, read from GET .../network/changes) and Apply and
         // Revert behind a summary and a confirmation. Apply has no automatic rollback, and the
@@ -748,7 +748,7 @@
         }
 
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): hardware health and disks of a node - LW Nov 2026
+        // Corporate Redesigned: hardware health and disks of a node - LW Nov 2026
         // Hardware: the lm-sensors rows (GET .../sensors) and the rows of the in-band monitoring
         // (HardwareMonitoringPanel reads GET .../hardware and hands them up) by kind, with value, Max
         // and Critical where a row carries them and a state worked out from those alone. A sensor
@@ -758,7 +758,7 @@
         // at a time), never on open. A value nobody reported says so, in a neutral style.
         // ═══════════════════════════════════════════════════════════
 
-        // an answer as the preview keeps it: the body, or { __crFail } with why the read failed
+        // an answer as Corporate Redesigned keeps it: the body, or { __crFail } with why the read failed
         // (loadTabData hands the classic views null for any failure and the reason is gone)
         async function crNdRead(r) {
             if (!r) return { __crFail: { status: 0, error: '', code: 'NO_ANSWER' } };
@@ -776,6 +776,9 @@
 
         function crNdWhy(t, f) {
             if (!f) return '';
+            // LW Nov 2026 - the node routes name a failed read by code (the English text is the detail)
+            const coded = { UPSTREAM_AUTH: 'crNdWhyAuth', PVE_READ_FAILED: 'crNdWhyPve', PVE_UNREACHABLE: 'crNdWhyOffline' }[f.code];
+            if (coded) return f.status ? `${t(coded)} (HTTP ${f.status})` : t(coded);
             if (f.error) return f.error;
             if (f.code === 'NOT_JSON') return t('crNdNotJson');
             if (f.code === 'NO_ANSWER' || !f.status) return t('crNdNoAnswer');
@@ -963,6 +966,12 @@
         // below their threshold, NVMe wear and critical warning. {} is what a failed read gives too
         const CR_ND_ATA_ERR = [[5, 'crNdErrRealloc', true], [187, 'crNdErrUncorrect', true], [197, 'crNdErrPending', true],
                                [198, 'crNdErrOffline', true], [199, 'crNdErrCrc', false]];
+        // LW Nov 2026 - a SMART answer that carries nothing a reading has
+        function crNdSmartBlank(b) {
+            if (!b || typeof b !== 'object' || Array.isArray(b)) return true;
+            return !(b.health || b.type || (Array.isArray(b.attributes) && b.attributes.length) || (typeof b.text === 'string' && b.text.trim()));
+        }
+
         function crNdSmart(ans) {
             const out = { known: false, temp: { k: 'none' }, errors: [], failing: [], wearUsed: null, critWarn: null };
             if (!ans || typeof ans !== 'object') return out;
@@ -1159,6 +1168,8 @@
                         {!anyLoading && m.rows.length > 0 && (
                             <span className="cr-muted cr-nn-count" data-cr-nh-judged="">{crNnT(t, 'crNhJudged', { j: judged, n: m.rows.length })}</span>
                         )}
+                        {/* LW Nov 2026 - a Refresh after the first read: the rows are the last read until the answer is in */}
+                        <CrNcUpdating on={!!loading && read !== undefined} />
                         <div className="cr-nn-acts">
                             <CrButton icon={<Icons.RotateCw />} onClick={onReload} disabled={loading && lm.state === 'loading'} data-cr-nh-reload="">{t('refresh')}</CrButton>
                         </div>
@@ -1545,7 +1556,9 @@
                 const body = await crNdRead(await authFetch(`${base}/disks/${encodeURIComponent(dev)}/smart`));
                 if (!alive.current) return null;
                 const f = crNdFail(body);
-                const v = f ? { state: 'error', fail: f } : { state: 'ok', data: body };
+                // LW Nov 2026 - the route answers 200 {} when it could not ask the node (get_node_disk_smart): an answer
+                // with no health, type, attributes or text is no reading, and may be a failed one
+                const v = f ? { state: 'error', fail: f } : crNdSmartBlank(body) ? { state: 'empty' } : { state: 'ok', data: body };
                 setSmart(p => ({ ...p, [dev]: v }));
                 return v;
             };
@@ -1577,8 +1590,9 @@
                 setModal({ disk: row.disk, loading: true, data: null, error: null });
                 const v = await readSmart(row.disk);
                 if (!v) return;
+                const why = v.state === 'ok' ? null : v.state === 'empty' ? t('crNdSmartBlankHint') : crNdWhy(t, v.fail);
                 setModal(cur => (cur && cur.disk === row.disk
-                    ? { disk: row.disk, loading: false, data: v.state === 'ok' ? v.data : null, error: v.state === 'ok' ? null : crNdWhy(t, v.fail) }
+                    ? { disk: row.disk, loading: false, data: v.state === 'ok' ? v.data : null, error: why }
                     : cur));
             };
 
@@ -1593,6 +1607,7 @@
                 if (!s) return notRead;
                 if (s.state === 'reading') return <span className="cr-muted"><Icons.RotateCw className="w-3 h-3 animate-spin inline" /> {t('crNdReadingOne')}</span>;
                 if (s.state === 'error') return <span className="cr-nh-bad" title={crNdWhy(t, s.fail)}>{t('crNdSmartFailed')}</span>;
+                if (s.state === 'empty') return <span className="cr-muted cr-nd-unread" title={t('crNdSmartBlankHint')} data-cr-nd-smart-blank="">{t('crNdSmartBlank')}</span>;
                 const p = crNdSmart(s.data);
                 if (p.temp.k === 'num') return <span className="cr-mono">{p.temp.v} °C</span>;
                 if (p.temp.k === 'bad') return <span className="cr-nh-bad" title={t('crNhUnreadableHint')}>{t('crNhUnreadable')}: <span className="cr-mono">{p.temp.raw}</span></span>;
@@ -1632,6 +1647,7 @@
                 if (!s) return notRead;
                 if (s.state === 'reading') return <span className="cr-muted">{t('crNdReadingOne')}</span>;
                 if (s.state === 'error') return <span className="cr-nh-bad" title={crNdWhy(t, s.fail)}>{t('crNdSmartFailed')}</span>;
+                if (s.state === 'empty') return <span className="cr-muted cr-nd-unread" title={t('crNdSmartBlankHint')}>{t('crNdSmartBlank')}</span>;
                 return <span className="cr-muted cr-nh-none">{t('crNhNotReported')}</span>;
             };
             const useCell = (r) => {
@@ -1655,6 +1671,7 @@
                     badge={m.state === 'ok' ? (
                         <>
                             <span className="cr-muted cr-nn-count">{crNnT(t, 'crNdCount', { n: m.rows.length })}</span>
+                            <CrNcUpdating on={!!loading} />
                             {failed > 0 && <span data-cr-nd-failed=""><CrBadge tone="error">{crNnT(t, 'crNdFailedBadge', { n: failed })}</CrBadge></span>}
                             {unknown > 0 && <span data-cr-nd-unknown=""><CrBadge tone="neutral" dot={false}>{crNnT(t, 'crNdUnknownBadge', { n: unknown })}</CrBadge></span>}
                         </>
@@ -1779,11 +1796,22 @@
             return typeof n === 'number' && Number.isFinite(n) ? n : null;
         };
         const CR_NS_RANK = { critical: 3, warning: 2, info: 1 };
-        // get_node_summary answers {} when it cannot read the node, a failed request is null here
-        function crNsSummaryState(s) {
+        // get_node_summary answers {} when it cannot read the node, a failed request is null here.
+        // LW Nov 2026 - on XCP-ng it is the host record (get_node_details: hostname, product_version, no uptime)
+        function crNsSummaryState(s, kind) {
             if (s === undefined) return 'loading';
             if (s === null || typeof s !== 'object') return 'error';
+            if (kind === 'xcpng') return s.product_version || s.hostname ? 'ok' : 'empty';
             return s.pveversion || crNsNum(s.uptime) ? 'ok' : 'empty';
+        }
+
+        // the node's state from its metrics row, as the summary and the header judge it: offline (the placeholder
+        // row of a node the server could not read is marked offline too), online, a status that is neither, or no row
+        function crNsLive(metrics) {
+            const m = metrics && typeof metrics === 'object' && Object.keys(metrics).length ? metrics : null;
+            const status = m ? String(m.status || '') : '';
+            const state = !m ? 'none' : (status === 'offline' || m.offline === true) ? 'offline' : status === 'online' ? 'online' : 'unknown';
+            return { m, status, state, live: state === 'online' };
         }
 
         // the hardware the page has read: the lm-sensors answer of the Hardware tab and the rows the
@@ -1820,17 +1848,16 @@
             return { state: 'ok', n: mine.length, sev, acked };
         }
 
-        function crNsModel({ metrics, summary, hw, alerts, node, now }) {
+        function crNsModel({ metrics, summary, hw, alerts, node, now, kind }) {
             if (!crNsNum(now)) now = Date.now();
-            const m = metrics && typeof metrics === 'object' && Object.keys(metrics).length ? metrics : null;
-            const sum = crNsSummaryState(summary);
+            const sum = crNsSummaryState(summary, kind);
             const s = sum === 'ok' ? summary : null;
+            // XCP-ng reports no swap and no root file system of the host: not applicable, never missing
+            const xcp = kind === 'xcpng';
             const items = [];
             const missing = [];
             const add = (id, level, key, vars) => items.push({ id, level, key, vars: vars || {} });
-            const status = m ? String(m.status || '') : '';
-            const offline = !!m && (status === 'offline' || m.offline === true);
-            const state = !m ? 'none' : offline ? 'offline' : status === 'online' ? 'online' : 'unknown';
+            const { m, status, state } = crNsLive(metrics);
             if (state === 'offline') add('status', 'critical', 'crNsOffline');
             else if (state === 'unknown') add('status', 'warning', 'crNsStatusUnknown', { status: status || '-' });
             else if (state === 'none') missing.push('status');
@@ -1859,9 +1886,9 @@
             };
             judge('cpu', cpu, 'crNsCpuHigh');
             judge('mem', mem, 'crNsMemHigh');
-            if (!noSwap) judge('swap', swap, 'crNsSwapHigh');
-            // LW Nov 2026 - the root disk is storage: the storage pair of the preview (crStoreTone)
-            if (root == null) missing.push('root');
+            if (!noSwap && !(xcp && swap == null)) judge('swap', swap, 'crNsSwapHigh');
+            // LW Nov 2026 - the root disk is storage: the storage pair of Corporate Redesigned (crStoreTone)
+            if (root == null) { if (!xcp) missing.push('root'); }
             else if (crStoreTone(root) !== 'success') {
                 add('root', crStoreTone(root) === 'error' ? 'critical' : 'warning', 'crNsRootHigh',
                     { v: root.toFixed(1), lim: crStoreTone(root) === 'error' ? CR_STORE_CRIT : CR_STORE_WARN, warn: CR_STORE_WARN, crit: CR_STORE_CRIT });
@@ -1869,7 +1896,8 @@
 
             const la = s && Array.isArray(s.loadavg) ? s.loadavg : (live && Array.isArray(m.loadavg) ? m.loadavg : null);
             const load = la ? [0, 1, 2].map(i => crNsNum(la[i])) : null;
-            const cpus = crNsNum(s && s.cpuinfo && s.cpuinfo.cpus) || (live ? crNsNum(m.cpuinfo && m.cpuinfo.cpus) : null);
+            const cpus = crNsNum(s && s.cpuinfo && s.cpuinfo.cpus) || (xcp ? crNsNum(s && s.cpu_count) : null)
+                || (live ? crNsNum(m.cpuinfo && m.cpuinfo.cpus) : null);
             const loadBad = !!la && load[0] == null;
             if (!la) missing.push('load');
             else if (load[0] != null && cpus > 0 && load[0] > cpus) add('load', 'warning', 'crNsLoadHigh', { v: load[0].toFixed(2), n: cpus });
@@ -1904,7 +1932,8 @@
             const alAge = al.at != null ? Math.max(0, now - al.at) : null;
             const ksm = live && s && s.ksm ? crNsNum(s.ksm.shared) : null;
             return { state, sum, cpu, mem, memUsed, memTotal, ksm, swap, noSwap, swapUsed, swapTotal, root, rootUsed, rootTotal,
-                     load, loadBad, cpus, up, hw: hwm, alerts: al, items, missing, overall, failed, hwAge, alAge };
+                     load, loadBad, cpus, up, hw: hwm, alerts: al, items, missing, overall, failed, hwAge, alAge,
+                     naSwap: xcp && swap == null && !noSwap, naRoot: xcp && root == null };
         }
 
         // --- tasks --------------------------------------------------------------------------------
@@ -1974,10 +2003,11 @@
             return min < 60 ? crNnT(t, 'crNsReadMin', { n: min }) : crNnT(t, 'crNsReadHours', { n: Math.floor(min / 60) });
         }
 
-        function CrNodeHealth({ node, clusterId, metrics, summary, hw, loading, onPerf, onHardware, onReload }) {
+        function CrNodeHealth({ node, clusterId, kind, metrics, summary, hw, loading, onPerf, onHardware, onReload }) {
             const { t } = useTranslation();
             const seen = crUseAlertsSeen(clusterId);
-            const m = crNsModel({ metrics, summary, hw, alerts: seen, node, now: Date.now() });
+            const m = crNsModel({ metrics, summary, hw, alerts: seen, node, now: Date.now(), kind });
+            const na = <span className="cr-muted cr-nh-none cr-ns-soft" title={t('crNsNotOnXcp')}>{t('crVmNotApplicable')}</span>;
             const nr = <span className="cr-muted cr-nh-none cr-ns-soft">{t('crNsNotReported')}</span>;
             const tone = (v, store) => { const x = store ? crStoreTone(v) : crTone(v); return x === 'error' || x === 'warning' ? x : undefined; };
             const level = (id) => { const it = m.items.find(i => i.id === id && i.level !== 'info'); return it ? (it.level === 'critical' ? 'error' : 'warning') : undefined; };
@@ -2009,12 +2039,12 @@
                         <CrStat id="ns-mem" label={t('memory')} value={m.mem != null ? pct(m.mem) : nr} meter={m.mem != null ? m.mem : null}
                             tone={tone(m.mem)} onClick={onPerf} title={t('crNsToPerf')}
                             sub={m.mem != null ? `${formatBytes(m.memUsed)} / ${formatBytes(m.memTotal)}${m.ksm != null ? crNnT(t, 'crNsKsm', { v: formatBytes(m.ksm) }) : ''}` : ''} />
-                        <CrStat id="ns-swap" label={t('swap')} value={m.noSwap ? t('crNsSwapNone') : m.swap != null ? pct(m.swap) : nr}
+                        <CrStat id="ns-swap" label={t('swap')} value={m.noSwap ? t('crNsSwapNone') : m.swap != null ? pct(m.swap) : m.naSwap ? na : nr}
                             meter={m.swap != null ? m.swap : null} tone={tone(m.swap)}
-                            sub={m.noSwap ? t('crNsSwapNoneSub') : m.swap != null ? `${formatBytes(m.swapUsed)} / ${formatBytes(m.swapTotal)}` : ''} />
-                        <CrStat id="ns-root" label={t('crNsRoot')} value={m.root != null ? pct(m.root) : nr} meter={m.root != null ? m.root : null}
+                            sub={m.noSwap ? t('crNsSwapNoneSub') : m.swap != null ? `${formatBytes(m.swapUsed)} / ${formatBytes(m.swapTotal)}` : m.naSwap ? t('crNsNotOnXcp') : ''} />
+                        <CrStat id="ns-root" label={t('crNsRoot')} value={m.root != null ? pct(m.root) : m.naRoot ? na : nr} meter={m.root != null ? m.root : null}
                             meterTone={m.root != null ? crStoreTone(m.root) : undefined} title={crStoreScale(t)}
-                            tone={tone(m.root, true)} sub={m.root != null ? `${formatBytes(m.rootUsed)} / ${formatBytes(m.rootTotal)}` : ''} />
+                            tone={tone(m.root, true)} sub={m.root != null ? `${formatBytes(m.rootUsed)} / ${formatBytes(m.rootTotal)}` : m.naRoot ? t('crNsNotOnXcp') : ''} />
                         <CrStat id="ns-load" label={t('crNsLoad')} tone={level('load')}
                             value={m.loadBad ? <span className="cr-nh-bad cr-ns-soft">{t('crNhUnreadable')}</span> : m.load && m.load[0] != null ? m.load[0].toFixed(2) : nr}
                             sub={loadSub} />
@@ -2071,7 +2101,12 @@
         // the open task: its log (the task center's reader), and while it runs its status every 2 s,
         // so the row ends when the task does; then the list is read again for the end time
         function CrNtLog({ row, kind, authFetch, onEnded, onClose, t }) {
-            const log = crUseTaskLog(row, true, authFetch, t);
+            // LW Nov 2026 - the view makes a new authFetch on every render; the log reader keys its read on the function,
+            // so it gets one that stays, or every dashboard render would read the log again
+            const fetchRef = useRef(authFetch);
+            fetchRef.current = authFetch;
+            const stableFetch = useCallback((...a) => (fetchRef.current ? fetchRef.current(...a) : Promise.resolve(null)), []);
+            const log = crUseTaskLog(row, true, authFetch ? stableFetch : null, t);
             const st = crNtState(row, kind);
             const [statusFail, setStatusFail] = useState(false);
             const running = st === 'running' && kind === 'proxmox';
@@ -2176,6 +2211,8 @@
                     <div className="cr-nn-bar">
                         <h3 className="cr-nn-title">{t('tasks')}</h3>
                         {list && <span className="cr-muted cr-nn-count" data-cr-nt-scope="">{crNnT(t, 'crNtScope', { n: rows.length, node })}</span>}
+                        {/* LW Nov 2026 - a Refresh after the first read: the rows are the last read until the answer is in */}
+                        <CrNcUpdating on={!!loading && read !== undefined} />
                         <div className="cr-nn-acts">
                             <CrButton icon={<Icons.RotateCw />} onClick={onReload} disabled={loading && read === undefined} data-cr-nt-reload="">{t('refresh')}</CrButton>
                         </div>

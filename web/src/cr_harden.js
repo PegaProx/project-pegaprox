@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): Automation > Harden PVE Node - LW Nov 2026
+        // Corporate Layout - Redesigned: Automation > Harden PVE Node - LW Nov 2026
         // The three routes of the classic tab with the same request bodies: the check (one
         // node, always verbose so the detail panel has the evidence), the apply (one POST per
         // control, force only for sshd_hardening after the red tick) and the rollback. What

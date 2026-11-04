@@ -40,7 +40,8 @@
         // Settings > Server. A public read, so the login page knows the language as well.
         // Whatever goes wrong here counts as no lock, the server holds the line anyway.
         const NO_UI_LOCK = { layout: '', language: '', admins: false };
-        const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'cloud'];
+        // LW Nov 2026 - the redesign can be pinned as well (UI_LAYOUT_LOCKS of api/helpers.py)
+        const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'corporate-redesigned', 'cloud'];
 
         function cleanUiLock(d) {
             if (!d || typeof d !== 'object') return null;
@@ -292,7 +293,8 @@
         // the user's own Corporate or Cloud layout for the server default.
         function lockedTheme(theme, u, lockedLayout, defaultTheme) {
             if (lockedLayout === 'cloud') return 'cloud';
-            if (lockedLayout === 'corporate' && theme !== 'system') {
+            // LW Nov 2026 - a pinned Corporate Redesigned wears the Corporate palette as well
+            if ((lockedLayout === 'corporate' || lockedLayout === 'corporate-redesigned') && theme !== 'system') {
                 let light = false;
                 try { light = localStorage.getItem('corp-theme') === 'light'; } catch (_) {}
                 return light ? 'corporateLight' : 'corporateDark';
@@ -819,9 +821,10 @@
             const { user, layoutLock } = useAuth();
             // a pinned layout (#1189) wins over the user's own, which stays stored
             const layout = layoutLock || user?.ui_layout || 'modern';
-            // LW Oct 2026 - Corporate Redesigned (Preview) is Corporate plus a scoped skin:
+            // LW Oct 2026 - Corporate Redesigned is Corporate plus a scoped skin:
             // every isCorporate branch stays, the body keeps data-layout="corporate" and
-            // gets data-corp-variant on top. A corporate lock gives plain 'corporate' here
+            // gets data-corp-variant on top. A corporate lock gives plain 'corporate' here,
+            // a corporate-redesigned lock the redesign
             const isCorpRedesigned = layout === 'corporate-redesigned';
             const isCorporate = layout === 'corporate' || isCorpRedesigned;
             // NS 2026-06-05 — Cloud skin (Preview). Third layout alongside modern/corporate.

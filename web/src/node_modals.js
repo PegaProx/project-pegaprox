@@ -5368,6 +5368,9 @@
             // LW Oct 2026 (#763, #954) - entering maintenance asks with the evacuation options
             const [showMaintConfirm, setShowMaintConfirm] = useState(false);
             const [maintOptions, setMaintOptions] = useState({});
+            // LW Nov 2026 - Actions > Update asks first: the redesign with the Updates tab's dialog (row: what the last
+            // check said of this node), classic with its node card's question (reboot: the box)
+            const [updAsk, setUpdAsk] = useState(null);
             const [configSubTab, setConfigSubTab] = useState('network');
             const [zfsPool, setZfsPool] = useState(null);  // the ZFS pool shown in full
             const [monitorSubTab, setMonitorSubTab] = useState('performance');
@@ -5395,12 +5398,12 @@
             const [nodeIp, setNodeIp] = useState('');
             // LW Nov 2026 - where /ip took the address from; a *_fallback is a stand-in, not the node's own
             const [nodeIpSource, setNodeIpSource] = useState('');
-            // LW Nov 2026 - the preview draws the in-band (BMC) rows with the other sensors: the panel hands up what it read
+            // LW Nov 2026 - the redesign draws the in-band (BMC) rows with the other sensors: the panel hands up what it read
             const [crBmc, setCrBmc] = useState(null);
             const crHw = isCorpRedesigned && crKind === 'proxmox';
             // ... and keeps it until the view shows another node
-            useEffect(() => { setCrBmc(null); }, [clusterId, node]);
-            // LW Nov 2026 - unsaved edits of a configure card in the preview: the cards report them, and a
+            useEffect(() => { setCrBmc(null); setUpdAsk(null); }, [clusterId, node]);
+            // LW Nov 2026 - unsaved edits of a configure card in the redesign: the cards report them, and a
             // sub tab, a node tab, Back or a click that leaves the view asks first (keep or discard).
             // Classic draws no such card, so every guard below goes straight on there
             const crRootRef = useRef(null);
@@ -5454,7 +5457,7 @@
             const perfNet = perfZoom.source('net_in', 'net_out');
 
             // LW: Feb 2026 - save handler for configure tab edits
-            // LW Nov 2026 - it answers whether the write went through, so the preview keeps an edit open after a refusal
+            // LW Nov 2026 - it answers whether the write went through, so the redesign keeps an edit open after a refusal
             const handleSave = async (endpoint, payload, successMsg, method) => {
                 setSaving(true);
                 let ok = false;
@@ -5481,7 +5484,7 @@
                 return ok;
             };
 
-            // LW Nov 2026 - the delete of one interface, from the classic table and from the preview
+            // LW Nov 2026 - the delete of one interface, from the classic table and from the redesign
             const deleteNetIface = async (iface) => {
                 if (!confirm(`${t('delete')} ${iface.iface}?`)) return;
                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE' });
@@ -5496,7 +5499,7 @@
                 return handleSave(`repos/${repo.id || repo.index}`, payload, repo.enabled ? 'Repository disabled' : 'Repository enabled');
             };
 
-            // LW Nov 2026 - apt update of the node, from the classic button and from the preview
+            // LW Nov 2026 - apt update of the node, from the classic button and from the redesign
             const handleAptUpdate = async () => {
                 const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' });
                 addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error');
@@ -5515,6 +5518,19 @@
                     if (res && res.ok) { ok = true; addToast('Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
                     else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || 'Upload failed', 'error'); }
                 } catch (e) { addToast('Upload failed', 'error'); }
+                setSaving(false);
+                return ok;
+            };
+
+            // LW Nov 2026 - back to the self-signed certificate, the classic dialog's request (pveproxy restarts)
+            const handleCertRevert = async () => {
+                setSaving(true);
+                let ok = false;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom?restart=true`, { method: 'DELETE' });
+                    if (res && res.ok) { ok = true; addToast(t('certDeleted') || 'Certificate deleted', 'success'); loadTabData('system'); }
+                    else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || t('deleteFailed') || 'Delete failed', 'error'); }
+                } catch (e) { addToast(t('connectionError'), 'error'); }
                 setSaving(false);
                 return ok;
             };
@@ -5565,7 +5581,7 @@
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
                             `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
-                            // LW Nov 2026 - nothing below reads these two; the preview leaves them out, so a
+                            // LW Nov 2026 - nothing below reads these two; the redesign leaves them out, so a
                             // read after a Save does not wait for sensors over SSH
                             ...(crHw ? [] : [
                                 `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
@@ -5595,7 +5611,7 @@
                     };
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
-                    // LW Nov 2026 - the preview keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
+                    // LW Nov 2026 - the redesign keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
                     const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks');
                     const results = await Promise.all(urls.map(u => u.endsWith('/dns')
                         ? authFetch(u).then(readNodeDns)
@@ -5613,7 +5629,7 @@
                         }
                         else if (tab === 'network') newData.network = results[0];
                         else if (tab === 'system') {
-                            // a failed read stays null, so the next visit to the tab asks again; the preview
+                            // a failed read stays null, so the next visit to the tab asks again; the redesign
                             // keeps why the others failed and hands the classic fields what they had before
                             const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
                             if (crKeep) newData.sysFail = { hosts: crNdFail(results[1]), time: crNdFail(results[2]), syslog: crNdFail(results[3]), certificates: crNdFail(results[4]) };
@@ -5630,7 +5646,7 @@
                             newData.tempHistory = (results[1] && Array.isArray(results[1].series)) ? results[1].series : null;
                         }
                         else if (tab === 'disks') {
-                            // the tables below get null for a failed read, as before; the preview keeps the reasons
+                            // the tables below get null for a failed read, as before; the redesign keeps the reasons
                             const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
                             if (crKeep) newData.disksRead = results;
                             newData.disks = got[0] || [];
@@ -5639,7 +5655,7 @@
                             newData.zfs = got[3] || [];
                         }
                         else if (tab === 'repos') {
-                            // LW Nov 2026 - the classic table gets what it had; the preview keeps the answer or why it failed
+                            // LW Nov 2026 - the classic table gets what it had; the redesign keeps the answer or why it failed
                             const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
                             if (crKeep) newData.reposRead = results[0];
                             newData.repos = got[0]?.repositories || [];
@@ -5718,7 +5734,7 @@
             };
 
             const nodeVms = (clusterResources || []).filter(r => r.node === node && (r.type === 'qemu' || r.type === 'lxc'));
-            // LW Nov 2026 - the System sub tabs the preview draws itself for a PVE node
+            // LW Nov 2026 - the System sub tabs the redesign draws itself for a PVE node
             const crSys = crHw && ['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab);
             // LW Nov 2026 - and these five from the disks, repos and ceph reads (cr_nodestore.js)
             const crStore = crHw && ['lvm', 'lvmthin', 'zfs', 'repos', 'ceph'].includes(configSubTab);
@@ -5740,6 +5756,39 @@
             const rootTotal = metrics.disk_total || 0;
             const rootPercent = rootTotal > 0 ? ((rootUsed / rootTotal) * 100).toFixed(1) : '0.0';
 
+            // LW Nov 2026 - one node's update. The redesign takes the count and kernel flag of the last check from the
+            // server's copy (it asks no node), read when the question opens; until then the count is '-', never 0
+            const { can: crCan } = crVmCan();
+            const crAskUpdate = async () => {
+                if (!isCorpRedesigned) { setUpdAsk({ classic: true, reboot: true }); return; }
+                setUpdAsk({ reading: true, row: { name: node, m: metrics, count: '-', kernel: false } });
+                const r = await authFetch(`${API_URL}/updates-overview`);
+                const d = r && r.ok ? await r.json().catch(() => null) : null;
+                if (navKeyRef.current !== navKey) return;
+                const h = d && Array.isArray(d.hosts) ? d.hosts.find(x => x && x.kind === 'node' && x.cluster_id === clusterId && String(x.name) === node && x.ok) : null;
+                // the reboot default follows the kernel flag, so the question can be started only once this
+                // read ended, found or not; the dialog stays mounted and keeps what was chosen in it
+                setUpdAsk(a => (a && a.row && a.row.name === node && !a.classic
+                    ? { reading: false, row: h ? { ...a.row, count: typeof h.count === 'number' ? h.count : '-', kernel: !!h.kernel } : a.row } : a));
+            };
+            // the Updates tab's request: the reboot as chosen, force only after the dialog asked again
+            const crStartUpdate = async (name, reboot, force) => {
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${name}/update`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(force ? { reboot, force: true } : { reboot }),
+                });
+                const d = res ? await res.json().catch(() => null) : null;
+                if (res && !res.ok && d && crUpdNeedsForce(d.error, d.code)) return { needForce: true };
+                if (res && (res.ok || (d && d.success))) { setUpdAsk(null); addToast(`${t('updateStartedFor')} ${name}`, 'success'); return { ok: true }; }
+                if (d && d.code === 'MISSING_PERMISSION' && d.required === 'node.reboot') return { err: t('crUpdWhyRebootPerm') };
+                return { err: (d && d.error) || (res ? `HTTP ${res.status}` : t('crDcNoAnswer')) };
+            };
+            // LW Nov 2026 - the header of the redesign takes the node's state as its health card does (crNsLive): a
+            // node not online has no live figures, and a cluster host /ip fell back to is marked as a stand-in
+            const crLive = crNsLive(clusterMetrics?.[node]);
+            const crHeadState = crLive.state === 'offline' ? 'offline' : isMaint ? 'maintenance' : crLive.state === 'online' ? 'online' : 'unknown';
+            const crIpStandIn = /_fallback$/.test(String(nodeIpSource || ''));
+
             // the Actions menu of the header, shared with the header of Corporate Redesigned
             const nodeActionsMenu = (
                 <div className="relative">
@@ -5758,7 +5807,8 @@
                             <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
                                 <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
                             </button>
-                            <button onClick={() => { onStartUpdate(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                            <button onClick={() => { setShowActionsMenu(false); crAskUpdate(); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}
+                                data-corp-node-update="">
                                 <Icons.Download className="w-3.5 h-3.5" /> {t('update') || 'Update'}
                             </button>
                             <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
@@ -5791,15 +5841,18 @@
                     {/* Header Bar */}
                     {isCorpRedesigned ? (
                         <CrObjectHeader kind="node" icon={<Icons.Server />} name={node} onBack={() => crGuard(onBack)}
-                            status={<CrStateBadge state={isMaint ? 'maintenance' : nodeOnline ? 'online' : 'offline'} />}
+                            status={crHeadState === 'unknown'
+                                ? <span data-cr-state="unknown" title={t('crNsStatusNotLive')}><CrBadge tone="neutral">{t('unknown')}</CrBadge></span>
+                                : <CrStateBadge state={crHeadState} />}
                             meta={[
                                 { key: 'cluster', label: t('cluster'), value: clusterName },
-                                { key: 'ip', label: t('ipAddress'), value: nodeIp, mono: true },
+                                { key: 'ip', label: t('ipAddress'), mono: true, value: nodeIp && crIpStandIn
+                                    ? <span data-cr-node-ip-standin="" title={t('crNcIpStandIn')}>{nodeIp} <span className="cr-muted">({t('crNcIpStandIn')})</span></span> : nodeIp },
                                 { key: 'pve', label: t('pveVersion'), value: data.summary?.pveversion || metrics.pveversion },
-                                { key: 'cpu', label: t('cpu'), value: metrics.cpu_percent != null ? `${cpuPercent}%` : null },
-                                { key: 'mem', label: t('memory'), value: ramTotal > 0 ? `${ramPercent}% (${formatBytes(ramUsed)} / ${formatBytes(ramTotal)})` : null },
+                                { key: 'cpu', label: t('cpu'), value: crLive.live && crNsNum(metrics.cpu_percent) != null ? `${cpuPercent}%` : null },
+                                { key: 'mem', label: t('memory'), value: crLive.live && ramTotal > 0 ? `${ramPercent}% (${formatBytes(ramUsed)} / ${formatBytes(ramTotal)})` : null },
                                 { key: 'guests', label: t('guests'), value: `${runningVms}/${nodeVms.length} ${t('running').toLowerCase()}` },
-                                { key: 'uptime', label: t('uptime'), value: crUptime(data.summary?.uptime || metrics.uptime) },
+                                { key: 'uptime', label: t('uptime'), value: crLive.live || crNsNum(data.summary?.uptime) > 0 ? crUptime(data.summary?.uptime || metrics.uptime) : null },
                             ]}
                             actions={(
                                 <>
@@ -5862,12 +5915,12 @@
                             </div>
                         )}
 
-                        {/* LW Nov 2026 - the preview: the node's health from what the view holds (cr_node.js), for a
+                        {/* LW Nov 2026 - the redesign: the node's health from what the view holds (cr_node.js), for a
                             PVE node the system information and the guests under it in the same cards (cr_nodecfg.js) */}
                         {activeDetailTab === 'summary' && isCorpRedesigned && (
                             <div className={crHw ? 'cr-nc-page' : undefined}>
                                 <CrBoundary key={navKey} id="node-health">
-                                    <CrNodeHealth node={node} clusterId={clusterId} metrics={clusterMetrics?.[node]} summary={data.summary}
+                                    <CrNodeHealth node={node} clusterId={clusterId} kind={crKind} metrics={clusterMetrics?.[node]} summary={data.summary}
                                         hw={crHw ? { read: data.sensorsRead, readAt: data.sensorsAt, bmc: crBmc } : null} loading={loading}
                                         onPerf={() => { setMonitorSubTab('performance'); setActiveDetailTab('monitor'); }}
                                         onHardware={() => setActiveDetailTab('hardware')} onReload={() => loadTabData('summary')} />
@@ -5903,7 +5956,7 @@
                                     </table>
                                 </div>
 
-                                {/* Capacity & Usage card - LW Nov 2026: the preview has these figures in its health tiles, with their limits */}
+                                {/* Capacity & Usage card - LW Nov 2026: the redesign has these figures in its health tiles, with their limits */}
                                 {!isCorpRedesigned && (
                                 <div style={{border: '1px solid var(--corp-border-medium)'}}>
                                     <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
@@ -5976,11 +6029,11 @@
                             <div className="flex gap-0" style={{minHeight: '400px'}}>
                                 <div className="corp-subnav">
                                     <button className={`corp-subnav-item ${monitorSubTab === 'performance' ? 'active' : ''}`} onClick={() => setMonitorSubTab('performance')}>{t('performance')}</button>
-                                    <button className={`corp-subnav-item ${monitorSubTab === 'tasks' ? 'active' : ''}`} onClick={() => { setMonitorSubTab('tasks'); if (!data.tasks) loadTabData('tasks'); }}>{t('tasks')}</button>
+                                    <button className={`corp-subnav-item ${monitorSubTab === 'tasks' ? 'active' : ''}`} onClick={() => { setMonitorSubTab('tasks'); if (monitorSubTab === 'tasks' && !data.tasks) loadTabData('tasks'); }}>{t('tasks')}</button>
                                     <button className={`corp-subnav-item ${monitorSubTab === 'timeline' ? 'active' : ''}`} onClick={() => setMonitorSubTab('timeline')} data-corp-node-timeline>{t('tlTab')}</button>
                                 </div>
                                 <div className="flex-1 pl-4">
-                                    {/* LW Nov 2026 - the figures, the charts and their data quality of the preview (cr_perf.js) */}
+                                    {/* LW Nov 2026 - the figures, the charts and their data quality of the redesign (cr_perf.js) */}
                                     {monitorSubTab === 'performance' && isCorpRedesigned && (
                                         <CrBoundary key={navKey} id="node-perf">
                                             <CrNodePerf node={node} clusterId={clusterId} kind={crKind} live={clusterMetrics?.[node]} summary={data.summary}
@@ -6034,7 +6087,7 @@
                                             } : undefined} />
                                     )}
                                     {monitorSubTab === 'tasks' && (isCorpRedesigned ? (
-                                        // LW Nov 2026 - the preview: filters, search and the log of a task (cr_node.js)
+                                        // LW Nov 2026 - the redesign: filters, search and the log of a task (cr_node.js)
                                         <CrBoundary key={navKey} id="node-tasks">
                                             <CrNodeTasks node={node} clusterId={clusterId} kind={crKind} read={data.tasksRead} loading={loading}
                                                 authFetch={authFetch} onReload={() => loadTabData('tasks')} guests={nodeVms} onOpenGuest={onSelectVm} />
@@ -6069,28 +6122,30 @@
                         {/* Configure Tab */}
                         {activeDetailTab === 'configure' && (
                             <div className="flex gap-0" style={{minHeight: '400px'}}>
+                                {/* LW Nov 2026 - the effect on the sub tab reads a tab on its first visit; a click on the open
+                                    one reads again only what is missing, so a first visit is one read, not two */}
                                 <div className="corp-subnav" onClickCapture={crHw ? (e => crNcSubnavHold(e, crIsDirty, crAsk)) : undefined}>
                                     <div className="corp-subnav-header">{t('network')}</div>
                                     <button className={`corp-subnav-item ${configSubTab === 'network' ? 'active' : ''}`} onClick={() => setConfigSubTab('network')}>{t('network')}</button>
                                     <div className="corp-subnav-header">{t('systemInfo')}</div>
-                                    <button className={`corp-subnav-item ${configSubTab === 'dns' ? 'active' : ''}`} onClick={() => { setConfigSubTab('dns'); if (!data.dns) loadTabData('system'); }}>{t('dns')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'hosts' ? 'active' : ''}`} onClick={() => { setConfigSubTab('hosts'); if (data.dns === undefined) loadTabData('system'); }}>{t('hostsFile')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'time' ? 'active' : ''}`} onClick={() => { setConfigSubTab('time'); if (data.dns === undefined) loadTabData('system'); }}>{t('timeConfig')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'certs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('certs'); if (data.dns === undefined) loadTabData('system'); }}>{t('certificates')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'syslog' ? 'active' : ''}`} onClick={() => { setConfigSubTab('syslog'); if (data.dns === undefined) loadTabData('system'); }}>{t('syslog')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'dns' ? 'active' : ''}`} onClick={() => { setConfigSubTab('dns'); if (configSubTab === 'dns' && !data.dns) loadTabData('system'); }}>{t('dns')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'hosts' ? 'active' : ''}`} onClick={() => { setConfigSubTab('hosts'); if (configSubTab === 'hosts' && data.dns === undefined) loadTabData('system'); }}>{t('hostsFile')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'time' ? 'active' : ''}`} onClick={() => { setConfigSubTab('time'); if (configSubTab === 'time' && data.dns === undefined) loadTabData('system'); }}>{t('timeConfig')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'certs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('certs'); if (configSubTab === 'certs' && data.dns === undefined) loadTabData('system'); }}>{t('certificates')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'syslog' ? 'active' : ''}`} onClick={() => { setConfigSubTab('syslog'); if (configSubTab === 'syslog' && data.dns === undefined) loadTabData('system'); }}>{t('syslog')}</button>
                                     <div className="corp-subnav-header">{t('storage')}</div>
-                                    <button className={`corp-subnav-item ${configSubTab === 'disks' ? 'active' : ''}`} onClick={() => { setConfigSubTab('disks'); if (!data.disks) loadTabData('disks'); }}>{t('disks')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'lvm' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvm'); if (!data.disks) loadTabData('disks'); }}>{t('lvmStorage')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'lvmthin' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvmthin'); if (!data.disks) loadTabData('disks'); }}>{t('lvmThinStorage')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'zfs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('zfs'); if (!data.disks) loadTabData('disks'); }}>{t('zfsStorage')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'disks' ? 'active' : ''}`} onClick={() => { setConfigSubTab('disks'); if (configSubTab === 'disks' && !data.disks) loadTabData('disks'); }}>{t('disks')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'lvm' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvm'); if (configSubTab === 'lvm' && !data.disks) loadTabData('disks'); }}>{t('lvmStorage')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'lvmthin' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvmthin'); if (configSubTab === 'lvmthin' && !data.disks) loadTabData('disks'); }}>{t('lvmThinStorage')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'zfs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('zfs'); if (configSubTab === 'zfs' && !data.disks) loadTabData('disks'); }}>{t('zfsStorage')}</button>
                                     <div className="corp-subnav-header">Extras</div>
-                                    <button className={`corp-subnav-item ${configSubTab === 'repos' ? 'active' : ''}`} onClick={() => { setConfigSubTab('repos'); if (!data.repos) loadTabData('repos'); }}>{t('repositories')}</button>
-                                    <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (!data.ceph) loadTabData('ceph'); }}>Ceph</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'repos' ? 'active' : ''}`} onClick={() => { setConfigSubTab('repos'); if (configSubTab === 'repos' && !data.repos) loadTabData('repos'); }}>{t('repositories')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (configSubTab === 'ceph' && !data.ceph) loadTabData('ceph'); }}>Ceph</button>
                                 </div>
                                 <div className="flex-1 pl-4">
                                     {configSubTab === 'dns' && data.dns === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
                                     {configSubTab === 'hosts' && data.hosts === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
-                                    {/* LW Nov 2026 - the preview draws these five of a PVE node in section cards (cr_nodecfg.js), outside
+                                    {/* LW Nov 2026 - the redesign draws these five of a PVE node in section cards (cr_nodecfg.js), outside
                                         the fieldset so a standby can still read again; the writes take readOnly and the classic handlers */}
                                     {crSys && (
                                         <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-cfg">
@@ -6099,7 +6154,7 @@
                                                 onSaveDns={form => handleSave('dns', form, 'DNS saved')}
                                                 onSaveHosts={text => handleSave('hosts', { data: text }, 'Hosts saved', 'POST')}
                                                 onSaveTime={tz => handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'))}
-                                                cert={{ open: showCertUpload, setOpen: setShowCertUpload, form: certForm, setForm: setCertForm, upload: handleCertUpload }}
+                                                cert={{ open: showCertUpload, setOpen: setShowCertUpload, form: certForm, setForm: setCertForm, upload: handleCertUpload, revert: handleCertRevert }}
                                                 onDirty={crOnDirty} />
                                         </CrBoundary>
                                     )}
@@ -6120,7 +6175,7 @@
                                             authFetch={authFetch} onReload={() => loadTabData('disks')} />
                                     )}
                                     <fieldset disabled={haReadOnly} className="contents">
-                                    {/* LW Nov 2026 - the preview keeps its network card (and an open Apply dialog) while a failed list is read again */}
+                                    {/* LW Nov 2026 - the redesign keeps its network card (and an open Apply dialog) while a failed list is read again */}
                                     {loading && !data.network && !data.dns && !data.disks && !crSys && !crStore && !crDisks
                                         && !(crHw && configSubTab === 'network' && data.network === null) ? (
                                         <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
@@ -6129,7 +6184,7 @@
                                             {/* LW: Feb 2026 - full network editing like modern NodeModal */}
                                             {configSubTab === 'network' && (
                                                 <div>
-                                                    {/* LW Nov 2026 - the preview: by kind, what waits, Apply and Revert behind a summary (cr_node.js) */}
+                                                    {/* LW Nov 2026 - the redesign: by kind, what waits, Apply and Revert behind a summary (cr_node.js) */}
                                                     {isCorpRedesigned && crKind === 'proxmox' ? (
                                                         <CrNodeNetwork network={data.network} loading={loading} clusterId={clusterId} node={node}
                                                             nodeIp={nodeIp} nodeIpSource={nodeIpSource} clusterHost={clusterHost} authFetch={authFetch} addToast={addToast}
@@ -6627,7 +6682,7 @@
 
                         {/* VMs Tab */}
                         {activeDetailTab === 'vms' && (isCorpRedesigned ? (
-                            // LW Nov 2026 - the preview: search, filters and sorting of the node's guests (cr_node.js)
+                            // LW Nov 2026 - the redesign: search, filters and sorting of the node's guests (cr_node.js)
                             <CrBoundary key={navKey} id="node-guests">
                                 <CrNodeGuests node={node} guests={nodeVms} onSelectVm={onSelectVm} />
                             </CrBoundary>
@@ -6662,7 +6717,7 @@
                         {/* Hardware Tab (#609 in-band BMC) */}
                         {activeDetailTab === 'hardware' && (
                             <div className={crHw ? 'cr-nc-page cr-nh-page' : 'space-y-6'}>
-                                {/* LW Nov 2026 - the preview: every sensor by kind with its limits and state, the history (cr_node.js) */}
+                                {/* LW Nov 2026 - the redesign: every sensor by kind with its limits and state, the history (cr_node.js) */}
                                 {crHw && (
                                     <CrBoundary key={`${navKey}-basics`} id="node-hw-basics">
                                         <CrNodeHwBasics summary={data.summary} disks={data.disksRead} loading={loading}
@@ -6816,6 +6871,25 @@
                             onConfirm={() => { setShowMaintConfirm(false); onMaintenanceToggle(node, true, maintOptions); }} />
                     )}
                     {crLeave && <CrNcLeave node={node} ids={Object.keys(crDirtyRef.current)} onKeep={() => setCrLeave(null)} onDiscard={crDiscard} />}
+                    {updAsk && updAsk.row && !haReadOnly && (
+                        <CrUpdNodeDialog key={node} row={updAsk.row} reading={!!updAsk.reading} canReboot={crCan('node.reboot')}
+                            onCancel={() => setUpdAsk(null)} onStart={crStartUpdate} />
+                    )}
+                    {updAsk && updAsk.classic && !haReadOnly && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60" data-corp-node-update-ask="">
+                            <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('startUpdate') || 'Start Update'}: {node}</h3>
+                                <label className="flex items-center gap-2 text-[13px] mb-4" style={{color: '#adbbc4'}}>
+                                    <input type="checkbox" checked={!!updAsk.reboot} onChange={(e) => { const on = e.target.checked; setUpdAsk(a => ({ ...a, reboot: on })); }} />
+                                    {t('rebootAfterUpdate') || 'Reboot after update'}
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setUpdAsk(null)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
+                                    <button onClick={() => { const rb = !!updAsk.reboot; setUpdAsk(null); onStartUpdate(node, rb); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#49afd9', border: '1px solid #3d9bc2'}}>{t('startUpdate') || 'Start'}</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }

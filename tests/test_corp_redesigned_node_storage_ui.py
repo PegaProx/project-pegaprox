@@ -312,13 +312,14 @@ def test_runtime_lvm_read_states(open_app):
     err = sec.locator('[data-cr-nc-state="error"][data-cr-nc-for="lvm"]')
     err.wait_for(timeout=8000)
     assert 'Node pve1 did not answer' in err.inner_text()
-    # Retry is the disks read of the view (all four), and the empty answer is not said to be "none"
+    # Retry is the disks read of the view (all four)
     app.server.routes[('GET', LVM)] = (200, [])
     before = [app.server.reads(p) for p in (DISKS, LVM, THIN, ZFS)]
     err.locator('[data-cr-nc-retry="lvm"]').click()
     empty = sec.locator('[data-cr-nc-state="empty"][data-cr-nc-for="lvm"]')
     empty.wait_for(timeout=8000)
-    assert 'when the read on the node failed' in empty.inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert 'This node has no LVM volume groups.' in empty.inner_text() and 'failed' not in empty.inner_text()
     assert [app.server.reads(p) for p in (DISKS, LVM, THIN, ZFS)] == [n + 1 for n in before]
     app.server.routes[('GET', LVM)] = (200, {'leaf': 0, 'children': []})
     app.server.routes[('GET', DISKS)] = 'hold'
@@ -363,7 +364,8 @@ def test_runtime_thin_pools_empty_answer(open_app):
     _open_cfg(page, 'lvmthin')
     st = _sec(page, 'lvmthin').locator('[data-cr-nc-state="empty"]')
     st.wait_for(timeout=8000)
-    assert 'also when the read on the node failed' in st.inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert 'No thin pools in the answer.' in st.inner_text() and 'failed' not in st.inner_text()
 
 
 def test_runtime_zfs_pool_cards_and_the_pool_detail(open_app):

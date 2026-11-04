@@ -1,7 +1,7 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): the topology - LW Oct 2026
+        // Corporate Layout - Redesigned: the topology - LW Oct 2026
         // TopologyView hands over its frozen snapshot and the answers it already reads
-        // (networks, datastores, affinity rules); this draws them for the preview. A cluster
+        // (networks, datastores, affinity rules); this draws them for the redesign. A cluster
         // box holds its nodes, a node card the guests placed on it, a backup server sits in
         // the box of a cluster it is linked to. Storage, bridge and affinity lines are drawn
         // only where an answer names them. A node with many guests folds them into one row,
@@ -155,7 +155,8 @@
                     const gs = n.guests.filter(g => o.show[g.type]);
                     const key = `n:${cl.id}:${n.name}`;
                     const pick = o.open[key];
-                    const usual = gs.length > 0 && auto && gs.length <= T.guestCap;
+                    // LW Nov 2026 - o.collapsed: Settings > Display "Collapse nodes by default"
+                    const usual = gs.length > 0 && auto && gs.length <= T.guestCap && !o.collapsed;
                     const open = gs.length > 0 && (pick != null ? !!pick : usual);
                     return { key, n, gs, open, w: T.nodeW, h: tall(gs.length, open), h0: tall(gs.length, usual) };
                 });
@@ -304,7 +305,7 @@
             );
         }
 
-        // CPU and RAM by CR_WARN/CR_CRIT, a storage (store) by the storage pair of the preview
+        // CPU and RAM by CR_WARN/CR_CRIT, a storage (store) by the storage pair of the redesign
         function crTopoBar(x, y, w, pct, c, store) {
             const v = Math.max(0, Math.min(100, pct));
             const tn = store ? crStoreTone(v) : crTone(v);
@@ -732,6 +733,21 @@
             const [legend, setLegend] = useState(() => crRead('cr-topo-legend') === '1');
             const [show, setShow] = useState(() => ({ qemu: true, lxc: true, pbs: true, ...(crReadJson('cr-topo-show') || {}) }));
             const [folded, setFolded] = useState(() => crReadJson('cr-topo-folded') || {});
+            // LW Nov 2026 - the setting the classic cards read: every node starts folded. A node opened or
+            // folded by hand stays so until the setting changes (its event clears the picks, as classic does)
+            const [collapsed, setCollapsed] = useState(() => crRead('pegaprox-nodes-default-collapsed') === '1');
+            useEffect(() => {
+                const onPref = (e) => { setCollapsed(!!(e && e.detail)); setOpen({}); };
+                window.addEventListener('pegaprox-node-collapse-pref', onPref);
+                return () => window.removeEventListener('pegaprox-node-collapse-pref', onPref);
+            }, []);
+            // LW Nov 2026 - Diagram or Cards, as classic offers them for one cluster
+            const [view, setView] = useState(() => (crRead('cr-topo-view') === 'cards' ? 'cards' : 'diagram'));
+            const cards = !multi && view === 'cards';
+            const pickView = (v) => { setView(v); crWrite('cr-topo-view', v === 'cards' ? 'cards' : null); if (v === 'diagram') wantFit.current = true; };
+            // a refused or failed read of the affinity rules is not "no rules"
+            const [affUnread, setAffUnread] = useState(false);
+            useEffect(() => { setAffUnread(false); }, [clusterId]);
             const handlers = useRef({});
             handlers.current = { onVmClick, onNodeClick, onClusterClick };
 
@@ -745,7 +761,9 @@
 
             const model = useMemo(() => {
                 if (multi) return crTopoModel(frozenMultiCluster || []);
-                const pbs = (frozenPbs || []).filter(p => p.status !== 'disconnected' && (p.linked_clusters || []).includes(clusterId));
+                // LW Nov 2026 - a backup server linked to no cluster is shown for every cluster, as in classic
+                const pbs = (frozenPbs || []).filter(p => p.status !== 'disconnected'
+                    && (!(p.linked_clusters || []).length || p.linked_clusters.includes(clusterId)));
                 return crTopoModel([{ id: clusterId || '', name: clusterName, nodes: frozenNodes, resources: frozenResources, pbs }]);
             }, [multi, frozenMultiCluster, frozenNodes, frozenResources, frozenPbs, clusterId, clusterName]);
             const storages = useMemo(() => (!multi && showStorage && storageData ? buildStorages(storageData) : []),
@@ -753,8 +771,8 @@
                 [multi, showStorage, storageData]);
             const networks = useMemo(() => (!multi && showNetwork && Array.isArray(networkData)
                 ? networkData.filter(n => n && typeof n.name === 'string' && n.name.length) : []), [multi, showNetwork, networkData]);
-            const lay = useMemo(() => crTopoLayout(model, { multi, folded, open, show, aspect, storages, networks }),
-                [model, multi, folded, open, show, aspect, storages, networks]);
+            const lay = useMemo(() => crTopoLayout(model, { multi, folded, open, show, aspect, storages, networks, collapsed }),
+                [model, multi, folded, open, show, aspect, storages, networks, collapsed]);
             const layRef = useRef(lay);
             layRef.current = lay;
             const hit = useMemo(() => crTopoFind(model, q), [model, q]);
@@ -826,7 +844,7 @@
                 const fresh = fitModel.current !== model;
                 if ((wantFit.current || (fresh && autoFit.current)) && fitAll()) wantFit.current = false;
                 fitModel.current = model;
-            }, [lay, revision, fitAll]);
+            }, [lay, revision, fitAll, cards]);
             useEffect(() => {
                 const el = canvasRef.current;
                 if (!el || typeof ResizeObserver === 'undefined') return;
@@ -846,7 +864,8 @@
                 });
                 ro.observe(el);
                 return () => ro.disconnect();
-            }, [fitAll]);
+            // the canvas is not mounted while the cards are on screen
+            }, [fitAll, cards]);
             // the wheel zooms at the pointer; it has to be non-passive to keep the page still
             useEffect(() => {
                 const el = canvasRef.current;
@@ -859,7 +878,7 @@
                 };
                 el.addEventListener('wheel', onWheel, { passive: false });
                 return () => el.removeEventListener('wheel', onWheel);
-            }, [zoomAt]);
+            }, [zoomAt, cards]);
 
             // --- full screen: the Fullscreen API where it works, else the canvas covers the page ---
             useEffect(() => {
@@ -1045,11 +1064,16 @@
                 wantFit.current = true;
             };
             const toggleAffinity = () => {
-                if (!showAffinity && !(affinityRules || []).length && clusterId) {
+                // LW Nov 2026 - an unread answer is said next to the chip and read again on the next toggle
+                if (!showAffinity && (affUnread || !(affinityRules || []).length) && clusterId) {
                     fetch(`${API_URL}/clusters/${clusterId}/affinity-rules`, { headers: getAuthHeaders(), credentials: 'include' })
                         .then(r => (r.ok ? r.json() : null))
-                        .then(d => setAffinityRules(Array.isArray(d) ? d : (d && d.rules) || []))
-                        .catch(() => {});
+                        .then(d => {
+                            const rules = Array.isArray(d) ? d : d && d.rules;
+                            setAffUnread(!Array.isArray(rules) || !!(d && d.error));
+                            setAffinityRules(Array.isArray(rules) ? rules : []);
+                        })
+                        .catch(() => setAffUnread(true));
                 }
                 setShowAffinity(v => !v);
             };
@@ -1088,7 +1112,7 @@
                         <div className="cr-topo-bar-left">
                             <span className="cr-topo-scope" data-cr-topo-scope="">{scope}</span>
                             {quorum}
-                            <div className="cr-search-box">
+                            {!cards && <div className="cr-search-box">
                                 <Icons.Search className="cr-search-ico" />
                                 <input type="search" className="cr-input" value={query} data-cr-topo-search=""
                                     placeholder={t('crTopoSearch')} aria-label={t('crTopoSearch')}
@@ -1097,41 +1121,54 @@
                                         if (e.key === 'Enter') { e.preventDefault(); setQ(query.trim().toLowerCase()); setTimeout(zoomToHits, 0); }
                                         else if (e.key === 'Escape' && query) { e.stopPropagation(); setQuery(''); }
                                     }} />
-                            </div>
-                            {q && (
+                            </div>}
+                            {q && !cards && (
                                 <span className="cr-table-count" aria-live="polite" data-cr-topo-hits={hit.count}>
                                     {hit.count ? crFill(t('crTopoMatches'), { n: crNum(hit.count) }) : t('crNoMatch')}
                                 </span>
                             )}
-                            {q && hit.count > 0 && (
+                            {q && !cards && hit.count > 0 && (
                                 <button type="button" className="cr-btn cr-btn-ghost" onClick={zoomToHits} data-cr-topo-zoomhits="">{t('crTopoZoomHits')}</button>
                             )}
                             <div className="cr-seg" role="group" aria-label={t('filter')}>
                                 {chip('qemu', t('vms'), show.qemu, () => toggleShow('qemu'), totals.qemu)}
                                 {chip('lxc', t('containers'), show.lxc, () => toggleShow('lxc'), totals.lxc)}
                                 {totals.pbs > 0 && chip('pbs', t('backupServers'), show.pbs, () => toggleShow('pbs'), totals.pbs)}
-                                {!multi && chip('storage', t('storage'), !!showStorage, onToggleStorage)}
-                                {!multi && chip('network', t('network'), !!showNetwork, onToggleNetwork)}
-                                {!multi && chip('affinity', t('affinity'), !!showAffinity, toggleAffinity)}
+                                {!multi && !cards && chip('storage', t('storage'), !!showStorage, onToggleStorage)}
+                                {!multi && !cards && chip('network', t('network'), !!showNetwork, onToggleNetwork)}
+                                {!multi && !cards && chip('affinity', t('affinity'), !!showAffinity, toggleAffinity)}
                             </div>
+                            {!multi && !cards && showAffinity && affUnread && (
+                                <span className="cr-topo-unread" role="status" data-affinity-unread="1">
+                                    <Icons.AlertTriangle className="w-3.5 h-3.5" />{t('affinityRulesUnread')}
+                                </span>
+                            )}
                         </div>
                         <div className="cr-topo-bar-right">
+                            {!multi && (
+                                <div className="cr-seg" role="group" aria-label={t('crTopoViewAs')}>
+                                    <button type="button" className={!cards ? 'active' : ''} aria-pressed={!cards} data-cr-topo-view="diagram"
+                                        onClick={() => pickView('diagram')}>{t('diagramView')}</button>
+                                    <button type="button" className={cards ? 'active' : ''} aria-pressed={cards} data-cr-topo-view="cards"
+                                        onClick={() => pickView('cards')}>{t('cardView')}</button>
+                                </div>
+                            )}
                             {multi && (
                                 <button type="button" className="cr-btn cr-btn-ghost" onClick={() => foldAll(!allFolded)} data-cr-topo-foldall={allFolded ? 'open' : 'fold'}>
                                     {allFolded ? t('crTopoUnfoldAll') : t('crTopoFoldAll')}
                                 </button>
                             )}
-                            <div className="cr-seg cr-topo-zoom" role="group" aria-label={t('crTopoZoom')}>
+                            {!cards && <div className="cr-seg cr-topo-zoom" role="group" aria-label={t('crTopoZoom')}>
                                 <button type="button" onClick={() => zoomCenter(0.8)} aria-label={t('zoomOut')} title={t('zoomOut')} data-cr-topo-zoom="out"><Icons.ZoomOut /></button>
                                 <button type="button" onClick={actualSize} title={t('crTopoActualSize')} aria-label={t('crTopoActualSize')} data-cr-topo-zoom="pct">
                                     <span className="cr-topo-pct" data-cr-topo-pct={zoomPct}>{zoomPct}%</span>
                                 </button>
                                 <button type="button" onClick={() => zoomCenter(1.25)} aria-label={t('zoomIn')} title={t('zoomIn')} data-cr-topo-zoom="in"><Icons.ZoomIn /></button>
                                 <button type="button" onClick={fitAll} data-cr-topo-fit="">{t('crTopoFit')}</button>
-                            </div>
+                            </div>}
                             {iconBtn(<Icons.RefreshCw />, t('refreshData'), onRefresh, { 'data-cr-topo-refresh': '' })}
-                            {iconBtn(<Icons.Info />, t('legend'), toggleLegend, { 'aria-pressed': legend, 'data-cr-topo-legend': '' })}
-                            <div className="cr-menu-anchor">
+                            {!cards && iconBtn(<Icons.Info />, t('legend'), toggleLegend, { 'aria-pressed': legend, 'data-cr-topo-legend': '' })}
+                            {!cards && <div className="cr-menu-anchor">
                                 {iconBtn(<Icons.Download />, t('export'), () => setExportOpen(o => !o), { 'aria-haspopup': 'true', 'aria-expanded': exportOpen, 'data-cr-topo-export': '' })}
                                 {exportOpen && (
                                     <>
@@ -1144,12 +1181,17 @@
                                         </div>
                                     </>
                                 )}
-                            </div>
+                            </div>}
                             {iconBtn(full ? <Icons.Minimize /> : <Icons.Maximize />, full ? t('exitFullscreen') : t('fullscreen'), toggleFull,
                                 { 'aria-pressed': !!full, 'data-cr-topo-full': '' })}
                         </div>
                     </div>
-                    <div ref={canvasRef} className={`cr-topo-canvas${grabbing ? ' cr-topo-grabbing' : ''}`} style={{ background: c.canvas }}
+                    {cards && (
+                        <CrTopoCards cl={model[0]} show={show} collapsed={collapsed} open={open} t={t}
+                            onToggle={(key, on) => setOpen(o => ({ ...o, [key]: on }))}
+                            onVmClick={onVmClick} onNodeClick={onNodeClick} />
+                    )}
+                    {!cards && <div ref={canvasRef} className={`cr-topo-canvas${grabbing ? ' cr-topo-grabbing' : ''}`} style={{ background: c.canvas }}
                         tabIndex={0} role="group" aria-label={t('crTopoDiagram')} aria-describedby="cr-topo-hint"
                         onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
                         onPointerOver={onOver} onPointerOut={onOut} onFocus={onFocusIn} onBlur={onFocusOut}
@@ -1199,6 +1241,93 @@
                                 <div className="cr-topo-legend-note">{t('crTopoHint')}</div>
                             </div>
                         )}
+                    </div>}
+                </div>
+            );
+        }
+
+        // LW Nov 2026 - the Cards view of classic for one cluster: a card per node with its state, CPU
+        // and RAM and its guests (the first CR_TOPO_CARD_ROWS, then all of them on request), and a card per
+        // backup server of the cluster. The head of a node folds it; "Collapse nodes by default" starts
+        // every node folded. A guest opens the guest, the node name the node
+        const CR_TOPO_CARD_ROWS = 5;
+        function CrTopoCards({ cl, show, collapsed, open, onToggle, onVmClick, onNodeClick, t }) {
+            const [all, setAll] = useState({});
+            if (!cl) return null;
+            const stateTone = { online: 'success', offline: 'error', maintenance: 'warning', unknown: 'none' };
+            const stateText = (s) => (s === 'offline' ? t('offline') : s === 'maintenance' ? t('maintenance') : s === 'unknown' ? t('crTopoNotReported') : t('online'));
+            return (
+                <div className="cr-topo-cards" data-cr-topo-cards="">
+                    {cl.unknown > 0 && <p className="cr-muted cr-topo-cards-note">{t('crTopoNotReported')}</p>}
+                    <div className="cr-topo-cards-grid">
+                        {cl.nodes.map(n => {
+                            const key = `n:${cl.id}:${n.name}`;
+                            const gs = n.guests.filter(g => show[g.type]);
+                            const isOpen = open[key] != null ? !!open[key] : !collapsed;
+                            const running = gs.filter(g => g.status === 'running').length;
+                            const stopped = gs.filter(g => g.status === 'stopped').length;
+                            const list = all[key] ? gs : gs.slice(0, CR_TOPO_CARD_ROWS);
+                            return (
+                                <section key={key} className="cr-topo-card" data-cr-topo-card={n.name} data-open={isOpen ? '1' : '0'}>
+                                    <div className="cr-topo-card-head">
+                                        <button type="button" className="cr-icon-btn" aria-expanded={isOpen} data-cr-topo-card-fold=""
+                                            aria-label={crFill(isOpen ? t('crCollapseNamed') : t('crExpandNamed'), { name: n.name })}
+                                            onClick={() => onToggle(key, !isOpen)}>
+                                            {isOpen ? <Icons.ChevronDown /> : <Icons.ChevronRight />}
+                                        </button>
+                                        <span className={`cr-dot cr-dot-${stateTone[n.state] || 'none'}`} aria-hidden="true" />
+                                        {onNodeClick
+                                            ? <button type="button" className="cr-link cr-strong cr-topo-card-name" onClick={() => onNodeClick(cl.id, n.name)}>{n.name}</button>
+                                            : <span className="cr-strong cr-topo-card-name">{n.name}</span>}
+                                        {n.state !== 'online' && <CrBadge tone={stateTone[n.state] === 'none' ? 'neutral' : stateTone[n.state]}>{stateText(n.state)}</CrBadge>}
+                                    </div>
+                                    {(n.cpu != null || n.ram != null) && (
+                                        <div className="cr-topo-card-meters">
+                                            <span className="cr-muted">{t('cpu')}</span><CrMeter value={n.cpu} />
+                                            <span className="cr-muted">{t('ram')}</span><CrMeter value={n.ram} />
+                                        </div>
+                                    )}
+                                    <div className="cr-topo-card-counts cr-muted" data-cr-topo-card-counts="">
+                                        {gs.length ? crFill(t('crTopoGuestCounts'), { running: crNum(running), stopped: crNum(stopped) }) : t('noGuests')}
+                                    </div>
+                                    {isOpen && gs.length > 0 && (
+                                        <ul className="cr-topo-card-guests">
+                                            {list.map(g => (
+                                                <li key={`${g.type}:${g.vmid}`}>
+                                                    <button type="button" className="cr-topo-card-guest" data-cr-topo-card-guest={g.vmid}
+                                                        onClick={onVmClick ? () => onVmClick({ ...g, _clusterId: cl.id }) : undefined}>
+                                                        <span className={`cr-dot cr-dot-${g.status === 'running' ? 'success' : 'none'}`} aria-hidden="true" />
+                                                        <span className={`cr-ico cr-guest-ico cr-guest-${g.type}`} aria-hidden="true">{g.type === 'lxc' ? <Icons.Box /> : <Icons.Monitor />}</span>
+                                                        <span className="cr-topo-card-gname">{g.name || `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}`}</span>
+                                                        <span className="cr-mono cr-muted">{g.vmid}</span>
+                                                        {g.status === 'running' && (
+                                                            <span className="cr-mono cr-muted cr-topo-card-use">{crPct((g.cpu || 0) * 100)} · {crBytes(g.mem)}</span>
+                                                        )}
+                                                    </button>
+                                                </li>
+                                            ))}
+                                            {gs.length > CR_TOPO_CARD_ROWS && (
+                                                <li>
+                                                    <button type="button" className="cr-link cr-topo-card-more" data-cr-topo-card-more=""
+                                                        onClick={() => setAll(a => ({ ...a, [key]: !a[key] }))}>
+                                                        {all[key] ? t('showLess') : crFill(t('crTopoShowAllN'), { n: crNum(gs.length) })}
+                                                    </button>
+                                                </li>
+                                            )}
+                                        </ul>
+                                    )}
+                                </section>
+                            );
+                        })}
+                        {show.pbs && cl.pbs.map(p => (
+                            <section key={`p:${p.id}`} className="cr-topo-card cr-topo-card-pbs" data-cr-topo-card-pbs={p.id}>
+                                <div className="cr-topo-card-head">
+                                    <span className="cr-ico" aria-hidden="true"><Icons.Shield /></span>
+                                    <span className="cr-strong cr-topo-card-name">{p.name}</span>
+                                </div>
+                                <div className="cr-topo-card-counts cr-muted">{t('backupServers')}{p.host ? ` · ${p.host}` : ''}</div>
+                            </section>
+                        ))}
                     </div>
                 </div>
             );

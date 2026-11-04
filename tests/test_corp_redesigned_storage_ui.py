@@ -62,31 +62,45 @@ G_GONE = _group('g9h8i7j6', 'Old pair', ['ceph-a', 'renamed-store'], enabled=Fal
 GROUPS = [G_CEPH, G_MIXED, G_GONE]
 
 
-def _sst(name, kind, total_gib, used_gib):
+def _sst(name, kind, total_gib, used_gib, node='pve1', shared=True):
+    """A member the server could read, as storage.py _shared_member / _member_stats send it."""
     total, used = total_gib * GIB, used_gib * GIB
     return {'storage': name, 'type': kind, 'total': total, 'used': used, 'avail': total - used,
-            'usage_percent': round(used / total * 100, 1) if total else 0}
+            'usage_percent': round(used / total * 100, 1), 'usable': True, 'state': 'ok', 'node': node, 'shared': shared}
+
+
+def _sbad(name, kind, state, node=None, shared=True):
+    """A member the server could not use: no figures, its state (storage.py:580-645), left out of the spread."""
+    return {'storage': name, 'type': kind, 'total': None, 'used': None, 'avail': None, 'usage_percent': None,
+            'usable': False, 'state': state, 'node': node, 'shared': shared}
 
 
 def _rec(vmid, name, status, disk, src, tgt, size, src_pct, tgt_pct):
-    return {'type': 'move_disk', 'vmid': vmid, 'vm_name': name, 'vm_status': status, 'disk': disk, 'source': src,
-            'target': tgt, 'disk_size': size, 'reason': f'Balance: {src} ({src_pct}%) → {tgt} ({tgt_pct}%)'}
+    ct = disk == 'rootfs' or disk.startswith('mp')
+    rec = {'type': 'move_disk', 'vmid': vmid, 'vm_name': name, 'vm_type': 'lxc' if ct else 'qemu', 'vm_status': status,
+           'disk': disk, 'source': src, 'target': tgt, 'disk_size': size, 'movable': True,
+           'reason': f'Balance: {src} ({src_pct}%) → {tgt} ({tgt_pct}%)'}
+    if ct and status == 'running':
+        # storage.py CT_RUNNING_REASON: the migrate route answers 409 for it
+        rec.update(movable=False, blocked='ct_running',
+                   blocked_reason='Proxmox VE moves the volume of a container only while the container is stopped')
+    return rec
 
 
-STATUS_CEPH = {'id': 'a1b2c3d4', 'name': 'Ceph pools', 'enabled': True, 'imbalance': 40.5, 'threshold': 20,
-               'storages': [_sst('ceph-a', 'rbd', 1000, 820), _sst('ceph-b', 'rbd', 1000, 415)],
+STATUS_CEPH = {'id': 'a1b2c3d4', 'name': 'Ceph pools', 'enabled': True, 'imbalance': 40.5, 'threshold': 20, 'tolerance': 5,
+               'storages': [_sst('ceph-a', 'rbd', 1000, 820), _sst('ceph-b', 'rbd', 1000, 415)], 'read_error': None,
                'recommendations': [_rec(100, 'web01', 'running', 'scsi0', 'ceph-a', 'ceph-b', 32 * GIB, 82.0, 41.5),
                                    _rec(101, 'ct01', 'running', 'rootfs', 'ceph-a', 'ceph-b', 8 * GIB, 82.0, 41.5),
                                    _rec(102, 'db01', 'stopped', 'scsi1', 'ceph-a', 'ceph-b', 0, 82.0, 41.5)],
                '_stats': {'rate_limiter': {}, 'cache': {}, 'cache_hit': False}}
-# the server reads nfs-old (inactive, no total) as 0 % and so makes it the target
-STATUS_MIXED = {'id': 'm1x2y3z4', 'name': 'Mixed', 'enabled': True, 'imbalance': 41.5, 'threshold': 15,
-                'storages': [_sst('ceph-b', 'rbd', 1000, 415), _sst('nfs-1', 'nfs', 500, 100),
-                             {'storage': 'nfs-old', 'type': 'nfs', 'total': 0, 'used': 0, 'avail': 0, 'usage_percent': 0}],
-                'recommendations': [_rec(100, 'web01', 'running', 'scsi1', 'ceph-b', 'nfs-old', 16 * GIB, 41.5, 0)],
+# nfs-old is inactive: the server leaves it out of the spread (41.5 - 20) and never sends a disk to it
+STATUS_MIXED = {'id': 'm1x2y3z4', 'name': 'Mixed', 'enabled': True, 'imbalance': 21.5, 'threshold': 15, 'tolerance': 5,
+                'storages': [_sst('ceph-b', 'rbd', 1000, 415), _sst('nfs-1', 'nfs', 500, 100), _sbad('nfs-old', 'nfs', 'unavailable')],
+                'read_error': None, 'recommendations': [_rec(100, 'web01', 'running', 'scsi1', 'ceph-b', 'nfs-1', 16 * GIB, 41.5, 20.0)],
                 '_stats': {}}
-STATUS_GONE = {'id': 'g9h8i7j6', 'name': 'Old pair', 'enabled': False, 'imbalance': 0, 'threshold': 20,
-               'storages': [_sst('ceph-a', 'rbd', 1000, 820)], 'recommendations': [], '_stats': {}}
+STATUS_GONE = {'id': 'g9h8i7j6', 'name': 'Old pair', 'enabled': False, 'imbalance': None, 'threshold': 20, 'tolerance': 5,
+               'storages': [_sst('ceph-a', 'rbd', 1000, 820), _sbad('renamed-store', None, 'missing', node='pve1', shared=None)],
+               'read_error': None, 'recommendations': [], '_stats': {}}
 STATUSES = {'a1b2c3d4': (200, STATUS_CEPH), 'm1x2y3z4': (200, STATUS_MIXED), 'g9h8i7j6': (200, STATUS_GONE)}
 UPID = 'UPID:pve1:0000A1B2:00C0FFEE:6721F000:qmmove:100:root@pam:'
 
@@ -163,8 +177,13 @@ class _SbServer(_DsServer):
                 return answer({'error': 'Name is required'}, 400)
             if len(data.get('storages') or []) < 2:
                 return answer({'error': 'At least 2 storages required'}, 400)
+            # storage.py create: the tolerance is kept, bounded to 0..20 (5 when it is not a number)
+            try:
+                tol = max(0, min(20, int(data.get('tolerance', 5))))
+            except (TypeError, ValueError):
+                tol = 5
             new = _group('n0n0n0n0', data['name'].strip(), data['storages'], threshold=data.get('threshold', 20),
-                         auto=data.get('auto_balance', False))
+                         auto=data.get('auto_balance', False), tolerance=tol)
             new.pop('type')
             new.pop('nodes')
             self.groups.append(new)
@@ -201,6 +220,11 @@ class _SbServer(_DsServer):
                 for k in ('name', 'storages', 'threshold', 'enabled', 'auto_balance', 'max_concurrent', 'check_interval'):
                     if k in (body or {}):
                         g[k] = body[k]
+                if 'tolerance' in (body or {}):
+                    try:
+                        g['tolerance'] = max(0, min(20, int(body['tolerance'])))
+                    except (TypeError, ValueError):
+                        g['tolerance'] = 5
                 return answer(g)
             if req.method == 'DELETE':
                 if 'delete' in self.refuse:
@@ -330,11 +354,11 @@ def test_runtime_no_storage_cluster_is_an_empty_state_with_prerequisites_and_the
     # no table, no detail, no invented content, and no status read
     assert page.locator('[data-cr-table="sb-groups"]').count() == 0 and page.locator('[data-cr-sb-detail]').count() == 0
     assert _status_calls(app) == []
-    # the primary action opens the classic create dialog, without the tolerance the server never stores
+    # the primary action opens the classic create dialog, with the tolerance the server keeps (since 3d10eb84)
     page.locator('[data-cr-sb-empty] [data-cr-sb-create]').click()
     dlg = page.locator('div.fixed.inset-0', has=page.locator('h3', has_text='Create Storage Cluster'))
     dlg.wait_for(timeout=4000)
-    assert dlg.get_by_text('Tolerance').count() == 0 and dlg.get_by_text('Migration Tolerance').count() == 0
+    assert dlg.get_by_text('Migration Tolerance').count() == 1 and dlg.locator('input[type="range"]').count() == 2
     dlg.locator('input[type="text"]').fill('Fast pools')
     for name in ('ceph-a', 'ceph-b'):
         dlg.locator('label', has_text=re.compile(rf'^\s*{name}\s*$')).locator('input').check()
@@ -470,22 +494,24 @@ def test_runtime_an_offline_member_is_left_out_and_never_the_quiet_target(open_a
     page = _balancing(app)
     _open_group(page, 'Mixed')
     m = page.locator('[data-cr-sb-member]').evaluate_all('ms => ms.map(m => [m.dataset.crSbMember, m.dataset.crSbUsable, (m.querySelector("[data-cr-sb-why]") || {}).dataset?.crSbWhy || null])')
-    assert m == [['ceph-b', '1', None], ['nfs-1', '1', 'partial'], ['nfs-old', '0', 'inactive']], m
+    # LW Nov 2026 - the server leaves an unusable member out and says why (state unavailable): the page
+    # takes its word, so the member is left out of the spread, without a 0 % or a "counted" note
+    assert m == [['ceph-b', '1', None], ['nfs-1', '1', 'partial'], ['nfs-old', '0', 'unavailable']], m
     off = page.locator('[data-cr-sb-member="nfs-old"]')
-    assert off.locator('[data-cr-sb-pct]').count() == 0 and 'Counted by the server at 0%' in off.inner_text()
-    # the server counts it (41.5 - 0); the readable members only spread 21.5, and the page says why
-    assert page.locator('[data-cr-sb-imbalance]').get_attribute('data-cr-sb-imbalance') == '41.5'
-    assert page.locator('[data-cr-sb-own]').get_attribute('data-cr-sb-own') == '21.5'
-    assert 'counts nfs-old although it is not available' in page.locator('[data-cr-sb-note="counted"]').inner_text()
+    assert off.locator('[data-cr-sb-pct]').count() == 0 and 'Left out of the spread' in off.inner_text()
+    assert 'Not available on any node that is online' in off.inner_text()
+    assert page.locator('[data-cr-sb-note="counted"]').count() == 0 and '%' not in off.inner_text()
+    # the server's spread and the page's agree (41.5 - 20), so no second figure is drawn
+    assert page.locator('[data-cr-sb-imbalance]').get_attribute('data-cr-sb-imbalance') == '21.5'
+    assert page.locator('[data-cr-sb-own]').count() == 0
     assert 'mixes storage types (nfs, rbd)' in page.locator('[data-cr-sb-note="mixed"]').inner_text()
-    # the recommendation that targets it is blocked, in the table and in the preview
-    assert page.locator('[data-cr-sb-risk-n="blocked"]').count() == 1
+    # the recommendation goes to nfs-1, never to the member that is down
+    assert page.locator('[data-cr-sb-preview]').evaluate_all('bs => bs.map(b => b.dataset.crSbPreview)') == ['100|scsi1|nfs-1']
     page.locator('[data-cr-sb-preview]').first.click()
     dlg = page.locator('[data-cr-sb-dialog]')
     dlg.wait_for(timeout=4000)
     risks = dlg.locator('[data-cr-sb-risk]').evaluate_all('rs => rs.map(r => [r.dataset.crSbRisk, r.dataset.crSbLevel])')
-    assert ['crSbRiskTargetDown', 'block'] in risks and ['crSbRiskTypes', 'warn'] in risks, risks
-    assert dlg.locator('[data-cr-sb-confirm]').is_disabled() and dlg.locator('[data-cr-sb-blocked]').count() == 1
+    assert ['crSbRiskTargetDown', 'block'] not in risks and ['crSbRiskTypes', 'warn'] in risks, risks
     dlg.locator('[data-cr-sb-cancel]').click()
     assert not [w for w in app.server.writes if w[0] == 'POST']
     assert _errors(app) == []
@@ -495,7 +521,8 @@ def test_runtime_a_member_that_is_gone_and_a_group_that_is_off(open_app):
     app = open_app()
     page = _balancing(app)
     _open_group(page, 'Old pair')
-    assert page.locator('[data-cr-sb-member="renamed-store"] [data-cr-sb-why="missing"]').inner_text() == 'Not found'
+    # the server's own word for a member it does not find (storage.py state missing, read on pve1)
+    assert page.locator('[data-cr-sb-member="renamed-store"] [data-cr-sb-why="missing"]').inner_text() == 'Not listed by pve1'
     # one member read by the server: its spread of 0 says nothing, so nothing is "within"
     assert _verdict(page) == 'unknown'
     assert 'read 1 of the members' in page.locator('[data-cr-sb-note="few"]').inner_text()
@@ -559,7 +586,7 @@ def test_runtime_a_late_status_of_the_group_before_does_not_land(open_app):
     app.server.release_status((200, STATUS_CEPH))
     page.wait_for_timeout(500)
     assert page.locator('.cr-sb-dtitle').inner_text() == 'Mixed'
-    assert page.locator('[data-cr-sb-imbalance]').get_attribute('data-cr-sb-imbalance') == '41.5'
+    assert page.locator('[data-cr-sb-imbalance]').get_attribute('data-cr-sb-imbalance') == '21.5'
     assert _errors(app) == []
 
 
@@ -569,9 +596,9 @@ def test_runtime_high_use_and_missing_capacity_figures(open_app):
     raw = _st('iscsi-lun', 'iscsi', 'images', 0, 0, shared=True, active_on=['pve1', 'pve2'], inactive_on=[])
     ds = dict(DATASTORES, shared=[full, edge, raw])
     g = _group('h1', 'Hot', ['ceph-full', 'ceph-edge', 'iscsi-lun'])
-    st = {'id': 'h1', 'name': 'Hot', 'enabled': True, 'imbalance': 86.0, 'threshold': 20, 'recommendations': [],
-          'storages': [_sst('ceph-full', 'rbd', 100, 86), _sst('ceph-edge', 'rbd', 100, 70),
-                       {'storage': 'iscsi-lun', 'type': 'iscsi', 'total': 0, 'used': 0, 'avail': 0, 'usage_percent': 0}]}
+    # the server reads the LUN without a size as no_size and leaves it out (86 - 70)
+    st = {'id': 'h1', 'name': 'Hot', 'enabled': True, 'imbalance': 16.0, 'threshold': 20, 'recommendations': [], 'read_error': None,
+          'storages': [_sst('ceph-full', 'rbd', 100, 86), _sst('ceph-edge', 'rbd', 100, 70), _sbad('iscsi-lun', 'iscsi', 'no_size', node='pve1')]}
     app = open_app(datastores=ds, groups=[g], statuses={'h1': (200, st)})
     page = _balancing(app)
     row = _cells(page, 'sb-groups')[0]
@@ -580,7 +607,7 @@ def test_runtime_high_use_and_missing_capacity_figures(open_app):
     tones = page.locator('[data-cr-sb-member]').evaluate_all('ms => ms.map(m => [m.dataset.crSbMember, m.dataset.crSbTone, m.dataset.crSbUsable])')
     # above 85 critical, 70 is already a warning; no usage reported is no figure and no 0 %
     assert tones == [['ceph-full', 'error', '1'], ['ceph-edge', 'warning', '1'], ['iscsi-lun', 'neutral', '0']], tones
-    assert page.locator('[data-cr-sb-member="iscsi-lun"] [data-cr-sb-why="nousage"]').count() == 1
+    assert page.locator('[data-cr-sb-member="iscsi-lun"] [data-cr-sb-why="no_size"]').inner_text() == 'Reports no size'
     assert '0.0 B' not in page.locator('[data-cr-sb-member="iscsi-lun"]').inner_text()
     assert _errors(app) == []
 
@@ -695,7 +722,10 @@ def test_runtime_a_move_cannot_start_twice(open_app):
 
 def test_runtime_containers_unknown_sizes_and_full_targets_carry_their_risks(open_app):
     small_b = _sst('ceph-b', 'rbd', 1000, 980)
-    st = dict(STATUS_CEPH, storages=[_sst('ceph-a', 'rbd', 1000, 820), small_b])
+    # a stopped container: the server moves it (move_volume), so only what the data says is a risk
+    recs = [r if r['vmid'] != 101 else _rec(101, 'ct01', 'stopped', 'rootfs', 'ceph-a', 'ceph-b', 8 * GIB, 82.0, 41.5)
+            for r in STATUS_CEPH['recommendations']]
+    st = dict(STATUS_CEPH, storages=[_sst('ceph-a', 'rbd', 1000, 820), small_b], recommendations=recs)
     ds = dict(DATASTORES, shared=[CEPH_A, _st('ceph-b', 'rbd', 'images', 1000, 980, shared=True, active_on=['pve1'], inactive_on=['pve2']),
                                   ISOS, NFS_1, NFS_OLD])
     app = open_app(statuses={'a1b2c3d4': (200, st)}, datastores=ds)
@@ -710,15 +740,15 @@ def test_runtime_containers_unknown_sizes_and_full_targets_carry_their_risks(ope
         dlg.locator('[data-cr-sb-cancel]').click()
         return got, after
     ct, _ = risks('101|rootfs|ceph-b')
-    # a container volume on a target set up for VM disks only, through the VM move call
-    assert 'crSbRiskContainer' in ct and 'crSbRiskContentCt' in ct and 'crSbRiskFree' not in ct, ct
+    # a container volume on a target set up for VM disks only; the move call itself is the right one now
+    assert 'crSbRiskContentCt' in ct and 'crSbRiskContainer' not in ct and 'crSbRiskFree' not in ct, ct
     # no size read, and db01 runs on pve2, which does not mount ceph-b
     db, after = risks('102|scsi1|ceph-b')
     assert 'crSbRiskSize' in db and 'crSbRiskNode' in db and after == 'unknown', (db, after)
     # 20 GB free for a 32 GB disk; running is said, not counted as a risk to check
     web, _ = risks('100|scsi0|ceph-b')
     assert 'crSbRiskFree' in web and 'crSbRiskRunning' in web, web
-    assert page.locator('[data-cr-sb-risk-n]').evaluate_all('xs => xs.map(x => x.dataset.crSbRiskN)') == ['1', '2', '2']
+    assert page.locator('[data-cr-sb-risk-n]').evaluate_all('xs => xs.map(x => x.dataset.crSbRiskN)') == ['1', '1', '2']
     assert not [w for w in app.server.writes if w[0] == 'POST']
     assert _errors(app) == []
 
@@ -907,7 +937,8 @@ def test_runtime_browse_shows_free_space_health_not_reported_and_the_storage_pai
     assert head.locator('[data-cr-ds-health="unreported"]').inner_text() == 'Health not reported'
     assert 'not how its data is' in head.locator('[data-cr-ds-health]').get_attribute('title')
     meter = head.locator('.cr-meter').get_attribute('title')
-    assert 'warning from 70%, critical above 85%' in meter and 'not configurable' in meter, meter
+    # the scale says its limits and nothing more (the "not configurable yet" note is gone)
+    assert 'warning from 70%, critical above 85%' in meter and 'not configurable' not in meter, meter
     assert '70% used or more' in page.locator('[data-cr-ds-problems]').get_attribute('title')
     assert _errors(app) == []
 

@@ -620,7 +620,8 @@ def test_runtime_task_list_states(open_app):
     app.server.routes[('GET', TASKS)] = (200, [])
     page.locator('[data-cr-nt-retry]').click()
     page.locator('[data-cr-nt][data-cr-nt-read="empty"]').wait_for(timeout=8000)
-    assert 'can be a failed read' in page.locator('[data-cr-nt] .cr-state-row').inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert page.locator('[data-cr-nt] .cr-state-row').inner_text().strip() == 'No tasks reported for pve1.'
     assert page.locator('[data-cr-nt-count="failed"]').inner_text() == '0'
     _no_errors(app)
 

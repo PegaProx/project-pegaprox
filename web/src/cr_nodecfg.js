@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the configuration of a node - LW Nov 2026
+        // Corporate Redesigned: the configuration of a node - LW Nov 2026
         // The parts every section of the node pages is built from: the section card (title,
         // description, actions), the key value grid, the form field, the edit bar with what a Save
         // changes, the danger zone, the states of a read and the short confirmation. Then the system
@@ -212,7 +212,7 @@
         // While a card holds unsaved edits, a click that can take the user out of the node view is held
         // and asked about first: one outside the view on the tree, a tab, a link, a button or a menu
         // entry. Not held: a click in a dialog, on a toggle that only opens something (aria-haspopup,
-        // aria-expanded), with a modifier key or another button. ask(go): go() sends the same click
+        // aria-expanded off the tree, a tree row's chevron), with a modifier key or another button. ask(go): go() sends the same click
         // again once the user chose to discard. Inside the view the node tabs, the configure sub nav
         // and Back ask through the view itself
         const CR_NC_LEAVE_SEL = 'a[href], button, [role="button"], [role="tab"], [role="treeitem"], [role="menuitem"], [role="option"], '
@@ -228,7 +228,13 @@
             if (target.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"]')) return null;
             const el = target.closest(CR_NC_LEAVE_SEL);
             if (!el || el.disabled || el.getAttribute('aria-disabled') === 'true') return null;
-            if (el.hasAttribute('aria-haspopup') || el.hasAttribute('aria-expanded')) return null;
+            if (el.hasAttribute('aria-haspopup')) return null;
+            // LW Nov 2026 - a tree row with aria-expanded selects too (a cluster row picks the cluster and closes the
+            // node view); only its chevron, the row's first child, just folds it
+            if (el.hasAttribute('aria-expanded')) {
+                if (el.getAttribute('role') !== 'treeitem') return null;
+                if (el.firstElementChild && el.firstElementChild.contains(target)) return null;
+            }
             return el;
         }
         function useCrNcLeaveGuard(on, rootRef, ask) {
@@ -244,8 +250,21 @@
                     e.stopPropagation();
                     askRef.current(() => crNcRedo(el));
                 };
+                // Enter or Space on a tree row picks it in its own key handler, not by a click: held the same way
+                const onKey = (e) => {
+                    if (crNcPass || (e.key !== 'Enter' && e.key !== ' ') || e.ctrlKey || e.metaKey || e.altKey) return;
+                    const el = crNcLeaveTarget(e.target, rootRef.current);
+                    if (!el || el.getAttribute('role') !== 'treeitem') return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    askRef.current(() => crNcRedo(el));
+                };
                 document.addEventListener('click', onClick, true);
-                return () => document.removeEventListener('click', onClick, true);
+                document.addEventListener('keydown', onKey, true);
+                return () => {
+                    document.removeEventListener('click', onClick, true);
+                    document.removeEventListener('keydown', onKey, true);
+                };
             }, [on]);
         }
         // the configure sub nav (shared markup): a click on another entry is held the same way
@@ -660,10 +679,12 @@
         // certs: undefined not read, [] what the route answers for none as well as for a failed read on
         // the node; fail is a refused or failed request. The upload form keeps the view's state, so
         // handleCertUpload sends what is typed here
-        function CrNodeCerts({ node, certs, fail, loading, saving, readOnly, open, setOpen, form, setForm, onUpload, onRetry, onDirty }) {
+        function CrNodeCerts({ node, certs, fail, loading, saving, readOnly, open, setOpen, form, setForm, onUpload, onRevert, onRetry, onDirty }) {
             const { t } = useTranslation();
             const [confirm, setConfirm] = useState(false);
-            useEffect(() => { setConfirm(false); }, [node]);
+            // LW Nov 2026 - back to the self-signed certificate (the classic dialog's delete), asked first
+            const [revert, setRevert] = useState(false);
+            useEffect(() => { setConfirm(false); setRevert(false); }, [node]);
             const now = Date.now();
             const list = Array.isArray(certs) ? certs.filter(c => c && typeof c === 'object') : [];
             const custom = list.find(c => c.filename === 'pveproxy-ssl.pem');
@@ -710,11 +731,20 @@
                                 </label>
                             </div>
                         ) : (
-                            <CrNcDanger id="cert-upload" title={t('crNcCertUploadTitle')} desc={t('crNcCertUploadDesc')}>
-                                <CrButton variant="danger" icon={<Icons.Upload />} onClick={() => setOpen(true)} disabled={readOnly} title={readOnly ? t('crNcReadOnly') : undefined} data-cr-nc-cert-open="">
-                                    {t('crNcCertUploadGo')}
-                                </CrButton>
-                            </CrNcDanger>
+                            <>
+                                <CrNcDanger id="cert-upload" title={t('crNcCertUploadTitle')} desc={t('crNcCertUploadDesc')}>
+                                    <CrButton variant="danger" icon={<Icons.Upload />} onClick={() => setOpen(true)} disabled={readOnly} title={readOnly ? t('crNcReadOnly') : undefined} data-cr-nc-cert-open="">
+                                        {t('crNcCertUploadGo')}
+                                    </CrButton>
+                                </CrNcDanger>
+                                {custom && onRevert && (
+                                    <CrNcDanger id="cert-revert" title={t('crNcCertRevertTitle')} desc={t('crNcCertRevertDesc')}>
+                                        <CrButton variant="danger" icon={<Icons.Trash2 />} onClick={() => setRevert(true)} disabled={readOnly} title={readOnly ? t('crNcReadOnly') : undefined} data-cr-nc-cert-revert="">
+                                            {t('crNcCertRevertGo')}
+                                        </CrButton>
+                                    </CrNcDanger>
+                                )}
+                            </>
                         )}
                     </>
                 );
@@ -741,6 +771,13 @@
                             onCancel={() => { if (!saving) setConfirm(false); }} onConfirm={upload}>
                             <p data-cr-nc-confirm-replace="">{crNnT(t, 'crNcCertConfirmBody', { node })}</p>
                             <p data-cr-nc-confirm-restart={form.restart ? 'on' : 'off'}>{t(form.restart ? 'crNcCertConfirmRestart' : 'crNcCertNoRestartNote')}</p>
+                            <p>{t('crNcCertConfirmRisk')}</p>
+                        </CrNcConfirm>
+                    )}
+                    {revert && !editing && (
+                        <CrNcConfirm id="certs-revert" title={crNnT(t, 'crNcCertRevertAsk', { node })} goLabel={t('crNcCertRevertGo')} busy={saving}
+                            onCancel={() => { if (!saving) setRevert(false); }} onConfirm={async () => { await onRevert(); setRevert(false); }}>
+                            <p data-cr-nc-confirm-revert="">{crNnT(t, 'crNcCertRevertBody', { node })}</p>
                             <p>{t('crNcCertConfirmRisk')}</p>
                         </CrNcConfirm>
                     )}
@@ -797,7 +834,7 @@
                     {tab === 'hosts' && <CrNodeHosts node={node} hosts={data.hosts} fail={fail.hosts} loading={loading} saving={saving} readOnly={readOnly} onSave={onSaveHosts} onRetry={onRetry} onDirty={onDirty} />}
                     {tab === 'time' && <CrNodeTime node={node} time={data.time} fail={fail.time} loading={loading} saving={saving} readOnly={readOnly} onSave={onSaveTime} onRetry={onRetry} onDirty={onDirty} />}
                     {tab === 'certs' && <CrNodeCerts node={node} certs={data.certificates} fail={fail.certificates} loading={loading} saving={saving} readOnly={readOnly}
-                        open={cert.open} setOpen={cert.setOpen} form={cert.form} setForm={cert.setForm} onUpload={cert.upload} onRetry={onRetry} onDirty={onDirty} />}
+                        open={cert.open} setOpen={cert.setOpen} form={cert.form} setForm={cert.setForm} onUpload={cert.upload} onRevert={cert.revert} onRetry={onRetry} onDirty={onDirty} />}
                     {tab === 'syslog' && <CrNodeSyslog node={node} lines={data.syslog} fail={fail.syslog} loading={loading} onRefresh={onRetry} />}
                 </div>
             );

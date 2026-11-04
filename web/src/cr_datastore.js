@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the datastores - LW Oct 2026
+        // Corporate Redesigned: the datastores - LW Oct 2026
         // The Browse tab of a cluster's Datastore tab (the storages grouped by node on
         // the left, the content of the picked one on the right) and the rows of the
         // datastore view in the sidebar. DatastoreTab keeps its state, its handlers and
@@ -207,7 +207,7 @@
         // Groups (shared, one per node, the ESXi hosts last as classic) with their storages under
         // them. A filter or "problems only" shows every group with a hit, open.
         function crStorageRows(datastores, esxiHosts, opts) {
-            const { query, problems, isOpen, t } = opts;
+            const { query, problems, isOpen, t, esxiErr } = opts;
             const q = (query || '').trim().toLowerCase();
             const narrowed = !!q || problems;
             const out = [];
@@ -237,9 +237,11 @@
             const hostHits = hosts.filter(h => !q || String(h.host || '').toLowerCase().includes(q));
             if (!problems && (!q || hostHits.length)) {
                 const open = !!q || isOpen('esxi');
-                out.push({ kind: 'group', key: 'g:esxi', id: 'esxi', h: CR_DS.groupH, label: t('esxiHosts'), count: hosts.length, open, icon: 'esxi' });
+                // a host list that could not be read has no count and is not "no hosts"
+                const failed = !!esxiErr && !hosts.length;
+                out.push({ kind: 'group', key: 'g:esxi', id: 'esxi', h: CR_DS.groupH, label: t('esxiHosts'), count: failed ? '-' : hosts.length, open, icon: 'esxi' });
                 if (open) {
-                    if (!hostHits.length) out.push({ kind: 'note', key: 'note:esxi', h: CR_DS.noteH, text: t('noEsxiHosts'), group: 'g:esxi' });
+                    if (!hostHits.length) out.push({ kind: 'note', key: 'note:esxi', h: CR_DS.noteH, text: failed ? t('crDsEsxiNotRead') : t('noEsxiHosts'), group: 'g:esxi' });
                     hostHits.forEach(h => out.push({ kind: 'esxi', key: `e:${h.id}`, h: CR_DS.noteH, host: h, group: 'g:esxi' }));
                 }
             }
@@ -667,7 +669,8 @@
             );
         }
 
-        function CrEsxiVms({ host, vms, loading, isAdmin, onClose, onDisconnect }) {
+        // error: why the VM list of this host could not be read (never the list of another host)
+        function CrEsxiVms({ host, vms, loading, error, isAdmin, onClose, onDisconnect, onRetry }) {
             const { t } = useTranslation();
             const columns = useMemo(() => [
                 { key: 'name', label: t('name'), flex: true, min: 160, render: v => <span className="cr-strong">{v.name}</span> },
@@ -702,15 +705,22 @@
                             </span>
                         </div>
                     </div>
-                    <CrTable id="ds-esxi" columns={columns} rows={vms} rowKey={v => v.id} searchable loading={loading}
-                        emptyText={t('esxiNoVms')} ariaLabel={t('esxiVms')} initialSort={{ key: 'name', dir: 'asc' }} />
+                    {error && !loading ? (
+                        <CrNcState id="ds-esxi" kind="error" onRetry={onRetry} data-cr-ds-esxi-error="">
+                            {crFill(t('crDsEsxiVmsFailed'), { why: error })}
+                        </CrNcState>
+                    ) : (
+                        <CrTable id="ds-esxi" columns={columns} rows={vms} rowKey={v => v.id} searchable loading={loading}
+                            emptyText={t('esxiNoVms')} ariaLabel={t('esxiVms')} initialSort={{ key: 'name', dir: 'asc' }} />
+                    )}
                 </>
             );
         }
 
         // --- the Browse tab -------------------------------------------------------------
 
-        function CrStorageBrowse({ datastores, selected, content, loading, error, onPick, may, canUploadTo, isAdmin,
+        // dsFail: the last read of the datastore list failed ({ msg, hasData }), said with a retry
+        function CrStorageBrowse({ datastores, dsFail, onDsRetry, selected, content, loading, error, onPick, may, canUploadTo, isAdmin,
                                    guests, onOpenGuest, run, esxi }) {
             const { t } = useTranslation();
             const [query, setQuery] = useState('');
@@ -767,8 +777,9 @@
             const fresh = !!selected && shownFor === storeKey;
 
             const isOpen = (id) => (crHas(fold, id) ? fold[id] : (id === 'esxi' ? false : (!many || id === 'shared' || id === `n:${selNode}`)));
-            const rows = useMemo(() => crStorageRows(data, esxi.hosts, { query, problems, isOpen, t }),
-                [data, esxi.hosts, query, problems, fold, many, selNode, t]);
+            const rows = useMemo(() => crStorageRows(data, esxi.hosts, { query, problems, isOpen, t, esxiErr: esxi.hostsErr }),
+                [data, esxi.hosts, esxi.hostsErr, query, problems, fold, many, selNode, t]);
+            const listUnread = !!dsFail && !dsFail.hasData;
 
             const def = crStorageDef(data, selected);
             const st = crStorageState(def);
@@ -818,7 +829,7 @@
                     <section className="cr-ds-side" aria-label={t('datastores')}>
                         <div className="cr-ds-side-head">
                             <span className="cr-table-title">{t('datastores')}</span>
-                            <span className="cr-ds-count">{storeCount}</span>
+                            <span className="cr-ds-count">{listUnread ? '-' : storeCount}</span>
                             <button type="button" className={`cr-ds-toggle${problems ? ' active' : ''}`} aria-pressed={problems}
                                 data-cr-ds-problems="" title={crFill(t('crStoreProblemsHint'), { warn: CR_STORE_WARN })} onClick={() => setProblems(v => !v)}>
                                 <Icons.AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />{t('crDsProblems')}
@@ -831,11 +842,21 @@
                                     placeholder={t('crDsFilter')} aria-label={t('crDsFilter')} data-cr-ds-filter="" />
                             </div>
                         </div>
+                        {dsFail && (
+                            <CrNcState id="ds-list" kind={listUnread ? 'error' : 'warning'} onRetry={onDsRetry} data-cr-ds-list-failed={listUnread ? 'unread' : 'stale'}>
+                                {crFill(t(listUnread ? 'crDsListFailed' : 'crDsListStale'), { why: dsFail.msg || '-' })}
+                            </CrNcState>
+                        )}
+                        {esxi.hostsErr && (
+                            <CrNcState id="ds-esxi-hosts" kind="error" onRetry={esxi.retryHosts} data-cr-ds-esxi-hosts-failed="">
+                                {crFill(t('crDsEsxiHostsFailed'), { why: esxi.hostsErr })}
+                            </CrNcState>
+                        )}
                         {rows.length ? (
                             <CrStorageList rows={rows} selectedKey={selKey} onActivate={pickRow} onToggle={toggle}
                                 onMenu={rowMenu} label={t('datastores')} />
                         ) : (
-                            <div className="cr-ds-list cr-ds-none" data-cr-ds-list="">{query || problems ? t('crNoMatch') : t('noDatastores')}</div>
+                            <div className="cr-ds-list cr-ds-none" data-cr-ds-list="">{query || problems ? t('crNoMatch') : listUnread ? t('crDsListNotRead') : t('noDatastores')}</div>
                         )}
                         {isAdmin && (
                             <div className="cr-ds-side-foot">
@@ -848,6 +869,7 @@
                     <section className="cr-ds-main" aria-label={t('content')} ref={mainRef}>
                         {esxi.selected ? (
                             <CrEsxiVms host={(esxi.hosts || []).find(h => h.id === esxi.selected)} vms={esxi.vms} loading={esxi.loading}
+                                error={esxi.vmsErr} onRetry={() => esxi.pick(esxi.selected)}
                                 isAdmin={isAdmin} onClose={esxi.close} onDisconnect={esxi.disconnect} />
                         ) : !selected ? (
                             <div className="cr-ds-empty" data-cr-ds-empty="">
@@ -880,8 +902,9 @@
         // --- the datastore view of the sidebar --------------------------------------------
 
         // the same rows as classic (shared first, then per node without the shared names), each
-        // with the meter, a state dot and the warning; Enter and click open it as before
-        function CrDsTree({ shared, local, skip, picked, clusterId, onOpen }) {
+        // with the meter, a state dot and the warning; Enter and click open it as before. fail: the
+        // last read of the list failed ({ msg }), said above the rows of an earlier read if any
+        function CrDsTree({ shared, local, skip, picked, clusterId, onOpen, fail, onRetry }) {
             const { t } = useTranslation();
             const walk = (e) => {
                 if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
@@ -897,6 +920,13 @@
             };
             return (
                 <div className="ml-5 corp-inline-tree cr-ds-tree" data-cr-ds-tree={clusterId}>
+                    {fail && (
+                        <div className="py-1 text-[12px] cr-tone-text cr-tone-error" role="alert" title={fail.msg || undefined}
+                            data-cr-ds-tree-failed={shared.length || local.length ? 'stale' : 'unread'}>
+                            {t(shared.length || local.length ? 'crDsTreeStale' : 'crDsTreeFailed')}{' '}
+                            {onRetry && <button type="button" className="cr-link" onClick={onRetry} data-cr-ds-tree-retry="">{t('retry')}</button>}
+                        </div>
+                    )}
                     {shared.length > 0 && (
                         <>
                             <div className="cr-ds-tree-head"><Icons.Globe className="w-3 h-3 flex-shrink-0" /><span>{t('shared')}</span></div>

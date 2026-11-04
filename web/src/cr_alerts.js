@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview) - the alert strip under the header. LW Nov 2026
+        // Corporate Redesigned - the alert strip under the header. LW Nov 2026
         // One strip in the page flow, in place of the red node banner, the yellow Corporate banner
         // and the "live updates disconnected" overlay of the variant. It reads nothing new: the
         // cluster list and the datacenter status the dashboard polls, the node list of the selected
@@ -243,7 +243,7 @@
                 : w && w.nodes ? (w.nodes === 1 ? t('crAlOneNode') : t('crAlNNodes').replace('{n}', w.nodes)) + ' ' + t('crAlLastOffline') : '')).filter(Boolean).join(', ');
         }
 
-        // --- the active alerts of a cluster, one store for the preview --------------------
+        // --- the active alerts of a cluster, one store for the redesign -------------------
 
         // LW Nov 2026 - the strip, the Datacenter page and Automation > Alerts read the active alerts of a
         // cluster through this store: an answer younger than CR_AL.incidentsEvery is handed out again, a
@@ -330,10 +330,16 @@
             return { cid: e.cid, rows: null, at: e.at, state: r.state === 'away' ? 'away' : 'error', code: r.code || 0 };
         }
 
-        // ... as Automation > Alerts reads it: the leader away, else the rows of a 2xx answer or none
+        // ... as Automation > Alerts reads it: the leader away, else the rows of an answer with the list.
+        // LW Nov 2026 - a failed or refused read (a 200 with an error included) is unread, with its
+        // code, as the strip reads it: never "none firing"
         function crAlAutomationView(e) {
             const r = e.res;
-            return { away: r.state === 'away', rows: r.code >= 200 && r.code < 300 && r.body ? (r.body.active_alerts || []) : [] };
+            const ok = r.state === 'ok' && r.body && Array.isArray(r.body.active_alerts);
+            return { away: r.state === 'away', rows: ok ? r.body.active_alerts : [],
+                     unread: ok || r.state === 'away' ? null : { code: r.code || 0, state: r.state,
+                         // the route's own failure is a 200 with error, say that text rather than the status
+                         error: (r.body && typeof r.body.error === 'string' && r.body.error) || '' } };
         }
 
         // --- the strip --------------------------------------------------------------

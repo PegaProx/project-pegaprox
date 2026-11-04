@@ -552,7 +552,8 @@ def test_runtime_disk_rows_with_full_partial_and_empty_data(open_app):
     assert 'I/O utilization per disk is not reported' in page.locator('[data-cr-nd-io]').inner_text()
     # nothing per disk or per pool on open
     assert app.server.reads_like(r'/smart$') == 0 and app.server.reads(TANK) == 0
-    _read_all(page, 4)
+    # sdb answers 200 {} (get_node_disk_smart when it could not ask the node): no reading, not counted as read
+    _read_all(page, 3)
     assert app.server.reads_like(r'/disks/[^/]+/smart$') == 5 and app.server.reads(TANK) == 1
     assert _cell(page, 'nvme0n1', 'temp') == '38 °C' and _cell(page, 'sda', 'temp') == '36 °C'
     assert 'Error log entries: 12' in _cell(page, 'nvme0n1', 'errors')
@@ -560,10 +561,10 @@ def test_runtime_disk_rows_with_full_partial_and_empty_data(open_app):
     assert _cell(page, 'sda', 'use') == 'ZFS tank'
     sdb = _cell(page, 'sdb', 'errors')
     assert 'ZFS tank read errors: 3' in sdb and 'ZFS tank checksum errors: 12' in sdb
-    assert _cell(page, 'sdb', 'use') == 'ZFS tank (FAULTED)' and _cell(page, 'sdb', 'temp') == 'not reported'
+    assert _cell(page, 'sdb', 'use') == 'ZFS tank (FAULTED)' and _cell(page, 'sdb', 'temp') == 'No data'
     assert _cell(page, 'sdc', 'temp') == 'SMART read failed' and _cell(page, 'sdd', 'temp') == 'not reported'
     assert _cell(page, 'sdd', 'errors') == 'not reported'
-    assert 'SMART read for 4 of 5 disks' in page.locator('[data-cr-nd-note]').inner_text()
+    assert 'SMART read for 3 of 5 disks' in page.locator('[data-cr-nd-note]').inner_text()
     _no_errors(app)
 
 
@@ -651,7 +652,7 @@ def test_runtime_layout_without_sideways_scroll(open_app, firefox, browser, engi
     page.locator('[data-cr-tabs="node"] [role="tab"]', has_text='Configure').click()
     page.locator('.corp-subnav-item', has_text=re.compile(r'^\s*Disks\s*$')).first.click()
     _drow(page, 'sdd').wait_for(timeout=8000)
-    _read_all(page, 4)
+    _read_all(page, 3)  # sdb's 200 {} is no reading
     assert page.evaluate(_NO_SIDEWAYS)
     assert page.evaluate(_MAIN_FITS), 'the disks section widens the page'
     scroll = page.locator('[data-cr-nd] .cr-nn-scroll')

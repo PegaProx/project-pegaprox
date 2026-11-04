@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): storage balancing - LW Oct 2026
+        // Corporate Redesigned: storage balancing - LW Oct 2026
         // The Storage Balancing sub tab of a cluster's Datastore tab. A storage cluster is a
         // named group of shared storages PegaProx balances disks between; it has no nodes of
         // its own. The overview is worked out from the group list and the datastores that
@@ -12,8 +12,10 @@
         // ═══════════════════════════════════════════════════════════
 
         const CR_SB_STEPS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50];   // the classic slider
-        // run_auto_storage_balance waits for threshold + tolerance; the tolerance is never stored, so 5
+        // run_auto_storage_balance waits for threshold + tolerance; 5 is what the server takes
+        // for a group stored without one. The tolerance select offers the classic slider's range
         const CR_SB_MARGIN = 5;
+        const CR_SB_TOL_STEPS = Array.from({ length: 21 }, (_, i) => i);
         // the PVE task types of a disk move: qm move-disk and pct move-volume
         const CR_SB_MOVES = new Set(['qmmove', 'move_volume']);
         const CR_SB_CHIPS = 8;
@@ -70,11 +72,12 @@
 
         // --- members, as the datastore list sees them ------------------------------------
 
-        function crSbMember(name, shared, localNames) {
+        // unread: the datastore list was never read, so a member is not judged against it
+        function crSbMember(name, shared, localNames, unread) {
             const def = shared.get(name) || null;
             const st = def ? crStorageState(def) : null;
             let why = '';
-            if (!def) why = localNames.has(name) ? 'local' : 'missing';
+            if (!def) why = unread ? 'listunread' : localNames.has(name) ? 'local' : 'missing';
             else if (st.offline) why = 'offline';
             else if (st.disabled) why = 'disabled';
             else if (st.inactive) why = 'inactive';
@@ -110,16 +113,25 @@
                 // LW Nov 2026 - a member the list knows only as a node's own storage is "not shared", as the detail says
                 missing: members.filter(m => m.why === 'missing').length,
                 local: members.filter(m => m.why === 'local').length,
+                listunread: members.filter(m => m.why === 'listunread').length,
             };
         }
 
-        // what the balancer works with (the status read) where there is one, the list where not
+        // A member of the status the server could read. It says so itself (usable), and leaves the
+        // others out of its spread and its recommendations (storage.py _member_stats); an answer
+        // without the flag counts by its figures
+        const crSbSrvUsable = (s) => !!s && (typeof s.usable === 'boolean' ? s.usable : Number(s.total) > 0)
+            && Number(s.total) > 0 && Number.isFinite(Number(s.used));
+
+        // What the balancer works with (the status read) where there is one, the list where not.
+        // A member the status lists is judged by the server: its figures or its state, also a
+        // storage of one node the server read on that node (shared false)
         function crSbFigures(members, status) {
             const srv = status && status.state === 'ok' ? status.body.storages : null;
             return members.map(m => {
                 const s = srv ? srv.find(x => x && x.storage === m.name) || null : null;
                 let total = null, used = null, avail = null, from = null;
-                if (s && Number(s.total) > 0 && Number.isFinite(Number(s.used))) {
+                if (crSbSrvUsable(s)) {
                     total = Number(s.total); used = Number(s.used);
                     avail = Number.isFinite(Number(s.avail)) ? Number(s.avail) : null;
                     from = 'server';
@@ -127,11 +139,12 @@
                     total = m.st.total; used = m.st.used; avail = m.st.avail; from = 'list';
                 }
                 const pct = total > 0 ? used / total * 100 : null;
+                const why = !s ? m.why : from === 'server' ? '' : (typeof s.state === 'string' && s.state) || 'unreadable';
                 return {
-                    ...m, srv: s, total, used, avail, pct, from,
-                    usable: m.usable && pct != null,
-                    // the server reads a storage without a total as 0 % (storage.py), the emptiest of all
-                    zero: !!s && !(Number(s.total) > 0),
+                    ...m, srv: s, total, used, avail, pct, from, why, whySrv: !!s && !!why,
+                    type: m.type || (s && typeof s.type === 'string' ? s.type : ''),
+                    usable: pct != null,
+                    localOn: from === 'server' && s.shared === false ? String(s.node || '-') : null,
                     unread: !!srv && !s,
                 };
             });
@@ -142,10 +155,21 @@
             return p.length >= 2 ? Math.max(...p) - Math.min(...p) : null;
         }
 
-        const crSbWhy = (m, t) => ({
-            missing: t('crSbWhyMissing'), local: t('crSbWhyLocal'), offline: t('crDsNodeOffline'), disabled: t('crDsDisabled'),
-            inactive: t('crDsInactive'), nousage: t('storageRawNoUsage'),
-        }[m.why] || '');
+        // the server's state words are the classic ones (storage.js memberStateText)
+        const CR_SB_SRV_WHY = { missing: 'sbMemberMissing', disabled: 'sbMemberDisabled', inactive: 'sbMemberInactive',
+                                unavailable: 'sbMemberUnavailable', no_size: 'sbMemberNoSize', unreadable: 'sbMemberUnreadable' };
+        const crSbWhy = (m, t) => {
+            if (m.whySrv) {
+                const text = t(CR_SB_SRV_WHY[m.why] || 'sbMemberUnreadable').replace('{node}', (m.srv && m.srv.node) || '-');
+                return text.charAt(0).toUpperCase() + text.slice(1);
+            }
+            return {
+                missing: t('crSbWhyMissing'), local: t('crSbWhyLocal'), offline: t('crDsNodeOffline'), disabled: t('crDsDisabled'),
+                inactive: t('crDsInactive'), nousage: t('storageRawNoUsage'), listunread: t('crSbWhyListUnread'),
+            }[m.why] || '';
+        };
+        const crSbWhyTone = (m) => (m.whySrv ? (m.why === 'disabled' || m.why === 'no_size' ? 'neutral' : 'error')
+            : m.why === 'missing' || m.why === 'local' || m.why === 'inactive' || m.why === 'offline' ? 'error' : 'neutral');
 
         // --- one move, worked out from the figures on screen -------------------------------
 
@@ -156,6 +180,11 @@
             const ct = (guest && guest.type === 'lxc') || /^(rootfs|mp\d+)$/.test(String(rec.disk || ''));
             const risks = [];
             const add = (level, key, vars) => risks.push({ level, key, text: crFill(t(key), vars || {}) });
+            // a move the server marks as one it refuses (a running container), with its reason
+            const refused = rec.movable === false;
+            const refusedWhy = !refused ? '' : rec.blocked === 'ct_running' ? t('sbCtRunning')
+                : (typeof rec.blocked_reason === 'string' && rec.blocked_reason) || t('crSbNotMovable');
+            if (refused) add('block', 'crSbRiskRefused', { why: refusedWhy });
             if (!tgt || !tgt.usable) {
                 add('block', 'crSbRiskTargetDown', { target: rec.target, why: tgt ? (crSbWhy(tgt, t) || t('crSbWhyNoFigures')) : t('crSbWhyMissing') });
             }
@@ -163,13 +192,12 @@
             if (tgt && tgt.content && !tgt.content.includes(ct ? 'rootdir' : 'images')) {
                 add('warn', ct ? 'crSbRiskContentCt' : 'crSbRiskContentVm', { target: rec.target, content: tgt.content.join(', ') });
             }
-            if (ct) add('warn', 'crSbRiskContainer');
             if (size == null) add('warn', 'crSbRiskSize');
             else if (tgt && tgt.avail != null && tgt.avail < size) add('warn', 'crSbRiskFree', { free: crBytes(tgt.avail), size: crBytes(size) });
             if (guest && guest.node && tgt && Array.isArray(tgt.off) && tgt.off.includes(guest.node)) {
                 add('warn', 'crSbRiskNode', { target: rec.target, node: guest.node });
             }
-            // a container cannot be moved live; its own risk above already says the move is likely refused
+            // a running container is one the server refuses, said above
             if (rec.vm_status === 'running' && !ct) add('info', 'crSbRiskRunning');
             if (!guest) add('info', 'crSbRiskNoGuest');
 
@@ -184,7 +212,7 @@
                 after = { src: s2, tgt: t2, spread: crSbSpread(moved), thin };
                 if (thin) add('info', 'crSbRiskThin', { size: crBytes(size), source: src.name, used: crBytes(src.used) });
             }
-            return { src, tgt, size, ct, risks, after, blocked: risks.some(r => r.level === 'block'), spread: crSbSpread(rows) };
+            return { src, tgt, size, ct, risks, after, refused, refusedWhy, blocked: risks.some(r => r.level === 'block'), spread: crSbSpread(rows) };
         }
 
         // --- the parts ---------------------------------------------------------------------
@@ -231,14 +259,14 @@
             );
         }
 
-        function CrSbEmpty({ datastores, dsLoading, may, standby, onCreate }) {
+        function CrSbEmpty({ datastores, dsLoading, listUnread, may, standby, onCreate }) {
             const { t } = useTranslation();
             const shared = (datastores && datastores.shared) || [];
             const usable = shared.filter(s => { const st = crStorageState(s); return st && !st.unavailable; }).length;
-            const twoShared = shared.length >= 2;
+            const twoShared = !listUnread && shared.length >= 2;
             const canConfig = may('storage.config');
             const ready = twoShared && canConfig && !standby;
-            const why = !twoShared ? t('crSbNeedTwo') : standby ? t('crSbStandbyShort') : !canConfig ? t('crSbNeedConfig') : '';
+            const why = listUnread ? t('crSbPreSharedUnread') : !twoShared ? t('crSbNeedTwo') : standby ? t('crSbStandbyShort') : !canConfig ? t('crSbNeedConfig') : '';
             return (
                 <section className="cr-sb-empty" data-cr-sb-empty="" aria-labelledby="cr-sb-empty-title">
                     <span className="cr-sb-empty-ico" aria-hidden="true"><Icons.Layers /></span>
@@ -247,7 +275,7 @@
                         <p className="cr-sb-empty-text">{t('crSbEmptyText')}</p>
                         <ul className="cr-sb-pres" aria-label={t('crSbPrereqs')}>
                             <CrSbPrereq ok={twoShared}>
-                                {dsLoading && !shared.length ? t('crSbPreSharedLoading')
+                                {listUnread ? t('crSbPreSharedUnread') : dsLoading && !shared.length ? t('crSbPreSharedLoading')
                                     : crFill(t('crSbPreShared'), { n: shared.length, ok: usable })}
                             </CrSbPrereq>
                             <CrSbPrereq ok={canConfig && !standby}>{standby ? t('crSbStandbyShort') : t('crSbPreConfig')}</CrSbPrereq>
@@ -276,10 +304,10 @@
                     <div className="cr-sb-mline">
                         <span className="cr-sb-mname">{r.name}</span>
                         {r.type && <span className="cr-ds-type">{r.type}</span>}
-                        {r.why && <CrBadge tone={r.why === 'missing' || r.why === 'local' || r.why === 'inactive' || r.why === 'offline' ? 'error' : 'neutral'}>
-                            <span data-cr-sb-why={r.why}>{crSbWhy(r, t)}</span>
+                        {r.why && <CrBadge tone={crSbWhyTone(r)}>
+                            <span data-cr-sb-why={r.why} data-cr-sb-from={r.whySrv ? 'server' : 'list'}>{crSbWhy(r, t)}</span>
                         </CrBadge>}
-                        {!r.why && r.unread && <CrBadge tone="warning" title={t('crSbUnreadHint')}><span data-cr-sb-why="unread">{t('crSbUnread')}</span></CrBadge>}
+                        {!r.why && r.unread && <CrBadge tone="warning" title={t('crSbNotInStatusHint')}><span data-cr-sb-why="unread">{t('crSbUnread')}</span></CrBadge>}
                         {r.st && r.st.partial && <CrBadge tone="warning"><span data-cr-sb-why="partial">{r.st.partial.on.length}/{r.st.partial.on.length + r.st.partial.off.length} {t('nodes')}</span></CrBadge>}
                         <span className="cr-sb-mside">
                             {r.usable && <span className="cr-mono" data-cr-sb-pct={r.pct.toFixed(1)}>{crPct(r.pct, 1)}</span>}
@@ -307,11 +335,10 @@
                             <span className="cr-mono" data-cr-sb-used="">
                                 {crFill(t('crUsedOf'), { used: crBytes(r.used), total: crBytes(r.total) })}
                                 {r.avail != null && <>, {crBytes(r.avail)} {t('free')}</>}
+                                {r.localOn && <span className="cr-muted" data-cr-sb-local={r.localOn}> - {t('sbMemberLocal').replace('{node}', r.localOn)}</span>}
                             </span>
                         ) : (
-                            <span className="cr-muted" data-cr-sb-nofig="">
-                                {r.zero ? t('crSbCountedZero') : t('crSbLeftOut')}
-                            </span>
+                            <span className="cr-muted" data-cr-sb-nofig="">{t('crSbLeftOut')}</span>
                         )}
                         <CrSbNodes m={r} />
                     </div>
@@ -419,7 +446,9 @@
 
         // --- the page ------------------------------------------------------------------------
 
-        function CrStorageBalancing({ clusterId, authFetch, datastores, dsLoading, list, listRead, setList, reloadList, may, standby,
+        // dsFail: the last read of the datastore list failed ({ msg, hasData }); without data from an
+        // earlier read the members are not judged against it
+        function CrStorageBalancing({ clusterId, authFetch, datastores, dsLoading, dsFail, onDsRetry, list, listRead, setList, reloadList, may, standby,
                                       guests, onOpenGuest, tasks, onCreate }) {
             const { t } = useTranslation();
             const [selId, setSelId] = useState(null);
@@ -458,10 +487,11 @@
                 return out;
             }, [datastores]);
             const groups = Array.isArray(list) ? list : [];
+            const listUnread = !!dsFail && !dsFail.hasData;
             const rows = useMemo(() => groups.filter(g => g && g.id != null).map(g => {
-                const members = crSbNames(g.storages).map(n => crSbMember(n, shared, localNames));
+                const members = crSbNames(g.storages).map(n => crSbMember(n, shared, localNames, listUnread));
                 return { id: g.id, g, members, sum: crSbSum(members) };
-            }), [groups, shared, localNames]);
+            }), [groups, shared, localNames, listUnread]);
             const sel = rows.find(r => r.id === selId) || null;
             const guestMap = useMemo(() => crGuestMap(Array.isArray(guests) ? guests : []), [guests]);
 
@@ -515,6 +545,8 @@
                 put(g, { auto_balance: on }, 'auto', false);
             };
             const setThreshold = (g, v) => put(g, { threshold: v }, 'threshold', true);
+            // LW Nov 2026 - the server keeps the tolerance now and the worker acts above threshold + tolerance
+            const setTolerance = (g, v) => put(g, { tolerance: v }, 'tolerance', false);
             const addMember = (g, name) => put(g, { storages: crSbNames(g.storages).concat([name]) }, 'members', true);
             const removeMember = (g, name) => {
                 const now = crSbNames(g.storages);
@@ -624,6 +656,7 @@
                 { key: 'state', label: t('crSbColMembers'), width: 136, title: t('crSbColMembersHint'), sortValue: r => r.sum.bad,
                   render: r => {
                       const n = r.members.length;
+                      if (r.sum.listunread) return <CrBadge tone="neutral"><span data-cr-sb-state="unread">{t('crSbStateListUnread')}</span></CrBadge>;
                       if (r.sum.missing || r.sum.local) {
                           // one badge each, side by side or one under the other in the narrow column
                           return (
@@ -647,12 +680,14 @@
                 const mean = readable.length >= 2 ? readable.reduce((a, r) => a + r.pct, 0) / readable.length : null;
                 const spread = crSbSpread(figs);
                 const body = st && st.state === 'ok' ? st.body : null;
-                const srvN = body ? body.storages.length : 0;
+                // the members the server could read; it lists the others with their state
+                const srvN = body ? body.storages.filter(crSbSrvUsable).length : 0;
                 // null is no figure (Number(null) would be 0)
                 const fig = (v) => (v == null || v === '' ? NaN : Number(v));
                 const thr = body && Number.isFinite(fig(body.threshold)) ? fig(body.threshold) : fig(g.threshold);
                 const imb = body && Number.isFinite(fig(body.imbalance)) ? fig(body.imbalance) : null;
-                const counted = figs.filter(r => r.srv && !r.usable);
+                // why no member could be read (the node list refused, no node online), as the server says it
+                const readError = body && typeof body.read_error === 'string' && body.read_error ? body.read_error : '';
                 let verdict = 'unread', judge = '';
                 if (st && st.state === 'loading') verdict = 'loading';
                 else if (body) {
@@ -671,6 +706,7 @@
                 const steps = CR_SB_STEPS.includes(thrNow) || !Number.isFinite(thrNow) ? CR_SB_STEPS : CR_SB_STEPS.concat([thrNow]).sort((a, b) => a - b);
                 const every = crSbEvery(g.check_interval == null ? 3600 : g.check_interval);
                 const margin = crSbMargin(g);
+                const tolSteps = CR_SB_TOL_STEPS.includes(margin) ? CR_SB_TOL_STEPS : CR_SB_TOL_STEPS.concat([margin]).sort((a, b) => a - b);
                 const trig = Number.isFinite(thrNow) ? thrNow + margin : null;
                 const lock = !canEdit ? (standby ? t('crSbStandbyShort') : t('crSbNeedConfig')) : '';
                 const myMsg = msg && (msg.id === g.id || msg.id == null) ? msg : null;
@@ -683,6 +719,8 @@
                     const guest = guestMap ? guestMap.get(String(rec.vmid)) || null : null;
                     return { key: `${recKey(rec)}#${i}`, rec, guest, plan: crSbPlan(rec, figs, guest, t), started: started[recKey(rec)] || null };
                 });
+                const refusedRows = recRows.filter(r => r.plan.refused);
+                const refusedWhy = Array.from(new Set(refusedRows.map(r => r.plan.refusedWhy))).join('; ');
                 const recCols = [
                     { key: 'guest', label: t('crSbGuest'), flex: true, min: 150, sortValue: r => (r.guest && r.guest.name) || r.rec.vm_name || '',
                       text: r => `${(r.guest && r.guest.name) || r.rec.vm_name || ''} ${r.rec.vmid}`,
@@ -731,6 +769,8 @@
                                 <CrBadge tone="info"><span data-cr-sb-started={r.started.upid || ''}>{t('crSbStarted')}</span></CrBadge>
                                 <button type="button" className="cr-link" onClick={(e) => { e.stopPropagation(); openTasks(r.rec.vmid); }} data-cr-sb-tasks="">{t('crSbOpenTasks')}</button>
                             </span>
+                          : r.plan.refused
+                              ? <span className="cr-muted" data-cr-sb-refused={r.rec.blocked || 'server'} title={r.plan.refusedWhy}>{t('crSbNotMovable')}</span>
                           : canEdit
                               ? <CrButton className="cr-btn-xs" icon={<Icons.Eye />} data-cr-sb-preview={recKey(r.rec)}
                                   onClick={(e) => { e.stopPropagation(); openMove(r.rec); }}>{t('crSbPreview')}</CrButton>
@@ -808,6 +848,13 @@
                                     {steps.map(v => <option key={v} value={String(v)}>{crFill(t('crSbPoints'), { n: v })}</option>)}
                                 </select>
                             </label>
+                            <label className="cr-sb-field" title={lock || t('storageToleranceDesc')}>
+                                <span>{t('migrationTolerance')}</span>
+                                <select className="cr-select" value={String(margin)} disabled={!canEdit || !!busy.tolerance}
+                                    onChange={e => setTolerance(g, Number(e.target.value))} data-cr-sb-tolerance="">
+                                    {tolSteps.map(v => <option key={v} value={String(v)}>{crFill(t('crSbPoints'), { n: v })}</option>)}
+                                </select>
+                            </label>
                             {canEdit && addable.length > 0 && (
                                 <label className="cr-sb-field">
                                     <select className="cr-select" value="" disabled={!!busy.members} data-cr-sb-add="" aria-label={t('crSbAddMember')}
@@ -867,6 +914,11 @@
                                         : verdict === 'unknown' ? <><Icons.Info className="w-4 h-4" />{t({ imbalance: 'crSbNoImbalance', threshold: 'crSbNoThreshold' }[judge] || 'crSbCannotJudge')}</>
                                         : <><Icons.AlertCircle className="w-4 h-4" />{t('crSbUnreadVerdict')}</>}
                                 </div>
+                                {readError && verdict === 'unknown' && (
+                                    <CrSbCallout tone="error" id="read-error" onRetry={() => readStatus(g.id)}>
+                                        <p data-cr-sb-read-error="">{crFill(t('crSbServerSays'), { why: readError })}</p>
+                                    </CrSbCallout>
+                                )}
                                 {st && st.state !== 'ok' && st.state !== 'loading' && (
                                     <CrSbCallout tone={st.state === 'forbidden' || st.state === 'notfound' ? 'warning' : 'error'} id={`status-${st.state}`}
                                         onRetry={() => readStatus(g.id)}>
@@ -889,12 +941,7 @@
                                         </>}
                                     </dl>
                                 )}
-                                {body && srvN < 2 && <CrSbCallout tone="warning" id="few"><p>{crFill(t('crSbServerFew'), { n: srvN })}</p></CrSbCallout>}
-                                {counted.length > 0 && (
-                                    <CrSbCallout tone="warning" id="counted">
-                                        <p>{crFill(t('crSbCounted'), { names: counted.map(r => r.name).join(', ') })}</p>
-                                    </CrSbCallout>
-                                )}
+                                {body && srvN < 2 && <CrSbCallout tone="warning" id="few"><p>{crFill(t('crSbServerFewOf'), { n: srvN, total: sel.members.length })}</p></CrSbCallout>}
                                 {body && figs.some(r => r.unread && !r.why) && (
                                     <CrSbCallout tone="info" id="unread"><p>{crFill(t('crSbUnreadNote'), { names: figs.filter(r => r.unread && !r.why).map(r => r.name).join(', ') })}</p></CrSbCallout>
                                 )}
@@ -911,6 +958,11 @@
                                 <CrTable id="sb-recs" columns={recCols} rows={recRows} rowKey={r => r.key} ariaLabel={t('crSbRecs')}
                                     toolbar={<span className="cr-table-title">{t('crSbRecs')}</span>} rowHeight={30}
                                     actions={<span className="cr-table-sub" title={t('crSbRecsHint')}>{t('crSbRecsSub')}</span>} />
+                                {refusedRows.length > 0 && (
+                                    <p className="cr-sb-fine" data-cr-sb-refused-note={refusedRows.length}>
+                                        {crFill(t('crSbRefusedNote'), { n: refusedRows.length, why: refusedWhy })}
+                                    </p>
+                                )}
                                 <p className="cr-sb-fine">{t('crSbRecsFoot')}</p>
                             </div>
                         )}
@@ -935,8 +987,8 @@
 
             const createBtn = canEdit && (
                 <CrButton variant="primary" icon={<Icons.Plus />} onClick={onCreate} data-cr-sb-create=""
-                    disabled={((datastores && datastores.shared) || []).length < 2}
-                    title={((datastores && datastores.shared) || []).length < 2 ? t('crSbNeedTwo') : undefined}>
+                    disabled={listUnread || ((datastores && datastores.shared) || []).length < 2}
+                    title={listUnread ? t('crSbPreSharedUnread') : ((datastores && datastores.shared) || []).length < 2 ? t('crSbNeedTwo') : undefined}>
                     {t('createStorageCluster')}
                 </CrButton>
             );
@@ -956,6 +1008,11 @@
                         <span className="cr-badge cr-badge-warning cr-badge-plain">{t('experimentalFeature')}</span> {t('crSbExperimental')}
                     </p>
                     {standby && <CrSbCallout tone="info" id="standby"><p>{t('crSbStandby')}</p></CrSbCallout>}
+                    {dsFail && (
+                        <CrSbCallout tone={dsFail.hasData ? 'warning' : 'error'} id="ds-failed" onRetry={onDsRetry}>
+                            <p>{crFill(t(dsFail.hasData ? 'crSbDsStale' : 'crSbDsFailed'), { why: dsFail.msg || '-' })}</p>
+                        </CrSbCallout>
+                    )}
                     {pageMsg && <CrSbCallout tone={pageMsg.tone} id={`msg-${pageMsg.tone}`}><p data-cr-sb-msg={pageMsg.tone}>{pageMsg.text}</p></CrSbCallout>}
 
                     {listState === 'loading' ? (
@@ -967,7 +1024,7 @@
                                 : listState === 'malformed' ? t('crSbStatusMalformed') : crSbError({ error: listRead.msg }, listRead.code, t)}</p>
                         </CrSbCallout>
                     ) : !rows.length ? (
-                        <CrSbEmpty datastores={datastores} dsLoading={dsLoading} may={may} standby={standby} onCreate={onCreate} />
+                        <CrSbEmpty datastores={datastores} dsLoading={dsLoading} listUnread={listUnread} may={may} standby={standby} onCreate={onCreate} />
                     ) : (
                         <>
                             <CrTable id="sb-groups" columns={columns} rows={rows} rowKey={r => r.id} selectedKey={selId}

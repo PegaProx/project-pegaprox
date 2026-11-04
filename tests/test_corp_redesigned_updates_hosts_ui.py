@@ -190,10 +190,14 @@ def test_runtime_one_node_is_updated_from_its_dialog_and_its_task_is_followed(op
     assert app.errors == []
 
 
+# the refusal of vms.py start_node_update outside maintenance mode, English with a code
+NOT_IN_MAINT = (400, {'error': 'Node pve1 is not in maintenance mode', 'code': 'NOT_IN_MAINTENANCE', 'node': 'pve1'})
+
+
 def test_runtime_a_node_outside_maintenance_asks_again_and_sends_force(open_app):
     app = open_app()
     page = _tab(app)
-    app.server.node_answer['pve1'] = (400, {'error': 'Node pve1 ist nicht im Wartungsmodus.'})
+    app.server.node_answer['pve1'] = NOT_IN_MAINT
     panel = _open_node(page, 'pve1')
     panel.locator('[data-cr-upd-open="node-update"]').click()
     dlg = page.locator('[data-cr-upd-dialog="node-update"]')
@@ -220,7 +224,7 @@ def test_runtime_the_variant_sends_what_the_classic_section_sends(open_app):
     classic = open_app(layout='corporate', storage={'updateCheck_c1': json.dumps({'time': '2026-10-30T08:00:00.000Z',
                                                                                     'summary': U._check_answer()['summary'],
                                                                                     'nodes': U._check_answer()['nodes']})})
-    classic.server.node_answer['pve1'] = (400, {'error': 'Node pve1 ist nicht im Wartungsmodus.'})
+    classic.server.node_answer['pve1'] = NOT_IN_MAINT
     page = classic.page
     page.on('dialog', lambda d: d.accept())
     page.locator('.corp-tree-item', has_text='Testi').first.click()
@@ -234,7 +238,7 @@ def test_runtime_the_variant_sends_what_the_classic_section_sends(open_app):
     want = [r[2] for r in _reqs(classic, 'POST', '/nodes/pve1/update')]
     assert want == [{'reboot': True}, {'reboot': True, 'force': True}], want
     app = open_app()
-    app.server.node_answer['pve1'] = (400, {'error': 'Node pve1 ist nicht im Wartungsmodus.'})
+    app.server.node_answer['pve1'] = NOT_IN_MAINT
     page = _tab(app)
     _open_node(page, 'pve1').locator('[data-cr-upd-open="node-update"]').click()
     page.locator('[data-cr-upd-confirm="node-update"]').click()

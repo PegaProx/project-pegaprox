@@ -1,8 +1,8 @@
 """Corporate Redesigned (Preview): the layout id and where it is wired in.
 
 corporate-redesigned is Corporate with a scoped skin on top. The server stores it like any
-other layout, a lock never names it, and a lock to corporate pins its users to the classic
-one. In the browser useLayout() reports it as Corporate (isCorporate) plus isCorpRedesigned,
+other layout, a lock may name it (MK Nov 2026), and a lock to corporate pins its users to the
+classic one. In the browser useLayout() reports it as Corporate (isCorporate) plus isCorpRedesigned,
 the body keeps data-layout="corporate" and carries data-corp-variant="redesigned"; every
 other layout ends without that attribute. The runtime part drives the built bundle through
 the fake server of tests/test_ha_ui.py and skips without Playwright. LW Oct 2026
@@ -75,19 +75,23 @@ def test_a_corporate_lock_refuses_the_preview_and_keeps_the_stored_choice(api, d
     assert r.status_code == 200
 
 
-def test_a_lock_cannot_name_the_preview(api, db):
-    from pegaprox.api.helpers import UI_LAYOUT_LOCKS
-    assert tuple(UI_LAYOUT_LOCKS) == ('modern', 'corporate', 'cloud')
+# MK Nov 2026 - these two said a lock can never name the redesign. That was reversed:
+# classic Corporate is frozen, so an admin has to be able to pin the redesign.
+# tests/test_ui_lock_corp_redesigned.py covers the lock itself
+def test_a_lock_can_name_the_redesign(api, db):
     root = api.as_user(_seed_user(db, 'root', role='admin'))
     r = root.post('/api/settings/server', json={'ui_layout_lock': 'corporate-redesigned'})
-    assert r.status_code == 400
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert api.anon().get('/api/interface/lock').get_json()['layout'] == 'corporate-redesigned'
 
 
-def test_the_server_change_is_the_allowlist_alone():
+def test_the_server_change_is_the_two_allowlists():
     users = _read('pegaprox', 'api', 'users.py')
     assert users.count("'corporate-redesigned'") == 1
     assert "if layout in ['modern', 'classic', 'corporate', 'corporate-redesigned', 'cloud']:" in users
-    for name in ('helpers.py', 'auth.py', 'settings.py'):
+    helpers = _read('pegaprox', 'api', 'helpers.py')
+    assert helpers.count("'corporate-redesigned'") == 1
+    for name in ('auth.py', 'settings.py'):
         assert 'corporate-redesigned' not in _read('pegaprox', 'api', name), name
 
 
@@ -99,9 +103,10 @@ def _function(src, name):
     return src[start:end]
 
 
-def test_the_lock_list_is_unchanged():
+def test_the_lock_list_takes_the_redesign():
+    # LW Nov 2026 - the browser keeps a lock to the redesign, as the server stores it
     ctx = _read('web', 'src', 'contexts.js')
-    assert "const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'cloud'];" in ctx
+    assert "const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'corporate-redesigned', 'cloud'];" in ctx
 
 
 def test_use_layout_reports_corporate_plus_the_variant():
@@ -198,8 +203,9 @@ def _selectors(css):
 
 def test_the_css_block_is_one_and_every_rule_is_scoped():
     html = _read('web', 'index.html.original')
-    assert html.count('LW Oct 2026 - Corporate Layout - Redesigned (Preview)') == 1
-    title = html.index('LW Oct 2026 - Corporate Layout - Redesigned (Preview)')
+    # LW Nov 2026 - the title of the block lost its "(Preview)"
+    assert html.count('LW Oct 2026 - Corporate Layout - Redesigned\n') == 1
+    title = html.index('LW Oct 2026 - Corporate Layout - Redesigned\n')
     start = html.rindex('/*', 0, title)
     block = html[start:html.index('</style>', start)]
     sels = _selectors(block)
@@ -311,7 +317,8 @@ def test_runtime_the_profile_card_picks_the_preview(open_app):
     card = page.locator('[data-layout-pick="corporate-redesigned"]')
     card.wait_for(timeout=5000)
     text = card.text_content()
-    assert 'Corporate Redesigned' in text and 'Preview' in text, text
+    # LW Nov 2026 - the layout is no preview, the card says its name only
+    assert 'Corporate Redesigned' in text and 'preview' not in text.lower(), text
     card.click()
     page.wait_for_function('() => document.body.dataset.corpVariant === "redesigned"', timeout=5000)
     sent = [b for b in app.server.bodies.get('/api/user/preferences', []) if b.get('ui_layout')]

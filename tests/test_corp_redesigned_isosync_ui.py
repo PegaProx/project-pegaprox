@@ -205,8 +205,8 @@ def test_runtime_the_page_has_its_parts_and_keeps_the_sub_tab_strip(open_app):
     for sec in ('iso-activity', 'iso-auto', 'iso-files', 'iso-nodes'):
         assert page.locator(f'[data-cr-nc-sec="{sec}"]').count() == 1, sec
     assert page.locator('.corp-tab-strip button.active', has_text='ISO Sync').count() == 1
-    # the classic sub tab is not drawn beside it: no browser-only auto-sync checkbox
-    assert page.locator('[data-cr-iso] input[type="checkbox"]').count() == 0
+    # the classic sub tab is not drawn beside it: the one switch is the auto-sync of the layout
+    assert page.locator('[data-cr-iso] input[type="checkbox"]:not([data-cr-iso-auto])').count() == 0
     assert page.get_by_text('Auto-Sync after Upload', exact=True).count() == 0
     # one read of the status for ISO images and one of the last result, nothing per file or node
     assert _count(app, 'GET', STATUS) == 1 and _count(app, 'GET', LAST) == 1
@@ -453,14 +453,17 @@ def test_runtime_a_standby_reads_and_writes_nothing(open_app):
 
 
 @pytest.mark.parametrize('flag, shown', [(None, 'Off'), ('true', 'On')])
-def test_runtime_auto_sync_is_said_to_be_not_available_and_the_browser_flag_is_only_shown(open_app, flag, shown):
+def test_runtime_auto_sync_is_the_switch_of_the_browser_flag(open_app, flag, shown):
+    # the switch is offered (the upload copies once its task ended), on the flag of the classic checkbox
     app = open_app(storage={'autosync-c1': flag} if flag else None)
     page = _tab(app)
     card = page.locator('[data-cr-nc-sec="iso-auto"]')
-    assert 'not available' in card.locator('[data-cr-nc-k="server"] dd').inner_text()
-    assert card.locator('[data-cr-nc-k="browser"] dd').inner_text().strip().startswith(shown)
-    assert card.locator('input, button').count() == 0
+    box = card.locator('[data-cr-iso-auto]')
+    assert box.is_checked() == (flag == 'true')
+    assert card.locator('[data-cr-iso-auto-state]').inner_text().strip() == shown
     assert page.evaluate("() => localStorage.getItem('autosync-c1')") == flag
+    box.click()
+    assert page.evaluate("() => localStorage.getItem('autosync-c1')") == ('false' if flag == 'true' else 'true')
     _no_errors(app)
 
 
@@ -550,9 +553,10 @@ def test_the_variant_is_gated_and_uses_the_classic_writes():
     assert 'onClick={() => triggerSync(sourceNode, f.storage, f.name)}' in storage
     assert storage.count('if (crTracked === true)') == 2
     src = _read('web', 'src', 'cr_isosync.js')
-    # reads only: the status and the last result, no write of its own and no browser flag
+    # reads only: the status and the last result, no write of its own; the one browser write is the
+    # flag of the classic checkbox, the copy after an upload is DatastoreTab's Sync
     assert "method:" not in src and 'POST' not in src
     assert sorted(set(re.findall(r'/iso-sync/[a-z-]+', src))) == ['/iso-sync/last-result', '/iso-sync/status']
-    assert 'localStorage.setItem' not in src
+    assert src.count('localStorage.setItem') == 1 and 'const key = `autosync-${clusterId}`;' in src
     assert 'cr_isosync.js' in _read('web', 'Dev', 'build.sh')
     assert 'function CrIsoSync(' in _read('web', 'index.html')

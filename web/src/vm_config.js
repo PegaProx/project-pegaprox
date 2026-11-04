@@ -794,9 +794,36 @@
             );
         }
 
+        // LW Nov 2026 - Corporate Redesigned names the reads of a tab that failed, with Retry, so an empty list
+        // below it is not taken for the guest's own (parts: { name: HTTP code, 0 for no answer })
+        function CrVcTabFail({ id, what, parts, onRetry }) {
+            const { t } = useTranslation();
+            const { isCorpRedesigned } = useLayout();
+            const bad = Object.entries(parts || {}).filter(([, v]) => v !== null && v !== undefined);
+            if (!isCorpRedesigned || !bad.length) return null;
+            const why = bad.map(([k, v]) => `${k}: ${v ? `HTTP ${v}` : t('crVmNoAnswer')}`).join(', ');
+            return (
+                <div className="cr-callout cr-callout-error" role="alert" data-cr-vc-tabfail={id} data-cr-vc-tabfail-parts={bad.map(([k]) => k).join(' ')}>
+                    <Icons.AlertCircle className="w-4 h-4" />
+                    <div><p>{crFill(t('crVcTabFailed'), { what, why })}</p></div>
+                    <button type="button" className="cr-btn cr-btn-xs" onClick={onRetry} data-cr-vc-tabfail-retry={id}>{t('retry')}</button>
+                </div>
+            );
+        }
+
         function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false, initialTab = 'general' }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haStandby } = useAuth();
+            // LW Nov 2026 - the guest view reads its config again once this dialog is gone
+            const closedRef = useRef(null);
+            closedRef.current = { cluster_id: clusterId, vmid: vm.vmid, vm_type: vm.type };
+            useEffect(() => () => {
+                window.dispatchEvent(new CustomEvent('pegaprox-vm-config-closed', { detail: closedRef.current }));
+            }, []);
+            // LW Nov 2026 - the tab reads that failed, by tab and part (a code, 0 for no answer); shown by the redesign
+            const [crFail, setCrFail] = useState({});
+            const crFailed = (tab, part, res) => setCrFail(f => ({ ...f, [tab]: { ...(f[tab] || {}), [part]: res && res.ok ? null : (res ? res.status : 0) } }));
+            const crAnyFail = (tab) => Object.values(crFail[tab] || {}).some(v => v !== null && v !== undefined);
             const [config, setConfig] = useState(null);
             const [configError, setConfigError] = useState(null);  // MK: Track config load errors
             const [loading, setLoading] = useState(true);
@@ -962,7 +989,7 @@
             const { isCorpRedesigned } = useLayout();
             const crVcCluster = allClusters.find(c => c.id === clusterId);
             const crVc = isCorpRedesigned && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
-            // LW Nov 2026 - the preview's edits of network devices, saved from the review with the classic request
+            // LW Nov 2026 - the redesign's edits of network devices, saved from the review with the classic request
             const [crNets, setCrNets] = useState({});
             const crv = useCrVc({ on: crVc, vm, clusterId, authFetch, config, changes, nets: crNets });
 
@@ -1031,7 +1058,7 @@
                                 ...newConfig.raw
                             }
                         }));
-                        // LW Nov 2026 - the preview reads what waits for the next start again, the
+                        // LW Nov 2026 - the redesign reads what waits for the next start again, the
                         // running config its prediction compares with comes from it
                         if (crVc) crv.refresh();
                     }
@@ -1316,7 +1343,7 @@
 
             const fetchConfig = async (retryCount = 0) => {
                 setLoading(true);
-                // LW Nov 2026 - handed back for the preview's save (the classic callers ignore it)
+                // LW Nov 2026 - handed back for the redesign's save (the classic callers ignore it)
                 let loaded = null;
                 try {
                     const response = await authFetch(
@@ -1394,11 +1421,13 @@
             const fetchSnapshots = async () => {
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots`);
+                    crFailed('snapshots', 'snapshots', response);
                     if (response && response.ok) {
                         setSnapshots(await response.json());
                     }
                 } catch (error) {
                     console.error('to load snapshots:', error);
+                    crFailed('snapshots', 'snapshots', null);
                 }
             };
 
@@ -1431,6 +1460,7 @@
             const fetchReplications = async () => {
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/replication?vmid=${vm.vmid}`);
+                    crFailed('replication', 'replication', response);
                     if (response && response.ok) {
                         setReplications(await response.json());
                     }
@@ -1443,6 +1473,7 @@
             const fetchCrossClusterRepls = async () => {
                 try {
                     const response = await authFetch(`${API_URL}/cross-cluster-replications?vmid=${vm.vmid}`);
+                    crFailed('replication', 'cross-cluster', response);
                     if (response && response.ok) {
                         setCrossClusterRepls(await response.json());
                     }
@@ -1505,11 +1536,13 @@
                 setBackupLoading(true);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups`);
+                    crFailed('backups', 'backups', response);
                     if (response && response.ok) {
                         setVmBackups(await response.json());
                     }
                 } catch (error) {
                     console.error('failed to load backups:', error);
+                    crFailed('backups', 'backups', null);
                 } finally {
                     setBackupLoading(false);
                 }
@@ -1521,12 +1554,14 @@
                 try {
                     // Fetch Proxmox tasks for this VM
                     const tasksRes = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/tasks?vmid=${vm.vmid}&limit=50`);
+                    crFailed('history', 'tasks', tasksRes);
                     if (tasksRes && tasksRes.ok) {
                         setVmProxmoxTasks(await tasksRes.json());
                     }
                     
                     // Fetch PegaProx audit log for this VM
                     const auditRes = await authFetch(`${API_URL}/clusters/${clusterId}/audit?vmid=${vm.vmid}&limit=50`);
+                    crFailed('history', 'audit', auditRes);
                     if (auditRes && auditRes.ok) {
                         setVmPegaproxActions(await auditRes.json());
                     }
@@ -1548,6 +1583,8 @@
                         authFetch(`${base}/ipset`),
                         authFetch(`${base}/refs`)
                     ]);
+                    setCrFail(f => ({ ...f, firewall: Object.fromEntries([['options', optRes], ['rules', rulesRes], ['aliases', aliasRes], ['ipset', ipsetRes], ['refs', refsRes]]
+                        .map(([k, r]) => [k, r && r.ok ? null : (r ? r.status : 0)])) }));
                     if (optRes?.ok) setFwOptions(await optRes.json());
                     if (rulesRes?.ok) setFwRules(await rulesRes.json());
                     if (aliasRes?.ok) setFwAliases(await aliasRes.json());
@@ -2131,7 +2168,7 @@
                 setHasChanges(Object.keys(next).length > 0);
             };
 
-            // LW Nov 2026 - an edit of the preview's Hardware tab: several keys and the delete list in one go
+            // LW Nov 2026 - an edit of the redesign's Hardware tab: several keys and the delete list in one go
             const crVcSet = (patch) => {
                 const next = crVcPatch(changes, patch, config?.raw);
                 setChanges(next);
@@ -2139,7 +2176,7 @@
             };
 
             const handleChange = (section, key, value) => {
-                // in the preview a value set back to what the config holds is no change any more
+                // in the redesign a value set back to what the config holds is no change any more
                 if (crVc && crVcSame(config?.raw?.[key], value)) return crVcRevert(key);
                 setChanges(prev => ({
                     ...prev,
@@ -2197,11 +2234,11 @@
                     addToast(t('connectionError'), 'error');
                 }
                 setSaving(false);
-                // LW Nov 2026 - the preview reads what PVE keeps pending once it knows the outcome
+                // LW Nov 2026 - the redesign reads what PVE keeps pending once it knows the outcome
                 return saved;
             };
 
-            // the preview saves only from its review; the rows are the prediction PVE's answer goes next to
+            // the redesign saves only from its review; the rows are the prediction PVE's answer goes next to
             const crVcSave = async () => {
                 const sent = crv.rows;
                 crv.beginSave();
@@ -2236,7 +2273,7 @@
             };
 
             // LW Nov 2026 - the delete buttons of EFI disk, TPM and cloud-init drive, out of the classic
-            // Hardware tab so the preview's tab sends the same requests
+            // Hardware tab so the redesign's tab sends the same requests
             const handleDeleteEfiDisk = async () => {
                 if (!confirm(t('confirmDeleteEfiDisk') || 'Delete EFI disk? This may prevent the VM from booting.')) return;
                 try {
@@ -2362,8 +2399,8 @@
                 }
             };
 
-            // LW Nov 2026 - the permanent delete of an unused disk, out of the classic Disks tab so the
-            // preview's tab sends the same request
+            // LW Nov 2026 - the permanent delete of an unused disk, out of the classic Disks tab so
+            // the redesign's tab sends the same request
             const handleDeleteUnusedDisk = async (disk) => {
                 if (!confirm(t('deleteUnusedDiskConfirm') || `Permanently delete ${disk.id}? This cannot be undone!`)) return;
                 try {
@@ -2715,7 +2752,7 @@
             // header with explicit Apply / Cancel actions). The Modern dark
             // pill-tab look feels foreign in the Corporate layout especially
             // under the light theme. Body markup is shared between layouts.
-            // LW Nov 2026 - the SMBIOS card of the Options tab, the preview's Options tab shows it too
+            // LW Nov 2026 - the SMBIOS card of the Options tab, the redesign's Options tab shows it too
             const renderSmbiosCard = () => (
                                                     <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
                                                         <div className="flex items-center justify-between mb-3">
@@ -3335,7 +3372,7 @@
                                                    onAddTpm: () => setShowAddTpm(true), onDeleteTpm: handleDeleteTpm,
                                                    onAddCloudInit: () => setShowAddCloudInit(true), onDeleteCloudInit: handleDeleteCloudInit }}
                                             rngCard={
-                                                // running only draws the yellow restart pill; the device row's pending chip says it in the preview
+                                                // running only draws the yellow restart pill; the device row's pending chip says it in the redesign
                                                 <VirtioRngCard value={config?.raw?.rng0} running={false}
                                                     onAdd={() => setShowRngDialog(true)} onEdit={() => setShowRngDialog(true)} onRemove={removeRng} t={t} />
                                             }
@@ -4295,6 +4332,7 @@
                                                 </button>
                                             </div>
                                             
+                                            <CrVcTabFail id="snapshots" what={t('snapshotsTab')} parts={crFail.snapshots} onRetry={fetchSnapshots} />
                                             {snapshots.length > 0 ? (
                                                 <div className="space-y-3">
                                                     {snapshots.map(snap => (
@@ -4337,7 +4375,7 @@
                                                         </div>
                                                     ))}
                                                 </div>
-                                            ) : (
+                                            ) : crAnyFail('snapshots') && isCorpRedesigned ? null : (
                                                 <div className="text-center py-8 text-gray-500">
                                                     <Icons.Clock />
                                                     <p className="mt-2">{t('noSnapshots')}</p>
@@ -4486,6 +4524,7 @@
                                                 </div>
                                             </div>
                                             
+                                            <CrVcTabFail id="backups" what={t('backupsTab')} parts={crFail.backups} onRetry={fetchBackups} />
                                             {backupLoading ? (
                                                 <div className="flex items-center justify-center py-8">
                                                     <Icons.RotateCw className="animate-spin text-gray-400" />
@@ -4598,7 +4637,7 @@
                                                         </div>
                                                     ))}
                                                 </div>
-                                            ) : (
+                                            ) : crAnyFail('backups') && isCorpRedesigned ? null : (
                                                 <div className="text-center py-8 text-gray-500">
                                                     <Icons.Database className="mx-auto opacity-50" />
                                                     <p className="mt-2">{t('noBackups') || 'No backups found'}</p>
@@ -4915,6 +4954,8 @@
                                                 </div>
                                             )}
                                             
+                                            <CrVcTabFail id="replication" what={t('replicationJobs')} parts={crFail.replication}
+                                                onRetry={() => { fetchReplications(); fetchCrossClusterRepls(); }} />
                                             {replications.length > 0 ? (
                                                 <div className="space-y-3">
                                                     {replications.map(job => (
@@ -4962,7 +5003,7 @@
                                                         </div>
                                                     ))}
                                                 </div>
-                                            ) : (
+                                            ) : (crFail.replication || {}).replication != null && isCorpRedesigned ? null : (
                                                 <div className="text-center py-8 text-gray-500">
                                                     <Icons.RefreshCw />
                                                     <p className="mt-2">{t('noReplicationJobs')}</p>
@@ -4995,7 +5036,7 @@
                                                     </button>
                                                 </div>
 
-                                                {crossClusterRepls.length === 0 ? (
+                                                {crossClusterRepls.length === 0 ? ((crFail.replication || {})['cross-cluster'] != null && isCorpRedesigned ? null :
                                                     <div className="text-center py-6 text-gray-500 text-sm">
                                                         {t('noReplicationJobs')}
                                                     </div>
@@ -5200,6 +5241,8 @@
                                                 </button>
                                             </div>
 
+                                            <CrVcTabFail id="history" what={historySubTab === 'proxmox' ? t('proxmoxTasks') : t('pegaproxActions')}
+                                                parts={historySubTab === 'proxmox' ? { tasks: (crFail.history || {}).tasks } : { audit: (crFail.history || {}).audit }} onRetry={fetchHistory} />
                                             {historyLoading ? (
                                                 <div className="flex items-center justify-center py-8">
                                                     <Icons.RotateCw className="w-6 h-6 animate-spin text-proxmox-orange" />
@@ -5249,7 +5292,7 @@
                                                                         </tbody>
                                                                     </table>
                                                                 </div>
-                                                            ) : (
+                                                            ) : (crFail.history || {}).tasks != null && isCorpRedesigned ? null : (
                                                                 <div className="text-center py-8 text-gray-500">
                                                                     <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
                                                                     <p>No Proxmox tasks found for this {isQemu ? 'VM' : 'Container'}</p>
@@ -5293,7 +5336,7 @@
                                                                         </tbody>
                                                                     </table>
                                                                 </div>
-                                                            ) : (
+                                                            ) : (crFail.history || {}).audit != null && isCorpRedesigned ? null : (
                                                                 <div className="text-center py-8 text-gray-500">
                                                                     <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
                                                                     <p>No PegaProx actions found for this {isQemu ? 'VM' : 'Container'}</p>
@@ -5314,6 +5357,7 @@
                                                 </div>
                                             ) : (
                                                 <>
+                                                    <CrVcTabFail id="firewall" what={t('firewall')} parts={crFail.firewall} onRetry={fetchFirewallData} />
                                                     {/* Sub-tabs for firewall sections */}
                                                     <div className="flex gap-1 border-b border-proxmox-border pb-2">
                                                         {['rules', 'options', 'aliases', 'ipsets', 'log'].map(st => (
@@ -5366,7 +5410,7 @@
                                                                     </thead>
                                                                     <tbody>
                                                                         {(!fwRules || fwRules.length === 0) ? (
-                                                                            <tr><td colSpan="11" className="p-8 text-center text-gray-500">{t('noFirewallRules') || 'No firewall rules configured'}</td></tr>
+                                                                            <tr><td colSpan="11" className="p-8 text-center text-gray-500">{(crFail.firewall || {}).rules != null && isCorpRedesigned ? t('crVmNotRead') : (t('noFirewallRules') || 'No firewall rules configured')}</td></tr>
                                                                         ) : (Array.isArray(fwRules) ? fwRules : []).map((rule, idx) => (
                                                                             <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
                                                                                 <td className="p-3 text-gray-400">{rule.pos}</td>
@@ -5456,6 +5500,8 @@
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
                                                                     <div className="text-sm text-gray-400 mb-2">{t('fwEnable') || 'Firewall'}</div>
                                                                     <button
+                                                                        disabled={(crFail.firewall || {}).options != null && isCorpRedesigned}
+                                                                        data-cr-vc-fw-switch={!isCorpRedesigned ? undefined : (crFail.firewall || {}).options != null ? 'unread' : fwOptions.enable ? 'on' : 'off'}
                                                                         onClick={async () => {
                                                                             const newVal = fwOptions.enable ? 0 : 1;
                                                                             try {
@@ -5478,7 +5524,7 @@
                                                                                 : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
                                                                         }`}
                                                                     >
-                                                                        {fwOptions.enable ? t('enabled') || 'Enabled' : t('disabled') || 'Disabled'}
+                                                                        {(crFail.firewall || {}).options != null && isCorpRedesigned ? t('crVmNotRead') : fwOptions.enable ? t('enabled') || 'Enabled' : t('disabled') || 'Disabled'}
                                                                     </button>
                                                                 </div>
                                                                 <div className="bg-proxmox-dark rounded-lg p-4">
@@ -6356,7 +6402,7 @@
                                                         {(() => {
                                                             const currentBoot = getValue('options', 'boot') || '';
                                                             const bootdisk = getValue('options', 'bootdisk') || '';
-                                                            // LW Nov 2026 - parsed in vcBootModel, the preview's Options tab reads the same
+                                                            // LW Nov 2026 - parsed in vcBootModel, the redesign's Options tab reads the same
                                                             const { bootDevices, sortedDevices } = vcBootModel(config, currentBoot, bootdisk);
                                                             
                                                             const toggleDevice = (device) => {
@@ -6494,7 +6540,7 @@
                             )}
                         </div>
 
-                        {/* Footer - the preview has its pending changes panel there */}
+                        {/* Footer - the redesign has its pending changes panel there */}
                         {crVc && (
                             <CrVcPanel t={t} crv={crv} changesCount={Object.keys(changes).length + Object.keys(crNets).length} saving={saving}
                                 readOnly={haReadOnly} onSave={crVcSave} onRevert={crVcRevert} />
@@ -8352,7 +8398,7 @@
             );
         }
 
-        // LW Nov 2026 - the order of the Disks tab (#610 follow-up), for the classic list and the preview's:
+        // LW Nov 2026 - the order of the Disks tab (#610 follow-up), for the classic list and the redesign's:
         // data disks by bus and index, then CD/DVD drives, then the EFI and TPM volumes
         function vcDiskOrder(a, b) {
             const rank = (d) => {
@@ -8371,7 +8417,7 @@
             return 0;
         }
 
-        // LW Nov 2026 - the boot order of the Options tab as data, for the classic list and the preview's:
+        // LW Nov 2026 - the boot order of the Options tab as data, for the classic list and the redesign's:
         // every device that can boot, the ones in the order (legacy letters resolved), and both sorted
         function vcBootModel(config, currentBoot, bootdisk) {
             const raw = config?.raw || {};
@@ -8447,7 +8493,7 @@
         }
 
         // LW Nov 2026 - what the edit dialog of a network device starts from and sends (PUT .../networks/<id>);
-        // the preview's Network tab edits the same object
+        // the redesign's Network tab edits the same object
         function vcNetEditInitial(network) {
             return {
             bridge: network.bridge || 'vmbr0',

@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the performance metrics of a node and a guest - LW Nov 2026
+        // Corporate Redesigned: the performance metrics of a node and a guest - LW Nov 2026
         // The Performance panel of the node's and the guest's Monitor tab: the figures above the
         // charts, the time of the newest sample and the gaps under them, three groups a user opens
         // (pressure stall, the period before, the interface counters of a node) and what the loaded

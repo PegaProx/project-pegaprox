@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview) - the task center. LW Oct 2026
+        // Corporate Redesigned - the task center. LW Oct 2026
         // It draws the task data the app already has and keeps no tracker of its own: the
         // TaskBar's list of the selected cluster, the SSE task frames of every cluster the
         // stream carries, one read per cluster without a fresh list when the list opens for
@@ -514,7 +514,12 @@
                 type: typeof f.type === 'string' ? f.type : '',
                 cluster: typeof f.cluster === 'string' ? f.cluster : '',
                 q: typeof f.q === 'string' ? f.q : '',
+                today: f.today === true,
             };
+        }
+        // LW Nov 2026 - the classic "Today's tasks": started since midnight in this browser
+        function crTaskToday(r, dayStart) {
+            return !!r.starttime && r.starttime * 1000 >= dayStart;
         }
 
         // The bar and the drawer. TaskBar keeps the selected cluster's list, the open state (its
@@ -659,14 +664,14 @@
                 crWrite('cr-tc-filters', JSON.stringify(next));
                 return next;
             });
-            // LW Oct 2026 - a page of the preview hands over a task it started: the drawer opens on its
+            // LW Oct 2026 - a page of the redesign hands over a task it started: the drawer opens on its
             // guest (the resource filter), in the scope of its cluster. Only for now: the filters the
             // user keeps are not overwritten by it
             useEffect(() => {
                 const onOpen = (e) => {
                     const d = (e && e.detail) || {};
                     setScopePick(d.cluster && d.cluster !== clusterId ? 'all' : null);
-                    setFilters(f => ({ ...f, status: 'all', type: '', cluster: '', q: d.q != null ? String(d.q) : '' }));
+                    setFilters(f => ({ ...f, status: 'all', type: '', cluster: '', today: false, q: d.q != null ? String(d.q) : '' }));
                     setExpanded(true);
                 };
                 window.addEventListener('cr-tc-open', onOpen);
@@ -681,7 +686,9 @@
             // a remembered cluster that is not there any more is left out
             const fCluster = scope === 'all' && filters.cluster && ids.split(',').includes(filters.cluster) ? filters.cluster : '';
             const q = filters.q.trim().toLowerCase();
-            const match = useMemo(() => (r) => {
+            const day = new Date().toDateString();
+            const dayStart = useMemo(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }, [day]);
+            const matchBase = useMemo(() => (r) => {
                 if (filters.type && r.type !== filters.type) return false;
                 if (fCluster && r.cluster_id !== fCluster) return false;
                 if (q) {
@@ -691,15 +698,18 @@
                 }
                 return true;
             }, [filters.type, fCluster, q]);
+            const match = useMemo(() => (filters.today ? (r) => matchBase(r) && crTaskToday(r, dayStart) : matchBase),
+                [matchBase, filters.today, dayStart]);
             const stripCounts = useMemo(() => {
                 const shown = rows.filter(match);
                 return { ...crTaskCounts(shown), all: shown.length };
             }, [rows, match]);
+            const todayCount = useMemo(() => rows.filter(r => matchBase(r) && crTaskToday(r, dayStart)).length, [rows, matchBase, dayStart]);
             const tableFilter = useMemo(() => {
                 const want = filters.status;
                 return (r) => (want === 'all' || CR_TC_BUCKET[crTaskState(r)] === want) && match(r);
             }, [filters.status, match]);
-            const activeFilters = (filters.status !== 'all' ? 1 : 0) + (filters.type ? 1 : 0) + (fCluster ? 1 : 0) + (q ? 1 : 0);
+            const activeFilters = (filters.status !== 'all' ? 1 : 0) + (filters.type ? 1 : 0) + (fCluster ? 1 : 0) + (q ? 1 : 0) + (filters.today ? 1 : 0);
 
             // --- the open task: the log pane, the classic dialog ---
             const [logKey, setLogKey] = useState(null);
@@ -1178,6 +1188,12 @@
                                                         </button>
                                                     ))}
                                                 </div>
+                                                <div className="cr-seg" role="group" aria-label={t('todaysTasks')}>
+                                                    <button type="button" className={filters.today ? 'active' : ''} aria-pressed={filters.today}
+                                                        data-cr-tc-today="" title={t('todaysTasks')} onClick={() => keepFilters({ today: !filters.today })}>
+                                                        {t('crTaskToday')}<span className="cr-seg-n">{todayCount}</span>
+                                                    </button>
+                                                </div>
                                                 <select className="cr-select" value={filters.type} aria-label={t('crTaskOperation')} data-cr-tc-type=""
                                                     onChange={e => keepFilters({ type: e.target.value })}>
                                                     <option value="">{t('crTaskAllTypes')}</option>
@@ -1198,7 +1214,7 @@
                                                 </div>
                                                 {activeFilters > 0 && (
                                                     <button type="button" className="cr-btn cr-btn-ghost" data-cr-tc-clearfilters=""
-                                                        onClick={() => keepFilters({ status: 'all', type: '', cluster: '', q: '' })}>
+                                                        onClick={() => keepFilters({ status: 'all', type: '', cluster: '', q: '', today: false })}>
                                                         {t('crTaskClearFilters').replace('{n}', activeFilters)}
                                                     </button>
                                                 )}

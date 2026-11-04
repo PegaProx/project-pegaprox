@@ -1,6 +1,6 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): Reports - the summary and Infrastructure Insights - LW Oct 2026
-        // Mounted instead of the classic summary body and InsightsTab, in the preview only. The
+        // Corporate Redesigned: Reports - the summary and Infrastructure Insights - LW Oct 2026
+        // Mounted instead of the classic summary body and InsightsTab, in the redesign only. The
         // summary reads through the dashboard's loadReportSummary (period, or from/to for the two
         // presets the endpoint cannot name and for the zoom); the rankings, guest counts, top
         // talkers and rollups come from the guest lists the dashboard already holds, the node disks

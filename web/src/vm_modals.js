@@ -1634,6 +1634,8 @@
             const [snapshots, setSnapshots] = useState([]);
             const [efficientSnapshots, setEfficientSnapshots] = useState([]);
             const [snapsLoading, setSnapsLoading] = useState(false);
+            // LW Nov 2026 - which snapshot read failed ({ std, eff }: a code, 0 for no answer), shown by the redesign
+            const [snapsFail, setSnapsFail] = useState(null);
             const [showCreateSnap, setShowCreateSnap] = useState(false);
             const [snapName, setSnapName] = useState('');
             const [snapDesc, setSnapDesc] = useState('');
@@ -1738,17 +1740,22 @@
                         authFetch(`${base}/efficient-snapshots${haStandby ? '' : '?refresh=true'}`)
                     ]);
                     const std = stdRes?.ok ? await stdRes.json() : undefined;
-                    const eff = effRes?.ok ? await effRes.json() : undefined;
+                    // LW Nov 2026 - the efficient list needs vm.snapshot, the plain one vm.view: a 403 there
+                    // means a viewer is not offered it, not a read that failed
+                    const effDenied = effRes?.status === 403;
+                    const eff = effRes?.ok ? await effRes.json() : (effDenied ? [] : undefined);
                     if (seq !== snapSeqRef.current) return;
                     if (std !== undefined) setSnapshots(std);
                     if (eff !== undefined) setEfficientSnapshots(eff);
-                } catch(e) { console.error('snapshots fetch:', e); }
+                    const fail = { std: stdRes?.ok ? null : (stdRes ? stdRes.status : 0), eff: effRes?.ok || effDenied ? null : (effRes ? effRes.status : 0) };
+                    setSnapsFail(fail.std !== null || fail.eff !== null ? fail : null);
+                } catch(e) { console.error('snapshots fetch:', e); if (seq === snapSeqRef.current) setSnapsFail({ std: 0, eff: null }); }
                 if (seq === snapSeqRef.current) setSnapsLoading(false);
             };
 
             // refetch when VM changes while snapshots tab is open
             React.useEffect(() => {
-                setSnapshots([]); setEfficientSnapshots([]); setSnapsLoading(false);
+                setSnapshots([]); setEfficientSnapshots([]); setSnapsLoading(false); setSnapsFail(null);
                 if (activeDetailTab === 'snapshots') fetchSnapshots();
                 return () => { snapSeqRef.current++; };
             }, [vm.vmid, clusterId]);
@@ -1832,7 +1839,7 @@
             const [metricsTimeframe, setMetricsTimeframe] = useState('hour');
             const [metricsData, setMetricsData] = useState(null);
             const [metricsLoading, setMetricsLoading] = useState(false);
-            // LW Oct 2026 - a failed read, so the preview can tell it from a range without samples
+            // LW Oct 2026 - a failed read, so the redesign can tell it from a range without samples
             const [metricsFailed, setMetricsFailed] = useState(false);
             // LW Oct 2026 - Corporate Redesigned: what came of the reads on open (the classic
             // states keep their old fallbacks), each with the time it came back
@@ -1876,6 +1883,12 @@
                 fetchLockStatus(() => stale);
                 return () => { stale = true; };
             }, [vm.vmid, clusterId]);
+            // LW Nov 2026 - the redesigned summary asks again when the lock of the guest list changes; the
+            // line shown stays until the answer is in, an answer for another guest is dropped
+            const rereadLock = () => {
+                const key = `${clusterId}/${vm.vmid}`;
+                fetchLockStatus(() => snapKeyRef.current !== key);
+            };
 
             // Unlock VM
             const handleUnlock = async () => {
@@ -1942,9 +1955,18 @@
             // one's values on screen until the new request came back. Nobody noticed while
             // the fields were machine types that read alike - a description is a sentence
             // about a specific VM, and reading the wrong one is worse than reading none.
+            // LW Nov 2026 - read again when the configuration dialog closes or a vm_config frame names this
+            // guest; a re-read of the same guest keeps what is shown until its answer is in
+            const [cfgTick, setCfgTick] = useState(0);
+            const cfgShownRef = React.useRef('');
             useEffect(() => {
-                setVmHwInfo(null);
-                setCrConfig(isCorpRedesigned ? { state: 'loading' } : null);
+                const shown = `${clusterId}/${vm.node}/${vm.vmid}/${isCorpRedesigned ? 1 : 0}`;
+                const again = cfgShownRef.current === shown;
+                cfgShownRef.current = shown;
+                if (!again) {
+                    setVmHwInfo(null);
+                    setCrConfig(isCorpRedesigned ? { state: 'loading' } : null);
+                }
                 // LW Oct 2026 - Corporate Redesigned shows a container's hardware from its config too
                 if (!isQemu && !isCorpRedesigned) return;
                 let stale = false;
@@ -1956,24 +1978,49 @@
                     .then(cfg => {
                         if (stale) return;
                         if (isCorpRedesigned) setCrConfig(c => (cfg && typeof cfg === 'object' ? { state: 'ok', body: cfg, at: Date.now() }
-                            : c && c.state !== 'loading' ? c : { state: 'unreachable', at: Date.now() }));
+                            : c && c.state !== 'loading' && c.state !== 'ok' ? c : { state: 'unreachable', at: Date.now() }));
                         if (!isQemu) return;
                         if (!cfg) { setVmHwInfo(null); return; }
-                        const raw = cfg.raw || cfg;
+                        // LW Nov 2026 - XCP-ng sends its own fields and no raw (a 'networks' list, no machine or BIOS):
+                        // only what it has, and a field of the wrong shape never fails the read
+                        const pve = !!(cfg.raw && typeof cfg.raw === 'object');
+                        const raw = pve ? cfg.raw : cfg;
+                        let net = null;
+                        try {
+                            const nk = Object.keys(raw).find(k => /^net\d+$/.test(k) && typeof raw[k] === 'string');
+                            net = nk ? raw[nk].split(',')[0].split('=')[0] : null;
+                        } catch (_) { net = null; }
                         setVmHwInfo({
-                            machine: raw.machine || 'i440fx', bios: raw.bios || 'seabios',
-                            cpu: raw.cpu || 'kvm64', scsihw: raw.scsihw || 'lsi',
-                            cores: raw.cores || 1, sockets: raw.sockets || 1,
-                            ostype: raw.ostype,
+                            ...(pve ? {
+                                machine: raw.machine || 'i440fx', bios: raw.bios || 'seabios',
+                                cpu: raw.cpu || 'kvm64', scsihw: raw.scsihw || 'lsi',
+                                cores: raw.cores || 1, sockets: raw.sockets || 1,
+                                ostype: raw.ostype, agent: raw.agent,
+                            } : {}),
                             // #813 - rides along in the same response, no extra request
-                            description: (raw.description || '').trim(),
-                            net: (() => { const nk = Object.keys(raw).find(k => k.startsWith('net')); return nk ? raw[nk].split(',')[0].split('=')[0] : null; })(),
-                            agent: raw.agent,
+                            description: typeof raw.description === 'string' ? raw.description.trim() : '',
+                            net,
                         });
                     })
                     .catch(() => { if (!stale) { setVmHwInfo(null); if (isCorpRedesigned) setCrConfig({ state: 'error', at: Date.now() }); } });
                 return () => { stale = true; };
-            }, [vm.vmid, vm.node, clusterId, isCorpRedesigned]);
+            }, [vm.vmid, vm.node, clusterId, isCorpRedesigned, cfgTick]);
+            useEffect(() => {
+                let timer = null;
+                const onCfg = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (String(d.cluster_id) !== String(clusterId) || Number(d.vmid) !== Number(vm.vmid)) return;
+                    clearTimeout(timer);
+                    timer = setTimeout(() => setCfgTick(n => n + 1), 300);  // a burst of frames is one read
+                };
+                window.addEventListener('pegaprox-vm-config', onCfg);
+                window.addEventListener('pegaprox-vm-config-closed', onCfg);
+                return () => {
+                    clearTimeout(timer);
+                    window.removeEventListener('pegaprox-vm-config', onCfg);
+                    window.removeEventListener('pegaprox-vm-config-closed', onCfg);
+                };
+            }, [clusterId, vm.vmid]);
 
             // Fetch HA status
             // NS, Nov 2026: read again after a toggle too, so the card shows what PVE holds. Until a
@@ -2206,7 +2253,7 @@
                                 { key: 'node', label: t('node'), value: vm.node },
                                 { key: 'cluster', label: t('cluster'), value: clusterName },
                                 { key: 'os', label: t('guestOs'), value: guestInfo?.os_pretty_name || vmHwInfo?.ostype },
-                                { key: 'ip', label: t('ipAddress'), value: (guestInfo?.ip_addresses || []).slice(0, 2).join(', '), mono: true },
+                                { key: 'ip', label: t('ipAddress'), value: crVmIps(vm, guestInfo, clusterType).slice(0, 2).join(', '), mono: true },
                                 { key: 'cpus', label: t('crVcpus'), value: vm.maxcpu },
                                 { key: 'mem', label: t('memory'), value: vm.maxmem ? formatBytes(vm.maxmem) : null },
                                 { key: 'uptime', label: t('uptime'), value: isRunning ? crUptime(vm.uptime) : null },
@@ -2281,7 +2328,7 @@
                     {activeDetailTab === 'summary' && isCorpRedesigned && (
                         <div className="p-4">
                             <CrBoundary key={`${clusterId}:${vm.vmid}`} id="vm-summary">
-                            <CrVmSummary vm={vm} clusterId={clusterId} clusterName={clusterName}
+                            <CrVmSummary vm={vm} clusterId={clusterId} clusterName={clusterName} kind={clusterType || 'proxmox'} onLockChanged={rereadLock}
                                 isQemu={isQemu} isRunning={isRunning} acts={acts} consoles={consoles} authFetch={authFetch}
                                 guestInfo={guestInfo} agentRead={agentRead} config={crConfig}
                                 lockInfo={lockInfo} lockRead={lockRead} onUnlock={() => setShowUnlockConfirm(true)}
@@ -2356,7 +2403,7 @@
                                     <table className="corp-property-grid">
                                         <tbody>
                                             <tr><td>{t('guestOs') || 'Guest OS'}</td><td>{guestInfo?.os_pretty_name || vmHwInfo?.ostype || (isQemu ? 'QEMU Virtual Machine' : 'LXC Container')}</td></tr>
-                                            <tr><td>{t('type')}</td><td>{isQemu ? 'QEMU/KVM' : 'LXC'} - {vmHwInfo ? `${vmHwInfo.machine} / ${vmHwInfo.bios === 'ovmf' ? 'UEFI' : 'SeaBIOS'}` : vm.vmid}</td></tr>
+                                            <tr><td>{t('type')}</td><td>{isQemu ? 'QEMU/KVM' : 'LXC'} - {vmHwInfo && vmHwInfo.machine ? `${vmHwInfo.machine} / ${vmHwInfo.bios === 'ovmf' ? 'UEFI' : 'SeaBIOS'}` : vm.vmid}</td></tr>
                                             <tr><td>{t('qemuAgent') || 'QEMU Agent'}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled') || 'Not installed'}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
                                             <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestIps(guestInfo).join(', ') || '-'}</td></tr>
                                             {guestInfo?.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
@@ -2485,7 +2532,7 @@
                                                     </div>
                                                     <span style={{color: '#e9ecef', minWidth: '35px'}}>{cpuPercent}%</span>
                                                 </div>
-                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{vm.maxcpu} {t('cores')} {vmHwInfo ? `• ${vmHwInfo.cpu}` : ''}</div>
+                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{vm.maxcpu} {t('cores')} {vmHwInfo && vmHwInfo.cpu ? `• ${vmHwInfo.cpu}` : ''}</div>
                                             </div>
                                         </div>
                                         {/* Memory */}
@@ -2535,7 +2582,7 @@
                                             </div>
                                         )}
                                         {/* BIOS/Machine */}
-                                        {vmHwInfo && (
+                                        {vmHwInfo && vmHwInfo.machine && (
                                             <div className="flex items-center gap-2 text-[12px]">
                                                 <Icons.Settings className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#728b9a'}} />
                                                 <span style={{color: '#adbbc4', width: '60px'}}>{t('biosType') || 'BIOS'}</span>
@@ -2910,9 +2957,22 @@
 
                                 const stdSnaps = snapshots.filter(s => s.name !== 'current');
                                 const tree = buildSnapTree(stdSnaps);
+                                // LW Nov 2026 - the redesign says a snapshot read that failed, with Retry, never "no snapshots"
+                                const snapWhy = (code) => (code ? `HTTP ${code}` : t('crVmNoAnswer'));
+                                const snapFailNote = isCorpRedesigned && snapsFail ? (
+                                    <div className="cr-callout cr-callout-error" role="alert"
+                                        data-cr-vm-snaps-fail={[snapsFail.std !== null ? 'std' : '', snapsFail.eff !== null ? 'eff' : ''].filter(Boolean).join(' ')}>
+                                        <Icons.AlertCircle className="w-4 h-4" />
+                                        <div>
+                                            {snapsFail.std !== null && <p>{crFill(t('crVmSnapsFailed'), { why: snapWhy(snapsFail.std) })}</p>}
+                                            {snapsFail.eff !== null && <p>{crFill(t('crVmEffSnapsFailed'), { why: snapWhy(snapsFail.eff) })}</p>}
+                                        </div>
+                                        <button type="button" className="cr-btn cr-btn-xs" onClick={fetchSnapshots} data-cr-vm-snaps-retry="">{t('retry')}</button>
+                                    </div>
+                                ) : null;
 
                                 if (stdSnaps.length === 0 && efficientSnapshots.length === 0)
-                                    return (
+                                    return snapFailNote || (
                                         <div className="corp-empty-state">
                                             <Icons.Clock style={{color: 'var(--corp-border-medium)'}} />
                                             <div className="corp-empty-title">{t('noSnapshots') || 'No snapshots'}</div>
@@ -2921,6 +2981,7 @@
                                     );
 
                                 return (<>
+                                    {snapFailNote}
                                     {tree.map(root => renderSnapNode(root, 0))}
 
                                     {efficientSnapshots.length > 0 && (<>
@@ -7681,7 +7742,7 @@
 
         // LW: All Clusters Overview - GitHub Feature Request #16
         // added a bunch of stuff here - storage, sparklines, sorting etc
-        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests, recentEvents, canAudit, authFetch }) {
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests, onOpenTopology, recentEvents, canAudit, authFetch }) {
             // #625: an empty list on a standby is no reason to offer adding a cluster there -
             // say why it is empty instead: no sync yet, or its live view is off
             const haInfo = (useAuth() || {}).ha || {};
@@ -8008,13 +8069,13 @@
                 );
             };
             
-            // LW Oct 2026 - Corporate Redesigned (Preview) draws its own dashboard from the same figures
+            // LW Oct 2026 - Corporate Redesigned draws its own dashboard from the same figures
             if (isCorpRedesigned && !topologyOnly) {
                 return (
                     <CrDashboard clusters={clusters} allMetrics={allMetrics} clusterStats={clusterStats} clusterGroups={clusterGroups}
                         allClusterGuests={allClusterGuests} recentEvents={recentEvents} canAudit={canAudit} authFetch={authFetch}
                         onSelectCluster={onSelectCluster} onSelectVm={onSelectVm} onOpenClusterTab={onOpenClusterTab}
-                        onOpenGuests={onOpenGuests} addToast={addToast} onAutoInstall={haStandby ? undefined : onAutoInstall}
+                        onOpenGuests={onOpenGuests} onOpenTopology={onOpenTopology} addToast={addToast} onAutoInstall={haStandby ? undefined : onAutoInstall}
                         openIn={openIn} emptyText={haStandby ? haNoClusters : t('noClustersConfigured')} />
                 );
             }

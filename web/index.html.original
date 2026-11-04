@@ -3690,8 +3690,8 @@
             .corp-tab-strip button { flex: 0 0 auto; white-space: nowrap; }
         }
         /* ============================================================
-           LW Oct 2026 - Corporate Layout - Redesigned (Preview)
-           Every rule of the preview skin lives in this block and nowhere else. It only
+           LW Oct 2026 - Corporate Layout - Redesigned
+           Every rule of the redesign lives in this block and nowhere else. It only
            matches body[data-corp-variant="redesigned"], which useLayout() sets for the
            corporate-redesigned layout (data-layout stays "corporate", so all classic
            Corporate rules keep working underneath). Classic Corporate, Modern and Cloud
@@ -4127,6 +4127,7 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail-btn:hover { color: var(--cr-text-primary); background: var(--cr-bg-hover); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail-btn.active { color: var(--cr-accent); background: var(--cr-accent-soft); box-shadow: inset 2px 0 0 var(--cr-accent); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail-sep { width: 20px; height: 1px; margin: 4px 0; background: var(--cr-border-primary); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail-btn svg { width: 16px; height: 16px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle { position: relative; z-index: 5; flex-shrink: 0; width: 6px; margin-left: -3px; cursor: col-resize; touch-action: none; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: transparent; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle:hover::after, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle:focus-visible::after { width: 2px; background: var(--cr-accent); }
@@ -4193,6 +4194,7 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-value { font-size: 19px; font-weight: 600; line-height: 1.2; color: var(--cr-text-primary); font-variant-numeric: tabular-nums; white-space: nowrap; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-unit { margin-left: 4px; font-size: 12px; font-weight: 400; color: var(--cr-text-muted); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-sub { font-size: 11.5px; color: var(--cr-text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-subnote { font-size: 11.5px; color: var(--cr-warning); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-error .cr-stat-value { color: var(--cr-error); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-warning .cr-stat-value { color: var(--cr-warning); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-stat-bar { position: relative; height: 3px; margin: 2px 0 1px; overflow: hidden; background: var(--cr-bg-sunken); border-radius: 2px; }
@@ -4311,6 +4313,24 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-empty { height: 100%; justify-content: center; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-full { position: fixed; inset: 0; z-index: 90; border: 0; border-radius: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-full .cr-topo-canvas { flex: 1 1 auto; height: auto; }
+        /* LW Nov 2026 - the Cards view and the note of an unread affinity list */
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-unread { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--cr-warning); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-cards { padding: 10px; overflow: auto; max-height: clamp(420px, calc(100vh - var(--cr-header-h) - var(--cr-bottom-h) - 150px), 2400px); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-full .cr-topo-cards { flex: 1 1 auto; max-height: none; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-cards-note { margin: 0 0 8px; font-size: 12px; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; align-items: start; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card { min-width: 0; padding: 8px 10px; background: var(--cr-bg-secondary); border: 1px solid var(--cr-border-primary); border-radius: 3px; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-head .cr-icon-btn { margin-left: -4px; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-meters { display: grid; grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 4px 8px; margin-top: 6px; font-size: 12px; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-counts { margin-top: 6px; font-size: 12px; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-guests { margin: 6px 0 0; padding: 4px 0 0; list-style: none; border-top: 1px solid var(--cr-border-secondary); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-guest { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 2px 4px; font-size: 12px; text-align: left; color: var(--cr-text-primary); background: none; border: 0; border-radius: 3px; cursor: pointer; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-guest:hover { background: var(--cr-bg-hover); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-gname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-use { flex: 0 0 auto; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-topo-card-more { margin: 2px 4px 0; font-size: 12px; }
 
         /* -- 12. compliance and the modules -- */
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-cmp-hint { margin: -4px 0 0; font-size: 12px; color: var(--cr-text-muted); }
@@ -5793,7 +5813,7 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nv-checks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nv-checks > li { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; font-size: 12.5px; color: var(--cr-text-primary); overflow-wrap: anywhere; }
 
-        /* -- 33. one rule set for the preview (round 8): the node count of the dashboard names the clusters it leaves out, on a second line where the tile is narrow; the members state of a balancing group, one badge per kind -- */
+        /* -- 33. one rule set for Corporate Redesigned (round 8): the node count of the dashboard names the clusters it leaves out, on a second line where the tile is narrow; the members state of a balancing group, one badge per kind -- */
         body[data-layout="corporate"][data-corp-variant="redesigned"] [data-cr-summary] [data-cr-stat="nodes"] .cr-stat-sub { white-space: normal; overflow-wrap: anywhere; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-sb-states { display: inline-flex; flex-wrap: wrap; gap: 3px; max-width: 100%; }
 
@@ -5827,7 +5847,7 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-sub-key { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-sub-key .cr-mono { overflow-wrap: anywhere; }
 
-        /* -- 36. hardware inventory and storage tables of a node (round 9): processor and memory, disk health and PCI devices on the Hardware tab, the in-band panel in the preview tokens, LVM, LVM-Thin, ZFS and repositories as tables -- */
+        /* -- 36. hardware inventory and storage tables of a node (round 9): processor and memory, disk health and PCI devices on the Hardware tab, the in-band panel in the redesign's tokens, LVM, LVM-Thin, ZFS and repositories as tables -- */
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nh-basics { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; min-width: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nh-basics > .cr-nc-sec { min-width: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nh-pci-class, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nh-pci-dev { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6027,8 +6047,13 @@
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-left, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-right { flex: 1 1 100%; flex-wrap: wrap; }
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-search { flex: 1 1 100%; }
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-search input { width: 100% !important; }
-            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-crumbs, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-kbd-hint, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-divider, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail { display: none; }
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-kbd-hint, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-header-divider, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-side-handle, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-rail { display: none; }
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-sidebar-folded > .sticky { display: block !important; }
+            /* LW Nov 2026 - the trail stays, its last two steps, shrinking on the header row */
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-crumbs { flex: 1 1 0; }
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-crumbs li:not(:nth-last-child(-n+2)) { display: none; }
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-crumbs li:nth-last-child(2) > .cr-crumb-sep { display: none; }
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-crumb { min-width: 0; max-width: 100%; }
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-sidebar > .sticky { top: 0 !important; max-height: none !important; }
             body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tc-latest, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-tc-scope { display: none; }
             /* the classic rule above puts the task bar at the end of the page */

@@ -3542,7 +3542,7 @@
                                                     <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
                                                 </div>
                                             </button>
-                                            {/* LW Oct 2026 - Corporate Redesigned (Preview): Corporate with the redesigned skin */}
+                                            {/* LW Oct 2026 - Corporate Redesigned: Corporate with the redesigned skin */}
                                             <button
                                                 data-layout-pick="corporate-redesigned"
                                                 onClick={async () => {
@@ -3557,7 +3557,7 @@
                                                 }`}
                                             >
                                                 <div className="h-16 rounded mb-2 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
-                                                    {/* preview: slim header, inventory rail, dense rows */}
+                                                    {/* the picture: slim header, inventory rail, dense rows */}
                                                     <div className="absolute left-0 right-0 top-0 h-2" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
                                                         <div className="absolute top-0.5 left-1 w-3 h-1" style={{ background: '#55b6d0' }} />
                                                     </div>
@@ -3581,7 +3581,7 @@
                                                     )}
                                                 </div>
                                                 <div className="text-center">
-                                                    <span className="text-xs font-medium inline-flex items-center justify-center gap-1 flex-wrap">{t('layoutCorporateRedesigned')} <span className="text-[8px] px-1 rounded uppercase" style={{ background: 'rgba(85,182,208,0.15)', color: '#55b6d0' }}>{t('preview')}</span></span>
+                                                    <span className="text-xs font-medium">{t('layoutCorporateRedesigned')}</span>
                                                     <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                                 </div>
                                             </button>

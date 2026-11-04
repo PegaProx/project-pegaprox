@@ -200,6 +200,8 @@
             headers.current = getAuthHeaders;
             const [cov, setCov] = useState(undefined);
             const [covErr, setCovErr] = useState('');
+            // a Refresh keeps the answer on screen (and a filter on it) until the new one is in
+            const [covBusy, setCovBusy] = useState(false);
             const [filter, setFilter] = useState('all');
             const [editing, setEditing] = useState(false);
             const covSeq = useRef(0);
@@ -208,7 +210,8 @@
             // the read of the guest list's backup coverage panel; Refresh asks it to read anew
             const loadJobs = useCallback(async (refresh) => {
                 const mine = ++covSeq.current;
-                setCov(undefined);
+                if (refresh) setCovBusy(true);
+                else setCov(undefined);
                 setCovErr('');
                 try {
                     const res = await fetch(`${API_URL}/backup-coverage${refresh ? '?refresh=1' : ''}`,
@@ -223,6 +226,8 @@
                     }
                 } catch (e) {
                     if (mine === covSeq.current) { setCov(null); setCovErr(t('crSlaJobsFailedShort')); }
+                } finally {
+                    if (mine === covSeq.current) setCovBusy(false);
                 }
             }, []);  // eslint-disable-line react-hooks/exhaustive-deps
             useEffect(() => { loadJobs(false); }, [loadJobs]);
@@ -322,7 +327,7 @@
                     <CrPageHeader icon={<Icons.Shield />} title={t('backupSla') || 'Backup SLA'} sub={t('crSlaSub')}
                         actions={(
                             <>
-                                {loading && mine && <span className="cr-spinner" role="status" aria-label={t('loading')} />}
+                                {((loading && mine) || covBusy) && <span className="cr-spinner" role="status" aria-label={t('loading')} data-cr-sla-busy="" />}
                                 <button type="button" className="cr-icon-btn" onClick={refresh} disabled={editing}
                                     aria-label={t('refresh')} title={editing ? t('crSlaRefreshEditing') : t('refresh')} data-cr-sla-refresh="">
                                     <span className="cr-ico" aria-hidden="true"><Icons.RotateCw /></span>
@@ -338,6 +343,19 @@
                     {!mine && !loading && !error && (
                         <CrNcState id="sla-read" kind="info" onRetry={onRefresh} data-cr-sla-unread="">{t('crSlaNotRead')}</CrNcState>
                     )}
+                    {/* LW Nov 2026 - storages the server could not read: their guests may show no backup or an older one */}
+                    {mine && Array.isArray(mine.unread) && mine.unread.length > 0 && (() => {
+                        // a confined account gets the count without names
+                        const named = mine.unread.filter(u => u && typeof u === 'object' && (u.storage || u.node));
+                        return (
+                            <CrNcState id="sla-stores" kind="warning" onRetry={onRefresh} retryDisabled={loading} data-cr-sla-unread-stores={mine.unread.length}>
+                                {named.length
+                                    ? crFill(t('crSlaUnreadStores'), { n: mine.unread.length,
+                                        list: named.map(u => `${u.storage || '-'}${u.node ? ` (${u.node})` : ''}`).join(', ') })
+                                    : crFill(t('crSlaUnreadStoresCount'), { n: mine.unread.length })}
+                            </CrNcState>
+                        );
+                    })()}
                     {mine && !enabled && <CrNcState id="sla-off" kind="info" data-cr-sla-off="">{t('crSlaOffHint')}</CrNcState>}
 
                     <h2 className="cr-sla-h">{t('crSlaSecOverview')}</h2>

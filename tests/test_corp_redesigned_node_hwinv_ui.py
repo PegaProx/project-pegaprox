@@ -232,7 +232,8 @@ def test_runtime_pci_states(open_app):
     err.locator('[data-cr-nc-retry="pci"]').click()
     empty = page.locator('[data-cr-nc-sec="pci"][data-cr-nh-pci="empty"] [data-cr-nc-state="warning"]')
     empty.wait_for(timeout=8000)
-    assert 'can also be a read that failed' in empty.inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert 'Proxmox VE listed no PCI devices.' in empty.inner_text() and 'read that failed' not in empty.inner_text()
     # every device outside a group: IOMMU is off, said once above the table
     app.server.routes[('GET', PCI)] = (200, [dict(d, iommugroup=-1) for d in PCI_LIST])
     page.locator('[data-cr-nh-pci-reload]').click()

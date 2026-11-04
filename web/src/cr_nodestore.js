@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): storage, repositories and Ceph of a node - LW Nov 2026
+        // Corporate Redesigned: storage, repositories and Ceph of a node - LW Nov 2026
         // Configure > LVM, LVM-Thin and ZFS of a Proxmox VE node from the one disks read the view
         // already makes (disks, disks/lvm, disks/lvmthin, disks/zfs, kept by loadTabData with the
         // reason of a failed read), Repositories from the repos read and Ceph from its four reads.
@@ -32,8 +32,8 @@
         // --- rules ---------------------------------------------------------------------------------
 
         // the volume groups of disks/lvm. PVE answers a tree {leaf, children: [vg {name, size, free,
-        // lvcount, children: [pv {name, size, free}]}]}; the route answers [] when the read on the
-        // node failed, so a tree without groups is "none" and [] is "empty or failed"
+        // lvcount, children: [pv {name, size, free}]}]}; a tree without groups is "none". LW Nov 2026 -
+        // a failed read is an error of the route now, so an empty list is "empty" and means none too
         function crNvLvm(body, thins) {
             const tree = !!body && typeof body === 'object' && !Array.isArray(body);
             const list = tree ? (Array.isArray(body.children) ? body.children : []) : (Array.isArray(body) ? body : []);
@@ -160,7 +160,7 @@
         // --- parts ---------------------------------------------------------------------------------
 
         // how much of a total is used: a bar and "X of Y (Z%)"; a missing number says so.
-        // tone: 'auto' by the storage pair of the preview (crStoreTone: from 70 % warning, above 85 %
+        // tone: 'auto' by the storage pair of the redesign (crStoreTone: from 70 % warning, above 85 %
         // error), 'info' for a plain share
         function CrNvUsage({ id, used, total, tone = 'auto', label }) {
             const { t } = useTranslation();
@@ -556,7 +556,7 @@
             const m = slot.state === 'ok' ? crNvLvm(slot.body, thins) : null;
             const body = () => {
                 const st = crNvReadState(t, { id: 'lvm', slot, loading, onRetry: onReload,
-                    emptyText: m && m.state === 'empty' ? t('crNvLvmEmpty') : m && m.state === 'none' ? t('crNvLvmNone') : '' });
+                    emptyText: m && (m.state === 'empty' || m.state === 'none') ? t('crNvLvmNone') : '' });
                 if (st) return st;
                 return (
                     <div className="cr-nn-scroll">
@@ -921,9 +921,72 @@
             return children;
         }
 
-        function CrNodeCeph({ read, loading, onReload }) {
+        // LW Nov 2026 - the Ceph writes of the classic node dialog (NodeModal), same routes, each asked first: set up
+        // Ceph on the node, start, stop or restart its services, an OSD in or out, a scrub of one OSD
+        function useCrNxOps({ clusterId, node, authFetch, onReload }) {
+            const { t } = useTranslation();
+            const [ask, setAsk] = useState(null);     // { op, osd } while the question is open
+            const [busy, setBusy] = useState(false);
+            const [done, setDone] = useState(null);   // { tone, text } of the last write
+            const alive = useRef(true);
+            useEffect(() => () => { alive.current = false; }, []);
+            useEffect(() => { setAsk(null); setDone(null); }, [clusterId, node]);
+            const base = `${API_URL}/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node)}/ceph`;
+            const url = (a) => (a.op === 'init' ? `${base}/init` : ['start', 'stop', 'restart'].includes(a.op) ? `${base}/${a.op}`
+                : `${base}/osd/${encodeURIComponent(a.osd)}/${a.op}`);
+            const run = async () => {
+                const a = ask;
+                if (!a || busy || !authFetch) return;
+                setBusy(true);
+                const r = await authFetch(url(a), { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+                const body = r ? await r.json().catch(() => null) : null;
+                if (!alive.current) return;
+                setBusy(false);
+                setAsk(null);
+                const label = crNxOpLabel(t, a);
+                if (r && r.ok) {
+                    setDone({ tone: 'success', text: crNnT(t, 'crNxOpDone', { what: label }) });
+                    // services take a moment before the status says what they do (the classic dialog waits 2 s)
+                    if (['start', 'stop', 'restart'].includes(a.op)) setTimeout(() => { if (alive.current) onReload(); }, 2000);
+                    else if (a.op !== 'scrub') onReload();
+                } else {
+                    const why = body && typeof body.error === 'string' && body.error ? body.error : r ? `HTTP ${r.status}` : t('crNdNoAnswer');
+                    setDone({ tone: 'error', text: crNnT(t, 'crNxOpFailed', { what: label, why }) });
+                }
+            };
+            return { ask, setAsk, busy, done, setDone, run };
+        }
+        function crNxOpLabel(t, a) {
+            return crNnT(t, { init: 'crNxOpInit', start: 'crNxOpStart', stop: 'crNxOpStop', restart: 'crNxOpRestart',
+                              in: 'crNxOpIn', out: 'crNxOpOut', scrub: 'crNxOpScrub' }[a.op], { osd: a.osd });
+        }
+        function CrNxOps({ ops, node }) {
+            const { t } = useTranslation();
+            return (
+                <>
+                    {ops.done && (
+                        <div className={`cr-callout cr-callout-${ops.done.tone}`} role={ops.done.tone === 'error' ? 'alert' : 'status'} data-cr-nx-op-done={ops.done.tone}>
+                            {ops.done.tone === 'error' ? <Icons.AlertCircle className="w-4 h-4" /> : <Icons.CheckCircle className="w-4 h-4" />}
+                            <div>{ops.done.text}</div>
+                            <button type="button" className="cr-btn cr-btn-xs" onClick={() => ops.setDone(null)}>{t('close')}</button>
+                        </div>
+                    )}
+                    {ops.ask && (
+                        <CrNcConfirm id={`ceph-${ops.ask.op}`} title={crNnT(t, 'crNxOpAsk', { what: crNxOpLabel(t, ops.ask), node })}
+                            goLabel={crNxOpLabel(t, ops.ask)} busy={ops.busy} onCancel={() => { if (!ops.busy) ops.setAsk(null); }} onConfirm={ops.run}>
+                            <p>{t({ init: 'crNxOpInitBody', start: 'crNxOpSvcBody', stop: 'crNxOpStopBody', restart: 'crNxOpSvcBody',
+                                    in: 'crNxOpInBody', out: 'crNxOpOutBody', scrub: 'crNxOpScrubBody' }[ops.ask.op])}</p>
+                        </CrNcConfirm>
+                    )}
+                </>
+            );
+        }
+
+        function CrNodeCeph({ clusterId, node, read, loading, onReload, readOnly, authFetch }) {
             const { t } = useTranslation();
             const m = useMemo(() => crNxModel(read), [read]);
+            const ops = useCrNxOps({ clusterId, node, authFetch, onReload });
+            const may = !readOnly && !!authFetch;
             const refresh = <CrNvRefresh id="ceph" loading={loading} onClick={onReload} />;
             if (m.state !== 'ok') {
                 let st;
@@ -932,7 +995,17 @@
                 // not said as "no Ceph": the same answer comes from a Ceph whose monitors are down
                 else if (m.state === 'none') st = <CrNcState id="ceph" kind="warning" onRetry={onReload} retryDisabled={loading}>{t('crNxNone')}</CrNcState>;
                 else st = <CrNcState id="ceph" kind="warning" onRetry={onReload} retryDisabled={loading}>{t('crNxBlank')}</CrNcState>;
-                return <CrNcSection id="ceph" data-cr-nx-state={m.state} title="Ceph" desc={t('crNxDesc')} actions={refresh}>{st}</CrNcSection>;
+                return (
+                    <CrNcSection id="ceph" data-cr-nx-state={m.state} title="Ceph" desc={t('crNxDesc')} actions={refresh}>
+                        {st}
+                        {m.state === 'none' && may && (
+                            <CrNcDanger id="ceph-init" title={t('crNxOpInit')} desc={t('crNxOpInitDesc')}>
+                                <CrButton variant="danger" onClick={() => ops.setAsk({ op: 'init' })} data-cr-nx-op="init">{t('crNxOpInit')}</CrButton>
+                            </CrNcDanger>
+                        )}
+                        <CrNxOps ops={ops} node={node} />
+                    </CrNcSection>
+                );
             }
             const yes = t('crNxYes'), no = t('crNxNo');
             const inQuorum = (mon) => {
@@ -942,7 +1015,17 @@
             const osdLine = m.osds.total != null ? crNnT(t, 'crNxOsdLine', { up: m.osds.up ?? '?', in: m.osds.in ?? '?', n: m.osds.total }) : null;
             return (
                 <>
-                    <CrNcSection id="ceph" data-cr-nx-state="ok" title={t('crNxStatus')} desc={t('crNxDesc')} actions={refresh}
+                    <CrNcSection id="ceph" data-cr-nx-state="ok" title={t('crNxStatus')} desc={t('crNxDesc')}
+                        actions={(
+                            <>
+                                {may && ['start', 'stop', 'restart'].map(op => (
+                                    <CrButton key={op} variant={op === 'stop' ? 'danger' : undefined} onClick={() => ops.setAsk({ op })} data-cr-nx-op={op}>
+                                        {crNxOpLabel(t, { op })}
+                                    </CrButton>
+                                ))}
+                                {refresh}
+                            </>
+                        )}
                         badge={<span data-cr-nx-health={m.tone}>{m.status ? <CrBadge tone={m.tone} dot={m.tone !== 'neutral'}>{m.status}</CrBadge> : <CrBadge tone="neutral" dot={false}>{t('crNvHealthNone')}</CrBadge>}</span>}>
                         {m.checks.length > 0 && (
                             <ul className="cr-nv-checks" aria-label={t('crNxChecks')}>
@@ -984,7 +1067,7 @@
                         <CrNxList id="ceph-osd" list={m.osd} count={m.osds.total} loading={loading} onRetry={onReload} emptyKey="crNxOsdEmpty">
                             <div className="cr-nn-scroll">
                                 <table className="corp-datagrid cr-table cr-nn-table" aria-label="OSDs">
-                                    <thead><tr><th>{t('name')}</th><th>{t('crNxHost')}</th><th>{t('status')}</th><th>{t('crNxIn')}</th><th>{t('crNxClass')}</th><th>{t('crNxUsed')}</th></tr></thead>
+                                    <thead><tr><th>{t('name')}</th><th>{t('crNxHost')}</th><th>{t('status')}</th><th>{t('crNxIn')}</th><th>{t('crNxClass')}</th><th>{t('crNxUsed')}</th>{may && <th>{t('actions')}</th>}</tr></thead>
                                     <tbody>
                                         {m.osd.rows.map((o, i) => {
                                             const up = o.status == null ? null : String(o.status).toLowerCase() === 'up';
@@ -1003,6 +1086,20 @@
                                                             <span className="cr-nv-usage-text">{pct.toFixed(1)}%</span>
                                                         </span>
                                                     ) : <CrNcMissing />}</td>
+                                                    {may && (() => {
+                                                        const id = o.id != null ? String(o.id) : String(o.name || '').replace(/^osd\./, '');
+                                                        if (!id) return <td><CrNcMissing /></td>;
+                                                        return (
+                                                            <td className="cr-nx-osd-acts">
+                                                                {isIn != null && (
+                                                                    <button type="button" className="cr-btn cr-btn-xs" onClick={() => ops.setAsk({ op: isIn ? 'out' : 'in', osd: id })}
+                                                                        data-cr-nx-op={`${isIn ? 'out' : 'in'}:${id}`}>{isIn ? t('crNxOut') : t('crNxInYes')}</button>
+                                                                )}
+                                                                <button type="button" className="cr-btn cr-btn-xs" onClick={() => ops.setAsk({ op: 'scrub', osd: id })}
+                                                                    data-cr-nx-op={`scrub:${id}`}>{t('crNxScrub')}</button>
+                                                            </td>
+                                                        );
+                                                    })()}
                                                 </tr>
                                             );
                                         })}
@@ -1011,6 +1108,7 @@
                             </div>
                         </CrNxList>
                     </CrNcSection>
+                    <CrNxOps ops={ops} node={node} />
                     <CrNcSection id="ceph-mon" title={t('crNxMons')} desc={t('crNxMonDesc')}>
                         <CrNxList id="ceph-mon" list={m.mon} count={m.mons.total} loading={loading} onRetry={onReload} emptyKey="crNxMonEmpty">
                             <div className="cr-nn-scroll">
@@ -1085,7 +1183,8 @@
                     {tab === 'zfs' && <CrNodeZfs {...disk} pool={zfsPool} onPool={onZfsPool} />}
                     {tab === 'repos' && <CrNodeRepos node={node} repos={data.reposRead === undefined ? undefined : data.repos} fail={crNdFail(data.reposRead)}
                         loading={loading} saving={saving} readOnly={readOnly} onToggle={onToggleRepo} onAptUpdate={onAptUpdate} onReload={onReloadRepos} onDirty={onDirty} />}
-                    {tab === 'ceph' && <CrNodeCeph read={data.cephRead} loading={loading} onReload={onReloadCeph} />}
+                    {tab === 'ceph' && <CrNodeCeph clusterId={clusterId} node={node} read={data.cephRead} loading={loading} onReload={onReloadCeph}
+                        readOnly={readOnly} authFetch={authFetch} />}
                 </div>
             );
         }

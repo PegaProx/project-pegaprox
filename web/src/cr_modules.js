@@ -221,7 +221,8 @@
             );
         }
 
-        function CrCveScan({ cluster, results, loading, installing, readOnly, onScan, onInstall, onOpenUpdates, nav }) {
+        // error: why the last scan failed ({ code, reason }); a failed scan is said with a retry, not "no scan yet"
+        function CrCveScan({ cluster, results, error, loading, installing, readOnly, onScan, onInstall, onOpenUpdates, nav }) {
             const { t } = useTranslation();
             const cid = cluster && cluster.id;
             const m = useMemo(() => crCveModel(results), [results]);
@@ -282,7 +283,7 @@
             const png = () => crRpPng(rootRef.current && rootRef.current.querySelector('[data-cr-cve-report]'),
                 `pegaprox-cve-report-${clusterLabel(cluster) || 'cluster'}-${new Date().toISOString().slice(0, 10)}.png`);
 
-            const state = loading ? 'scanning' : m ? 'ok' : 'none';
+            const state = loading ? 'scanning' : m ? 'ok' : error ? 'failed' : 'none';
             const allFailed = m && m.total > 0 && m.ok === 0;
             const dash = (v) => (allFailed ? '-' : v);
             return (
@@ -302,6 +303,11 @@
                     {readOnly && <CrRpNote tone="info" id="cve-standby">{t('crMdStandby')}</CrRpNote>}
 
                     {state === 'scanning' && <CrNcState id="cve" kind="loading">{t('scanRunning')} {t('scanTakesMinute')}</CrNcState>}
+                    {state === 'failed' && (
+                        <CrNcState id="cve-failed" kind="error" onRetry={readOnly ? undefined : () => onScan()} data-cr-cve-error={error.code || 0}>
+                            {crFill(t('crCveScanFailedNote'), { why: error.reason || t('cveScanNoAnswer') })}
+                        </CrNcState>
+                    )}
                     {state === 'none' && (
                         <CrNcSection id="cve-none" title={t('noScanResults')} desc={t('crCveNoneDesc')} />
                     )}
@@ -520,7 +526,8 @@
             return null;
         }
 
-        function CrCosts({ cluster, summary, rows, loading, readErr, days, onDays, canAct, onRefresh, onRates, rateForm, setRateForm,
+        // rowsErr: the per guest read failed on its own ({ why }), shown in place of its table
+        function CrCosts({ cluster, summary, rows, loading, readErr, rowsErr, days, onDays, canAct, onRefresh, onRates, rateForm, setRateForm,
                            showRates, onCloseRates, onSaveRates, savingRates, onCsv, onPdf, nav }) {
             const { t } = useTranslation();
             const cid = cluster && cluster.id;
@@ -614,8 +621,14 @@
                                 </CrPanel>
                             </div>
                             <CrPanel title={t('crMdPerGuest')} className="cr-ins-panel" data-cr-cost-guests="">
-                                <CrTable id="cost-guests" columns={cols} rows={rows || []} rowKey={r => String(r.vmid)} ariaLabel={t('crMdPerGuest')}
-                                    searchable initialSort={{ key: 'monthly', dir: 'desc' }} emptyText={t('noVmsFound')} maxHeight={560} />
+                                {rowsErr && !loading ? (
+                                    <CrNcState id="cost-guests" kind="error" onRetry={onRefresh} data-cr-md-rows-failed="cost">
+                                        {crFill(t('crMdGuestsFailed'), { why: crMdWhy(rowsErr, t) })}
+                                    </CrNcState>
+                                ) : (
+                                    <CrTable id="cost-guests" columns={cols} rows={rowsErr ? [] : rows || []} rowKey={r => String(r.vmid)} ariaLabel={t('crMdPerGuest')}
+                                        searchable initialSort={{ key: 'monthly', dir: 'desc' }} emptyText={t('noVmsFound')} maxHeight={560} loading={!!rowsErr && loading} />
+                                )}
                             </CrPanel>
                         </>
                     )}
@@ -681,7 +694,7 @@
             );
         }
 
-        function CrPower({ cluster, summary, rows, loading, readErr, days, onDays, canAct, onRefresh, onRates, rateForm, setRateForm, showRates,
+        function CrPower({ cluster, summary, rows, loading, readErr, rowsErr, days, onDays, canAct, onRefresh, onRates, rateForm, setRateForm, showRates,
                            onCloseRates, onSaveRates, savingRates, onHosts, hostForm, setHost, onCloseHosts, onSaveHosts, savingHosts, onCsv, onPdf, nav }) {
             const { t } = useTranslation();
             const cid = cluster && cluster.id;
@@ -821,8 +834,14 @@
                                 </CrPanel>
                             ) : null}
                             <CrPanel title={t('crMdPerGuest')} className="cr-ins-panel" data-cr-power-guests="">
-                                <CrTable id="power-guests" columns={cols} rows={rows || []} rowKey={x => String(x.vmid)} ariaLabel={t('crMdPerGuest')}
-                                    searchable initialSort={{ key: 'mkwh', dir: 'desc' }} emptyText={t('noVmsFound')} maxHeight={560} />
+                                {rowsErr && !loading ? (
+                                    <CrNcState id="power-guests" kind="error" onRetry={onRefresh} data-cr-md-rows-failed="power">
+                                        {crFill(t('crMdGuestsFailed'), { why: crMdWhy(rowsErr, t) })}
+                                    </CrNcState>
+                                ) : (
+                                    <CrTable id="power-guests" columns={cols} rows={rowsErr ? [] : rows || []} rowKey={x => String(x.vmid)} ariaLabel={t('crMdPerGuest')}
+                                        searchable initialSort={{ key: 'mkwh', dir: 'desc' }} emptyText={t('noVmsFound')} maxHeight={560} loading={!!rowsErr && loading} />
+                                )}
                             </CrPanel>
                         </>
                     )}
@@ -854,12 +873,17 @@
             const links = Array.isArray(graph.links) ? graph.links : [];
             const byId = new Map(items.map(n => [n.id, n]));
             const guests = items.filter(n => n.kind === 'vm' || n.kind === 'ct');
+            // LW Nov 2026 - a set of ids per bridge: with 10k guests on vmbr0 a search of its list per link was quadratic
             const on = new Map();
+            const onIds = new Map();
             links.forEach(l => {
                 if (l.kind !== 'attached' || !byId.has(l.source) || !byId.has(l.target)) return;
-                if (!on.has(l.target)) on.set(l.target, []);
-                if (!on.get(l.target).includes(byId.get(l.source))) on.get(l.target).push(byId.get(l.source));
+                let ids = onIds.get(l.target);
+                if (!ids) { ids = new Set(); onIds.set(l.target, ids); on.set(l.target, []); }
+                if (!ids.has(l.source)) { ids.add(l.source); on.get(l.target).push(byId.get(l.source)); }
             });
+            const perNode = new Map();
+            guests.forEach(g => perNode.set(g.parent_id, (perNode.get(g.parent_id) || 0) + 1));
             const linked = new Set();
             on.forEach(list => list.forEach(g => linked.add(g.id)));
             const iface = (n) => {
@@ -874,7 +898,7 @@
             const vnets = items.filter(n => n.kind === 'sdn_vnet').map(iface);
             const nodes = items.filter(n => n.kind === 'node').map(n => ({
                 id: n.id, name: n.label, meta: n.meta || {}, ifaces: ifaces.filter(i => `node:${i.node}` === n.id),
-                guests: guests.filter(g => g.parent_id === n.id).length,
+                guests: perNode.get(n.id) || 0,
             }));
             const c = graph.counts || {};
             return {
@@ -902,6 +926,25 @@
             );
         }
 
+        // the guests on a bridge or unlinked ones, through CrTable: it draws only the rows in view (10k on vmbr0)
+        function CrNetGuests({ id, list, cid, nav, withNode, attr }) {
+            const { t } = useTranslation();
+            const columns = useMemo(() => {
+                const cols = [
+                    { key: 'state', label: t('status'), width: 96, sortValue: g => (g.meta && g.meta.status) || null,
+                      render: g => <CrStateBadge state={g.meta && g.meta.status} /> },
+                    { key: 'name', label: t('name'), flex: true, min: 140, sortValue: g => g.label || '', text: g => `${g.label || ''} ${(g.meta && g.meta.vmid) || ''}`,
+                      render: g => <span {...{ [attr]: g.meta && g.meta.vmid }}><CrMdGuest cid={cid} vmid={g.meta && g.meta.vmid} name={g.label} type={g.kind === 'ct' ? 'lxc' : 'qemu'} nav={nav} /></span> },
+                    { key: 'vmid', label: 'ID', width: 80, mono: true, sortValue: g => Number(g.meta && g.meta.vmid) || null, render: g => (g.meta && g.meta.vmid) || '' },
+                ];
+                if (withNode) cols.push({ key: 'node', label: t('node'), width: 110, sortValue: g => String(g.parent_id || '').replace(/^node:/, ''),
+                    render: g => <span className="cr-muted">{String(g.parent_id || '').replace(/^node:/, '')}</span> });
+                return cols;
+            }, [t, cid, nav, withNode, attr]);
+            return <CrTable id={id} columns={columns} rows={list} rowKey={g => g.id} ariaLabel={t('crNetGuests')} rowHeight={30}
+                searchable={list.length > 12} maxHeight={420} initialSort={{ key: 'vmid', dir: 'asc' }} />;
+        }
+
         function CrNetDetail({ i, cid, nav, onClose }) {
             const { t } = useTranslation();
             const kind = i.kind === 'bond' ? t('crNetBond') : i.kind === 'sdn_vnet' ? t('crNetVnet') : t('crNetBridge');
@@ -921,15 +964,9 @@
                     ]} />
                     <h4 className="cr-nn-sub">{crFill(t('crNetGuestsOn'), { n: i.guests.length })}</h4>
                     {i.guests.length === 0 ? <p className="cr-sb-fine">{t('crNetNoGuests')}</p> : (
-                        <ul className="cr-md-guests" data-cr-net-guests={i.id}>
-                            {i.guests.map(g => (
-                                <li key={g.id}>
-                                    <CrStateBadge state={g.meta && g.meta.status} />
-                                    <CrMdGuest cid={cid} vmid={g.meta && g.meta.vmid} name={g.label} type={g.kind === 'ct' ? 'lxc' : 'qemu'} nav={nav} />
-                                    <span className="cr-muted cr-mono">{g.meta && g.meta.vmid}</span>
-                                </li>
-                            ))}
-                        </ul>
+                        <div data-cr-net-guests={i.id}>
+                            <CrNetGuests id="net-guests" list={i.guests} cid={cid} nav={nav} attr="data-cr-net-guest" />
+                        </div>
                     )}
                 </CrNcSection>
             );
@@ -1014,18 +1051,7 @@
                             {m.orphans.length > 0 && (
                                 <CrNcSection id="net-orphans" data-cr-net-orphans={m.orphans.length} title={crFill(t('crNetUnlinkedTitle'), { n: m.orphans.length })} desc={t('crNetUnlinkedDesc')}
                                     actions={<CrButton variant="ghost" onClick={() => setShowOrphans(v => !v)} aria-expanded={showOrphans} data-cr-net-orphans-toggle="">{showOrphans ? t('crNetHide') : t('crNetShow')}</CrButton>}>
-                                    {showOrphans && (
-                                        <ul className="cr-md-guests">
-                                            {m.orphans.map(g => (
-                                                <li key={g.id} data-cr-net-orphan={g.meta && g.meta.vmid}>
-                                                    <CrStateBadge state={g.meta && g.meta.status} />
-                                                    <CrMdGuest cid={cid} vmid={g.meta && g.meta.vmid} name={g.label} type={g.kind === 'ct' ? 'lxc' : 'qemu'} nav={nav} />
-                                                    <span className="cr-muted cr-mono">{g.meta && g.meta.vmid}</span>
-                                                    <span className="cr-muted">{String(g.parent_id || '').replace(/^node:/, '')}</span>
-                                                </li>
-                                            ))}
-                                        </ul>
-                                    )}
+                                    {showOrphans && <CrNetGuests id="net-orphans" list={m.orphans} cid={cid} nav={nav} withNode attr="data-cr-net-orphan" />}
                                 </CrNcSection>
                             )}
                         </>

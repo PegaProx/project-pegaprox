@@ -538,7 +538,8 @@ def test_runtime_certificates_empty_and_refused(open_app):
     sec = _sec(page, 'certs')
     empty = sec.locator('[data-cr-nc-state="empty"]')
     empty.wait_for(timeout=8000)
-    assert 'same answer' in empty.inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert 'The node listed no certificates.' in empty.inner_text() and 'same answer' not in empty.inner_text()
     app.server.routes[('GET', CERTS)] = (403, {'error': 'Permission denied (node.view)'})
     empty.locator('[data-cr-nc-retry="certs"]').click()
     err = sec.locator('[data-cr-nc-state="error"]')

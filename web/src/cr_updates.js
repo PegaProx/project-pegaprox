@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): Automation > Updates - LW Nov 2026
+        // Corporate Layout - Redesigned: Automation > Updates - LW Nov 2026
         // The update manager of one cluster on the routes the classic section uses. Opening it
         // reads three things: the server's copy of the last check (/updates-overview, it asks no
         // node), the rolling update of the cluster and its schedule. A check runs apt update on
@@ -177,7 +177,8 @@
         // the task stamps are the server's local time without a zone
         const crUpdStamp = (v) => (typeof v === 'string' && v ? v.replace('T', ' ').slice(0, 19) : '');
         // the classic retry: the server refuses a node outside maintenance mode with this German word
-        const crUpdNeedsForce = (msg) => typeof msg === 'string' && msg.includes('Wartungsmodus');
+        // LW Nov 2026 - the route names the refusal by code (NOT_IN_MAINTENANCE); the German sentence of older servers still counts
+        const crUpdNeedsForce = (msg, code) => code === 'NOT_IN_MAINTENANCE' || (typeof msg === 'string' && msg.includes('Wartungsmodus'));
         async function crUpdJobGet(authFetch, url) {
             const r = await crDcGet(authFetch, url);
             // a failed task answers 200 with its error: that is the task, not a failed read
@@ -217,7 +218,9 @@
 
         // --- what this browser holds for the session: the check answers and the headroom reads -------
 
-        const crUpd = { checks: {}, room: {}, dismissed: {}, subs: new Set() };
+        const crUpd = { checks: {}, room: {}, dismissed: {}, want: {}, subs: new Set() };
+        // the sub tab the page opens on next, once (the Timeline's "Open view" of a run asks for the history)
+        function crUpdWantTab(cid, tab) { crUpd.want[cid] = tab; }
         // the package lists of a check belong to the account that ran it (crSessionFor)
         crSessionStore(() => { crUpd.checks = {}; crUpd.room = {}; crUpd.dismissed = {}; });
         function crUpdEmit() { crUpd.subs.forEach(f => { try { f(); } catch (_) {} }); }
@@ -288,34 +291,81 @@
             crUpdEmit();
         }
 
-        // the list as plain text for a change ticket (#1192), from the check answer of this session
-        function crUpdText(t, name, answer) {
-            const body = answer.body || {};
-            const sum = body.summary || {};
+        // the Type of a package in the classic text (security.js pkgKind): kernel by its name, security by origin or section
+        const crUpdPkgKind = (p) => {
+            const n = String(p.Package || '');
+            if (n.includes('linux-image') || n.includes('kernel')) return 'Kernel';
+            return String(p.Origin || '').includes('security') || String(p.Section || '').includes('security') ? 'Security' : 'Update';
+        };
+
+        // The list as plain text for a change ticket (#1192), with what the classic text writes: the
+        // total, every node and backup server with its packages and their type. src.answer is a check
+        // of this session, src.browser the copy a classic check left in this browser (nodes only), and
+        // without either src.model is the server's overview: counts per host, no package lists
+        function crUpdText(t, name, src) {
             const table = (rows) => {
                 rows = rows.map(r => r.map(String));
                 const width = rows[0].map((_, i) => Math.max(...rows.map(r => r[i].length)));
                 return rows.map(r => '  ' + r.map((c, i) => (i < r.length - 1 ? c.padEnd(width[i]) : c)).join('  '));
             };
+            const sortBy = (list) => list.sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+            const totalLine = (n, failed) => (n > 0 || failed > 0 ? `${n} ${t('updatesAvailable')}` : t('noUpdatesAvailable'));
             const out = [t('updCopyHeading').replace('{cluster}', name)];
-            if (sum.checked_at) out.push(crFill(t('crUpdCopyChecked'), { time: sum.checked_at }));
+            if (!src.answer && !src.browser) {
+                const m = src.model;
+                if (m.checkedAt) out.push(crFill(t('crUpdCopyChecked'), { time: crFmtDate(new Date(m.checkedAt * 1000)) }));
+                out.push(t('updCopyCopiedAt').replace('{time}', crFmtDate(new Date(), { timeZoneName: 'short' })));
+                const pbsN = m.pbs.filter(h => h.ok).reduce((s, h) => s + (h.count || 0), 0);
+                out.push(totalLine((m.total || 0) + pbsN, m.failed.length), t('crUpdCopyNoPackages'));
+                const bad = m.failed.length + m.missing.length + m.pbs.filter(h => !h.ok).length;
+                if (bad) out.push(t('updCopyFailedHosts').replace('{n}', bad));
+                m.rows.forEach(r => out.push('', r.pending === 'ok' ? `${r.name} - ${r.count || 0} ${t('updates')}${r.kernel ? ' - Kernel' : ''}`
+                    : `${r.name} - ${r.pending === 'failed' ? t('checkFailed') : t('crUpdNotReported')}`));
+                if (m.pbs.length) out.push('', 'Proxmox Backup Server');
+                m.pbs.forEach(h => out.push('', h.ok ? `${h.name} - ${h.count || 0} ${t('updates')}` : `${h.name} - ${t('checkFailed')}`));
+                return out.join('\n') + '\n';
+            }
+            const body = (src.answer ? src.answer.body : src.browser) || {};
+            const sum = body.summary || {};
+            const head = (n, d, flags) => (!d || d.success === false ? `${n} - ${t('checkFailed')}${d && d.error ? ': ' + d.error : ''}`
+                : `${n} - ${typeof d.count === 'number' && d.count >= 0 ? d.count : (Array.isArray(d.updates) ? d.updates.length : 0)} ${t('updates')}${flags.length ? ' - ' + flags.join(', ') : ''}`);
+            if (src.answer && sum.checked_at) out.push(crFill(t('crUpdCopyChecked'), { time: sum.checked_at }));
+            if (!src.answer && src.browser.time) out.push(`${t('lastChecked')}: ${crFmtDate(new Date(src.browser.time), { timeZoneName: 'short' })}`);
             out.push(t('updCopyCopiedAt').replace('{time}', crFmtDate(new Date(), { timeZoneName: 'short' })));
-            const nodes = Object.entries(body.nodes || {}).sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-            const failed = nodes.filter(([, d]) => !d || d.success === false).length;
+            const nodes = sortBy(Object.entries(body.nodes || {}));
+            const pbs = sortBy(Object.entries(body.pbs && typeof body.pbs === 'object' ? body.pbs : {}));
+            const failed = [...nodes, ...pbs].filter(([, d]) => !d || d.success === false).length;
+            out.push(totalLine(Number(sum.total_updates) || 0, Number(sum.nodes_failed) || 0));
             if (failed) out.push(t('updCopyFailedHosts').replace('{n}', failed));
+            // the browser's copy of a classic check keeps the nodes, not the backup servers
+            if (!body.pbs && Number(sum.total_pbs) > 0) out.push(t('updCopyPbsMissing').replace('{n}', sum.total_pbs));
             nodes.forEach(([n, d]) => {
-                if (!d || d.success === false) {
-                    out.push('', `${n} - ${t('checkFailed')}${d && d.error ? ': ' + d.error : ''}`);
-                    return;
-                }
-                const list = Array.isArray(d.updates) ? d.updates : [];
-                out.push('', `${n} - ${list.length} ${t('updates')}`);
+                const list = d && d.success !== false && Array.isArray(d.updates) ? d.updates : [];
+                const flags = [list.some(p => crUpdKernelKind(p.Package)) && 'Kernel', list.some(p => crUpdPkgKind(p) === 'Security') && 'Security'].filter(Boolean);
+                out.push('', head(n, d, flags));
                 if (list.length) {
-                    out.push(...table([[t('package'), t('currentVersion'), t('newVersion'), t('crUpdOrigin')],
-                        ...list.map(p => [p.Package || '-', p.OldVersion || '-', p.Version || '-', p.Origin || '-'])]));
+                    out.push(...table([[t('package'), t('currentVersion'), t('newVersion'), t('type'), t('crUpdOrigin')],
+                        ...list.map(p => [p.Package || '-', p.OldVersion || '-', p.Version || '-', crUpdPkgKind(p), p.Origin || '-'])]));
+                }
+            });
+            if (pbs.length) out.push('', 'Proxmox Backup Server');
+            pbs.forEach(([n, d]) => {
+                out.push('', head(n, d, []));
+                const list = d && d.success !== false && Array.isArray(d.updates) ? d.updates : [];
+                if (list.length) {
+                    out.push(...table([[t('package'), 'Version'], ...list.map(p => [p.Package || p.package || '-', p.Version || p.version || '-'])]));
                 }
             });
             return out.join('\n') + '\n';
+        }
+        // the copy a check of the classic layout left in this browser (security.js checkUpdates), only
+        // when this account wrote it: the next account of the browser does not get the packages of the one before
+        function crUpdBrowserCopy(cid, who) {
+            try {
+                const d = JSON.parse(localStorage.getItem(`updateCheck_${cid}`) || 'null');
+                return who && d && typeof d === 'object' && d.user === who && d.nodes && typeof d.nodes === 'object'
+                    && Object.keys(d.nodes).length ? d : null;
+            } catch (_) { return null; }
         }
         async function crUpdCopy(text) {
             try {
@@ -526,7 +576,7 @@
                         </span>
                         <span className="cr-upd-run-acts">
                             {onHistory && <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={onHistory} data-cr-upd-run-history="">{t('crUpdOpenHistory')}</button>}
-                            {over && <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={onDismiss} data-cr-upd-run-dismiss="" title={t('crUpdDismissHint')}>{t('crUpdDismiss')}</button>}
+                            {over && <button type="button" className="cr-btn cr-btn-ghost cr-btn-xs" onClick={onDismiss} data-cr-upd-run-dismiss="" title={canAct ? t('crUpdDismissServerHint') : t('crUpdDismissHint')}>{t('crUpdDismiss')}</button>}
                         </span>
                     </header>
                     <div className="cr-upd-run-facts">
@@ -939,6 +989,8 @@
                 skip_evacuation: armed ? s.skip_evacuation === true : false,
                 evacuation_timeout: CR_UPD_TIMEOUTS.includes(s.evacuation_timeout) ? s.evacuation_timeout : 1800,
                 reboot_timeout: CR_UPD_TIMEOUTS.includes(s.reboot_timeout) ? s.reboot_timeout : 600,
+                // LW Nov 2026 - the stored value, as the classic switch loads it (a missing one is the route's true)
+                wait_for_reboot: s.wait_for_reboot !== false,
             }));
             const [mt, setMt] = useState(s.migrate_templates === true);
             const [ra, setRa] = useState(s.relax_anti_affinity === true);
@@ -959,7 +1011,7 @@
                 // every flag explicit: the route defaults include_reboot to true when it is missing
                 const body = {
                     enabled: !!f.enabled, schedule_type: f.schedule_type, day, time: f.time,
-                    include_reboot: !!rebootOn, skip_evacuation: !!f.skip_evacuation, skip_up_to_date: true, wait_for_reboot: true,
+                    include_reboot: !!rebootOn, skip_evacuation: !!f.skip_evacuation, skip_up_to_date: true, wait_for_reboot: !!f.wait_for_reboot,
                     evacuation_timeout: f.evacuation_timeout, reboot_timeout: f.reboot_timeout,
                     migrate_templates: !!(mt && !f.skip_evacuation), relax_anti_affinity: !!(ra && !f.skip_evacuation),
                 };
@@ -1020,9 +1072,13 @@
                         <span><span className="cr-strong">{t('crUpdReboot')}</span><span className="cr-upd-hint">{canReboot ? t('crUpdSchedRebootHint') : t('crUpdWhyRebootPerm')}</span></span>
                     </label>
                     {dropsReboot && <CrUpdNote tone="warning" id="reboot-dropped"><p>{t('crUpdSchedDropsReboot')}</p></CrUpdNote>}
+                    <label className={`cr-upd-opt${!rebootOn ? ' cr-upd-opt-off' : ''}`}>
+                        <input type="checkbox" checked={!!f.wait_for_reboot} disabled={!rebootOn} onChange={e => set('wait_for_reboot', e.target.checked)} data-cr-upd-sopt="wait_for_reboot" />
+                        <span><span className="cr-strong">{t('crUpdWaitReboot')}</span><span className="cr-upd-hint">{t('crUpdWaitRebootHint')}</span></span>
+                    </label>
                     <div className="cr-upd-sched-grid">
                         <label className="cr-upd-field"><span className="cr-muted">{t('crUpdEvacTimeout')}</span>{tsel('evacuation_timeout', f.skip_evacuation)}</label>
-                        <label className="cr-upd-field"><span className="cr-muted">{t('crUpdRebootTimeout')}</span>{tsel('reboot_timeout', !rebootOn)}</label>
+                        <label className="cr-upd-field"><span className="cr-muted">{t('crUpdRebootTimeout')}</span>{tsel('reboot_timeout', !rebootOn || !f.wait_for_reboot)}</label>
                     </div>
                     {pve && (
                         <div className="cr-upd-evac">
@@ -1192,9 +1248,13 @@
 
         // Update one node: apt update and dist-upgrade on that node only, the reboot as chosen. The
         // server asks for maintenance mode; without it the dialog asks again and sends force
-        function CrUpdNodeDialog({ row, canReboot, onCancel, onStart }) {
+        function CrUpdNodeDialog({ row, reading, canReboot, onCancel, onStart }) {
             const { t } = useTranslation();
             const [reboot, setReboot] = useState(!!row.kernel && canReboot);
+            // a kernel flag that comes later sets the default only while nobody chose (the node header opens
+            // this before the server's copy answered and keeps the box and Start off until then)
+            const chosen = useRef(false);
+            useEffect(() => { if (!chosen.current) setReboot(!!row.kernel && canReboot); }, [row.kernel, canReboot]);
             const [step, setStep] = useState('ask');
             const [busy, setBusy] = useState(false);
             const [err, setErr] = useState('');
@@ -1214,7 +1274,7 @@
                         <>
                             <CrButton onClick={onCancel} disabled={busy} data-cr-upd-cancel="">{t('cancel')}</CrButton>
                             {step === 'ask' ? (
-                                <CrButton variant="primary" icon={busy ? <span className="cr-spinner" /> : <Icons.Download />} onClick={() => go(false)} disabled={busy}
+                                <CrButton variant="primary" icon={busy ? <span className="cr-spinner" /> : <Icons.Download />} onClick={() => go(false)} disabled={busy || reading}
                                     data-cr-upd-confirm="node-update">{t('startUpdate')}</CrButton>
                             ) : (
                                 <CrButton variant="danger" icon={busy ? <span className="cr-spinner" /> : <Icons.AlertTriangle />} onClick={() => go(true)} disabled={busy}
@@ -1229,8 +1289,8 @@
                     )}
                     {step === 'ask' && !inMaint && <p className="cr-sb-fine" data-cr-upd-node-maint="">{t('crUpdNodeNoMaint')}</p>}
                     <label className={`cr-upd-opt${canReboot ? '' : ' cr-upd-opt-off'}`}>
-                        <input type="checkbox" checked={!!(reboot && canReboot)} disabled={!canReboot || busy || step === 'force'}
-                            onChange={e => setReboot(e.target.checked)} data-cr-upd-opt="node-reboot" />
+                        <input type="checkbox" checked={!!(reboot && canReboot)} disabled={!canReboot || busy || reading || step === 'force'}
+                            onChange={e => { chosen.current = true; setReboot(e.target.checked); }} data-cr-upd-opt="node-reboot" />
                         <span><span className="cr-strong">{t('rebootAfterUpdate')}</span>{!canReboot && <span className="cr-upd-hint">{t('crUpdWhyRebootPerm')}</span>}</span>
                     </label>
                     {step === 'force' && (
@@ -1477,7 +1537,7 @@
 
         function CrUpdates({ cluster, metrics, nav, authFetch, cve }) {
             const { t } = useTranslation();
-            const { haReadOnly } = useAuth();
+            const { haReadOnly, user } = useAuth();
             const { holds, can } = crVmCan();
             const store = useCrUpd();
             const c = cluster || {};
@@ -1488,11 +1548,17 @@
             const [run, setRun] = useState(null);
             const [sched, setSched] = useState(null);
             const [hist, setHist] = useState(null);
-            const [tab, setTab] = useState('nodes');
+            const [tab, setTab] = useState(() => {
+                const want = crUpd.want[cid];
+                delete crUpd.want[cid];
+                return want === 'history' || want === 'guests' ? want : 'nodes';
+            });
             const [openNode, setOpenNode] = useState(null);
             const [dlg, setDlg] = useState(null);
             const [act, setAct] = useState({ busy: false, err: '' });
             const [copyMsg, setCopyMsg] = useState('');
+            // a Hide the server did not take: the run is hidden here only, and the page says why
+            const [hideMsg, setHideMsg] = useState('');
             const [refreshing, setRefreshing] = useState(false);
             // the upgrade task of a single node / backup server, by node name / pbs_id
             const [jobs, setJobs] = useState({});
@@ -1621,7 +1687,7 @@
                 const body = force ? { reboot, force: true } : { reboot };
                 const res = await authFetch(jobUrl(name), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
                 const d = res ? await res.json().catch(() => null) : null;
-                if (res && !res.ok && d && crUpdNeedsForce(d.error)) return { needForce: true };
+                if (res && !res.ok && d && crUpdNeedsForce(d.error, d.code)) return { needForce: true };
                 if (res && (res.ok || (d && d.success))) {
                     const at = Date.now();
                     const task = d && d.task && typeof d.task === 'object' ? d.task : { status: 'starting', node: name, reboot };
@@ -1693,9 +1759,34 @@
             const anyway = () => { setDlg(null); write('POST', '/updates/rolling/resume', { accept_quorum_risk: true }); };
             const cancel = () => { setDlg(null); write('DELETE', '/updates/rolling'); };
 
+            // LW Nov 2026 - the classic Dismiss: the server drops the finished run (it stays in the history).
+            // One the server refuses, or a caller who may not clear it, hides it in this browser only and says so
+            const dismiss = async () => {
+                if (!r) return;
+                const key = `${cid}|${r.run_id || r.started_at}`;
+                setHideMsg('');
+                crUpd.dismissed[key] = true;
+                crUpdEmit();
+                if (!mayUpdate) {
+                    setHideMsg(crFill(t('crUpdHideLocal'), { why: whyUpdate || '-' }));
+                    return;
+                }
+                const res = await authFetch(`${base}/updates/rolling/clear`, { method: 'POST' });
+                const d = res ? await res.json().catch(() => null) : null;
+                if (res && res.ok && d && d.success) { loop(); return; }
+                setHideMsg(crFill(t('crUpdHideLocal'), { why: (d && d.error) || (res ? `HTTP ${res.status}` : t('crDcNoAnswer')) }));
+            };
+
+            // the check of this session, else the copy a classic check left in this browser, else the
+            // server's overview (counts per host): a standby or a read-only account can copy too
+            const who = (user && user.username) || '';
+            const browserCopy0 = useMemo(() => crUpdBrowserCopy(cid, who), [cid, who]);
+            const browserCopy = !(chk && chk.answer) ? browserCopy0 : null;
+            const copySrc = chk && chk.answer ? { answer: chk.answer } : browserCopy ? { browser: browserCopy }
+                : model.state === 'ok' && model.rows.length + model.pbs.length > 0 ? { model } : null;
             const copyText = async () => {
-                if (!chk || !chk.answer) return;
-                const ok = await crUpdCopy(crUpdText(t, clusterLabel(c), chk.answer));
+                if (!copySrc) return;
+                const ok = await crUpdCopy(crUpdText(t, clusterLabel(c), copySrc));
                 setCopyMsg(ok ? t('updCopyDone') : t('updCopyFailed'));
             };
 
@@ -1849,14 +1940,16 @@
                     <CrPageHeader icon={<Icons.Download />} title={t('updateManager')} sub={clusterLabel(c)}
                         actions={(
                             <>
-                                <CrButton icon={<Icons.ClipboardList />} onClick={copyText} disabled={!chk || !chk.answer}
-                                    title={chk && chk.answer ? t('updCopyHint') : t('crUpdCopyNeedsCheck')} data-cr-upd-copy="">{t('updCopyButton')}</CrButton>
+                                <CrButton icon={<Icons.ClipboardList />} onClick={copyText} disabled={!copySrc}
+                                    title={!copySrc ? t('crUpdCopyNothing') : copySrc.model ? t('crUpdCopyCountsHint') : copySrc.browser ? t('crUpdCopyBrowserHint') : t('updCopyHint')}
+                                    data-cr-upd-copy={copySrc ? Object.keys(copySrc)[0] : ''}>{t('updCopyButton')}</CrButton>
                                 <CrButton icon={refreshing ? <span className="cr-spinner" /> : <Icons.RotateCw />} onClick={refresh} disabled={refreshing}
                                     title={t('crUpdRefreshHint')} data-cr-upd-refresh="">{t('crUpdRefresh')}</CrButton>
                             </>
                         )} />
                     <p className="cr-cmp-hint">{t('crUpdIntroHosts')}</p>
                     {copyMsg && <p className="cr-upd-line" role="status" data-cr-upd-copy-msg="">{copyMsg}</p>}
+                    {hideMsg && <p className="cr-upd-line cr-upd-warn" role="status" data-cr-upd-hide-msg="">{hideMsg}</p>}
 
                     {standby && <CrUpdNote id="standby"><p>{t('crUpdStandby')}</p></CrUpdNote>}
                     {model.state === 'forbidden' && <CrUpdNote tone="warning" id="forbidden"><p>{t('crUpdOvNoAccess')}</p></CrUpdNote>}
@@ -1923,7 +2016,7 @@
                         <CrUpdRun run={r} view={view} t={t} canAct={mayUpdate} canReboot={canReboot} busy={act.busy} err={act.err}
                             onContinue={cont} onAnyway={() => setDlg({ kind: 'anyway', node: (r.paused_details && r.paused_details.node) || r.current_node || '-' })}
                             onCancel={() => setDlg({ kind: 'cancel' })} onHistory={canView ? goHistory : null}
-                            onDismiss={() => { crUpd.dismissed[`${cid}|${r.run_id || r.started_at}`] = true; crUpdEmit(); }} />
+                            onDismiss={dismiss} />
                     )}
 
                     <CrTabs id="upd" label={t('updateManager')} tabs={tabs} active={tabId} onChange={pickTab} />

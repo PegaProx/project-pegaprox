@@ -2,8 +2,11 @@
         // PegaProx - Storage
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
+        // LW Nov 2026 - how long the auto-sync of an upload waits for its Proxmox VE task to end
+        const CR_DS_AUTOSYNC_WAIT = 15 * 60 * 1000;
+
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData, guests, onOpenGuest, crTasks, crSub, onCrSubShown }) {
+        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData, sharedDatastoreRead, guests, onOpenGuest, crTasks, crSub, onCrSubShown }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, user, haReadOnly } = useAuth();
             // #644: gate the storage action bar on the same fine-grained perms the API
@@ -21,6 +24,14 @@
             // LW Oct 2026 - Corporate Redesigned: why the content read failed, and the newest read
             const [crContentError, setCrContentError] = useState(null);
             const crContentSeq = useRef(0);
+            // LW Nov 2026 - how this tab's last read of /datastores ended ({ ok, at, msg }); the
+            // dashboard's own read comes in as sharedDatastoreRead, the later of the two counts
+            const [crDsRead, setCrDsRead] = useState(null);
+            // why the ESXi host list or the VM list of the picked host could not be read
+            const [crEsxiErr, setCrEsxiErr] = useState({ hosts: '', vms: '' });
+            const esxiVmsSeq = useRef(0);
+            // an upload that waits for its Proxmox VE task before the auto-sync copies it
+            const [crAutoSync, setCrAutoSync] = useState(null);
             const [expandedNodes, setExpandedNodes] = useState({});
             const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla, recovery
             const [syncStatus, setSyncStatus] = useState(null);
@@ -333,7 +344,7 @@
                 setStorageClusters([]);  // NS: also reset storage clusters
                 setSelectedCluster(null);
                 setClusterStatus(null);
-                if (isCorpRedesigned) setCrScRead(null);
+                if (isCorpRedesigned) { setCrScRead(null); setCrDsRead(null); setCrEsxiErr({ hosts: '', vms: '' }); crDropAutoSync('crDsAutoSyncDropped'); }
                 setEsxiHosts([]);  // NS: reset ESXi hosts too
                 setSelectedEsxi(null);
                 setEsxiVms([]);
@@ -451,14 +462,39 @@
                         }
                         
                         initialLoadDone.current = true;
+                        if (isCorpRedesigned) setCrDsRead({ ok: true, at: Date.now() });
+                    } else if (isCorpRedesigned && clusterId === activeClusterIdRef.current) {
+                        const msg = await crReadWhy(resp);
+                        if (clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg });
                     }
                 } catch (err) {
                     console.error('fetching datastores:', err);
+                    if (isCorpRedesigned && clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg: t('crLoadFailed') });
                 } finally {
                     setLoading(false);
                     fetchingRef.current = false;
                 }
             };
+            // LW Nov 2026 - a refused or lost read as text: what its code says (the server's error is
+            // the English detail of a failed Proxmox VE read), the error and the status
+            const crCodedWhy = (b, status) => {
+                const coded = b && { UPSTREAM_AUTH: 'crNdWhyAuth', PVE_READ_FAILED: 'crNdWhyPve', PVE_UNREACHABLE: 'crNdWhyOffline' }[b.code];
+                return [coded ? t(coded) : '', b && typeof b.error === 'string' ? b.error : '', status ? `HTTP ${status}` : ''].filter(Boolean).join(' - ');
+            };
+            const crReadWhy = async (r) => {
+                if (!r) return t('crDriftOffline');
+                return crCodedWhy(await r.json().catch(() => null), r.status);
+            };
+            // the later of the two datastore reads, when it failed: hasData says an earlier read is on screen
+            const crDsFail = (() => {
+                if (!isCorpRedesigned) return null;
+                const a = crDsRead;
+                const b = sharedDatastoreRead && sharedDatastoreRead.at ? sharedDatastoreRead : null;
+                const last = !a ? b : !b ? a : (b.at > a.at ? b : a);
+                if (!last || last.ok) return null;
+                const hasData = !!((datastores.shared || []).length || Object.keys(datastores.local || {}).length);
+                return { msg: last.msg || '', hasData };
+            })();
             
             // LW Oct 2026 - Corporate Redesigned: the same GET, but a refused, failed or late answer says so
             // instead of leaving "no storage clusters" (or the list of the cluster before) on screen
@@ -716,7 +752,7 @@
                         // not the previous storage's content under this one's name
                         setStorageContent([]);
                         setContentError(errorText(response, data));
-                        if (isCorpRedesigned) setCrContentError((data && data.error) || t('crDsLoadFailed'));
+                        if (isCorpRedesigned) setCrContentError((data && data.code ? crCodedWhy(data, 0) : data && data.error) || t('crDsLoadFailed'));
                     }
                 } catch (error) {
                     console.error('loading content:', error);
@@ -747,6 +783,56 @@
                 }
             };
             
+            // LW Nov 2026 - Corporate Redesigned: with auto-sync on (the ISO Sync tab, the flag of the
+            // classic checkbox) an ISO or template uploaded to a node's own storage is copied to the
+            // other nodes once the upload task of Proxmox VE ended well. The task is read from the
+            // task list the dashboard keeps, nothing is polled for it
+            const crQueueAutoSync = (answer, filename, ct) => {
+                let on = false;
+                try { on = localStorage.getItem(`autosync-${clusterId}`) === 'true'; } catch (_) {}
+                const sel = selectedStorage;
+                if (!on || !sel || !sel.node || (datastores.shared || []).some(s => s.storage === sel.name)) return;
+                let upid = '';
+                try { upid = (JSON.parse(answer) || {}).upid; } catch (_) {}
+                if (typeof upid !== 'string' || !upid) return;
+                setCrAutoSync({ cid: clusterId, upid, node: sel.node, storage: sel.name, filename, ct });
+                addToast(crFill(t('crDsAutoSyncWaiting'), { name: filename }), 'info');
+            };
+            // a pending copy that goes without being made is said: the page or the cluster was left, or
+            // its task was not seen ending within CR_DS_AUTOSYNC_WAIT
+            const crAutoSyncNow = useRef(null);
+            crAutoSyncNow.current = { job: crAutoSync, say: (key, job) => addToast(crFill(t(key), { name: job.filename }), 'warning') };
+            const crDropAutoSync = (key) => {
+                const { job, say } = crAutoSyncNow.current || {};
+                if (!job) return;
+                crAutoSyncNow.current = { job: null, say };
+                setCrAutoSync(null);
+                say(key, job);
+            };
+            useEffect(() => () => crDropAutoSync('crDsAutoSyncDropped'), []);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                if (!crAutoSync) return;
+                const id = setTimeout(() => crDropAutoSync('crDsAutoSyncTimeout'), CR_DS_AUTOSYNC_WAIT);
+                return () => clearTimeout(id);
+            }, [crAutoSync]);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                const job = crAutoSync;
+                if (!isCorpRedesigned || !job || job.cid !== clusterId) return;
+                const task = (Array.isArray(crTasks) ? crTasks : []).find(x => x && x.upid === job.upid);
+                const state = task ? crTaskState(task) : null;
+                if (!task || state === 'running' || state === 'queued') return;
+                setCrAutoSync(null);
+                if (state !== 'done') { addToast(crFill(t('crDsAutoSyncTaskFailed'), { name: job.filename }), 'error'); return; }
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${job.cid}/iso-sync`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ source_node: job.node, storage: job.storage, filename: job.filename, content_type: job.ct }),
+                    });
+                    if (r && r.ok) addToast(crFill(t('crDsAutoSyncStarted'), { name: job.filename }), 'success');
+                    else addToast(crFill(t('crDsAutoSyncRefused'), { name: job.filename, why: await crReadWhy(r) }), 'error');
+                })();
+            }, [crAutoSync, crTasks]);  // eslint-disable-line react-hooks/exhaustive-deps
+
             const handleUpload = async () => {
                 if (!uploadFile || !selectedStorage) return;
                 
@@ -792,6 +878,7 @@
                 
                 xhr.addEventListener('load', () => {
                     if (xhr.status >= 200 && xhr.status < 300) {
+                        if (isCorpRedesigned && !isDiskImage) crQueueAutoSync(xhr.responseText, uploadFile.name, isTemplate ? 'vztmpl' : 'iso');
                         setUploadModalOpen(false);
                         setUploadFile(null);
                         setUploadProgress(0);
@@ -933,9 +1020,16 @@
             const fetchEsxiHosts = async () => {
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts`);
-                    if (r?.ok) setEsxiHosts(await r.json());
+                    if (r?.ok) {
+                        setEsxiHosts(await r.json());
+                        if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: '' }));
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        setCrEsxiErr(x => ({ ...x, hosts: why }));
+                    }
                 } catch (e) {
                     console.error('fetching esxi hosts:', e);
+                    if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: t('crLoadFailed') }));
                 }
             };
             
@@ -985,15 +1079,27 @@
             };
             
             const fetchEsxiVms = async (hostId) => {
+                // LW Nov 2026 - the list of the host picked before is not this host's, and only the
+                // newest read lands: a failed or slow read showed the other host's VMs under this one
+                const mine = ++esxiVmsSeq.current;
                 setSelectedEsxi(hostId);
+                setEsxiVms([]);
+                if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, vms: '' }));
                 setEsxiVmsLoading(true);
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}/vms`);
-                    if (r?.ok) setEsxiVms(await r.json());
+                    if (r?.ok) {
+                        const list = await r.json();
+                        if (mine === esxiVmsSeq.current) setEsxiVms(list);
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        if (mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: why }));
+                    }
                 } catch (e) {
                     console.error('fetching esxi vms:', e);
+                    if (isCorpRedesigned && mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: t('crLoadFailed') }));
                 } finally {
-                    setEsxiVmsLoading(false);
+                    if (mine === esxiVmsSeq.current) setEsxiVmsLoading(false);
                 }
             };
             
@@ -1240,6 +1346,7 @@
                     {activeTab === 'sync' && isCorpRedesigned ? (
                         /* LW Nov 2026 - Corporate Redesigned: the Sync and Sync All of the classic sub tab, drawn by CrIsoSync */
                         <CrIsoSync key={clusterId} clusterId={clusterId} call={authFetch} datastores={datastores} dsLoading={loading}
+                            dsFail={crDsFail} onDsRetry={fetchDatastores} autoSyncWaiting={!!crAutoSync}
                             contentType={syncContentType} onContentType={setSyncContentType} canSync={hasPerm('storage.upload')}
                             onSync={triggerSync} onSyncAll={triggerSyncAll} addToast={addToast} />
                     ) : activeTab === 'sync' ? (
@@ -1473,7 +1580,7 @@
                         <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
                     ) : activeTab === 'browse' && isCorpRedesigned ? (
                         /* LW Oct 2026 - Corporate Redesigned: the same state, setters and dialogs, drawn by CrStorageBrowse */
-                        <CrStorageBrowse key={clusterId} datastores={datastores} selected={selectedStorage}
+                        <CrStorageBrowse key={clusterId} datastores={datastores} dsFail={crDsFail} onDsRetry={fetchDatastores} selected={selectedStorage}
                             content={storageContent} loading={contentLoading} error={crContentError}
                             onPick={loadStorageContent} may={hasPerm} canUploadTo={canUploadTo} isAdmin={isAdmin}
                             guests={guests} onOpenGuest={onOpenGuest}
@@ -1488,8 +1595,9 @@
                             }}
                             esxi={{
                                 hosts: esxiHosts, selected: selectedEsxi, vms: esxiVms, loading: esxiVmsLoading,
+                                hostsErr: crEsxiErr.hosts, vmsErr: crEsxiErr.vms, retryHosts: fetchEsxiHosts,
                                 pick: fetchEsxiVms, disconnect: disconnectEsxiHost, connect: () => setShowAddEsxi(true),
-                                close: () => { setSelectedEsxi(null); setEsxiVms([]); },
+                                close: () => { esxiVmsSeq.current++; setSelectedEsxi(null); setEsxiVms([]); setEsxiVmsLoading(false); setCrEsxiErr(x => ({ ...x, vms: '' })); },
                             }} />
                     ) : activeTab === 'browse' ? (
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1867,7 +1975,7 @@
                 /* LW Oct 2026 - Corporate Redesigned: the group list and datastores held here, the create dialog below */
                 <CrBoundary key={clusterId} id="balancing">
                     <CrStorageBalancing clusterId={clusterId} authFetch={authFetch} datastores={datastores}
-                        dsLoading={loading} list={storageClusters} listRead={crScRead && crScRead.cid === clusterId ? crScRead : null}
+                        dsLoading={loading} dsFail={crDsFail} onDsRetry={fetchDatastores} list={storageClusters} listRead={crScRead && crScRead.cid === clusterId ? crScRead : null}
                         setList={setStorageClusters} reloadList={fetchStorageClusters} may={hasPerm} standby={!!haReadOnly}
                         guests={guests} onOpenGuest={onOpenGuest} tasks={crTasks} onCreate={() => setShowCreateCluster(true)} />
                 </CrBoundary>
@@ -2209,8 +2317,7 @@
                                             max={50}
                                             step={5}
                                         />
-                                        {/* LW Oct 2026 - Corporate Redesigned: the server does not store a tolerance, so the preview does not ask for one */}
-                                        {!isCorpRedesigned && <Slider
+                                        <Slider
                                             label={t('migrationTolerance') || 'Tolerance'}
                                             description={t('storageToleranceDesc')}
                                             value={newClusterTolerance}
@@ -2218,7 +2325,7 @@
                                             min={0}
                                             max={20}
                                             step={1}
-                                        />}
+                                        />
                                     </div>
                                     <div className="flex gap-2 justify-end pt-4">
                                         <button

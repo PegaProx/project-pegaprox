@@ -722,8 +722,8 @@ def test_runtime_proxmox_ha_is_never_disabled_when_unknown(open_app, case):
     _open_guest(page, 'web01')
     h = _settled_health(page)
     want = {'forbidden': ['unknown', 'No permission', 'Needs the ha.view permission.'],
-            'empty': ['unconfigured', 'Not HA managed',
-                      'The cluster lists no Proxmox HA resources. The server also answers an empty list when it cannot read them.'],
+            # a failed read is a 502 of the route (get_proxmox_ha_resources strict), so an empty list is no doubt
+            'empty': ['unconfigured', 'Not HA managed', 'The cluster lists no Proxmox HA resources.'],
             'other': ['unconfigured', 'Not HA managed', 'Not among the Proxmox HA resources of this cluster.'],
             'error_state': ['critical', 'HA state: error'],
             'no_live': ['unknown', 'Configured']}[case]

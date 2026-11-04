@@ -21,10 +21,11 @@ from test_hardening_custom_profiles_ui import P1
 
 LAYOUT = 'corporate-redesigned'
 
-# True passed, False failed, None no result. ssh_perms on pve1 comes back verbose, with evidence
+# True passed, False failed, None no result. LW Nov 2026 - the shape the route sends without verbose
+# (a verdict per control): the page never asks for verbose, so no evidence comes
 VERDICTS = {
     'pve1': {'fs_modules': True, 'core_dumps': False, 'mount_options': None, 'journald': True,
-             'ssh_perms': {'status': False, 'actual': 'PermitRootLogin yes'},
+             'ssh_perms': False,
              'pam_faillock': False, 'backup_dns': None},
     'pve2': {'fs_modules': True, 'core_dumps': True, 'mount_options': True, 'journald': None, 'ssh_perms': True,
              'pam_faillock': True, 'backup_dns': True},
@@ -150,9 +151,8 @@ def test_runtime_not_checked_is_never_passed(open_app):
     rows = {r[2]: r for r in _rows(page, 'cmp-controls')}
     assert rows['core_dumps'][4:7] == ['1', '1', '0'] and rows['core_dumps'][7] == 'Failed on pve1'
     assert rows['mount_options'][4:7] == ['1', '0', '1'] and rows['mount_options'][7] == 'No result from pve1'
-    # the evidence column is there because pve1 sent some
-    assert page.locator('[data-cr-table="cmp-controls"] th[data-cr-col="evidence"]').count() == 1
-    assert any('PermitRootLogin yes' in ' '.join(r) for r in _rows(page, 'cmp-controls'))
+    # no evidence column: the answers carry none (the Hardening page shows a node's evidence)
+    assert page.locator('[data-cr-table="cmp-controls"] th[data-cr-col="evidence"]').count() == 0
     # the chips: not checked holds the partly checked ones too
     counts = page.evaluate('''() => Object.fromEntries(Array.from(document.querySelectorAll('[data-cr-cmp-show]'))
         .map(b => [b.dataset.crCmpShow, b.querySelector('.cr-seg-n').innerText]))''')

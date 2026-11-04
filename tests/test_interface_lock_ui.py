@@ -101,9 +101,10 @@ def test_the_layouts_are_the_ones_the_server_pins(card):
     ctx = _read('web', 'src', 'contexts.js')
     found = re.search(r"const UI_LOCK_LAYOUTS = \[([^\]]*)\];", ctx)
     assert found
-    assert re.findall(r"'(\w+)'", found.group(1)) == list(UI_LAYOUT_LOCKS)
+    # LW Nov 2026 - a layout id may carry a hyphen (corporate-redesigned can be pinned)
+    assert re.findall(r"'([\w-]+)'", found.group(1)) == list(UI_LAYOUT_LOCKS)
     layout_select = _between(card, 'id="ui-layout-lock"', '</select>')
-    assert re.findall(r'<option value="(\w*)"', layout_select) == [''] + list(UI_LAYOUT_LOCKS)
+    assert re.findall(r'<option value="([\w-]*)"', layout_select) == [''] + list(UI_LAYOUT_LOCKS)
 
 
 def test_the_card_loads_and_sends_its_three_fields(card):
@@ -246,7 +247,8 @@ class _Page(_App):
             self.page.locator('input[autocomplete="username"]').wait_for(timeout=30000)
             self.page.wait_for_timeout(800)
         elif self.wait == 'picker':
-            self.page.locator('[data-layout-pick]').wait_for(timeout=30000)
+            # LW Nov 2026 - more than one card carries the hook since Corporate Redesigned is offered there too
+            self.page.locator('[data-layout-pick]').first.wait_for(timeout=30000)
             self.page.wait_for_timeout(300)
         else:
             super().wait_for_app()

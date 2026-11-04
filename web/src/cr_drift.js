@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): config drift - LW Oct 2026
+        // Corporate Layout - Redesigned: config drift - LW Oct 2026
         // DriftTab mounts this and keeps the policy switch (savePolicy). The page reads the
         // three drift routes itself, so every read has a state of its own: a refused, missing,
         // offline or failed read says so and is never drawn as "no findings". Counts are the

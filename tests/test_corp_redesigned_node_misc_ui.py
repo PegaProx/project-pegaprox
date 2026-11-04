@@ -599,7 +599,8 @@ def test_runtime_a_subscription_read_that_failed_or_came_back_empty_is_said(open
     err.locator('[data-cr-nc-retry]').click()
     empty = page.locator('[data-cr-sub-state="empty"] [data-cr-nc-state="warning"]')
     empty.wait_for(timeout=5000)
-    assert 'pve1 reported no subscription data' in empty.inner_text() and 'read that failed' in empty.inner_text()
+    # the route fails a failed read now, so an empty answer carries no doubt
+    assert 'pve1 reported no subscription data' in empty.inner_text() and 'read that failed' not in empty.inner_text()
     assert page.locator('[data-cr-sub-status]').count() == 0
     _no_errors(app)
 

@@ -1,6 +1,6 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the summary of a VM or container - LW Oct 2026
-        // Drawn by CorporateVmDetailView in the preview only, from the reads the view makes
+        // Corporate Redesigned: the summary of a VM or container - LW Oct 2026
+        // Drawn by CorporateVmDetailView in Corporate Redesigned only, from the reads the view makes
         // anyway (lock, guest agent, config, HA resources, the hour of metrics it loads on
         // open), the guest list row and the backup list the dashboard polls. Only the recovery
         // state (on expand) and the migration check (on a click) ask the server for more.
@@ -184,8 +184,12 @@
             const agentCfg = cfgRaw ? (cfgRaw.agent != null ? cfgRaw.agent : cfgOpt && cfgOpt.agent) : null;
             const enabled = cfgRaw ? crVmAgentOn(agentCfg) : null;
             const optLink = perm.config ? { label: t('crVmOpenOptions'), go: () => x.openConfig('options') } : null;
+            // LW Nov 2026 - the QEMU guest agent and Proxmox HA are Proxmox VE's; another cluster type is not judged by them
+            const pve = (x.kind || 'proxmox') === 'proxmox';
             if (!isQemu) {
                 row('agent', <Icons.Terminal />, t('crVmAgent'), 'na', t('crVmNotApplicable'), t('crVmAgentCt'));
+            } else if (!pve) {
+                row('agent', <Icons.Terminal />, t('crVmAgent'), 'na', t('crVmNotApplicable'), t('crVmAgentNotPve'));
             } else {
                 const cfgText = enabled == null ? t('crVmAgentCfgUnknown') : enabled ? t('crVmAgentCfgOn') : t('crVmAgentCfgOff');
                 const ar = x.agentRead;
@@ -199,10 +203,12 @@
                     row('agent', <Icons.Terminal />, t('crVmAgent'), 'healthy', t('crVmAgentAnswers'), [cfgText, os].filter(Boolean).join(' · '),
                         { when: crVmClock(ar.at), whenTitle: t('crVmReadAt'), link: optLink });
                 } else if (ar.state === 'down') {
+                    // the classic notice's way to the agent's install guide, next to the options
                     row('agent', <Icons.Terminal />, t('crVmAgent'), enabled === false ? 'unconfigured' : 'warning',
                         enabled === false ? t('crVmAgentOff') : t('crVmAgentSilent'),
                         enabled === false ? t('crVmAgentOffHint') : `${cfgText}. ${t('crVmAgentSilentHint')}`,
-                        { when: crVmClock(ar.at), whenTitle: t('crVmReadAt'), link: optLink });
+                        { when: crVmClock(ar.at), whenTitle: t('crVmReadAt'), link: optLink,
+                          href: { label: t('installGuestAgent'), url: 'https://pve.proxmox.com/wiki/Qemu-guest-agent' } });
                 } else {
                     row('agent', <Icons.Terminal />, t('crVmAgent'), 'unknown', t('crVmReadFailedShort'),
                         [crVmReadText(ar, t), x.guestInfo ? t('crVmAgentOlder') : ''].filter(Boolean).join(' '),
@@ -220,7 +226,9 @@
                 crFill(t('crVmHaLimits'), { r: res.max_restart != null ? res.max_restart : '-', l: res.max_relocate != null ? res.max_relocate : '-' }),
                 res.state ? crFill(t('crVmHaRequested'), { s: res.state }) : ''].filter(Boolean).join(' · ') : '';
             const haWhen = ha && ha.at ? { when: crVmClock(ha.at), whenTitle: t('crVmReadAt') } : {};
-            if (live && ha && ha.state === 'ok' && !res) {
+            if (!pve) {
+                row('ha', <Icons.Shield />, t('proxmoxHa'), 'na', t('crVmNotApplicable'), t('crVmHaNotPve'));
+            } else if (live && ha && ha.state === 'ok' && !res) {
                 // the HA resources read after the row: after a removal, or an addition made elsewhere,
                 // the two disagree until the guest list catches up. The resource list decides the switch
                 row('ha', <Icons.Shield />, t('proxmoxHa'), 'unknown', t('crVmHaDisagree'),
@@ -318,8 +326,8 @@
             return live;
         }
 
-        // the lock that holds: the read on open when it worked (fresher than the polled row, and
-        // it ends with an Unlock), else the lock the guest list names
+        // the lock that holds: the lock read when it worked (made on open and again whenever the row's
+        // lock changes, and it ends with an Unlock), else the lock the guest list names
         function crVmLockedBy(vm, lockInfo, lockRead) {
             if (lockRead && lockRead.state === 'ok') return lockInfo && lockInfo.locked ? String(lockInfo.lock_reason || '?') : '';
             return vm.lock ? String(vm.lock) : '';
@@ -349,7 +357,7 @@
             return crVmReadText(rr, t);
         }
 
-        function CrVmHealth({ vm, clusterId, isQemu, isRunning, acts, authFetch, guestInfo, agentRead, config, lockInfo, lockRead,
+        function CrVmHealth({ vm, clusterId, kind, isQemu, isRunning, acts, authFetch, guestInfo, agentRead, config, lockInfo, lockRead,
                               haRead, onHaChanged, backupStatus, backupFor, onMigrate, onTimeline, openConfig, open }) {
             const { t } = useTranslation();
             const { holds, can } = crVmCan();
@@ -407,7 +415,7 @@
                 }
             };
 
-            const rows = crVmHealthRows({ vm, clusterId, isQemu, isRunning, acts, perm, guestInfo, agentRead, config, lockInfo, lockRead,
+            const rows = crVmHealthRows({ vm, clusterId, kind, isQemu, isRunning, acts, perm, guestInfo, agentRead, config, lockInfo, lockRead,
                                           haRead, backupStatus, backupFor, rr, pf, onMigrate: onMigrate ? () => onMigrate(vm) : null, onTimeline,
                                           openConfig, open }, t);
             const counts = {};
@@ -428,7 +436,7 @@
                         </button>
                     );
                 }
-                if (r.id === 'ha' && perm.ha && haRead && (haRead.state === 'ok' || r.managed)) {
+                if (r.id === 'ha' && r.state !== 'na' && perm.ha && haRead && (haRead.state === 'ok' || r.managed)) {
                     const managed = !!r.managed;
                     out.push(
                         <button key="ha" type="button" className={`cr-btn cr-btn-xs${managed ? ' cr-btn-danger' : ''}`} disabled={haBusy}
@@ -440,6 +448,10 @@
                 }
                 if (r.link && r.link.go) {
                     out.push(<button key="link" type="button" className="cr-link cr-vm-hlink" onClick={r.link.go} data-cr-vm-hlink={r.id}>{r.link.label}</button>);
+                }
+                if (r.href) {
+                    out.push(<a key="href" className="cr-link cr-vm-hlink" href={r.href.url} target="_blank" rel="noopener noreferrer"
+                        data-cr-vm-hhref={r.id}>{r.href.label}</a>);
                 }
                 if (r.link2 && r.link2.go) {
                     out.push(<button key="link2" type="button" className="cr-link cr-vm-hlink" onClick={r.link2.go} title={r.link2.title}
@@ -710,7 +722,7 @@
             return r || t('crVmNoAnswer');
         }
 
-        function CrVmFilesystems({ vm, clusterId, authFetch, isQemu, isRunning, guestInfo, agentRead }) {
+        function CrVmFilesystems({ vm, clusterId, kind, authFetch, isQemu, isRunning, guestInfo, agentRead }) {
             const { t } = useTranslation();
             const scale = crStoreScale(t);
             const listed = Array.isArray(guestInfo && guestInfo.filesystems) ? guestInfo.filesystems.filter(fs => fs && typeof fs === 'object') : [];
@@ -731,6 +743,7 @@
             }, [askAgain, agentRead && agentRead.at]);
             let state, rows = [], at = agentRead && agentRead.at, why = '';
             if (!isQemu) state = 'lxc';
+            else if ((kind || 'proxmox') !== 'proxmox') state = 'na';
             else if (!isRunning) state = 'stopped';
             else if (!agentRead || agentRead.state === 'loading') state = 'loading';
             else if (agentRead.state === 'down') state = 'down';
@@ -792,7 +805,7 @@
                 );
             } else {
                 const text = { stopped: 'crVmFsStopped', loading: 'loading', checking: 'crVmFsChecking', down: 'crVmFsDown', failed: 'crVmFsFailed',
-                               none: 'crVmFsNone', unread: 'crVmFsUnread' }[state];
+                               none: 'crVmFsNone', unread: 'crVmFsUnread', na: 'crVmFsNotPve' }[state];
                 const spin = state === 'loading' || state === 'checking';
                 body = (
                     <p className="cr-vm-note" data-cr-vm-fsnote="" role={state === 'unread' ? 'alert' : undefined}>
@@ -812,16 +825,19 @@
         // --- hardware, by group, each opening its tab of the configuration --------------
 
         function crVmMib(v) {
-            const n = Number(v);
+            // LW Nov 2026 - memory can be a property string ('current=4096'), read as the dialog reads it
+            const n = typeof v === 'string' && /[=,]/.test(v) ? Number(crVcProps(v, 'current').current) : Number(v);
             return Number.isFinite(n) && n > 0 ? crBytes(n * 1024 * 1024) : null;
         }
 
-        function CrVmHardware({ vm, isQemu, config, onOpen, locked }) {
+        function CrVmHardware({ vm, isQemu, kind, config, onOpen, locked }) {
             const { t } = useTranslation();
             const { can } = crVmCan();
             const may = can('vm.config');
             const ok = config && config.state === 'ok';
             const cfg = ok ? config.body : {};
+            // LW Nov 2026 - an XCP-ng config has its own fields (vcpus, memory and sizes in bytes, VIFs) and no raw
+            const native = ok && (kind === 'xcpng' || !(cfg.raw && typeof cfg.raw === 'object'));
             const raw = cfg.raw || {};
             const hw = cfg.hardware || {};
             const dflt = (v, d) => (v != null && v !== '' ? String(v) : crFill(t('crVmDefault'), { v: d }));
@@ -831,7 +847,26 @@
             const cds = disks.filter(d => d && (d.media === 'cdrom' || String(d.value || '').includes('media=cdrom')));
             const unused = Array.isArray(cfg.unused_disks) ? cfg.unused_disks.length : 0;
             const groups = [];
-            if (isQemu) {
+            if (isQemu && native) {
+                const vcpus = crVmHasNum(cfg.vcpus) && cfg.vcpus > 0 ? cfg.vcpus : vm.maxcpu;
+                const boot = crVmHasNum(cfg.vcpus_at_startup) && cfg.vcpus_at_startup > 0 && cfg.vcpus_at_startup !== vcpus ? cfg.vcpus_at_startup : null;
+                groups.push({ id: 'cpu', tab: 'hardware', icon: <Icons.Cpu />, title: t('crVmProcessors'), lines: [
+                    crFill(t('crVmVcpus'), { n: vcpus || '-' }), boot ? crFill(t('crVmXcpAtStart'), { n: boot }) : '',
+                ] });
+                groups.push({ id: 'memory', tab: 'hardware', icon: <Icons.MemoryStick />, title: t('memory'), lines: [
+                    crVmHasNum(cfg.memory) && cfg.memory > 0 ? crBytes(cfg.memory) : vm.maxmem ? crBytes(vm.maxmem) : '-',
+                ] });
+                const own = (l) => (Array.isArray(l) ? l.filter(x => x && typeof x === 'object') : []);
+                groups.push({ id: 'disks', tab: 'disks', icon: <Icons.HardDrive />, title: t('disks'), list: [
+                    ...own(cfg.disks).map(d => ({ k: `${t('disk')} ${d.id != null ? d.id : '-'}`,
+                        v: [d.storage, crVmHasNum(d.size) && d.size > 0 ? crBytes(d.size) : ''].filter(Boolean).join(' · ') || d.name || '' })),
+                    ...own(cfg.cdroms).map(c => ({ k: `${t('crVmCdrom')} ${c.device != null ? c.device : '-'}`,
+                        v: c.iso ? String(c.iso) : t('crVmCdEmpty') })),
+                ], lines: [] });
+                groups.push({ id: 'network', tab: 'network', icon: <Icons.Network />, title: t('network'), list: own(cfg.networks).map(n => ({
+                    k: `VIF ${n.id != null ? n.id : '-'}`, v: [n.network, n.bridge, n.mac].filter(Boolean).join(' · '),
+                })), lines: [] });
+            } else if (isQemu) {
                 const sockets = Number(raw.sockets || hw.sockets || 1), cores = Number(raw.cores || hw.cores || 1);
                 groups.push({ id: 'cpu', tab: 'hardware', icon: <Icons.Cpu />, title: t('crVmProcessors'), lines: ok ? [
                     crFill(t('crVmSocketsCores'), { s: sockets, c: cores, n: sockets * cores }),
@@ -839,7 +874,7 @@
                 ] : [crFill(t('crVmVcpus'), { n: vm.maxcpu || '-' })] });
                 const balloon = raw.balloon;
                 groups.push({ id: 'memory', tab: 'hardware', icon: <Icons.MemoryStick />, title: t('memory'), lines: ok ? [
-                    crVmMib(raw.memory || hw.memory) || '-',
+                    crVmMib(raw.memory || hw.memory) || (vm.maxmem ? crBytes(vm.maxmem) : '-'),
                     balloon == null || balloon === '' ? '' : Number(balloon) === 0 ? t('crVmBalloonOff') : crFill(t('crVmBalloonMin'), { v: crVmMib(balloon) || balloon }),
                 ] : [vm.maxmem ? crBytes(vm.maxmem) : '-'] });
                 groups.push({ id: 'disks', tab: 'disks', icon: <Icons.HardDrive />, title: t('disks'), list: ok ? [
@@ -970,7 +1005,11 @@
                                     {[n.mac, list(n.ips).filter(Boolean).map(ip => `${ip.address}${ip.prefix ? '/' + ip.prefix : ''}`).join(', ')].filter(Boolean).join(' · ')}
                                 </dd></div>
                         ))}
-                        {users.length > 0 && <div><dt>{t('loggedInUsers')}</dt><dd>{users.map(u => (u.domain ? `${u.domain}\\${u.user}` : u.user)).join(', ')}</dd></div>}
+                        {users.length > 0 && <div><dt>{t('loggedInUsers')}</dt><dd data-cr-vm-users="">{users.map(u => {
+                            // the login time the agent reports, as the classic table had it
+                            const who = u.domain ? `${u.domain}\\${u.user}` : u.user;
+                            return crVmHasNum(u.login_time) && u.login_time > 0 ? `${who} (${crFmtDate(u.login_time * 1000)})` : who;
+                        }).join(', ')}</dd></div>}
                         {skew != null && (
                             <div><dt>{t('clockSkew')}</dt>
                                 <dd className={`cr-mono cr-tone-text cr-tone-${Math.abs(skew) > 60 ? 'error' : Math.abs(skew) > 5 ? 'warning' : 'success'}`}
@@ -1039,8 +1078,16 @@
             );
         }
 
-        function crVmFacts(vm, guestInfo) {
-            const ips = guestInfo && Array.isArray(guestInfo.ip_addresses) ? guestInfo.ip_addresses.filter(x => typeof x === 'string') : [];
+        // LW Nov 2026 - the guest's addresses: what the agent answered; an XCP-ng guest has no QEMU agent, its row
+        // carries the addresses of its guest metrics
+        function crVmIps(vm, guestInfo, kind) {
+            const strs = (l) => (Array.isArray(l) ? l.filter(x => typeof x === 'string' && x) : []);
+            const own = strs(guestInfo && guestInfo.ip_addresses);
+            return own.length || (kind || 'proxmox') === 'proxmox' ? own : strs(vm && vm.ip_addresses);
+        }
+
+        function crVmFacts(vm, guestInfo, kind) {
+            const ips = crVmIps(vm, guestInfo, kind);
             const tags = Array.isArray(vm.tags) ? vm.tags : String(vm.tags || '').split(/[;,]/).map(s => s.trim()).filter(Boolean);
             return { ips, tags, hostname: guestInfo && guestInfo.hostname };
         }
@@ -1053,8 +1100,19 @@
             const { isQemu, isRunning, clusterId } = p;
             const fresh = useCrVmLiveRow(p.vm, clusterId);
             const vm = useMemo(() => (fresh ? { ...p.vm, hastate: fresh.hastate, lock: fresh.lock } : p.vm), [p.vm, fresh]);
-            const facts = crVmFacts(vm, p.guestInfo);
-            const description = p.config && p.config.state === 'ok' && p.config.body.raw ? String(p.config.body.raw.description || '').trim() : '';
+            // LW Nov 2026 - a lock the guest list gained or lost since the read asks the lock route again,
+            // so the line and Unlock follow it (the read on open alone was only fresh then)
+            const rowLock = vm.lock ? String(vm.lock) : '';
+            const lastLock = useRef(null);
+            useEffect(() => {
+                if (lastLock.current !== null && lastLock.current !== rowLock && p.onLockChanged) p.onLockChanged();
+                lastLock.current = rowLock;
+            }, [rowLock]);
+            const facts = crVmFacts(vm, p.guestInfo, p.kind);
+            // an XCP-ng config carries the description at the top, a Proxmox VE one in raw
+            const cfgBody = p.config && p.config.state === 'ok' ? p.config.body : null;
+            const descSrc = cfgBody ? (cfgBody.raw && typeof cfgBody.raw === 'object' ? cfgBody.raw.description : (p.kind || 'proxmox') !== 'proxmox' ? cfgBody.description : '') : '';
+            const description = typeof descSrc === 'string' ? descSrc.trim() : '';
             const lockedBy = crVmLockedBy(vm, p.lockInfo, p.lockRead);
             const sid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
             const haRes = p.haRead && p.haRead.state === 'ok' ? (p.haRead.list || []).find(r => r && r.sid === sid) : null;
@@ -1085,15 +1143,15 @@
                             )}
                         </div>
                     )}
-                    <CrVmHealth vm={vm} clusterId={clusterId} isQemu={isQemu} isRunning={isRunning} acts={p.acts} authFetch={p.authFetch}
+                    <CrVmHealth vm={vm} clusterId={clusterId} kind={p.kind} isQemu={isQemu} isRunning={isRunning} acts={p.acts} authFetch={p.authFetch}
                         guestInfo={p.guestInfo} agentRead={p.agentRead} config={p.config} lockInfo={p.lockInfo} lockRead={p.lockRead}
                         haRead={p.haRead} onHaChanged={p.onHaChanged} backupStatus={p.backupStatus} backupFor={p.backupFor}
                         onMigrate={p.acts ? p.onMigrate : null} onTimeline={p.onTimeline} openConfig={openConfig} open={p.open} />
                     <CrVmSparks isRunning={isRunning} metrics={p.metrics} />
-                    <CrVmFilesystems vm={vm} clusterId={clusterId} authFetch={p.authFetch} isQemu={isQemu} isRunning={isRunning}
+                    <CrVmFilesystems vm={vm} clusterId={clusterId} kind={p.kind} authFetch={p.authFetch} isQemu={isQemu} isRunning={isRunning}
                         guestInfo={p.guestInfo} agentRead={p.agentRead} />
                     <div className="cr-vm-grid2">
-                        <CrVmHardware vm={vm} isQemu={isQemu} config={p.config} onOpen={openConfig} locked={!!lockedBy} />
+                        <CrVmHardware vm={vm} isQemu={isQemu} kind={p.kind} config={p.config} onOpen={openConfig} locked={!!lockedBy} />
                         <div className="cr-vm-col">
                             <CrVmRelated vm={vm} clusterId={clusterId} clusterName={p.clusterName} config={p.config} nav={p.nav} haRes={haRes} />
                             {isQemu && isRunning && <CrVmAgentInfo guestInfo={p.guestInfo} agentRead={p.agentRead} />}

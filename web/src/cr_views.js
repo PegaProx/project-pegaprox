@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): the views - LW Oct 2026
+        // Corporate Layout - Redesigned: the views - LW Oct 2026
         // The dashboard, the object header and tabs of cluster, node, VM and
         // container, and the performance charts. Only mounted from branches that
         // check useLayout().isCorpRedesigned. Every figure comes from what the
@@ -15,7 +15,7 @@
             if (pct == null || !Number.isFinite(pct)) return 'neutral';
             return pct > CR_CRIT ? 'error' : pct > CR_WARN ? 'warning' : 'success';
         }
-        // LW Nov 2026 - storage, root disks and thin pools: one pair for the whole preview (the
+        // LW Nov 2026 - storage, root disks and thin pools: one pair for the whole layout (the
         // overview alerts, the cluster table, the Datacenter page, the datastores, the node).
         // Below 70 % normal, 70 to 85 % warning (both ends included), above 85 % critical. Not
         // configurable: the server keeps no storage threshold
@@ -32,7 +32,22 @@
         const CR_ERR_WARN = 1;
         const CR_ERR_CRIT = 5;
         const crPct = (v, digits = 0) => (Number.isFinite(v) ? `${v.toFixed(digits)}%` : '-');
-        const crBytes = (b) => (Number.isFinite(b) ? formatBytes(b) : '-');
+        // LW Nov 2026 - formatBytes of ui.js with the number in the UI language (9,0 GB on a German page)
+        const CR_BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const crByteFmt = {};
+        function crBytes(b) {
+            if (!Number.isFinite(b)) return '-';
+            if (b === 0) return '0 B';
+            const loc = crLocale();
+            const num = (v, digits) => {
+                const key = `${loc}|${digits}`;
+                if (!crByteFmt[key]) crByteFmt[key] = new Intl.NumberFormat(crLocale(), { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false });
+                return crByteFmt[key].format(v);
+            };
+            if (b < 1) return `${num(b, 2)} B`;
+            const i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), CR_BYTE_UNITS.length - 1);
+            return `${num(b / Math.pow(1024, i), 1)} ${CR_BYTE_UNITS[i]}`;
+        }
         const crFill = (s, vars) => Object.keys(vars).reduce((out, k) => out.split(`{${k}}`).join(vars[k]), s || '');
 
         function crUptime(s) {
@@ -57,8 +72,9 @@
 
         // one tile of a summary strip. meterTone: the bar's colour where crTone's limits are not
         // the ones (storage passes crStoreTone). pressed: a tile that is also a filter says
-        // whether it is the one applied (LW Nov 2026)
-        function CrStat({ id, label, value, unit, sub, tone, meter, meterTone, onClick, title, pressed }) {
+        // whether it is the one applied (LW Nov 2026). note: a second line under sub, in the
+        // warning colour, for what the figure leaves out
+        function CrStat({ id, label, value, unit, sub, tone, meter, meterTone, onClick, title, pressed, note }) {
             const body = (
                 <>
                     <span className="cr-stat-label">{label}</span>
@@ -69,6 +85,7 @@
                         </span>
                     )}
                     {sub && <span className="cr-stat-sub">{sub}</span>}
+                    {note && <span className="cr-stat-subnote" data-cr-stat-note="">{note}</span>}
                 </>
             );
             const cls = `cr-stat${tone ? ' cr-stat-' + tone : ''}`;
@@ -93,14 +110,18 @@
 
         // --- the inventory, summed up ---------------------------------------------
         // What the datacenter status of each cluster says. A cluster that is not
-        // connected, or has not answered yet, adds nothing; a figure no cluster
-        // reported stays null. An answer without any node is Proxmox VE not delivering
-        // its cluster status (vms.py answers zeros then): its nodes are "not read"
-        // (nodes null, noNodes true), its guests and resources still count.
-        // nodesMissing: the connected clusters whose nodes are not in the node count.
-        function crInventory(clusters, allMetrics) {
+        // connected adds nothing; a figure no cluster reported stays null. An answer
+        // without any node is Proxmox VE not delivering its cluster status (vms.py
+        // answers zeros then): its nodes are "not read" (state 'empty'), its guests
+        // and resources still count. nodesMissing: the connected clusters whose nodes
+        // are not in the node count.
+        // LW Nov 2026 - with opts.now (the dashboard) an answer older than CR_AL.stale is not
+        // current: like a status that never came it adds nothing, and its row says which it is
+        // (state 'stale', or 'wait' and then 'unread' once opts.since is CR_AL.unreadAfter ago).
+        // uncounted names the clusters left out of every sum. Without opts every answer counts
+        function crInventory(clusters, allMetrics, opts) {
             const per = {};
-            const sum = { clusters: clusters.length, connected: 0, reporting: 0, nodesMissing: 0,
+            const sum = { clusters: clusters.length, connected: 0, counted: 0, reporting: 0, nodesMissing: 0, uncounted: [],
                           nodes: null, vms: null, cts: null, cpu: null, mem: null, storage: null };
             const add = (key, part) => {
                 if (!part) return;
@@ -111,19 +132,30 @@
             const guests = (g) => (g ? { running: g.running || 0, stopped: g.stopped || 0,
                                         total: g.total != null ? g.total : (g.running || 0) + (g.stopped || 0) } : null);
             const share = (r) => (r && r.total > 0 && Number.isFinite(r.used) ? { used: r.used, total: r.total } : null);
+            const now = opts && opts.now;
+            const blank = { nodes: null, vms: null, cts: null, cpu: null, mem: null, storage: null, hardware: null, quorate: null };
             clusters.forEach(c => {
                 if (c.connected) sum.connected++;
-                const entry = c.connected ? allMetrics?.[c.id] : null;
-                const d = entry && entry.data;
                 // an ESXi connection has no datacenter status and no nodes of this kind
-                const counted = c.connected && c.cluster_type !== 'esxi';
-                if (!d || !d.nodes) { per[c.id] = null; if (counted) sum.nodesMissing++; return; }
+                if (!c.connected || c.cluster_type === 'esxi') { per[c.id] = null; return; }
+                sum.counted++;
+                const entry = allMetrics?.[c.id];
+                const d = entry && entry.data;
+                const at = entry && entry.lastUpdate ? new Date(entry.lastUpdate).getTime() : 0;
+                const old = !!now && !!d && (!at || now - at > CR_AL.stale);
+                if (!d || !d.nodes || old) {
+                    const state = old ? 'stale' : d || !now || now - ((opts && opts.since) || now) > CR_AL.unreadAfter ? 'unread' : 'wait';
+                    per[c.id] = { ...blank, state, lastUpdate: entry && entry.lastUpdate ? entry.lastUpdate : null };
+                    sum.nodesMissing++;
+                    sum.uncounted.push(clusterLabel(c));
+                    return;
+                }
                 sum.reporting++;
                 const res = d.resources || {};
                 const noNodes = !(d.nodes.total > 0);
-                if (noNodes && counted) sum.nodesMissing++;
+                if (noNodes) sum.nodesMissing++;
                 const row = {
-                    noNodes,
+                    state: noNodes ? 'empty' : 'ok',
                     nodes: noNodes ? null : { online: d.nodes.online || 0, offline: d.nodes.offline || 0, total: d.nodes.total || 0 },
                     vms: guests(d.guests && d.guests.vms),
                     cts: guests(d.guests && d.guests.containers),
@@ -143,6 +175,8 @@
             ['cpu', 'mem', 'storage'].forEach(k => { if (sum[k]) sum[k].pct = sum[k].used / sum[k].total * 100; });
             return { sum, per };
         }
+        // a row the sums take: a current answer (with or without nodes)
+        const crInvRead = (r) => !!r && (r.state === 'ok' || r.state === 'empty');
 
         // the alerts the overview can tell without asking anything new, each tied to its cluster
         function crAlerts(clusters, per, t) {
@@ -193,11 +227,17 @@
             const crit = alerts.filter(a => a.sev === 'error').length;
             const warn = alerts.length - crit;
             const used = (r) => crFill(t('crUsedOf'), { used: crBytes(r.used), total: crBytes(r.total) });
+            // LW Nov 2026 - a cluster without a current status is in none of the sums below; every figure says so
+            const left = s.uncounted.length;
+            const leftNote = left > 0 ? crFill(t('crNodesUncounted'), { n: left }) : null;
+            const leftTitle = left > 0 ? crFill(t('crDashUncountedHint'), { clusters: s.uncounted.join(', ') }) : undefined;
+            const waiting = Object.values(inv.per).some(r => r && r.state === 'wait');
             return (
                 <section className="cr-stat-row" aria-label={t('crSummary')} data-cr-summary="">
-                    <CrStat id="clusters" label={t('clusters')} value={s.connected} unit={`/ ${s.clusters}`}
-                        tone={offline > 0 ? 'error' : null}
-                        sub={offline > 0 ? crFill(t('crNOffline'), { n: offline }) : t('crAllOnline')} />
+                    <CrStat id="clusters" label={t('crClusters')} value={s.connected} unit={`/ ${s.clusters}`}
+                        tone={offline > 0 ? 'error' : null} title={leftTitle}
+                        sub={offline > 0 ? crFill(t('crNOffline'), { n: offline }) : t('crAllOnline')}
+                        note={left > 0 ? crFill(t('crDashNoStatusN'), { n: left }) : null} />
                     {(s.nodes || (s.reporting > 0 && s.nodesMissing > 0)) && (
                         <CrStat id="nodes" label={t('nodes')} value={s.nodes ? s.nodes.online : '-'} unit={s.nodes ? `/ ${s.nodes.total}` : null}
                             tone={nodeOff > 0 ? 'error' : null} title={s.nodesMissing > 0 ? t('crNodesUncountedHint') : undefined}
@@ -205,24 +245,29 @@
                     )}
                     {s.vms && (
                         <CrStat id="vms" label={t('crVmsRunning')} value={s.vms.running} unit={`/ ${s.vms.total}`}
-                            sub={`${s.vms.stopped} ${t('stopped').toLowerCase()}`} />
+                            sub={`${s.vms.stopped} ${t('stopped').toLowerCase()}`} note={leftNote} title={leftTitle} />
                     )}
                     {s.cts && (
                         <CrStat id="cts" label={t('crCtsRunning')} value={s.cts.running} unit={`/ ${s.cts.total}`}
-                            sub={`${s.cts.stopped} ${t('stopped').toLowerCase()}`} />
+                            sub={`${s.cts.stopped} ${t('stopped').toLowerCase()}`} note={leftNote} title={leftTitle} />
                     )}
                     {s.cpu && (
-                        <CrStat id="cpu" label={t('cpu')} value={crPct(s.cpu.pct)} meter={s.cpu.pct}
+                        <CrStat id="cpu" label={t('cpu')} value={crPct(s.cpu.pct)} meter={s.cpu.pct} note={leftNote} title={leftTitle}
                             sub={crFill(t('crCoresOf'), { used: s.cpu.used.toFixed(1), total: s.cpu.total })} />
                     )}
-                    {s.mem && <CrStat id="mem" label={t('ram')} value={crPct(s.mem.pct)} meter={s.mem.pct} sub={used(s.mem)} />}
+                    {s.mem && <CrStat id="mem" label={t('ram')} value={crPct(s.mem.pct)} meter={s.mem.pct} sub={used(s.mem)} note={leftNote} title={leftTitle} />}
                     {s.storage && <CrStat id="storage" label={t('storage')} value={crPct(s.storage.pct)} meter={s.storage.pct}
-                        meterTone={crStoreTone(s.storage.pct)} sub={used(s.storage)} title={crStoreScale(t)} />}
+                        meterTone={crStoreTone(s.storage.pct)} sub={used(s.storage)} note={leftNote}
+                        title={leftTitle ? `${crStoreScale(t)}. ${leftTitle}` : crStoreScale(t)} />}
                     <CrStat id="alerts" label={t('crCriticalAlerts')} value={crit} tone={crit > 0 ? 'error' : warn > 0 ? 'warning' : null}
                         sub={crFill(t('crWarningsN'), { n: warn })} onClick={alerts.length ? onShowAlerts : undefined} />
-                    {s.connected > 0 && s.reporting === 0 && (
-                        <div className="cr-stat cr-stat-note" data-cr-stat="waiting">
-                            <span className="cr-spinner" aria-hidden="true" />{t('crNoLiveData')}
+                    {/* LW Nov 2026 - only clusters that have a status to give: an ESXi connection never does. The spinner
+                        stands for the first CR_AL.unreadAfter, after that the clusters did not answer */}
+                    {s.counted > 0 && s.reporting === 0 && (
+                        <div className="cr-stat cr-stat-note" data-cr-stat="waiting" data-cr-waiting={waiting ? 'wait' : 'none'}>
+                            {waiting
+                                ? <><span className="cr-spinner" aria-hidden="true" />{t('crNoLiveData')}</>
+                                : t('crDashNoStatus')}
                         </div>
                     )}
                 </section>
@@ -250,26 +295,39 @@
                 return m;
             }, [alerts]);
             const rows = useMemo(() => clusters.map(c => ({
-                c, r: inv.per[c.id], health: inv.per[c.id] ? (statsById[c.id] || {}).healthScore : null,
+                c, r: inv.per[c.id], health: crInvRead(inv.per[c.id]) ? (statsById[c.id] || {}).healthScore : null,
                 alerts: alertsBy[c.id] || [], group: groups[c.group_id] || '',
             })), [clusters, inv, statsById, alertsBy, groups]);
             const hasGroups = Object.keys(groups).length > 0;
 
+            // LW Nov 2026 - a connected cluster whose status is not current (none yet, none that came, an old
+            // one, or one without any node) is no green dot and no Online: its row says which, with dashes
+            const live = (x) => !x.r || x.r.state === 'ok';
+            const rank = (x) => (!x.c.connected ? 0 : live(x) ? 1 : 0.5);
+            const stateBadge = (x) => {
+                const st = x.r.state;
+                const at = x.r.lastUpdate ? crFmtTime(x.r.lastUpdate) : '';
+                if (st === 'wait') return <span data-cr-cl-state="wait"><CrBadge tone="neutral">{t('crDashWaitBadge')}</CrBadge></span>;
+                if (st === 'stale') {
+                    return <span data-cr-cl-state="stale" title={crFill(t('crDashStaleHint'), { time: at || '-' })}><CrBadge tone="warning">{t('crDashStaleBadge')}</CrBadge></span>;
+                }
+                return <span data-cr-cl-state="unread" title={st === 'empty' ? t('crNodesNotReadHint') : t('crDashUnreadHint')}><CrBadge tone="neutral">{t('crNodesNotRead')}</CrBadge></span>;
+            };
             const columns = useMemo(() => [
                 // LW Nov 2026 - a status without any node is "not read" here as in the strip and on the
                 // Datacenter page: no green dot, no Online, no 0/0
-                { key: 'dot', label: '', menuLabel: t('status'), width: 30, resizable: false, sortValue: x => (x.c.connected ? (x.r && x.r.noNodes ? 0.5 : 1) : 0),
-                  render: x => <span className={`cr-dot cr-dot-${!x.c.connected || x.alerts.some(a => a.sev === 'error') ? 'error' : x.r && x.r.noNodes ? 'neutral' : 'success'}`} aria-hidden="true" /> },
+                { key: 'dot', label: '', menuLabel: t('status'), width: 30, resizable: false, sortValue: rank,
+                  render: x => <span className={`cr-dot cr-dot-${!x.c.connected || x.alerts.some(a => a.sev === 'error') ? 'error' : !live(x) ? 'neutral' : 'success'}`} aria-hidden="true" /> },
                 { key: 'name', label: t('name'), flex: true, min: 160, sortValue: x => clusterLabel(x.c),
                   render: x => <span className="cr-strong" title={x.c.host || ''}>{clusterLabel(x.c)}</span> },
                 { key: 'group', label: t('group'), width: 120, hidden: !hasGroups, sortValue: x => x.group || null, render: x => x.group },
-                { key: 'status', label: t('status'), width: 104, sortValue: x => (x.c.connected ? (x.r && x.r.noNodes ? 0.5 : 1) : 0),
-                  render: x => (x.c.connected && x.r && x.r.noNodes
-                      ? <span data-cr-cl-state="unread" title={t('crNodesNotReadHint')}><CrBadge tone="neutral">{t('crNodesNotRead')}</CrBadge></span>
+                { key: 'status', label: t('status'), width: 104, sortValue: rank,
+                  render: x => (x.c.connected && !live(x)
+                      ? stateBadge(x)
                       : <CrBadge tone={x.c.connected ? 'success' : 'error'}>{x.c.connected ? t('online') : t('offline')}</CrBadge>) },
                 { key: 'nodes', label: t('nodes'), width: 80, align: 'right', mono: true, sortValue: x => (x.r && x.r.nodes ? x.r.nodes.total : null),
                   render: x => (x.r && x.r.nodes ? `${x.r.nodes.online}/${x.r.nodes.total}`
-                      : x.r && x.r.noNodes ? <span className="cr-muted" data-cr-cl-nodes="unread" title={t('crNodesNotReadHint')}>-</span> : '-') },
+                      : x.r && x.r.state === 'empty' ? <span className="cr-muted" data-cr-cl-nodes="unread" title={t('crNodesNotReadHint')}>-</span> : '-') },
                 { key: 'vms', label: 'VMs', width: 84, align: 'right', mono: true, sortValue: x => (x.r && x.r.vms ? x.r.vms.total : null),
                   title: t('crVmsRunning'), render: x => (x.r && x.r.vms ? `${x.r.vms.running}/${x.r.vms.total}` : '-') },
                 { key: 'cts', label: 'CTs', width: 84, align: 'right', mono: true, sortValue: x => (x.r && x.r.cts ? x.r.cts.total : null),
@@ -292,13 +350,17 @@
                   render: x => (x.r && x.r.lastUpdate ? crFmtTime(x.r.lastUpdate) : '') },
             ], [t, hasGroups]);
 
+            // LW Nov 2026 - Online counts what the rows call Online; a connected cluster without a current
+            // status has a chip of its own while there is one
             const counts = useMemo(() => ({
                 all: rows.length,
-                online: rows.filter(x => x.c.connected).length,
+                online: rows.filter(x => x.c.connected && live(x)).length,
+                unread: rows.filter(x => x.c.connected && !live(x)).length,
                 offline: rows.filter(x => !x.c.connected).length,
                 alerts: rows.filter(x => x.alerts.length).length,
             }), [rows]);
-            const filter = useMemo(() => (show === 'online' ? x => x.c.connected
+            const filter = useMemo(() => (show === 'online' ? x => x.c.connected && live(x)
+                : show === 'unread' ? x => x.c.connected && !live(x)
                 : show === 'offline' ? x => !x.c.connected
                 : show === 'alerts' ? x => x.alerts.length > 0 : null), [show]);
 
@@ -326,16 +388,17 @@
                     ],
                 });
             };
-            const chips = [['all', t('all')], ['online', t('online')], ['offline', t('offline')], ['alerts', t('alerts')]];
+            const chips = [['all', t('all')], ['online', t('online')], ...(counts.unread || show === 'unread' ? [['unread', t('crNodesNotRead')]] : []),
+                           ['offline', t('offline')], ['alerts', t('alerts')]];
             return (
                 <>
                     <CrTable id="dash-clusters" columns={columns} rows={rows} rowKey={x => x.c.id} filter={filter} searchable
-                        onRowClick={x => onOpen(x.c)} onRowContextMenu={openMenu} ariaLabel={t('clusters')}
+                        onRowClick={x => onOpen(x.c)} onRowContextMenu={openMenu} ariaLabel={t('crClusters')}
                         initialSort={{ key: 'name', dir: 'asc' }} maxHeight={342}
                         emptyText={t('noClustersConfigured')}
                         toolbar={(
                             <>
-                                <span className="cr-table-title">{t('clusters')}</span>
+                                <span className="cr-table-title">{t('crClusters')}</span>
                                 <div className="cr-seg" role="group" aria-label={t('filter')}>
                                     {chips.map(([id, label]) => (
                                         <button key={id} type="button" className={show === id ? 'active' : ''} aria-pressed={show === id}
@@ -512,15 +575,37 @@
             );
         }
 
-        // The All Clusters view of the preview. AllClustersOverview hands over what it has
+        // LW Nov 2026 - when this session first drew the dashboard: a cluster with no status this long
+        // after it is "not read" instead of "reading". The look again every CR_DASH_RECHECK ms reads
+        // nothing, it only draws when a row changes its state (a status turning old with no new answer)
+        const crDashSeen = { since: 0 };
+        crSessionStore(() => { crDashSeen.since = 0; });
+        const CR_DASH_RECHECK = 5000;
+        const crInvSig = (inv) => Object.keys(inv.per).map(k => `${k}:${inv.per[k] ? inv.per[k].state : '-'}`).join(',');
+
+        // The All Clusters view of Corporate Redesigned. AllClustersOverview hands over what it has
         // already worked out (clusterStats for the health score, openIn for the panels); the
         // rest is derived here. The panels below the tables are the classic ones, they fetch
-        // for themselves as they do there
+        // for themselves as they do there. The per-cluster node cards of classic are the
+        // Topology view (onOpenTopology), not drawn again here
         function CrDashboard({ clusters, allMetrics, clusterStats, clusterGroups, allClusterGuests, recentEvents, canAudit,
-                               authFetch, onSelectCluster, onSelectVm, onOpenClusterTab, onOpenGuests, addToast,
+                               authFetch, onSelectCluster, onSelectVm, onOpenClusterTab, onOpenGuests, onOpenTopology, addToast,
                                emptyText, onAutoInstall, openIn }) {
             const { t } = useTranslation();
-            const inv = useMemo(() => crInventory(clusters, allMetrics || {}), [clusters, allMetrics]);
+            if (!crDashSeen.since) crDashSeen.since = Date.now();
+            const [recheck, setRecheck] = useState(0);
+            const inv = useMemo(() => crInventory(clusters, allMetrics || {}, { now: Date.now(), since: crDashSeen.since }),
+                [clusters, allMetrics, recheck]);
+            const seen = useRef({ clusters, allMetrics, sig: '' });
+            seen.current = { clusters, allMetrics, sig: crInvSig(inv) };
+            useEffect(() => {
+                const id = setInterval(() => {
+                    const x = seen.current;
+                    const next = crInventory(x.clusters, x.allMetrics || {}, { now: Date.now(), since: crDashSeen.since });
+                    if (crInvSig(next) !== x.sig) setRecheck(n => n + 1);
+                }, CR_DASH_RECHECK);
+                return () => clearInterval(id);
+            }, []);
             const alerts = useMemo(() => crAlerts(clusters, inv.per, t), [clusters, inv, t]);
             const alertsRef = useRef(null);
             const showAlerts = () => {
@@ -542,6 +627,12 @@
                                 {onOpenGuests && (
                                     <button type="button" data-all-guests-link onClick={onOpenGuests} className="cr-btn cr-btn-ghost">
                                         <span className="cr-ico" aria-hidden="true"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
+                                {onOpenTopology && (
+                                    <button type="button" data-cr-dash-topology="" onClick={onOpenTopology} className="cr-btn cr-btn-ghost"
+                                        title={t('crDashTopologyHint')}>
+                                        <span className="cr-ico" aria-hidden="true"><Icons.Network /></span>{t('topologyView')}
                                     </button>
                                 )}
                                 <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')} className="cr-btn cr-btn-ghost" />
@@ -709,7 +800,9 @@
                 <section className="cr-stat-row" aria-label={t('crSummary')} data-cr-cluster-summary="">
                     {cpu != null && <CrStat id="cpu" label={t('clusterCpu')} value={crPct(cpu, 1)} meter={cpu} sub={cpuSub} />}
                     {mem && <CrStat id="mem" label={t('clusterMemory')} value={crPct(mem.pct, 1)} meter={mem.pct} sub={used(mem)} />}
-                    {storage && <CrStat id="storage" label={t('clusterStorage')} value={crPct(storage.pct, 1)} meter={storage.pct} sub={used(storage)} />}
+                    {/* LW Nov 2026 - storage takes the storage pair, as on the Datacenter page and the dashboard */}
+                    {storage && <CrStat id="storage" label={t('clusterStorage')} value={crPct(storage.pct, 1)} meter={storage.pct}
+                        meterTone={crStoreTone(storage.pct)} title={crStoreScale(t)} sub={used(storage)} />}
                     {guests && <CrStat id="guests" label={t('guests')} value={guests.running} unit={`/ ${guests.total}`}
                         sub={`${guests.running} ${t('runningOf')} ${guests.total}`} />}
                     {children}

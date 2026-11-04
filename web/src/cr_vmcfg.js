@@ -1,14 +1,14 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Redesigned (Preview): the configuration dialog of a QEMU VM - LW Nov 2026
+        // Corporate Redesigned: the configuration dialog of a QEMU VM - LW Nov 2026
         // ConfigModal (vm_config.js) keeps its state, its fetches and its save; for a QEMU VM in the
-        // preview it hands its changes here. What lives in this file: which change applies to the
+        // redesign it hands its changes here. What lives in this file: which change applies to the
         // running VM and which waits for the next start (the rules of qemu-server, below), the
         // pending changes panel in place of the footer, what Proxmox VE itself keeps pending after
         // a save, the General tab in sections and the settings without a field. A container keeps
         // the classic dialog, and the classic layouts never reach any of it.
         // ═══════════════════════════════════════════════════════════
 
-        // true inside the dialog of a QEMU VM in the preview: the red restart tags stay out, the
+        // true inside the dialog of a QEMU VM in the redesign: the red restart tags stay out, the
         // panel says it once per change instead
         const CrVcBadgeOff = createContext(false);
 
@@ -391,7 +391,7 @@
             return s.length > 60 ? `${s.slice(0, 57)}...` : s;
         }
 
-        // the state of the preview's part of the dialog: the pending list of the VM (read on open and
+        // the state of the redesign's part of the dialog: the pending list of the VM (read on open and
         // after a save), the review and the answer of PVE after the last save
         function useCrVc({ on, vm, clusterId, authFetch, config, changes, nets }) {
             const [pend, setPend] = useState({ state: 'idle', rows: [] });
@@ -874,7 +874,7 @@
         }
 
         // ═══════════════════════════════════════════════════════════
-        // The Hardware tab of a QEMU VM in the preview, in sections - LW Nov 2026
+        // The Hardware tab of a QEMU VM in the redesign, in sections - LW Nov 2026
         // CPU, Memory, Firmware & Machine and Additional Hardware. Every field of the classic tab is
         // here, plus the keys the save path passes that it did not offer (vcpus, cpulimit, cpuunits,
         // affinity, shares, hugepages, keephugepages, numaN, audio0). Values go into the same body
@@ -1878,7 +1878,7 @@
             );
         }
 
-        // what every tab of the preview works with: the value of a key in the body or the config, the
+        // what every tab of the redesign works with: the value of a key in the body or the config, the
         // config after the save, the mark and the problems of a key, what waits for the next start
         function crVcTabCtx({ t, config, changes, crv, onSet, onRevert }) {
             const raw = config.raw || {};
@@ -1905,7 +1905,7 @@
             };
         }
 
-        // The Hardware tab of the preview: four sections over the same changes as the classic tab
+        // The Hardware tab of the redesign: four sections over the same changes as the classic tab
         function CrVcHardware({ t, vm, config, changes, crv, hardwareOptions, onSet, onRevert, dev, rngCard, vfsCard }) {
             const h = crVcTabCtx({ t, config, changes, crv, onSet, onRevert });
             return (
@@ -1923,7 +1923,7 @@
         window.PegaProxVmCfgChecks = Object.freeze({ check: crVcCheck, patch: crVcPatch, setFlag: crVcSetFlag });
 
         // ═══════════════════════════════════════════════════════════
-        // The Disks, Network and Options tabs of a QEMU VM in the preview - LW Nov 2026
+        // The Disks, Network and Options tabs of a QEMU VM in the redesign - LW Nov 2026
         // The same sections, folds and help marks as the Hardware tab. Disks: every device with its
         // storage and size, and the options of an existing volume (cache, discard, SSD emulation, IO
         // thread, backup, AIO, replication, read only) changed in the drive's own string through the
@@ -2157,7 +2157,7 @@
             );
         }
 
-        // The Disks tab of the preview: the disks with the options of their volumes, the CD/DVD
+        // The Disks tab of the redesign: the disks with the options of their volumes, the CD/DVD
         // drives, the EFI and TPM volumes and the unused disks, each with the classic actions
         function CrVcDisks({ t, config, changes, crv, onSet, onRevert, act }) {
             const h = crVcTabCtx({ t, config, changes, crv, onSet, onRevert });
@@ -2324,7 +2324,7 @@
             );
         }
 
-        // The Network tab of the preview: each interface edited in place, saved from the review
+        // The Network tab of the redesign: each interface edited in place, saved from the review
         function CrVcNetwork({ t, config, crv, nets, onNets, netInitial, bridgeList, hardwareOptions, generateMAC, onAdd, onToggleLink, onRemove }) {
             const raw = config.raw || {};
             const list = config.networks || [];

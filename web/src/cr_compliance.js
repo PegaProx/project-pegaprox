@@ -1,5 +1,5 @@
         // ═══════════════════════════════════════════════════════════
-        // Corporate Layout - Redesigned (Preview): the compliance dashboard - LW Oct 2026
+        // Corporate Layout - Redesigned: the compliance dashboard - LW Oct 2026
         // ComplianceDashboardTab keeps the reads, the profiles, the framework mapping and the
         // report; this draws what came back. A control without a result is "not checked": it
         // is never added to the passed ones and no score or rate divides by it. There is no
@@ -8,14 +8,17 @@
 
         const CR_CMP_TONE = { failed: 'error', partly: 'warning', unchecked: 'neutral', passed: 'success' };
 
-        // a few classic titles and notes carry a long dash; the preview shows a hyphen
+        // a few classic titles and notes carry a long dash; the redesign shows a hyphen
         const crDash = (s) => String(s == null ? '' : s).replace(/\s*\u2014\s*/g, ' - ');
 
         function crScoreTone(s) {
             return s == null ? null : s >= 90 ? 'success' : s >= 70 ? 'warning' : 'error';
         }
 
-        // the control results of one cluster, one row per control and the sums over the nodes
+        // the control results of one cluster, one row per control and the sums over the nodes.
+        // LW Nov 2026 - no evidence column: the page asks without verbose (one SSH audit per node is
+        // enough), so the server sends a verdict per control and nothing else. The Hardening page
+        // shows the evidence of a node
         function crComplianceRows(perNode, verdictOf, titles, frameworks) {
             const nodes = Object.entries(perNode || {}).filter(([k]) => k !== '_cluster');
             const answered = nodes.filter(([, i]) => i && i.controls);
@@ -24,12 +27,10 @@
             answered.forEach(([node, info]) => {
                 Object.entries(info.controls).forEach(([id, raw]) => {
                     const v = verdictOf(raw);
-                    const r = rows[id] || (rows[id] = { id, title: crDash(titles[id] || id), passed: [], failed: [], unchecked: [], evidence: '' });
+                    const r = rows[id] || (rows[id] = { id, title: crDash(titles[id] || id), passed: [], failed: [], unchecked: [] });
                     if (v === null) { r.unchecked.push(node); notChecked++; return; }
                     checked++;
                     if (v) { r.passed.push(node); passed++; } else r.failed.push(node);
-                    const ev = raw && typeof raw === 'object' ? (raw.actual || raw.output || raw.evidence || '') : '';
-                    if (ev && !r.evidence) r.evidence = String(ev);
                 });
             });
             const list = Object.values(rows).map(r => ({
@@ -101,7 +102,7 @@
 
         function CrCompliance({ t, selectedCluster, profile, setProfile, customProfiles, customSel, perNode, loading, checkedAt,
                                 frameworks, frameworkScore, verdictOf, sshReason, titles, overallScore, onRefresh, onReport,
-                                auditCounts }) {
+                                auditCounts, progress }) {
             const [show, setShow] = useState('all');
             const [fwPick, setFwPick] = useState('');
             const tableRef = useRef(null);
@@ -147,7 +148,6 @@
                 });
                 return c;
             }, [data, scope]);
-            const hasEvidence = data.list.some(r => r.evidence);
             const stateLabel = (s) => ({ failed: t('failed'), passed: t('passed'), unchecked: t('crCmpNotChecked'), partly: t('crCmpPartly') })[s];
             const nodeList = (a) => (a.length > 4 ? `${a.slice(0, 4).join(', ')} +${a.length - 4}` : a.join(', '));
 
@@ -172,9 +172,7 @@
                   } },
                 { key: 'fws', label: t('crCmpFrameworks'), width: 150, sortValue: r => r.fws.length,
                   render: r => <span title={r.fws.map(id => fwById[id] && fwById[id].name).join('\n')}>{r.fws.length ? r.fws.map(id => id.toUpperCase()).join(', ') : '-'}</span> },
-                { key: 'evidence', label: t('crCmpEvidence'), width: 220, hidden: !hasEvidence, sortValue: r => r.evidence || null,
-                  render: r => <span className="cr-mono" title={r.evidence}>{r.evidence}</span> },
-            ], [t, hasEvidence, fwById]);
+            ], [t, fwById]);
 
             const nodeRows = useMemo(() => data.nodes.map(([name, info]) => ({ name, info })), [data]);
             const nodeCols = useMemo(() => [
@@ -236,12 +234,17 @@
                     ) : (
                         <>
                             {clusterErr && (
-                                <div className="cr-callout cr-callout-warning" role="alert" data-cr-cmp-cluster-error="">
+                                <div className="cr-callout cr-callout-warning" role="alert" data-cr-cmp-cluster-error={clusterErr.code || ''}>
                                     <Icons.AlertTriangle className="w-4 h-4" />
                                     <div>
-                                        <p className="cr-strong">{t('complianceUnavailable')}</p>
+                                        <p className="cr-strong">{clusterErr.code === 'NODES_UNREAD' ? t('cmpNodesUnreadTitle') : t('complianceUnavailable')}</p>
                                         <p>{crDash(sshReason(clusterErr)[0])}</p>
                                         {sshReason(clusterErr)[1] && <p className="cr-muted">{crDash(sshReason(clusterErr)[1])}</p>}
+                                        {clusterErr.code === 'NODES_UNREAD' && (
+                                            <button type="button" className="cr-btn" onClick={onRefresh} disabled={loading} data-cr-cmp-retry="">
+                                                <span className="cr-ico" aria-hidden="true"><Icons.RefreshCw /></span>{t('retry')}
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                             )}
@@ -257,9 +260,12 @@
                                     sub={t('crCmpNotCounted')} title={t('hardenNotCheckedHint')} />
                                 <CrStat id="coverage" label={t('coverage')} value={coverage == null ? '-' : `${coverage}%`}
                                     sub={crFill(t('crCmpCoverageSub'), { checked: data.checked, total: data.checked + data.notChecked })} />
-                                <CrStat id="nodes" label={t('nodes')} value={data.answered.length} unit={`/ ${data.nodes.length}`}
+                                {/* LW Nov 2026 - while the checks run, how many of the nodes are in */}
+                                <CrStat id="nodes" label={t('nodes')} value={data.answered.length}
+                                    unit={`/ ${loading && progress ? progress.total : data.nodes.length}`}
                                     tone={unavailable ? 'warning' : null}
-                                    sub={unavailable ? crFill(t('crCmpUnavailableN'), { n: unavailable }) : (data.nodes.length ? t('crCmpAllAnswered') : '-')} />
+                                    sub={loading && progress ? crFill(t('cmpReadNofN'), { n: progress.done, total: progress.total })
+                                        : unavailable ? crFill(t('crCmpUnavailableN'), { n: unavailable }) : (data.nodes.length ? t('crCmpAllAnswered') : '-')} />
                                 <CrStat id="checked" label={t('lastCheck')} value={checkedAt ? crFmtTime(checkedAt) : '-'}
                                     sub={loading ? t('loading') : t('crCmpThisSession')} />
                             </section>
