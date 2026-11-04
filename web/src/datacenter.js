@@ -4,6 +4,372 @@
         // ═══════════════════════════════════════════════
         // Datacenter Tab Component (embedded in main view)
 
+        // Nov 2026 - the users, groups, roles, permissions (ACL) and realms of Proxmox VE itself,
+        // what Datacenter > Permissions holds in the PVE interface. Admins only; the server checks
+        // every id again (pegaprox/api/pve_access.py).
+        const PVA_USERID_RE = /^[^\s:\/@]{1,60}@[A-Za-z][A-Za-z0-9._-]{0,31}$/;
+        const PVA_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+        const PVA_PATH_RE = /^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/;
+        const pvaPathOk = (p) => PVA_PATH_RE.test(p || '') && !String(p).split('/').includes('..');
+        const pvaDate = (ts) => ts ? new Date(ts * 1000).toISOString().slice(0, 10) : '';
+
+        function PvaDialog({ title, onClose, onSave, problem, busy, t, children, wide }) {
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60" data-pva-dialog>
+                    <div className={`w-full ${wide ? 'max-w-3xl' : 'max-w-lg'} bg-proxmox-card border border-proxmox-border rounded-xl p-6 max-h-[90vh] overflow-y-auto`}>
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span className="text-proxmox-orange"><Icons.Users /></span>{title}
+                        </h3>
+                        <div className="space-y-3">{children}</div>
+                        {problem && <p className="text-xs text-red-400 mt-3" data-pva-problem>{problem}</p>}
+                        <div className="flex gap-2 justify-end pt-4">
+                            <button onClick={onClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                            <button onClick={onSave} disabled={!!problem || busy} data-pva-save
+                                className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 text-white rounded disabled:opacity-50">
+                                {busy ? t('saving') : t('save')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function PveAccessSection({ clusterId, addToast }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const [data, setData] = useState(null);
+            const [error, setError] = useState('');
+            const [tab, setTab] = useState('users');
+            const [dialog, setDialog] = useState(null);   // { kind, item, form }
+            const [busy, setBusy] = useState(false);
+            const [privFilter, setPrivFilter] = useState('');
+            const base = `${API_URL}/clusters/${clusterId}/pve-access`;
+            const call = (path, method = 'GET', body) => fetch(`${base}${path}`, {
+                method, credentials: 'include',
+                headers: { ...getAuthHeaders(), ...(body ? { 'Content-Type': 'application/json' } : {}) },
+                body: body ? JSON.stringify(body) : undefined,
+            });
+
+            const load = async () => {
+                setError('');
+                try {
+                    const r = await call('');
+                    const d = await r.json().catch(() => ({}));
+                    if (r.ok) setData(d); else { setData(null); setError(d.error || t('operationFailed')); }
+                } catch (e) {
+                    setData(null); setError(t('connectionError'));
+                }
+            };
+            useEffect(() => { setData(null); load(); }, [clusterId]);
+
+            const run = async (path, method, body, okKey) => {
+                setBusy(true);
+                try {
+                    const r = await call(path, method, body);
+                    const d = await r.json().catch(() => ({}));
+                    if (r.ok) {
+                        addToast(t(okKey || 'pvaSaved'), 'success');
+                        setDialog(null);
+                        load();
+                        return true;
+                    }
+                    addToast(d.error || t('pvaFailed'), 'error');
+                } catch (e) {
+                    addToast(t('connectionError'), 'error');
+                } finally {
+                    setBusy(false);
+                }
+                return false;
+            };
+            const ask = (key, vars) => confirm(Object.entries(vars).reduce((s, [k, v]) => s.replace(new RegExp(`\\{${k}\\}`, 'g'), () => v), t(key)));
+            const enc = encodeURIComponent;
+            const setForm = (patch) => setDialog(prev => ({ ...prev, form: { ...prev.form, ...patch } }));
+            const readOnly = haReadOnly;
+
+            // --- dialogs -----------------------------------------------------------------
+            const openUser = (u) => setDialog({ kind: 'user', item: u, form: u
+                ? { firstname: u.firstname, lastname: u.lastname, email: u.email, comment: u.comment, groups: u.groups, enable: !!u.enable, expire: pvaDate(u.expire) }
+                : { userid: '', password: '', firstname: '', lastname: '', email: '', comment: '', groups: [], enable: true, expire: '' } });
+            const userProblem = (f, isNew) => {
+                if (isNew && !PVA_USERID_RE.test(f.userid)) return t('pvaBadUserId');
+                if (isNew && f.password && !f.userid.endsWith('@pve')) return t('pvaPasswordHint');
+                if (isNew && f.password && f.password.length < 8) return t('pvaPasswordShort');
+                return '';
+            };
+            const saveUser = () => {
+                const f = dialog.form, u = dialog.item;
+                const expire = f.expire ? Math.floor(new Date(f.expire + 'T23:59:59').getTime() / 1000) : 0;
+                const body = { firstname: f.firstname, lastname: f.lastname, email: f.email, comment: f.comment, groups: f.groups, enable: f.enable, expire };
+                if (u) return run(`/users/${enc(u.userid)}`, 'PUT', body);
+                return run('/users', 'POST', { ...body, userid: f.userid, password: f.password || undefined });
+            };
+
+            const dialogBody = () => {
+                if (!dialog) return null;
+                const f = dialog.form;
+                const input = 'w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white';
+                const label = (key) => <label className="block text-xs text-gray-400 mb-1">{t(key)}</label>;
+                if (dialog.kind === 'user') {
+                    const isNew = !dialog.item;
+                    return (
+                        <PvaDialog title={t(isNew ? 'pvaAddUser' : 'pvaEditUser') + (isNew ? '' : `: ${dialog.item.userid}`)} onClose={() => setDialog(null)}
+                            onSave={saveUser} problem={userProblem(f, isNew)} busy={busy} t={t}>
+                            {isNew && (<>
+                                <div>{label('pvaUserId')}<input value={f.userid} onChange={e => setForm({ userid: e.target.value.trim() })} placeholder="ivan@pve" className={`${input} font-mono`} data-pva-userid /></div>
+                                <div>{label('pvaPassword')}<input type="password" value={f.password} onChange={e => setForm({ password: e.target.value })} disabled={!f.userid.endsWith('@pve')} className={`${input} disabled:opacity-50`} autoComplete="new-password" data-pva-password />
+                                    <p className="text-xs text-gray-500 mt-1">{t('pvaPasswordHint')}</p></div>
+                            </>)}
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>{label('pvaFirstName')}<input value={f.firstname} onChange={e => setForm({ firstname: e.target.value })} className={input} /></div>
+                                <div>{label('pvaLastName')}<input value={f.lastname} onChange={e => setForm({ lastname: e.target.value })} className={input} /></div>
+                                <div>{label('pvaEmail')}<input value={f.email} onChange={e => setForm({ email: e.target.value.trim() })} className={input} /></div>
+                                <div>{label('pvaExpire')}<input type="date" value={f.expire} onChange={e => setForm({ expire: e.target.value })} className={input} /></div>
+                            </div>
+                            <div>{label('comment')}<input value={f.comment} onChange={e => setForm({ comment: e.target.value })} className={input} /></div>
+                            <div>{label('pvaGroups')}
+                                <div className="flex flex-wrap gap-2">
+                                    {(data.groups || []).length === 0 && <span className="text-xs text-gray-500">{t('pvaNone')}</span>}
+                                    {(data.groups || []).map(g => (
+                                        <label key={g.groupid} className="flex items-center gap-1 text-sm text-gray-300">
+                                            <input type="checkbox" checked={f.groups.includes(g.groupid)} data-pva-group={g.groupid}
+                                                onChange={e => setForm({ groups: e.target.checked ? [...f.groups, g.groupid] : f.groups.filter(x => x !== g.groupid) })} />
+                                            {g.groupid}
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={f.enable} disabled={dialog.item && dialog.item.protected} onChange={e => setForm({ enable: e.target.checked })} />
+                                {t('enabled')}
+                            </label>
+                        </PvaDialog>
+                    );
+                }
+                if (dialog.kind === 'password') {
+                    return (
+                        <PvaDialog title={`${t('pvaSetPassword')}: ${dialog.item.userid}`} onClose={() => setDialog(null)} busy={busy} t={t}
+                            problem={f.password.length < 8 ? t('pvaPasswordShort') : (f.password !== f.again ? t('pvaPasswordMismatch') : '')}
+                            onSave={() => run(`/users/${enc(dialog.item.userid)}/password`, 'PUT', { password: f.password })}>
+                            <div>{label('pvaNewPassword')}<input type="password" value={f.password} onChange={e => setForm({ password: e.target.value })} className={input} autoComplete="new-password" /></div>
+                            <div>{label('pvaRepeatPassword')}<input type="password" value={f.again} onChange={e => setForm({ again: e.target.value })} className={input} autoComplete="new-password" /></div>
+                        </PvaDialog>
+                    );
+                }
+                if (dialog.kind === 'group') {
+                    const isNew = !dialog.item;
+                    return (
+                        <PvaDialog title={t(isNew ? 'pvaAddGroup' : 'pvaEditGroup') + (isNew ? '' : `: ${dialog.item.groupid}`)} onClose={() => setDialog(null)} busy={busy} t={t}
+                            problem={isNew && !PVA_ID_RE.test(f.groupid) ? t('pvaBadId') : ''}
+                            onSave={() => isNew ? run('/groups', 'POST', f) : run(`/groups/${enc(dialog.item.groupid)}`, 'PUT', { comment: f.comment })}>
+                            {isNew && <div>{label('pvaGroup')}<input value={f.groupid} onChange={e => setForm({ groupid: e.target.value.trim() })} className={`${input} font-mono`} data-pva-groupid /></div>}
+                            <div>{label('comment')}<input value={f.comment} onChange={e => setForm({ comment: e.target.value })} className={input} /></div>
+                        </PvaDialog>
+                    );
+                }
+                if (dialog.kind === 'role') {
+                    const isNew = !dialog.item;
+                    const q = privFilter.toLowerCase();
+                    const privs = (data.privileges || []).filter(p => !q || p.toLowerCase().includes(q));
+                    return (
+                        <PvaDialog wide title={t(isNew ? 'pvaAddRole' : 'pvaEditRole') + (isNew ? '' : `: ${dialog.item.roleid}`)} onClose={() => setDialog(null)} busy={busy} t={t}
+                            problem={isNew && !PVA_ID_RE.test(f.roleid) ? t('pvaBadId') : ''}
+                            onSave={() => isNew ? run('/roles', 'POST', f) : run(`/roles/${enc(dialog.item.roleid)}`, 'PUT', { privs: f.privs })}>
+                            {isNew && <div>{label('pvaRole')}<input value={f.roleid} onChange={e => setForm({ roleid: e.target.value.trim() })} className={`${input} font-mono`} data-pva-roleid /></div>}
+                            <div>{label('pvaPrivileges')}
+                                <input value={privFilter} onChange={e => setPrivFilter(e.target.value)} placeholder={t('pvaFilterPrivs')} className={`${input} mb-2`} />
+                                <div className="grid grid-cols-2 md:grid-cols-3 gap-1 max-h-64 overflow-y-auto">
+                                    {privs.map(p => (
+                                        <label key={p} className="flex items-center gap-1 text-xs text-gray-300 font-mono">
+                                            <input type="checkbox" checked={f.privs.includes(p)} data-pva-priv={p}
+                                                onChange={e => setForm({ privs: e.target.checked ? [...f.privs, p] : f.privs.filter(x => x !== p) })} />
+                                            {p}
+                                        </label>
+                                    ))}
+                                </div>
+                                <p className="text-xs text-gray-500 mt-1">{t('pvaSelected')}: {f.privs.length}</p>
+                            </div>
+                        </PvaDialog>
+                    );
+                }
+                if (dialog.kind === 'acl') {
+                    const subjects = f.type === 'group' ? (data.groups || []).map(g => g.groupid)
+                        : f.type === 'token' ? (data.users || []).flatMap(u => (u.tokens || []).map(tk => `${u.userid}!${tk}`))
+                        : (data.users || []).map(u => u.userid);
+                    const problem = !pvaPathOk(f.path) ? t('pvaBadPath') : !f.roleid ? t('pvaNeedRole') : !f.ugid ? t('pvaNeedSubject') : '';
+                    const key = f.type === 'group' ? 'groups' : f.type === 'token' ? 'tokens' : 'users';
+                    return (
+                        <PvaDialog title={t('pvaAddAcl')} onClose={() => setDialog(null)} busy={busy} t={t} problem={problem}
+                            onSave={() => run('/acl', 'PUT', { path: f.path, roles: [f.roleid], [key]: [f.ugid], propagate: f.propagate })}>
+                            <div>{label('pvaPath')}<input value={f.path} onChange={e => setForm({ path: e.target.value.trim() })} className={`${input} font-mono`} data-pva-path />
+                                <p className="text-xs text-gray-500 mt-1">{t('pvaPathHint')}</p></div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>{label('pvaSubjectType')}
+                                    <select value={f.type} onChange={e => setForm({ type: e.target.value, ugid: '' })} className={input} data-pva-type>
+                                        <option value="user">{t('pvaUser')}</option>
+                                        <option value="group">{t('pvaGroup')}</option>
+                                        <option value="token">{t('pvaToken')}</option>
+                                    </select></div>
+                                <div>{label('pvaSubject')}
+                                    <select value={f.ugid} onChange={e => setForm({ ugid: e.target.value })} className={input} data-pva-ugid>
+                                        <option value="">--</option>
+                                        {subjects.map(s => <option key={s} value={s}>{s}</option>)}
+                                    </select></div>
+                            </div>
+                            <div>{label('pvaRole')}
+                                <select value={f.roleid} onChange={e => setForm({ roleid: e.target.value })} className={input} data-pva-role>
+                                    <option value="">--</option>
+                                    {(data.roles || []).map(r => <option key={r.roleid} value={r.roleid}>{r.roleid}</option>)}
+                                </select></div>
+                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={f.propagate} onChange={e => setForm({ propagate: e.target.checked })} />
+                                {t('pvaPropagate')}
+                            </label>
+                            <p className="text-xs text-gray-500">{t('pvaPropagateHint')}</p>
+                        </PvaDialog>
+                    );
+                }
+                return null;
+            };
+
+            // --- tables ------------------------------------------------------------------
+            const pad = isCorporate ? 'px-3 py-2' : 'px-4 py-3';
+            const th = `${pad} text-left text-xs font-medium text-gray-400 uppercase`;
+            const td = `${pad} text-sm text-gray-300 align-top`;
+            const iconBtn = (onClick, title, danger, child, attr) => (
+                <button onClick={onClick} title={title} {...attr}
+                    className={`text-xs px-2 py-1 rounded ${danger ? 'text-red-400 hover:bg-red-500/20' : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'}`}>{child}</button>
+            );
+            const table = (head, rows) => rows.length === 0
+                ? <div className={`${pad} text-sm text-gray-500`} data-pva-empty>{t('pvaNone')}</div>
+                : (
+                    <div className="overflow-x-auto">
+                        <table className="w-full">
+                            <thead className="border-b border-proxmox-border"><tr>{head.map((h, i) => <th key={i} className={th}>{h}</th>)}</tr></thead>
+                            <tbody className="divide-y divide-proxmox-border">{rows}</tbody>
+                        </table>
+                    </div>
+                );
+
+            const views = {
+                users: () => table([t('pvaUserId'), t('name'), t('pvaEmail'), t('pvaGroups'), t('pvaExpire'), t('pvaTokens'), ''],
+                    (data.users || []).map(u => (
+                        <tr key={u.userid} data-pva-user={u.userid}>
+                            <td className={td}><span className="font-mono text-white">{u.userid}</span>
+                                {!u.enable && <span className="ml-2 text-xs text-red-400">{t('disabled')}</span>}
+                                {u.protected && <span className="ml-2 text-xs text-gray-500">{t('pvaProtected')}</span>}
+                                {u.comment && <div className="text-xs text-gray-500">{u.comment}</div>}</td>
+                            <td className={td}>{[u.firstname, u.lastname].filter(Boolean).join(' ')}</td>
+                            <td className={td}>{u.email}</td>
+                            <td className={td}>{(u.groups || []).join(', ')}</td>
+                            <td className={td}>{u.expire ? pvaDate(u.expire) : t('pvaNever')}</td>
+                            <td className={`${td} font-mono text-xs`}>{(u.tokens || []).join(', ')}</td>
+                            <td className={`${td} whitespace-nowrap text-right`}>{!readOnly && (<>
+                                {iconBtn(() => openUser(u), t('edit'), false, <Icons.Edit />, { 'data-pva-edit-user': u.userid })}
+                                {u.userid.endsWith('@pve') && iconBtn(() => setDialog({ kind: 'password', item: u, form: { password: '', again: '' } }), t('pvaSetPassword'), false, <Icons.Key />, { 'data-pva-password-user': u.userid })}
+                                {!u.protected && iconBtn(() => ask('pvaDeleteUserConfirm', { id: u.userid }) && run(`/users/${enc(u.userid)}`, 'DELETE', null, 'pvaDeleted'), t('remove'), true, <Icons.Trash className="w-3.5 h-3.5" />, { 'data-pva-delete-user': u.userid })}
+                            </>)}</td>
+                        </tr>
+                    ))),
+                groups: () => table([t('pvaGroup'), t('comment'), t('pvaMembers'), ''],
+                    (data.groups || []).map(g => (
+                        <tr key={g.groupid} data-pva-grouprow={g.groupid}>
+                            <td className={td}><span className="font-mono text-white">{g.groupid}</span></td>
+                            <td className={td}>{g.comment}</td>
+                            <td className={td}>{(g.users || []).join(', ')}</td>
+                            <td className={`${td} whitespace-nowrap text-right`}>{!readOnly && (<>
+                                {iconBtn(() => setDialog({ kind: 'group', item: g, form: { comment: g.comment } }), t('edit'), false, <Icons.Edit />)}
+                                {iconBtn(() => ask('pvaDeleteGroupConfirm', { id: g.groupid }) && run(`/groups/${enc(g.groupid)}`, 'DELETE', null, 'pvaDeleted'), t('remove'), true, <Icons.Trash className="w-3.5 h-3.5" />)}
+                            </>)}</td>
+                        </tr>
+                    ))),
+                roles: () => (<>
+                    <p className={`${pad} text-xs text-gray-500 border-b border-proxmox-border`}>{t('pvaBuiltInHint')}</p>
+                    {table([t('pvaRole'), t('pvaPrivileges'), ''],
+                        (data.roles || []).map(r => (
+                            <tr key={r.roleid} data-pva-rolerow={r.roleid}>
+                                <td className={`${td} whitespace-nowrap`}><span className="font-mono text-white">{r.roleid}</span>
+                                    {r.special && <span className="ml-2 text-xs text-gray-500">{t('pvaBuiltIn')}</span>}</td>
+                                <td className={`${td} font-mono text-xs break-all`}>{(r.privs || []).join(', ')}</td>
+                                <td className={`${td} whitespace-nowrap text-right`}>{!readOnly && !r.special && (<>
+                                    {iconBtn(() => { setPrivFilter(''); setDialog({ kind: 'role', item: r, form: { privs: r.privs || [] } }); }, t('edit'), false, <Icons.Edit />)}
+                                    {iconBtn(() => ask('pvaDeleteRoleConfirm', { id: r.roleid }) && run(`/roles/${enc(r.roleid)}`, 'DELETE', null, 'pvaDeleted'), t('remove'), true, <Icons.Trash className="w-3.5 h-3.5" />)}
+                                </>)}</td>
+                            </tr>
+                        )))}
+                </>),
+                acl: () => table([t('pvaPath'), t('pvaSubject'), t('pvaRole'), t('pvaPropagate'), ''],
+                    (data.acl || []).map((a, i) => {
+                        const key = a.type === 'group' ? 'groups' : a.type === 'token' ? 'tokens' : 'users';
+                        const locked = a.type === 'user' && a.ugid === 'root@pam' && a.path === '/';
+                        return (
+                            <tr key={i} data-pva-acl={`${a.path}|${a.ugid}|${a.roleid}`}>
+                                <td className={`${td} font-mono text-white`}>{a.path}</td>
+                                <td className={td}><span className="text-xs text-gray-500 mr-1">{t(a.type === 'group' ? 'pvaGroup' : a.type === 'token' ? 'pvaToken' : 'pvaUser')}</span>{a.ugid}</td>
+                                <td className={`${td} font-mono`}>{a.roleid}</td>
+                                <td className={td}>{a.propagate ? '✓' : ''}</td>
+                                <td className={`${td} text-right`}>{!readOnly && !locked && iconBtn(
+                                    () => ask('pvaDeleteAclConfirm', { role: a.roleid, path: a.path, who: a.ugid }) && run('/acl', 'PUT', { path: a.path, roles: [a.roleid], [key]: [a.ugid], delete: true }, 'pvaDeleted'),
+                                    t('remove'), true, <Icons.Trash className="w-3.5 h-3.5" />)}</td>
+                            </tr>
+                        );
+                    })),
+                realms: () => (<>
+                    <p className={`${pad} text-xs text-gray-500 border-b border-proxmox-border`}>{t('pvaRealmsHint')}</p>
+                    {table([t('pvaRealm'), t('pvaType'), t('comment'), t('pvaTfa')],
+                        (data.realms || []).map(r => (
+                            <tr key={r.realm} data-pva-realm={r.realm}>
+                                <td className={td}><span className="font-mono text-white">{r.realm}</span>
+                                    {r.default && <span className="ml-2 text-xs text-gray-500">{t('pvaDefault')}</span>}</td>
+                                <td className={td}>{r.type}</td>
+                                <td className={td}>{r.comment}</td>
+                                <td className={td}>{r.tfa}</td>
+                            </tr>
+                        )))}
+                </>),
+            };
+            const adders = {
+                users: () => openUser(null),
+                groups: () => setDialog({ kind: 'group', item: null, form: { groupid: '', comment: '' } }),
+                roles: () => { setPrivFilter(''); setDialog({ kind: 'role', item: null, form: { roleid: '', privs: [] } }); },
+                acl: () => setDialog({ kind: 'acl', item: null, form: { path: '/', type: 'user', ugid: '', roleid: '', propagate: true } }),
+            };
+            const tabs = [['users', 'pvaTabUsers'], ['groups', 'pvaTabGroups'], ['roles', 'pvaTabRoles'], ['acl', 'pvaTabAcl'], ['realms', 'pvaTabRealms']];
+            const addKey = { users: 'pvaAddUser', groups: 'pvaAddGroup', roles: 'pvaAddRole', acl: 'pvaAddAcl' }[tab];
+
+            return (
+                <div className={isCorporate ? 'space-y-2' : 'space-y-4'} data-pva-section>
+                    <p className="text-sm text-gray-400">{t('pvaIntro')}</p>
+                    <div className={isCorporate ? '' : 'bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden'}
+                        style={isCorporate ? { background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border)', borderRadius: 4 } : undefined}>
+                        <div className={`${pad} border-b border-proxmox-border flex flex-wrap justify-between items-center gap-2`}>
+                            <div className="flex flex-wrap gap-1">
+                                {tabs.map(([id, key]) => (
+                                    <button key={id} onClick={() => setTab(id)} data-pva-tab={id}
+                                        className={`px-3 py-1.5 text-sm rounded ${tab === id ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:bg-proxmox-dark hover:text-white'}`}>
+                                        {t(key)}{data && id !== 'realms' && id !== 'roles' ? ` (${(data[id] || []).length})` : ''}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {iconBtn(load, t('refresh'), false, <Icons.RefreshCw />, { 'data-pva-refresh': true })}
+                                {data && addKey && !readOnly && (
+                                    <button onClick={adders[tab]} data-pva-add={tab}
+                                        className={isCorporate ? 'corp-action-btn' : 'text-xs px-3 py-1.5 bg-proxmox-orange/20 text-proxmox-orange rounded hover:bg-proxmox-orange/30 flex items-center gap-1'}>
+                                        <Icons.Plus className="w-3 h-3" />{t(addKey)}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        {error ? <div className={`${pad} text-sm text-red-400`} data-pva-error>{error}</div>
+                            : !data ? <div className="flex justify-center p-4"><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-proxmox-orange"></div></div>
+                            : views[tab]()}
+                    </div>
+                    {data && !readOnly && dialogBody()}
+                </div>
+            );
+        }
+
         // LW Oct 2026 - the resource mappings of a cluster: directories (PVE 8.4+) to add, change
         // and remove, the PCI and USB mappings to look at. A directory mapping is what the virtiofs
         // share of a VM names, one absolute path per node; the server holds the same rules.
@@ -322,7 +688,7 @@
         // Datacenter Tab Component
         function DatacenterTab({ clusterId, addToast, initialSection, onSectionShown, crDc }) {
             const { t } = useTranslation();
-            const { getAuthHeaders } = useAuth();
+            const { getAuthHeaders, isAdmin } = useAuth();
             const { isCorporate, isCorpRedesigned } = useLayout();
             const [activeSection, setActiveSection] = useState(initialSection || 'summary');
             // LW Oct 2026 - opened from an overview on one section (the Ceph one): that once,
@@ -651,6 +1017,8 @@
                 { id: 'ha', labelKey: 'proxmoxNativeHa', icon: Icons.Activity, descKey: 'ha' },
                 { id: 'cpucompat', labelKey: 'cpuCompatibility', icon: Icons.Cpu, descKey: 'cpucompat' },
                 { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield, descKey: 'firewall' },
+                // Nov 2026 - the users and permissions of Proxmox VE itself, for PegaProx admins
+                ...(isAdmin ? [{ id: 'pveaccess', labelKey: 'pvaTitle', icon: Icons.Users, descKey: 'pveaccess' }] : []),
                 { id: 'subscriptions', labelKey: 'subscriptions', icon: Icons.FileKey, descKey: 'subscriptions' },
                 { id: 'ceph', labelKey: 'ceph', icon: Icons.Database, descKey: 'ceph' },
                 { id: 'metricserver', labelKey: 'metricServer', icon: Icons.BarChart, descKey: 'metricserver' },
@@ -8427,6 +8795,10 @@
                         {/* LW Oct 2026 - directory, PCI and USB resource mappings */}
                         {activeSection === 'mappings' && (
                             <ResourceMappingsSection clusterId={clusterId} addToast={addToast} />
+                        )}
+
+                        {activeSection === 'pveaccess' && isAdmin && (
+                            <PveAccessSection clusterId={clusterId} addToast={addToast} />
                         )}
 
                         {/* Metric Server Sub-Tab */}
