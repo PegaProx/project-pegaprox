@@ -2493,6 +2493,11 @@ def starlvm_plugin_status(cluster_id):
     """Per-node install state of the StarWind starlvm plugin (read-only probe)."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - an SSH probe of every node of the cluster: not for a confined caller,
+    # and refused before the first connection
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

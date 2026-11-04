@@ -263,6 +263,11 @@ def get_ceph_overview(cluster_id):
     """Ceph cluster overview - aggregates status from first available node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - Ceph is the cluster's storage, a pool or a guest grant does not cover it
+    # (as /api/ceph-overview answers 'confined')
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -493,6 +498,11 @@ def get_ceph_rollup():
 def get_node_ceph_status(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the status of the whole Ceph, whichever node it is asked on; so the
+    # reads below, as the log
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -518,6 +528,9 @@ def get_node_ceph_status(cluster_id, node):
 def get_node_ceph_config(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -559,6 +572,9 @@ def get_node_ceph_log(cluster_id, node):
 def get_ceph_osds(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -678,6 +694,9 @@ def ceph_osd_action(cluster_id, node, osdid, action):
 def get_ceph_mons(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -738,6 +757,9 @@ def destroy_ceph_mon(cluster_id, node, monid):
 def get_ceph_mds(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -797,6 +819,9 @@ def destroy_ceph_mds(cluster_id, node, name):
 def get_ceph_mgr(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -861,6 +886,9 @@ def destroy_ceph_mgr(cluster_id, node, mgrid):
 def get_ceph_pools(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -953,6 +981,9 @@ def destroy_ceph_pool(cluster_id, node, name):
 def get_ceph_fs(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -1037,6 +1068,9 @@ def destroy_ceph_fs(cluster_id, node, name):
 def get_ceph_rules(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error

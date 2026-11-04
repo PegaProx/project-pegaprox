@@ -33,7 +33,8 @@ from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validat
 from pegaprox.utils.sanitization import task_ref_ok
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
-                                  bounded_limit, node_maintenance_for_caller, upstream_failure)
+                                  bounded_limit, node_map_for_caller, upstream_failure)
+from pegaprox.api.helpers import caller_guest_nodes
 from pegaprox.api.helpers import pve_read_failed, pve_unreachable
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
@@ -526,11 +527,25 @@ def get_cluster_nodes(cluster_id):
     
     manager = cluster_managers[cluster_id]
 
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on, on every
+    # answer below (the cache keeps the whole list)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[NODES] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs',
+                        'nodes': []}), 503
+
+    def _theirs(rows):
+        if mine is None:
+            return rows
+        return [n for n in rows or [] if isinstance(n, dict) and n.get('node') in mine]
+
     # MK: XCP-ng clusters use their own get_nodes()
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         try:
             nodes = manager.get_nodes()
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
         except Exception as e:
             logging.debug(f"XCP-ng get_nodes failed for {cluster_id}: {e}")
             return jsonify({'error': 'Connection temporarily unavailable', 'nodes': [], 'offline': True}), 503
@@ -561,7 +576,7 @@ def get_cluster_nodes(cluster_id):
                     n['mem_percent'] = round((mem / maxmem) * 100, 2)
             # Cache the nodes data
             manager._cached_nodes = nodes
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
     except Exception as e:
         logging.debug(f"Failed to get nodes for {cluster_id}: {e}")
 
@@ -572,7 +587,7 @@ def get_cluster_nodes(cluster_id):
         for node in cached:
             if 'connection_status' not in node:
                 node['connection_status'] = 'stale'
-        return jsonify(cached)
+        return jsonify(_theirs(cached))
 
     # If HA is tracking nodes, return those
     if manager.ha_node_status:
@@ -583,7 +598,7 @@ def get_cluster_nodes(cluster_id):
                 'status': data.get('status', 'unknown'),
                 'connection_status': 'from_ha_cache'
             })
-        return jsonify(nodes)
+        return jsonify(_theirs(nodes))
     
     # Last resort - return empty but with error info
     return jsonify({
@@ -1445,14 +1460,15 @@ def get_cluster_metrics(cluster_id):
             if metrics:
                 # Cache the metrics
                 mgr._cached_metrics = metrics
-                # MK Oct 2026 - a node in maintenance names its guests: not to a confined caller
-                return jsonify(node_maintenance_for_caller(cluster_id, metrics))
+                # MK Nov 2026 - a confined caller gets the nodes their guests run on, and a
+                # maintenance there without the guests in it
+                return jsonify(node_map_for_caller(cluster_id, metrics))
         except Exception as e:
             logging.debug(f"Error getting metrics for {cluster_id}: {e}")
     
     # If live data failed, try cached data
     if hasattr(mgr, '_cached_metrics') and mgr._cached_metrics:
-        return jsonify(node_maintenance_for_caller(cluster_id, mgr._cached_metrics))
+        return jsonify(node_map_for_caller(cluster_id, mgr._cached_metrics))
     
     # If HA is tracking nodes, build metrics from HA data
     if mgr.ha_node_status:
@@ -1465,7 +1481,7 @@ def get_cluster_metrics(cluster_id):
                 'disk': {'used': 0, 'total': 0},
                 'from_ha_cache': True
             }
-        return jsonify(ha_metrics)
+        return jsonify(node_map_for_caller(cluster_id, ha_metrics))
     
     # Return error with empty metrics - frontend will keep old data
     return jsonify({'error': 'Connection temporarily unavailable', 'offline': True}), 503
@@ -1663,11 +1679,22 @@ def get_cluster_health(cluster_id):
             'computed_at': None,
         })
 
+    # MK Nov 2026 (#1218) - a caller confined to some guests is told about the nodes those
+    # run on: which are offline, the fullest storage, their replication jobs and backups.
+    # Nothing of it while their guests cannot be read, and no Ceph (below)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.warning(f"[health] guests on {cluster_id} unread, node factors left out for this caller: {e}")
+        mine = set()
+
     # 1) Nodes online
     try:
         ns = mgr.get_node_status() or {}
     except Exception:
         ns = {}
+    if mine is not None:
+        ns = {name: d for name, d in ns.items() if name in mine}
     total_nodes = len(ns)
     online_nodes = sum(1 for n in ns.values() if (n.get('status') in ('online', 'running') or not n.get('offline')))
     if total_nodes:
@@ -1694,7 +1721,7 @@ def get_cluster_health(cluster_id):
             if rows is not None:
                 _health_storage_cache.set(cluster_id, 'storage', rows, ttl_seconds=_HEALTH_STORAGE_TTL)
         for node_name, stor_name, used, total in (rows or []):
-            if total <= 0:
+            if total <= 0 or (mine is not None and node_name not in mine):
                 continue
             pct = (used / total) * 100.0
             if pct > worst_pct:
@@ -1725,6 +1752,9 @@ def get_cluster_health(cluster_id):
         repl = mgr.get_replication_status() or []
     except Exception:
         repl = []
+    if mine is not None:
+        # a job's 'type' is the replication type (local), not the guest's: asked as either
+        repl = scope_vm_rows(cluster_id, repl, vmid_key='guest', type_key='guest_type') if mine else []
     if repl:
         # PVE flags failures via 'fail_count' or non-zero error
         failed = sum(1 for r in repl if (r.get('fail_count') or 0) > 0 or r.get('error'))
@@ -1757,7 +1787,10 @@ def get_cluster_health(cluster_id):
             r = mgr._api_get(url)
             stale = 0
             if r is not None and r.status_code == 200:
-                stale = len(r.json().get('data') or [])
+                _rows = r.json().get('data') or []
+                if mine is not None:
+                    _rows = scope_vm_rows(cluster_id, _rows) if mine else []
+                stale = len(_rows)
             d = -10 if stale else 0
             score += d
             factors.append({
@@ -1775,9 +1808,7 @@ def get_cluster_health(cluster_id):
     # to a pool or to guests: Ceph is the cluster's storage, and the Ceph overview answers
     # 'confined' to them as well
     try:
-        from pegaprox.api.helpers import caller_is_scoped
-        scoped = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
-        ceph, has_ceph = (None, False) if scoped else _health_ceph_status(cluster_id, mgr)
+        ceph, has_ceph = (None, False) if mine is not None else _health_ceph_status(cluster_id, mgr)
         if has_ceph:
             f, issue = _health_ceph_factor(ceph, score)
             score += f['delta']

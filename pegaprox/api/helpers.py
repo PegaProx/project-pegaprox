@@ -3,6 +3,7 @@
 
 import os
 import json
+import threading
 import time
 import logging
 from datetime import datetime
@@ -641,17 +642,164 @@ def nodes_without_maintenance_guests(nodes):
             for name, n in nodes.items()}
 
 
-def node_maintenance_for_caller(cluster_id, nodes):
-    """The node map as the caller of this request may see it. The caller is only looked up
-    when a node is in maintenance: /metrics is polled from every open tab."""
-    if not nodes_in_maintenance_view(nodes):
-        return nodes
+# MK Nov 2026 - the node reads a confined caller polls (/metrics from every open tab) take the
+# guest list the broadcast loop read a moment ago instead of walking the cluster once more.
+# Placing a guest (restore, clone, migrate) asks a fresh one.
+GUEST_NODES_AGE = 6
+
+
+def guest_nodes_of(user, cluster_id, mgr, max_age=0):
+    """The nodes of `cluster_id` a guest `user` may see (vm.view) runs on, as a set.
+
+    One rule for where a confined caller may place a guest (restore, clone, migrate) and for
+    which nodes they may read. Asked guest by guest: get_user_vms knows the VM-ACLs only, so a
+    caller confined by a pool came back as unrestricted (#1081). Raises when the guest list did
+    not answer - an unread list is not a caller without guests."""
+    from pegaprox.utils.rbac import user_can_access_vm
+    if mgr is None:
+        raise LookupError(f'no manager for {cluster_id}')
+    rows = mgr.get_vm_resources(max_age=max_age) if max_age else mgr.get_vm_resources()
+    if getattr(rows, 'unavailable', False):
+        raise RuntimeError(f'the guest list of {cluster_id} did not answer')
+    nodes = set()
+    for r in rows or []:
+        node = r.get('node')
+        # one guest per node is enough, the rest of that node is not asked
+        if not node or node in nodes or not str(r.get('vmid', '')).isdigit():
+            continue
+        if user_can_access_vm(user, cluster_id, int(r['vmid']), 'vm.view', r.get('type')):
+            nodes.add(node)
+    return nodes
+
+
+def _request_caller():
+    """acting_user() with the username its stored record does not carry, which the pool and
+    ACL checks key on. No load of the whole users table: these run on polled reads."""
     from flask import request
-    from pegaprox.utils.auth import build_authz_user
-    if sees_whole_maintenance(build_authz_user(request.session.get('user', ''), request.session),
-                              cluster_id):
+    user = acting_user()
+    if not user:
+        return None
+    user = dict(user)
+    user.setdefault('username', request.session.get('user', ''))
+    return user
+
+
+# MK Nov 2026 - a polled node read of a confined caller takes the node set its stream's
+# resources pass found (realtime._sse_node_scope, renewed about every 10 s while a tab is
+# open), or one an earlier read worked out, when that is at most this many seconds old. The
+# Client Portal case, one guest among 10k, asks nearly every guest for its one node, and
+# /metrics alone is polled every 15 s per tab. Placing a guest (max_age=0) never takes it.
+GUEST_SCOPE_REUSE = 30
+_read_node_scope = {}
+_read_node_scope_lock = threading.Lock()
+
+
+def _node_scope_key(cluster_id, who):
+    """The key the stream keeps a node set under: cluster, account, the role it acts with.
+    None without a username, so two callers can never share one."""
+    username = who.get('username')
+    if not username:
+        return None
+    return (cluster_id, username, who.get('effective_role', who.get('role')))
+
+
+def _reused_node_scope(key):
+    now = time.monotonic()
+    try:
+        from pegaprox.utils import realtime
+        had = realtime._sse_node_scope.get(key)
+    except Exception:
+        had = None
+    # only a node set: "whole cluster" or "unseen" of the stream are no answer for a read
+    if had is not None and isinstance(had[1], frozenset) and now - had[0] <= GUEST_SCOPE_REUSE:
+        return set(had[1])
+    had = _read_node_scope.get(key)
+    if had is not None and now - had[0] <= GUEST_SCOPE_REUSE:
+        return set(had[1])
+    return None
+
+
+def _keep_node_scope(key, nodes):
+    now = time.monotonic()
+    with _read_node_scope_lock:
+        _read_node_scope[key] = (now, frozenset(nodes))
+        if len(_read_node_scope) > 4096:
+            for k in [k for k, (t, _n) in _read_node_scope.items() if now - t > GUEST_SCOPE_REUSE]:
+                del _read_node_scope[k]
+            if len(_read_node_scope) > 4096:
+                _read_node_scope.clear()
+
+
+def forget_node_scopes():
+    """Drop every node set kept for the reads and the streams (tests: the next cluster_1 has
+    other guests on other nodes)."""
+    with _read_node_scope_lock:
+        _read_node_scope.clear()
+    try:
+        from pegaprox.utils import realtime
+        with realtime._sse_node_scope_lock:
+            realtime._sse_node_scope.clear()
+    except Exception:
+        pass
+
+
+def caller_guest_nodes(cluster_id, max_age=GUEST_NODES_AGE, user=None):
+    """None when the caller of this request sees every node of `cluster_id` (the admin, an
+    operator of the cluster), else the set of nodes their guests run on (guest_nodes_of).
+    Confined when caller_is_scoped cannot tell. Raises when the guests cannot be read.
+    max_age > 0 (a polled read) may take a node set of the last GUEST_SCOPE_REUSE seconds."""
+    who = user if user is not None else _request_caller()
+    if not who:
+        return set()
+    try:
+        scoped = caller_is_scoped(who, cluster_id)
+    except Exception as e:
+        logging.warning(f"[SCOPE] scope on {cluster_id} unknown, asked as confined: {e}")
+        scoped = True
+    if not scoped:
+        return None
+    key = _node_scope_key(cluster_id, who) if max_age else None
+    if key is not None:
+        reused = _reused_node_scope(key)
+        if reused is not None:
+            return reused
+    nodes = guest_nodes_of(who, cluster_id, cluster_managers.get(cluster_id), max_age)
+    if key is not None:
+        _keep_node_scope(key, nodes)
+    return nodes
+
+
+def node_map_for_caller(cluster_id, nodes):
+    """A node map of get_node_status() or of /node-progress as the caller of this request may
+    see it. Whole for the admin and an operator of the cluster. A confined caller gets the
+    nodes their own guests run on, a maintenance there without the guests in it, and {} when
+    their guests cannot be read. The map is the manager's cache, which the broadcast loop
+    shares: a cut is a new dict, the map is never written to."""
+    if not isinstance(nodes, dict):
         return nodes
-    return nodes_without_maintenance_guests(nodes)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.warning(f"[SCOPE] guests on {cluster_id} unread, no nodes for a confined caller: {e}")
+        return {}
+    if mine is None:
+        return nodes
+    return nodes_without_maintenance_guests({name: n for name, n in nodes.items() if name in mine})
+
+
+def require_guest_node(cluster_id, node, user=None, max_age=GUEST_NODES_AGE):
+    """Gate for a route about one node of `cluster_id`. None when the caller sees every node
+    there or one of their guests runs on `node`, else the error response to return: 403 when
+    none does, 503 when their guests cannot be read."""
+    from flask import jsonify
+    try:
+        mine = caller_guest_nodes(cluster_id, max_age=max_age, user=user)
+    except Exception as e:
+        logging.error(f"[SCOPE] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    if mine is None or (isinstance(node, str) and node in mine):
+        return None
+    return jsonify({'error': 'Access denied: none of your guests run on this node'}), 403
 
 
 def scope_vm_rows(cluster_id, rows, *, vmid_key='vmid', type_key='type'):
@@ -754,7 +902,7 @@ def bounded_limit(value, default=50, maximum=1000):
     return min(n, maximum)
 
 
-def require_unconfined(cluster_id):
+def require_unconfined(cluster_id, user=None):
     """sec (audit): guard for a WHOLE-CLUSTER operation — one with no per-object notion, so
     user_can_access_vm has nothing to ask about: rebooting a node, draining it, rewriting the
     cluster's credentials or network, arming fencing, wiping a disk.
@@ -763,10 +911,14 @@ def require_unconfined(cluster_id):
     pool-/ACL-scoped caller, deferring the real decision downstream. For these routes downstream
     is where the decision has to happen, and the only correct answer for a confined caller is no.
 
+    user: the identity to ask about. A read the UI polls passes _request_caller(), which is
+    the record require_auth already fetched; without it the whole users table is loaded.
+
     Returns an error response to `return`, or None when the caller may proceed."""
     from flask import request, jsonify
     from pegaprox.utils.auth import build_authz_user
-    user = build_authz_user(request.session.get('user', ''), request.session)
+    if user is None:
+        user = build_authz_user(request.session.get('user', ''), request.session)
     if caller_is_scoped(user, cluster_id):
         return jsonify({'error': 'Access denied: this action affects the whole cluster'}), 403
     return None

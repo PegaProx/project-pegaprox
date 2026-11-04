@@ -1817,6 +1817,39 @@ def _vreason(level, code, **args):
             'text': (text or VERDICT_TEXT[code]).format(**{k: _say(v) for k, v in args.items()})}
 
 
+def for_nodes(report, nodes):
+    """The report as a caller confined to some guests sees it: the rows and the names of the
+    nodes in `nodes` (where their guests run) only, no headroom combinations, which name and
+    load every node, and no reserve, the spare room of every node. The counts stay whole, as
+    they do for the guests. Changes `report` and returns it. MK Nov 2026 (#1218)"""
+    keep = set(nodes or ())
+    rows = []
+    for r in report.get('nodes') or []:
+        if r.get('node') not in keep:
+            continue
+        if r.get('worst_when') and not set(r['worst_when']) <= keep:
+            r['worst_when'] = None
+        rows.append(r)
+    report['nodes'] = rows
+    report['reserve'] = None
+    limits = []
+    for item in report.get('limits') or []:
+        args = item.get('args') or {}
+        if isinstance(args.get('nodes'), list):
+            args['nodes'] = [n for n in args['nodes'] if n in keep]
+            if not args['nodes']:
+                continue
+            item['text'] = LIMITS[item['code']].format(**{k: _say(v) for k, v in args.items()})
+        limits.append(item)
+    report['limits'] = limits
+    if isinstance(report.get('headroom'), dict):
+        report['headroom']['combinations'] = []
+    for key in ('storage', 'network'):
+        if isinstance(report.get(key), dict) and isinstance(report[key].get('nodes'), list):
+            report[key]['nodes'] = [n for n in report[key]['nodes'] if n in keep]
+    return report
+
+
 def verdict(report):
     """{'level': ready|warning|blocked, 'reasons': [{level, code, args, text}]} of a report."""
     blocked, warned = [], []
