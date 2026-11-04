@@ -28,6 +28,8 @@ class PanelUsersMixin:
 
     # ------------------------------------------------------------------ hub
     def cmd_users(self, msg, uid, chat, arg):
+        if msg['chat'].get('type') != 'private':
+            return self.tg.send(chat, 'User management works only in a private chat with the bot.')
         return self.cb_users(uid, chat, None)
 
     def cb_users(self, uid, chat, mid):

@@ -24,6 +24,10 @@ class Store:
 
     def _load_key(self):
         if os.path.exists(self._key_path):
+            mode = os.stat(self._key_path).st_mode
+            if mode & 0o077:
+                raise SystemExit(f'{self._key_path} is readable by others (mode {oct(mode & 0o777)}); '
+                                 'run chmod 600 on it')
             with open(self._key_path, 'rb') as f:
                 return f.read().strip()
         key = Fernet.generate_key()

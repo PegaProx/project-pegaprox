@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Telegram bot (tgbot/): linking, permissions passed through, buttons, alerts."""
 import os
+import re
 import stat
 
 import pytest
@@ -302,3 +303,74 @@ def test_config_from_env_file(tmp_path):
     assert cfg.bot_token == '1:abc' and cfg.allowed_ids == {1, 2} and cfg.verify_tls == '/etc/ca.pem'
     with pytest.raises(SystemExit):
         Config.load(None, environ={})
+
+
+def test_tls_is_verified_unless_pegaprox_is_on_this_host():
+    assert Config.load(None, environ={'TG_BOT_TOKEN': '1:x'}).verify_tls is True
+    assert Config.load(None, environ={'TG_BOT_TOKEN': '1:x', 'PEGAPROX_URL': 'https://pp.lan:5000'}).verify_tls is True
+    for url in ('https://127.0.0.1:5000', 'https://localhost:5000', 'https://[::1]:5000'):
+        cfg = Config.load(None, environ={'TG_BOT_TOKEN': '1:x', 'PEGAPROX_URL': url, 'PEGAPROX_VERIFY_TLS': 'false'})
+        assert cfg.verify_tls is False
+    # the token goes out with every call: no unverified TLS across a network
+    with pytest.raises(SystemExit):
+        Config.load(None, environ={'TG_BOT_TOKEN': '1:x', 'PEGAPROX_URL': 'https://10.0.0.5:5000',
+                                   'PEGAPROX_VERIFY_TLS': 'false'})
+
+
+def test_a_token_sent_by_a_stranger_is_deleted_too(env):
+    bot, tg, calls, _, cfg = env
+    cfg.allowed_ids = {1}
+    bot.handle_update(msg(f'here it is {TOKEN}', mid=8))
+    assert (UID, 8) in tg.deleted
+    assert 'revoke that token' in tg.sent[-1][1]
+    assert calls == []
+
+
+def test_negative_alert_poll_is_refused():
+    with pytest.raises(SystemExit):
+        Config.load(None, environ={'TG_BOT_TOKEN': '1:x', 'TG_ALERT_POLL': '-5'})
+    assert Config.load(None, environ={'TG_BOT_TOKEN': '1:x', 'TG_ALERT_POLL': '0'}).alert_poll == 0
+
+
+def test_proxy_settings_in_the_env_file_reach_requests(tmp_path, monkeypatch):
+    for k in ('HTTPS_PROXY', 'NO_PROXY', 'TG_BOT_TOKEN'):
+        monkeypatch.delenv(k, raising=False)
+    p = tmp_path / 'bot.env'
+    p.write_text('TG_BOT_TOKEN=1:x\nHTTPS_PROXY=http://127.0.0.1:3128\nNO_PROXY=127.0.0.1\n', encoding='utf-8')
+    Config.load(str(p))
+    assert os.environ['HTTPS_PROXY'] == 'http://127.0.0.1:3128' and os.environ['NO_PROXY'] == '127.0.0.1'
+
+
+def test_a_key_file_readable_by_others_is_refused(tmp_path):
+    Store(str(tmp_path))
+    os.chmod(tmp_path / 'secret.key', 0o644)
+    with pytest.raises(SystemExit):
+        Store(str(tmp_path))
+
+
+def test_a_redirect_is_an_error_not_an_empty_answer():
+    class Resp:
+        status_code = 302
+
+        def json(self):
+            raise ValueError
+
+    class Session:
+        def request(self, method, url, **kw):
+            return Resp()
+
+    with pytest.raises(ApiError) as err:
+        PegaProx('https://pp:5000', TOKEN, session=Session()).clusters()
+    assert err.value.status == 302
+
+
+def test_api_output_is_escaped_before_it_is_cut(env):
+    bot, tg, _, _, _ = env
+    link(bot, tg)
+    bot.api = lambda uid: type('A', (), {'request': lambda self, *a, **k: {'x': '<&>' * 2000}})()
+    bot.handle_update(msg('/api GET /api/clusters'))
+    out = tg.sent[-1][1]
+    assert out.startswith('<pre>') and out.endswith('</pre>') and '<&>' not in out
+    body = out[len('<pre>'):-len('</pre>')]
+    assert body.endswith('\n…') and len(body) <= 3802
+    assert not re.search(r'&[a-z#0-9]*$', body[:-2])  # no half entity before the ellipsis

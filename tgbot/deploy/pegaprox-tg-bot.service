@@ -14,6 +14,11 @@ RestartSec=10
 StateDirectory=pegaprox-tg-bot
 StateDirectoryMode=0700
 NoNewPrivileges=true
+# The whole file system is read-only for the bot except its StateDirectory
+# (/var/lib/pegaprox-tg-bot). For another TG_DATA_DIR add a drop-in with
+# `systemctl edit pegaprox-tg-bot`:
+#   [Service]
+#   ReadWritePaths=/path/to/data
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true

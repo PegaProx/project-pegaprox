@@ -53,13 +53,19 @@ host or LXC that runs PegaProx.
 |---|---|---|
 | `TG_BOT_TOKEN` | | token from @BotFather, required |
 | `PEGAPROX_URL` | `https://127.0.0.1:5000` | PegaProx address |
-| `PEGAPROX_VERIFY_TLS` | `false` | `false` for a self-signed certificate, `true` or a path to a CA bundle |
+| `PEGAPROX_VERIFY_TLS` | `true` | `true`, a path to a CA bundle, or `false` for PegaProx's self-signed certificate on the same host (refused for any other host) |
 | `TG_ALLOWED_IDS` | empty | comma-separated Telegram user ids; when set, everyone else is refused |
 | `TG_ALERT_POLL` | `60` | seconds between checks for new alerts, `0` turns notifications off |
-| `TG_DATA_DIR` | `/var/lib/pegaprox-tg-bot` | where linked accounts are stored |
+| `TG_DATA_DIR` | `/var/lib/pegaprox-tg-bot` | where linked accounts are stored (see below for another path) |
 
-If PegaProx runs on another host, set its address in `PEGAPROX_URL` and turn certificate
-verification on (`PEGAPROX_VERIFY_TLS=/path/to/ca.pem`).
+If PegaProx runs on another host, set its address in `PEGAPROX_URL` and either give it a
+certificate the system trusts or point `PEGAPROX_VERIFY_TLS` at the CA bundle that signed it.
+The bot refuses to start with `PEGAPROX_VERIFY_TLS=false` for anything but a loopback address,
+since every request carries the user's API token.
+
+The service runs with `ProtectSystem=strict`, so only `/var/lib/pegaprox-tg-bot` is writable.
+For another `TG_DATA_DIR`, run `sudo systemctl edit pegaprox-tg-bot`, add
+`[Service]` / `ReadWritePaths=/path/to/data`, and restart the service.
 
 The HTTP client is `requests`, so the standard `HTTPS_PROXY` / `NO_PROXY` variables work in the
 same file if `api.telegram.org` is only reachable through a proxy. Keep the PegaProx address in

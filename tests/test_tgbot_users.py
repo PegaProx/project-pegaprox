@@ -96,9 +96,9 @@ def msg(text, chat_type='private', mid=10):
     return {'message': {'message_id': mid, 'from': {'id': UID}, 'chat': {'id': UID, 'type': chat_type}, 'text': text}}
 
 
-def press(bot, button):
+def press(bot, button, chat_type='private'):
     bot.handle_update({'callback_query': {'id': 'q', 'from': {'id': UID}, 'data': button['callback_data'],
-                                          'message': {'message_id': 99, 'chat': {'id': UID}}}})
+                                          'message': {'message_id': 99, 'chat': {'id': UID, 'type': chat_type}}}})
 
 
 def tap(bot, tg, label):
@@ -147,6 +147,25 @@ def test_create_a_panel_user(env):
     bot.handle_update(msg('Passw0rd!', mid=31))
     assert (UID, 31) in tg.deleted
     assert ('create_panel_user', 'ivan', 'Passw0rd!', 'viewer') in calls
+
+
+def test_a_password_sent_in_a_group_is_deleted_and_not_used(env):
+    bot, tg, calls, _ = env
+    open_panel(bot, tg)
+    tap(bot, tg, 'Create')
+    bot.handle_update(msg('ivan'))
+    tap(bot, tg, 'Viewer')
+    bot.handle_update(msg('Passw0rd!', chat_type='group', mid=32))
+    assert (UID, 32) in tg.deleted
+    assert not any(c[0] == 'create_panel_user' for c in calls)
+    assert 'private chat' in tg.sent[-1][1]
+
+
+def test_user_management_stays_out_of_groups(env):
+    bot, tg, calls, _ = env
+    bot.handle_update(msg('/users', chat_type='group'))
+    assert 'private chat' in tg.sent[-1][1]
+    assert not any(c[0] == 'panel_users' for c in calls)
 
 
 def test_change_role_disable_and_reset_2fa(env):

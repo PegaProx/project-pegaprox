@@ -2,6 +2,9 @@
 """Run the bot: python -m tgbot [--env /etc/pegaprox-tg-bot.env]"""
 import argparse
 import logging
+import warnings
+
+import urllib3
 
 from .bot import Bot
 from .config import Config
@@ -19,6 +22,9 @@ def main():
     # the token is part of every Telegram URL: keep urllib3 from logging request lines
     logging.getLogger('urllib3').setLevel(logging.WARNING)
     cfg = Config.load(args.env)
+    if cfg.verify_tls is False:
+        # allowed only for a PegaProx on this host (see Config.load): don't warn on every call
+        warnings.filterwarnings('ignore', category=urllib3.exceptions.InsecureRequestWarning)
     Bot(cfg, Telegram(cfg.bot_token), Store(cfg.data_dir)).run()
 
 

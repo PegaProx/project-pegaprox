@@ -8,7 +8,6 @@ The bot never holds more rights than the person behind the chat.
 from urllib.parse import quote
 
 import requests
-import urllib3
 
 
 class ApiError(Exception):
@@ -23,14 +22,12 @@ def _q(part):
 
 
 class PegaProx:
-    def __init__(self, base_url, token, verify=False, timeout=30, session=None):
+    def __init__(self, base_url, token, verify=True, timeout=30, session=None):
         self.base_url = base_url.rstrip('/')
         self.token = token
         self.verify = verify
         self.timeout = timeout
         self.http = session or requests.Session()
-        if verify is False:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # -- core ---------------------------------------------------------------
     def request(self, method, path, json=None, params=None):
@@ -42,6 +39,7 @@ class PegaProx:
                 headers={'Authorization': f'Bearer {self.token}', 'Accept': 'application/json',
                          # PegaProx's CSRF gate wants this on every write
                          'X-Requested-With': 'XMLHttpRequest'},
+                # verify is False only for a loopback PegaProx (Config.load enforces it)
                 verify=self.verify, timeout=self.timeout, allow_redirects=False)
         except requests.RequestException as e:
             raise ApiError(0, f'PegaProx is unreachable: {e.__class__.__name__}')
@@ -49,7 +47,7 @@ class PegaProx:
             body = r.json()
         except ValueError:
             body = None
-        if r.status_code >= 400:
+        if not 200 <= r.status_code < 300:  # a redirect (not followed) is a failure too
             msg = ''
             if isinstance(body, dict):
                 msg = body.get('error') or body.get('message') or ''

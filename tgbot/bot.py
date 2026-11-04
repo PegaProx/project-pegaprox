@@ -32,6 +32,8 @@ GUEST_ACTIONS = {
     'resume': ('⏯ Resume', False, 'Resume'),
 }
 TOKEN_RE = re.compile(r'^pgx_[0-9a-f]{4}_[A-Za-z0-9_\-]{20,}$')
+TOKEN_ANYWHERE_RE = re.compile(r'pgx_[0-9a-f]{4}_[A-Za-z0-9_\-]{20,}')
+PRIVATE_ONLY = 'User management works only in a private chat with the bot.'
 SNAP_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_\-]{1,39}$')
 
 HELP = (
@@ -93,7 +95,9 @@ class Bot(PanelUsersMixin):
     # ------------------------------------------------------------------ plumbing
     def api(self, uid):
         token = self.store.token(uid)
-        return self._api_factory(token) if token else None
+        if not token:
+            raise ApiError(401, 'no linked account')
+        return self._api_factory(token)
 
     def btn(self, uid, label, action, **ctx):
         return {'text': label, 'callback_data': self.cb.put(uid, action, **ctx)}
@@ -130,8 +134,26 @@ class Bot(PanelUsersMixin):
         uid = msg['from']['id']
         chat = msg['chat']['id']
         text = msg['text'].strip()
+        private = msg['chat'].get('type') == 'private'
+        has_token = bool(TOKEN_ANYWHERE_RE.search(text))
+        if has_token and (not private or not self.allowed(uid)):
+            # a token must not stay in a group or reach a bot that won't use it
+            gone = self.tg.delete(chat, msg['message_id'])
+            warn = ('I deleted the message with the token' if gone
+                    else 'I could not delete the message with the token')
+            if not self.allowed(uid):
+                return self.tg.send(chat, f'Access to this bot is closed. Your Telegram id: <code>{uid}</code>\n'
+                                          f'{warn}; revoke that token in PegaProx.')
+            return self.tg.send(chat, f'{warn}. Send tokens only in a private chat with the bot, '
+                                      'and revoke this one in PegaProx.')
         if not self.allowed(uid):
             return self.tg.send(chat, f'Access to this bot is closed. Your Telegram id: <code>{uid}</code>')
+        try:
+            return self._on_text(msg, uid, chat, text)
+        except ApiError as err:
+            return self.error(chat, err)
+
+    def _on_text(self, msg, uid, chat, text):
         if text.startswith('/'):
             cmd, _, arg = text.partition(' ')
             cmd = cmd[1:].split('@', 1)[0].lower()
@@ -229,10 +251,14 @@ class Bot(PanelUsersMixin):
             res = self.api(uid).request(parts[0], parts[1], json=body)
         except ApiError as err:
             return self.error(chat, err)
-        out = json.dumps(res, ensure_ascii=False, indent=1)
+        out = v.e(json.dumps(res, ensure_ascii=False, indent=1))
         if len(out) > 3800:
-            out = out[:3800] + '\n…'
-        return self.tg.send(chat, f'<pre>{v.e(out)}</pre>')
+            cut = out[:3800]
+            amp = cut.rfind('&')
+            if amp > cut.rfind(';'):  # don't leave half an HTML entity
+                cut = cut[:amp]
+            out = cut + '\n…'
+        return self.tg.send(chat, f'<pre>{out}</pre>')
 
     def on_input(self, msg, uid, chat, text, pend):
         kind = pend['kind']
@@ -263,9 +289,15 @@ class Bot(PanelUsersMixin):
             self.tg.answer(q['id'], 'No account linked: /login', alert=True)
             return
         _, action, ctx = item
+        if (action == 'users' or action.startswith('pp_')) and (msg.get('chat') or {}).get('type') != 'private':
+            self.tg.answer(q['id'], PRIVATE_ONLY, alert=True)
+            return
         self.tg.answer(q['id'])
         handler = getattr(self, f'cb_{action}')
-        return handler(uid, chat, mid, **ctx)
+        try:
+            return handler(uid, chat, mid, **ctx)
+        except ApiError as err:
+            return self.error(chat, err, mid)
 
     def screen(self, chat, mid, text, kb):
         if mid:
@@ -705,9 +737,9 @@ class Bot(PanelUsersMixin):
         return self.screen(chat, mid, 'Type a VM/CT name or ID:', None)
 
     def find(self, uid, chat, query):
-        api = self.api(uid)
         q = query.strip().lower()
         try:
+            api = self.api(uid)
             clusters = api.clusters()
         except ApiError as err:
             return self.error(chat, err)
@@ -738,10 +770,8 @@ class Bot(PanelUsersMixin):
             rec = self.store.get(uid) or {}
             if not rec.get('notify', True) or not self.allowed(uid):
                 continue
-            api = self.api(uid)
-            if not api:
-                continue
             try:
+                api = self.api(uid)
                 clusters = api.clusters()
             except ApiError:
                 continue

@@ -1,2 +1,3 @@
-requests>=2.31
-cryptography>=42
+requests>=2.34.0
+cryptography>=50.0.0
+certifi>=2026.10.19

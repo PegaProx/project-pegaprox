@@ -14,20 +14,33 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if ! command -v python3 >/dev/null || ! python3 -m venv --help >/dev/null 2>&1; then
+# `venv --help` works even without ensurepip, so try a real venv with pip
+probe="$(mktemp -d)"
+if ! command -v python3 >/dev/null || ! python3 -m venv "$probe/v" >/dev/null 2>&1; then
     apt-get update -qq
     apt-get install -y -qq python3 python3-venv
 fi
+rm -rf "$probe"
 
-id pegaprox-tg-bot >/dev/null 2>&1 || useradd --system --home-dir /var/lib/pegaprox-tg-bot --shell /usr/sbin/nologin pegaprox-tg-bot
+getent group pegaprox-tg-bot >/dev/null || groupadd --system pegaprox-tg-bot
+if id pegaprox-tg-bot >/dev/null 2>&1; then
+    usermod -a -G pegaprox-tg-bot pegaprox-tg-bot
+else
+    useradd --system --gid pegaprox-tg-bot --home-dir /var/lib/pegaprox-tg-bot \
+        --shell /usr/sbin/nologin pegaprox-tg-bot
+fi
 
 mkdir -p "$DEST"
 rm -rf "$DEST/tgbot"
 cp -r "$SRC" "$DEST/tgbot"
 find "$DEST/tgbot" -name '__pycache__' -prune -exec rm -rf {} +
-[ -x "$DEST/venv/bin/python" ] || python3 -m venv "$DEST/venv"
-"$DEST/venv/bin/pip" install -q --upgrade pip
-"$DEST/venv/bin/pip" install -q -r "$DEST/tgbot/requirements.txt"
+# a venv left half-made by an earlier failed run is rebuilt
+if ! "$DEST/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+    rm -rf "$DEST/venv"
+    python3 -m venv "$DEST/venv"
+fi
+"$DEST/venv/bin/python" -m pip install -q --upgrade pip
+"$DEST/venv/bin/python" -m pip install -q -r "$DEST/tgbot/requirements.txt"
 
 if [ ! -f "$ENV_FILE" ]; then
     install -m 0640 -o root -g pegaprox-tg-bot "$SRC/deploy/pegaprox-tg-bot.env.example" "$ENV_FILE"
