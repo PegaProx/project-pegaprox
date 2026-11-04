@@ -557,7 +557,8 @@ def test_runtime_a_standby_lists_the_guests_and_offers_nothing_to_do(real_app, l
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
 def test_runtime_the_overview_links_to_it_and_a_name_opens_the_guest(real_app, layout):
-    app = real_app(layout=layout, resources=[dict(g) for g in GUESTS_C1])
+    app = real_app(layout=layout, resources=[dict(g) for g in GUESTS_C1],
+                   extra={('GET', '/api/clusters/c2/resources'): (200, [dict(g) for g in GUESTS_C2])})
     page = app.page
     link = page.locator('[data-all-guests-link]')
     link.wait_for(timeout=10000)
@@ -567,8 +568,24 @@ def test_runtime_the_overview_links_to_it_and_a_name_opens_the_guest(real_app, l
     page.locator('[data-all-guests-row]').first.wait_for(timeout=10000)
     page.locator('[data-all-guests-open="c1:100"]').click()
     page.wait_for_function('() => !document.querySelector("[data-all-guests]")', timeout=5000)
+    if layout == 'modern':
+        page.locator('[data-vm-detail]').wait_for(timeout=5000)
+        assert 'web01' in page.locator('[data-vm-detail]').inner_text()
+    else:
+        page.locator('[data-corp-vm-timeline]').wait_for(timeout=5000)
     page.get_by_text('web01').first.wait_for(timeout=5000)
     assert ('GET', '/api/clusters/c1/resources') in app.server.calls
+    # a guest of the second cluster, whose vmid is not in the first cluster's list
+    _open_table(app, layout)
+    page.locator('[data-all-guests-open="c2:300"]').click()
+    page.wait_for_function('() => !document.querySelector("[data-all-guests]")', timeout=5000)
+    if layout == 'modern':
+        page.locator('[data-vm-detail]').wait_for(timeout=5000)
+        assert 'erp' in page.locator('[data-vm-detail]').inner_text()
+    else:
+        page.locator('[data-corp-vm-timeline]').wait_for(timeout=5000)
+    page.get_by_text('erp').first.wait_for(timeout=5000)
+    assert ('GET', '/api/clusters/c2/resources') in app.server.calls
     # and back through the sidebar
     _open_table(app, layout)
     page.locator('.pp-sidebar button', has_text='All Clusters').first.click()

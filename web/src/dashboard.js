@@ -14170,6 +14170,7 @@
             // LW: Feb 2026 - corporate sidebar inventory tree state
             const [expandedSidebarNodes, setExpandedSidebarNodes] = useState({});
             const [selectedSidebarVm, setSelectedSidebarVm] = useState(null);
+            const [allGuestsOpenVm, setAllGuestsOpenVm] = useState(null);
             const [selectedSidebarNode, setSelectedSidebarNode] = useState(null); // LW: Feb 2026 - corporate node detail
             // LW Oct 2026 (#1137) - the QDevice next to the nodes: what /qdevice said per cluster, the
             // cluster whose QDevice the corporate view shows, the one in the modern dialog
@@ -23100,6 +23101,8 @@
                                                                 });
                                                             }}
                                                             highlightedVm={highlightedVm}
+                                                            openVm={allGuestsOpenVm}
+                                                            onOpenVmConsumed={() => setAllGuestsOpenVm(null)}
                                                             addToast={addToast}
                                                             pendingVmAction={pendingVmAction}
                                                             onPendingActionConsumed={() => setPendingVmAction(null)}
@@ -30383,6 +30386,7 @@
                                         onOpenGuest={(cluster, guest) => {
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...guest, _clusterId: cluster.id});
+                                            if (!isCorporate) setAllGuestsOpenVm({...guest, _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);
                                             setActiveTab('resources');
                                             setResourcesSubTab('management');

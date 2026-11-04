@@ -1323,7 +1323,7 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // NS: filtering + sorting uses useMemo below (lines 1320+)
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite }) {
+        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openVm, onOpenVmConsumed }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, haReadOnly, haConsolesElsewhere } = useAuth();
             // #625 v2 - a standby shows the guests live but acts on none of them: no power,
@@ -1479,6 +1479,21 @@
                     }, 100);
                 }
             }, [highlightedVm, resources, itemsPerPage]);
+
+            // a guest opened from All Guests starts in detail
+            const openedVmRef = useRef(null);
+            useEffect(() => {
+                if (!openVm) { openedVmRef.current = null; return; }
+                const key = `${openVm._clusterId}:${openVm.vmid}`;
+                if (openVm._clusterId && openVm._clusterId !== clusterId) return;
+                if (openedVmRef.current === key) return;
+                const vm = (resources || []).find(r => r.vmid === openVm.vmid);
+                if (!vm) return;
+                openedVmRef.current = key;
+                setViewMode('detail');
+                setSelectedDetailVm(vm);
+                onOpenVmConsumed?.();
+            }, [openVm, resources]);
             
             // NS: Update selectedDetailVm when resources change (via SSE)
             // This ensures the detail view shows the current status without re-selecting the VM

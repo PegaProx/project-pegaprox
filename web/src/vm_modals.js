@@ -1101,7 +1101,7 @@
             };
 
             return (
-                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                <div data-vm-detail="" className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                     {/* Header */}
                     <div className="p-6 border-b border-proxmox-border bg-gradient-to-r from-proxmox-dark to-proxmox-card">
                         <div className="flex items-center justify-between">
