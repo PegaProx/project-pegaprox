@@ -137,7 +137,8 @@ class Bot(PanelUsersMixin):
         text = msg['text'].strip()
         private = msg['chat'].get('type') == 'private'
         has_token = bool(TOKEN_ANYWHERE_RE.search(text))
-        if has_token and (not private or not self.allowed(uid)):
+        login_form = TOKEN_RE.match(text) or re.match(r'^/login(@\w+)?\s', text)
+        if has_token and (not private or not self.allowed(uid) or not login_form):
             # a token must not stay in a group or reach a bot that won't use it
             gone = self.tg.delete(chat, msg['message_id'])
             warn = ('I deleted the message with the token' if gone
@@ -245,6 +246,11 @@ class Bot(PanelUsersMixin):
         return self.find(uid, chat, arg)
 
     def cmd_api(self, msg, uid, chat, arg):
+        if msg['chat'].get('type') != 'private':
+            # a raw call can carry a password or show account data: never in a group
+            self.tg.delete(chat, msg['message_id'])
+            return self.tg.send(chat, '/api works only in a private chat with the bot. I deleted the message; '
+                                      'if it held a password, change it.')
         parts = arg.split(None, 2)
         if len(parts) < 2 or parts[0].upper() not in ('GET', 'POST', 'PUT', 'PATCH', 'DELETE') \
                 or not parts[1].startswith('/api/'):

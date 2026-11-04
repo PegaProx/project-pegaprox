@@ -341,8 +341,9 @@ def test_negative_alert_poll_is_refused():
 
 
 def test_proxy_settings_in_the_env_file_reach_requests(tmp_path, monkeypatch):
-    for k in ('HTTPS_PROXY', 'NO_PROXY', 'TG_BOT_TOKEN'):
-        monkeypatch.delenv(k, raising=False)
+    # a copy, so the proxy the loader exports does not leak into later tests
+    monkeypatch.setattr(os, 'environ', {k: v for k, v in os.environ.items()
+                                        if k not in ('HTTPS_PROXY', 'NO_PROXY', 'TG_BOT_TOKEN')})
     p = tmp_path / 'bot.env'
     p.write_text('TG_BOT_TOKEN=1:x\nHTTPS_PROXY=http://127.0.0.1:3128\nNO_PROXY=127.0.0.1\n', encoding='utf-8')
     Config.load(str(p))
@@ -433,3 +434,25 @@ def test_an_alert_read_error_is_not_an_empty_list():
 def test_a_bad_timestamp_is_escaped():
     from tgbot import views
     assert '<' not in views.when('<b>x</b>')
+
+
+def test_a_token_pasted_in_passing_is_deleted_even_in_private(env):
+    bot, tg, calls, _, _ = env
+    link(bot, tg)
+    bot.handle_update(msg(f'my token is {TOKEN}', mid=12))
+    assert (UID, 12) in tg.deleted
+    assert 'revoke' in tg.sent[-1][1]
+
+
+def test_raw_api_stays_out_of_groups(env):
+    bot, tg, calls, _, _ = env
+    link(bot, tg)
+    calls.clear()
+    bot.handle_update(msg('/api POST /api/users {"password": "x"}', chat_type='group', mid=13))
+    assert (UID, 13) in tg.deleted and calls == []
+    assert 'private chat' in tg.sent[-1][1]
+
+
+def test_a_loopback_pegaprox_is_not_reached_through_a_proxy():
+    assert PegaProx('https://127.0.0.1:5000', TOKEN).http.trust_env is False
+    assert PegaProx('https://pp.lan:5000', TOKEN).http.trust_env is True

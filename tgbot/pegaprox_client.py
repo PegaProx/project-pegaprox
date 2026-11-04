@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 import requests
 
+from .config import is_loopback
+
 
 class ApiError(Exception):
     def __init__(self, status, message):
@@ -28,6 +30,9 @@ class PegaProx:
         self.verify = verify
         self.timeout = timeout
         self.http = session or requests.Session()
+        if session is None and is_loopback(self.base_url):
+            # the token must not go through a proxy meant for Telegram; verify is passed explicitly
+            self.http.trust_env = False
 
     # -- core ---------------------------------------------------------------
     def request(self, method, path, json=None, params=None):
