@@ -113,8 +113,9 @@ def main(argv: List[str]) -> int:
     print(f"master key source: {mk.source}{' (' + mk.source_path + ')' if mk.source_path else ''}")
     if mk.is_legacy:
         print("\n[WARN]  Master key is in the legacy CONFIG_DIR location.")
-        print("        Consider running `pegaprox secure-key migrate` first to move it")
-        print("        outside the DB directory before encrypting the DB itself.")
+        print("        Consider moving it to /etc/pegaprox/secret.key first (mode 0640,")
+        print("        owner root, group of the service user), outside the DB directory;")
+        print("        --keystore-status names the steps.")
         print()
 
     # Plan summary

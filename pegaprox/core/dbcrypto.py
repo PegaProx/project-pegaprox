@@ -129,17 +129,55 @@ if BACKEND == 'sqlcipher':
         )
 
 
+# MK Nov 2026 - the databases --keystore-status looks at, in CONFIG_DIR
+STATUS_DB_FILES = ('pegaprox.db', 'syslog.db')
+_SQLITE_MAGIC = b'SQLite format 3\x00'
+
+
+def file_state(db_path: str) -> str:
+    """'missing', 'empty', 'plain' or 'encrypted', from the first 16 bytes and without a
+    key: a plain SQLite file starts with its magic, a SQLCipher one with a random salt.
+    A file that is neither (truncated, not a database) reads as encrypted here too;
+    detect_db_state, which needs the key, tells those apart."""
+    try:
+        with open(db_path, 'rb') as fh:
+            head = fh.read(16)
+    except FileNotFoundError:
+        return 'missing'
+    except OSError as e:
+        return f'unreadable ({type(e).__name__})'
+    if not head:
+        return 'empty'
+    return 'plain' if head == _SQLITE_MAGIC else 'encrypted'
+
+
 def backend_status() -> dict:
-    """For the /api/security/db-status endpoint + admin health-indicator."""
+    """What `pegaprox_multi_cluster.py --keystore-status` prints for the databases.
+
+    MK Nov 2026 - encrypted_at_rest said whether the driver is there, so a database left
+    plain (PEGAPROX_DISABLE_AUTO_ENCRYPT, or no start since sqlcipher3 came) read as
+    encrypted. It now goes by the files in CONFIG_DIR, each listed with its state."""
+    from pegaprox.constants import CONFIG_DIR
+    files = {os.path.abspath(os.path.join(CONFIG_DIR, name)): file_state(os.path.join(CONFIG_DIR, name))
+             for name in STATUS_DB_FILES}
+    present = [s for s in files.values() if s not in ('missing', 'empty')]
+    encrypted = BACKEND == 'sqlcipher' and bool(present) and all(s == 'encrypted' for s in present)
+    if BACKEND != 'sqlcipher':
+        note = ("Full DB encryption unavailable on this platform. "
+                "Sensitive fields are still encrypted individually with AES-256-GCM.")
+    elif not present:
+        note = "SQLCipher is available. No database found in this config directory."
+    elif encrypted:
+        note = "Full database encryption is active."
+    else:
+        note = ("SQLCipher is available, but a database is still plain. The next start "
+                "encrypts it unless PEGAPROX_DISABLE_AUTO_ENCRYPT is set.")
     return {
         'backend': BACKEND,
-        'encrypted_at_rest': BACKEND == 'sqlcipher',
+        'encrypted_at_rest': encrypted,
         'cipher': 'AES-256-CBC + HMAC-SHA512 (SQLCipher 4)' if BACKEND == 'sqlcipher' else None,
-        'note': (
-            "Full database encryption is active." if BACKEND == 'sqlcipher'
-            else "Full DB encryption unavailable on this platform. "
-                 "Sensitive fields are still encrypted individually with AES-256-GCM."
-        ),
+        'files': files,
+        'note': note,
     }
 
 
