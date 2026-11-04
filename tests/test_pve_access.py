@@ -262,3 +262,10 @@ def test_a_failed_read_is_the_clusters_fault(pve):
     state['fail'] = (500, 'cfs lock timeout')
     r = admin.get(B)
     assert r.status_code == 502 and 'cfs lock' in r.get_json()['error']
+
+
+def test_a_list_that_is_not_a_list_is_not_empty(pve, monkeypatch):
+    admin, _, _ = pve
+    monkeypatch.setitem(PVE, 'acl', {'oops': 1})
+    r = admin.get(B)
+    assert r.status_code == 502 and 'acl' in r.get_json()['error']

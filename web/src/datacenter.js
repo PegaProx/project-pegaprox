@@ -57,8 +57,12 @@
             });
 
             // a load for a cluster the admin already switched away from must not land on the new one
+            // (a change made on cluster A that finishes after the switch reloads with A's load: dropped too)
             const loadSeq = useRef(0);
+            const currentCluster = useRef(clusterId);
+            currentCluster.current = clusterId;
             const load = async () => {
+                if (clusterId !== currentCluster.current) return;
                 const seq = ++loadSeq.current;
                 setError('');
                 try {

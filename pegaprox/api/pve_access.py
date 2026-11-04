@@ -173,7 +173,11 @@ def get_pve_access(cluster_id):
         for (key, _path, _params), (data, err) in zip(reads, results):
             if err:
                 return upstream_failure(*err)
-            out[key] = data if isinstance(data, list) else []
+            if data is None:
+                data = []
+            if not isinstance(data, list):
+                return upstream_failure(502, f'Proxmox sent a list of {key} that is not a list')
+            out[key] = data
         protected, _tokens = _protected(manager)
         users = []
         for u in out['users']:
