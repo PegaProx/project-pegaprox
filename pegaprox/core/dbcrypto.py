@@ -10,12 +10,11 @@ session tokens, plugin state.  A leaked DB backup gave an attacker enough
 context to plan a follow-up attack — even without the secret.key.
 
 This module adds a transparent SQLCipher backend.  When sqlcipher3 is
-importable (Linux x86_64 via pip wheel today), every PegaProx DB connection
+importable (a pip wheel on Linux x86_64 and aarch64, macOS and Windows), every PegaProx DB connection
 is automatically AES-256-CBC + HMAC-SHA512 encrypted at rest using the
 master key resolved by `pegaprox.core.keystore`.
 
-When sqlcipher3 is NOT importable (ARM, macOS, Windows — until they ship
-wheels), we fall back to plain sqlite3.  In that case the existing
+When sqlcipher3 is NOT importable (32-bit ARM, the Debian package), we fall back to plain sqlite3.  In that case the existing
 field-level encryption + the new Multi-Tier key-location protection still
 apply — graceful degradation.
 
@@ -46,10 +45,11 @@ try:
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
     BACKEND = 'sqlite-plain'
-    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) — DB will be plain "
-              "SQLite. Field-level encryption (Fernet) still applies. To "
-              "enable full-DB encryption, install sqlcipher3-binary (Linux "
-              "x86_64) or build pysqlcipher3 from source.", _e)
+    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
+              "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
+              "enable full-DB encryption, install the SQLCipher package of "
+              "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
+              "on aarch64, macOS and Windows).", _e)
 
 
 # Re-export Row, IntegrityError etc. so callers can `from .dbcrypto import Row`
@@ -138,7 +138,7 @@ def backend_status() -> dict:
         'note': (
             "Full database encryption is active." if BACKEND == 'sqlcipher'
             else "Full DB encryption unavailable on this platform. "
-                 "Sensitive fields are still Fernet-encrypted individually."
+                 "Sensitive fields are still encrypted individually with AES-256-GCM."
         ),
     }
 
@@ -593,7 +593,7 @@ def ensure_db_encrypted(db_path: str) -> dict:
         _AUTO_MIG_DONE.add(db_path)
         return {'action': 'opt-out'}
     if BACKEND != 'sqlcipher':
-        # No sqlcipher3 → can't encrypt anyway. Field-level Fernet still applies.
+        # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
         _AUTO_MIG_DONE.add(db_path)
         return {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
 

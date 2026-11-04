@@ -82,7 +82,8 @@ def main(argv: List[str]) -> int:
         print(f"\n[BLOCKED] sqlcipher3 not importable on this platform.")
         print(f"          DB encryption cannot be enabled.  Install:")
         print(f"            pip install 'sqlcipher3-binary>=0.6.0'   (Linux x86_64)")
-        print(f"          or build pysqlcipher3 from source (other platforms).")
+        print(f"            pip install 'sqlcipher3>=0.6.4'          (aarch64, macOS, Windows)")
+        print(f"          never both: they install the same module.")
         return 2
 
     state = dbcrypto.detect_db_state(db_path)
