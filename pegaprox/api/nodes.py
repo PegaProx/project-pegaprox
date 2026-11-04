@@ -24,6 +24,7 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
                                   bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error)
+from pegaprox.api.helpers import unread_failure
 
 bp = Blueprint('nodes', __name__)
 
@@ -115,7 +116,9 @@ def get_node_network_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
 
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_network_config(node))
+    # MK Nov 2026 - a failed read says so, it is not a node without interfaces
+    got = manager.get_node_network_config(node)
+    return unread_failure(got, f'the network configuration of node {node}') or jsonify(got)
 
 
 # MK Nov 2026 - what waits in interfaces.new until Apply. PVE sends it as the 'changes'
@@ -1014,7 +1017,8 @@ def get_node_time_api(cluster_id, node):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_node_time(node))
+    got = cluster_managers[cluster_id].get_node_time(node)
+    return unread_failure(got, f'the time settings of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/time', methods=['PUT'])
@@ -1057,7 +1061,8 @@ def get_node_syslog_api(cluster_id, node):
     manager = cluster_managers[cluster_id]
     start = request.args.get('start', 0, type=int)
     limit = bounded_limit(request.args.get('limit'), 500, 5000)
-    return jsonify(manager.get_node_syslog(node, start, limit))
+    got = manager.get_node_syslog(node, start, limit)
+    return unread_failure(got, f'the system log of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates', methods=['GET'])
@@ -1071,7 +1076,8 @@ def get_node_certificates_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_certificates(node))
+    got = manager.get_node_certificates(node)
+    return unread_failure(got, f'the certificates of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/renew', methods=['POST'])
@@ -1181,6 +1187,10 @@ def get_node_tasks_api(cluster_id, node):
     vmid = request.args.get('vmid', None, type=int)
     
     tasks = manager.get_node_tasks(node, start, limit * 3 if vmid else limit, errors)  # Get more if filtering
+    # MK Nov 2026 - before the scoping below, which hands on a plain list
+    failed = unread_failure(tasks, f'the task list of node {node}')
+    if failed:
+        return failed
 
     # sec (private disclosure Sep 2026 — audit): node-level twin of the confined cluster task log —
     # a scoped caller could read every VM's task history here instead. Confine the same way; admins
@@ -1298,7 +1308,8 @@ def get_node_subscription_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_subscription(node))
+    got = manager.get_node_subscription(node)
+    return unread_failure(got, f'the subscription of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['PUT'])

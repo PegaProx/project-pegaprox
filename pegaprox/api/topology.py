@@ -163,6 +163,11 @@ def topology(cluster_id):
     except Exception as e:
         logging.debug(f"[topology] sdn fetch failed: {e}")
 
+    # MK Nov 2026 - the ids a guest link may point at. Looking each one up in nodes_out,
+    # which holds every guest by then, made the links O(guests x graph): 4 s of CPU on the
+    # hub at 10k guests on SDN vnets
+    link_targets = {n['id'] for n in nodes_out if n['kind'] in ('bridge', 'bond', 'sdn_vnet')}
+
     # ── VMs / CTs grouped under their bridge
     try:
         # NS Jul 2026 (pentest DoS) — reuse the broadcast loop's cached snapshot
@@ -206,10 +211,10 @@ def topology(cluster_id):
         for br_name in _brs:
             # Try matching to a same-node bridge first; fall back to any node's
             br_target = f'br:{node}:{br_name}'
-            if not any(n['id'] == br_target for n in nodes_out):
+            if br_target not in link_targets:
                 # might be an SDN vnet
                 sdn_target = f'sdn:{br_name}'
-                if any(n['id'] == sdn_target for n in nodes_out):
+                if sdn_target in link_targets:
                     br_target = sdn_target
                 else:
                     # bridge wasn't seen — skip (could be on another node we didn't fully scan)

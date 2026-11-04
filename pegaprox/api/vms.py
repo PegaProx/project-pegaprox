@@ -54,6 +54,7 @@ from pegaprox.api.helpers import get_connected_manager, check_cluster_access, re
 from pegaprox.api.helpers import node_shell_address
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
 from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
                                   node_maintenance_for_caller)
@@ -1031,6 +1032,7 @@ def get_datastore_content(cluster_id, storage_name):
     if error:
         return error
     
+    node = None
     try:
         host, port = manager.host, manager.api_port
         node = request.args.get('node')
@@ -1043,6 +1045,9 @@ def get_datastore_content(cluster_id, storage_name):
                 for n in nodes_response.json().get('data', []):
                     node = n['node']
                     break
+            else:
+                return pve_read_failed(nodes_response.status_code, nodes_response.text,
+                                       'the nodes of this cluster')
         
         if not node:
             return jsonify({'error': 'No node available'}), 400
@@ -1078,10 +1083,17 @@ def get_datastore_content(cluster_id, storage_name):
             content = [r for r in content if not (isinstance(r, dict) and r.get('vmid') is not None)
                        or r.get('vmid') in _ok_vmids]
             return jsonify(content)
-        return jsonify([])
+        # MK Nov 2026 - a read PVE refused answered 200 [] and the storage showed as empty
+        return pve_read_failed(response.status_code, response.text,
+                               f'the content of storage {storage_name} on node {node}',
+                               node=node, storage=storage_name)
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         logging.warning(f"[API] Cluster {cluster_id} unreachable for storage content: {e}")
-        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+        # MK Nov 2026 - with the code and what was not read, like the refused read above
+        if not node:
+            return pve_unreachable('the nodes of this cluster', storage=storage_name)
+        return pve_unreachable(f'the content of storage {storage_name} on node {node}',
+                               node=node, storage=storage_name)
     except Exception as e:
         logging.error(f"Error getting datastore content: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get datastore content')}), 500
@@ -4320,30 +4332,42 @@ def start_node_update(cluster_id, node_name):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # MK Nov 2026 - English with a code the UI translates; this route answered in German
     paramiko = get_paramiko()
     if not paramiko:
-        return jsonify({'error': 'SSH nicht verfuegbar. Bitte installiere paramiko'}), 500
+        return jsonify({'error': 'SSH is not available on this server (the paramiko module is missing)',
+                        'code': 'SSH_UNAVAILABLE'}), 500
     
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
-    reboot = data.get('reboot', True)
-    force = data.get('force', False)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object', 'code': 'INVALID_FIELD'}), 400
+    # a missing reboot stays a reboot, as API clients know it. "false" as a string was a
+    # reboot as well (and "false" for force a forced update), so both are read as booleans
+    reboot = _checkbox(data.get('reboot', True))
+    force = _checkbox(data.get('force', False))
+    for field, value in (('reboot', reboot), ('force', force)):
+        if value is None:
+            return jsonify({'error': f'{field} is true or false', 'code': 'INVALID_FIELD', 'field': field}), 400
     # NS Oct 2026 - rebooting after the update is node.reboot, as on the rolling-update and
     # schedule routes; an update without one stays on node.update (#1072)
     if reboot:
         from pegaprox.utils.rbac import has_permission
         if not has_permission(build_authz_user(request.session.get('user', ''), request.session),
                               'node.reboot'):
-            return jsonify({'error': 'Rebooting the node needs the node.reboot permission'}), 403
+            return jsonify({'error': 'Rebooting the node needs the node.reboot permission',
+                            'code': 'MISSING_PERMISSION', 'required': 'node.reboot'}), 403
 
     # check maintenance mode (unless force)
     if not force:
         if node_name not in mgr.nodes_in_maintenance:
-            return jsonify({'error': f'Node {node_name} ist nicht im Wartungsmodus.'}), 400
+            return jsonify({'error': f'Node {node_name} is not in maintenance mode',
+                            'code': 'NOT_IN_MAINTENANCE', 'node': node_name}), 400
         
         maintenance_task = mgr.nodes_in_maintenance[node_name]
         if maintenance_task.status not in ['completed', 'completed_with_errors']:
-            return jsonify({'error': f'Evacuation in progress.'}), 400
+            return jsonify({'error': f'The evacuation of {node_name} has not finished',
+                            'code': 'EVACUATION_RUNNING', 'node': node_name}), 400
     
     task = mgr.start_node_update(node_name, reboot, force)
     
@@ -4357,7 +4381,8 @@ def start_node_update(cluster_id, node_name):
             'task': task.to_dict()
         })
     else:
-        return jsonify({'error': 'Update konnte nicht gestartet werden'}), 500
+        return jsonify({'error': f'The update of {node_name} could not be started',
+                        'code': 'UPDATE_NOT_STARTED', 'node': node_name}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node_name>/update', methods=['GET'])
@@ -6400,7 +6425,11 @@ def get_node_pci_devices(cluster_id, node):
                 device['display_name'] = f"{device.get('vendor_name', 'Unknown')} {device.get('device_name', device.get('id', 'Unknown'))}"
                 device['passthrough_capable'] = device.get('iommugroup', -1) >= 0
             return jsonify(devices)
-        return jsonify([])
+        # MK Nov 2026 - was 200 [], a node without PCI devices
+        return pve_read_failed(response.status_code, response.text, f'the PCI devices of node {node}')
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for the PCI devices: {e}")
+        return pve_unreachable(f'the PCI devices of node {node}')
     except Exception as e:
         logging.error(f"Error getting PCI devices: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get PCI devices')}), 500

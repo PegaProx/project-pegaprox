@@ -282,7 +282,9 @@ def save_server_settings(settings):
 
 # The layouts and languages an admin can pin for everyone (#1189, #1167). The languages are
 # the ones the UI ships, SUPPORTED_LANGS in web/src/contexts.js.
-UI_LAYOUT_LOCKS = ('modern', 'corporate', 'cloud')
+# MK Nov 2026 - corporate-redesigned can be pinned as well. A corporate lock still means the
+# classic Corporate, which is frozen, so without it nobody could be given the redesign
+UI_LAYOUT_LOCKS = ('modern', 'corporate', 'corporate-redesigned', 'cloud')
 UI_LANGUAGE_LOCKS = ('de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl')
 UI_LOCKED = 'UI_LOCKED'
 
@@ -1109,6 +1111,46 @@ def upstream_failure(status, error='', system='Proxmox VE', default=500, **extra
         return jsonify({**extra, 'error': f'{msg}: {error}' if error else msg,
                         'code': UPSTREAM_AUTH, 'upstream_status': status}), 502
     return jsonify({**extra, 'error': error}), status or default
+
+
+# MK Nov 2026 - reads that answered 200 with [] or {} when Proxmox VE refused them or did not
+# answer at all, so a node looked as if it had no interfaces, tasks, pools or certificates.
+# One shape for all of them: 502 with the reason and the status PVE sent, 503 when the
+# cluster is out of reach. `what` names the read in English ("the task list of node pve1").
+PVE_READ_FAILED = 'PVE_READ_FAILED'
+PVE_UNREACHABLE = 'PVE_UNREACHABLE'
+
+
+def pve_read_failed(status, text, what, **extra):
+    """(response, status) for a read Proxmox VE answered with `status` instead of 200.
+    text: the body it sent (or a reason of our own when status is 0). 401 and 403 go out
+    as UPSTREAM_AUTH (#1142); another 4xx keeps its status, as the passthroughs do; a 5xx
+    or no status at all is a 502."""
+    from flask import jsonify
+    reason = parse_pve_error(text or '', f'HTTP {status}' if status else 'no answer')
+    if status in UPSTREAM_AUTH_STATUSES:
+        return upstream_failure(status, reason, **extra)
+    body = {**extra, 'error': f'Could not read {what}: {reason}', 'code': PVE_READ_FAILED}
+    if status:
+        body['upstream_status'] = status
+    return jsonify(body), status if 400 <= (status or 0) < 500 else 502
+
+
+def pve_unreachable(what, **extra):
+    from flask import jsonify
+    return jsonify({**extra, 'error': f'Cluster temporarily unreachable: could not read {what}',
+                    'code': PVE_UNREACHABLE, 'offline': True}), 503
+
+
+def unread_failure(result, what, **extra):
+    """None for an answer that was read. For the UnreadList or UnreadDict a manager read
+    hands back when it did not answer (core/manager.py), the error response to send."""
+    if not getattr(result, 'unavailable', False):
+        return None
+    if getattr(result, 'offline', False):
+        return pve_unreachable(what, **extra)
+    return pve_read_failed(getattr(result, 'status', 0) or 0, getattr(result, 'text', '') or '',
+                           what, **extra)
 
 
 # MK Oct 2026 (#763, #954) - the two evacuation options of a rolling update. The run started

@@ -919,8 +919,23 @@ def _ssh_unavailable(mgr, node):
         'hint': hint,
         'node': node,
         # cluster-wide causes let the caller stop asking about the other 99 nodes
-        'cluster_wide': code == 'SSH_NO_CREDENTIALS',
+        'cluster_wide': _ssh_cause_is_cluster_wide(mgr, code),
     }), status
+
+
+def _ssh_cause_is_cluster_wide(mgr, code):
+    """Whether every node of the cluster gives the same answer. MK Nov 2026 - SSH switched
+    off is the cluster's switch, and was asked node by node. No credentials is the whole
+    cluster only when no node has a password of its own either (#1136); on a token cluster
+    where some do, the others still have to be asked."""
+    if code not in ('SSH_DISABLED', 'SSH_NO_CREDENTIALS'):
+        return False
+    try:
+        from pegaprox.utils.ssh import ssh_blocked_for
+        return ssh_blocked_for(mgr) == code
+    except Exception:
+        logging.debug('[hardening] cluster-wide SSH check failed', exc_info=True)
+        return False
 
 
 # MK Oct 2026 - custom hardening profiles. A profile is a named pick of the built-in

@@ -3365,7 +3365,14 @@ def iso_sync_status(cluster_id):
     content_type = request.args.get('content', 'iso')
     if content_type not in ('iso', 'vztmpl'):
         return jsonify({'error': 'content must be iso or vztmpl'}), 400
-    return jsonify(mgr.get_content_sync_status(content_type))
+    status = mgr.get_content_sync_status(content_type)
+    # MK Nov 2026 - no status at all is an error, not a cluster without ISOs
+    if status.get('error'):
+        if status.get('offline'):
+            return jsonify({'error': 'Cluster temporarily unreachable: could not read the sync status',
+                            'code': 'PVE_UNREACHABLE', 'offline': True}), 503
+        return jsonify({'error': f"Could not read the sync status: {status['error']}", 'code': 'READ_FAILED'}), 500
+    return jsonify(status)
 
 
 @bp.route('/api/clusters/<cluster_id>/iso-sync', methods=['POST'])
