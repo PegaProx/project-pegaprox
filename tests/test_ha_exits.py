@@ -475,6 +475,11 @@ EXITS = {
     # and its own port at the address it paired with (the other socket only binds, to
     # tell an address of this host)
     ('pegaprox/witness.py', '_dial_own', 'socket'): (2, 'local'),
+    # the Telegram bot is a process of its own. It reaches a cluster only through the
+    # PegaProx REST API under the user's token, so the API's own exits guard it; the
+    # other session is the Telegram Bot API.
+    ('tgbot/pegaprox_client.py', 'PegaProx.__init__', 'http-session'): (1, 'external'),
+    ('tgbot/telegram.py', 'Telegram.__init__', 'http-session'): (1, 'external'),
 }
 
 VERDICTS = {'guard', 'client', 'console', 'login', 'read', 'local', 'external', 'peer', 'unused'}
@@ -510,9 +515,10 @@ def test_the_inventory_counts_what_the_report_says():
     # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
     # 256 calls out of this process, 151 (function, kind) pairs in 137 functions; 46 of
     # them guarded at the exit and 85 execs on a client from a guarded factory. No route
-    # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 256 and len(EXITS) == 151
-    assert len({(f, q) for f, q, _k in EXITS}) == 137
+    # relies on the write gate alone any more. The Telegram bot (tgbot/) adds its two
+    # sessions, both external
+    assert sum(n for n, _v in EXITS.values()) == 258 and len(EXITS) == 153
+    assert len({(f, q) for f, q, _k in EXITS}) == 139
     assert by['guard'] == 46 and by['client'] == 85
 
 
@@ -819,6 +825,9 @@ AUTOMATIONS = {
     ('pegaprox/witness.py', 'serve.stop'): (1, 'local'),
     # and its upkeep: its own port for its health, the bundle from a member for an update
     ('pegaprox/witness.py', 'serve'): (1, 'peer'),
+    # the Telegram bot's alert poller reads active alerts over the PegaProx API
+    # and posts them to Telegram
+    ('tgbot/bot.py', 'Bot.run'): (1, 'read'),
 }
 
 

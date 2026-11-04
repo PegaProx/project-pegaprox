@@ -1,0 +1,22 @@
+[Unit]
+Description=Telegram bot for PegaProx
+After=network-online.target pegaprox.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pegaprox-tg-bot
+Group=pegaprox-tg-bot
+WorkingDirectory=/opt/pegaprox-tg-bot
+ExecStart=/opt/pegaprox-tg-bot/venv/bin/python -m tgbot --env /etc/pegaprox-tg-bot.env
+Restart=on-failure
+RestartSec=10
+StateDirectory=pegaprox-tg-bot
+StateDirectoryMode=0700
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
