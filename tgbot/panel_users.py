@@ -189,8 +189,9 @@ class PanelUsersMixin:
             except ApiError as err:
                 return self._pp_fail(uid, chat, None, err)
             return self.tg.send(chat, f'Which role should <b>{v.e(name)}</b> have?', kb)
-        # a password: never leave it in the chat
+        # a password: never leave it in the chat, and take it exactly as typed
         self.tg.delete(chat, msg['message_id'])
+        text = msg['text']
         if msg['chat'].get('type') != 'private':
             return self.tg.send(chat, 'Send passwords only in a private chat with the bot. '
                                       'If you sent it here, change it.')

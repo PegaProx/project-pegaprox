@@ -49,7 +49,7 @@ def when(ts):
             return datetime.fromtimestamp(int(ts)).strftime('%d.%m %H:%M')
         return datetime.fromisoformat(str(ts).replace('Z', '+00:00')).strftime('%d.%m %H:%M')
     except (ValueError, OSError):
-        return str(ts)[:16]
+        return e(str(ts)[:16])
 
 
 def cluster_name(c):

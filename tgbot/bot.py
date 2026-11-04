@@ -33,6 +33,7 @@ GUEST_ACTIONS = {
 }
 TOKEN_RE = re.compile(r'^pgx_[0-9a-f]{4}_[A-Za-z0-9_\-]{20,}$')
 TOKEN_ANYWHERE_RE = re.compile(r'pgx_[0-9a-f]{4}_[A-Za-z0-9_\-]{20,}')
+PASSWORD_KINDS = ('pp_newpass', 'pp_password')
 PRIVATE_ONLY = 'User management works only in a private chat with the bot.'
 SNAP_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_\-]{1,39}$')
 
@@ -154,6 +155,10 @@ class Bot(PanelUsersMixin):
             return self.error(chat, err)
 
     def _on_text(self, msg, uid, chat, text):
+        pend = self.pending.get(uid) or {}
+        if pend.get('kind') in PASSWORD_KINDS and not self._is_command(text):
+            # a password may start with '/': only a bare known command interrupts the prompt
+            return self.on_input(msg, uid, chat, text, self.pending.pop(uid))
         if text.startswith('/'):
             cmd, _, arg = text.partition(' ')
             cmd = cmd[1:].split('@', 1)[0].lower()
@@ -171,6 +176,10 @@ class Bot(PanelUsersMixin):
         if TOKEN_RE.match(text):  # a token pasted without /login
             return self.cmd_login(msg, uid, chat, text)
         return self.tg.send(chat, 'Open /menu or see /help')
+
+    def _is_command(self, text):
+        m = re.match(r'^/([a-z]+)(@\w+)?$', text)
+        return bool(m) and hasattr(self, 'cmd_' + m.group(1))
 
     def cmd_start(self, msg, uid, chat, arg):
         if self.store.get(uid):
@@ -740,22 +749,42 @@ class Bot(PanelUsersMixin):
         q = query.strip().lower()
         try:
             api = self.api(uid)
-            clusters = api.clusters()
+            found = self._search(api, q)
         except ApiError as err:
             return self.error(chat, err)
+        if not found:
+            return self.tg.send(chat, f'Nothing found for "{v.e(query)}".')
+        kb = [[self.btn(uid, f'{v.guest_button(x)} @ {v.cluster_name(c)}'[:60], 'guest',
+                        g=self._g(c['id'], v.cluster_name(c), x))] for c, x in found[:20]]
+        return self.tg.send(chat, f'Found: {len(found)}', kb)
+
+    @staticmethod
+    def _search(api, q):
+        """One call to PegaProx's global search; cluster by cluster only if it refuses the query."""
+        try:
+            hits = api.search(q)
+        except ApiError as err:
+            if err.status != 400:  # e.g. a one-character query
+                raise
+            hits = None
+        if hits is not None:
+            out = []
+            for h in hits:
+                if h.get('type') not in ('vm', 'ct'):
+                    continue
+                c = {'id': h.get('cluster_id'), 'name': h.get('cluster_name'), 'display_name': h.get('cluster_name')}
+                x = dict(h, type='qemu' if h['type'] == 'vm' else 'lxc')
+                out.append((c, x))
+            return out
         found = []
-        for c in clusters:
+        for c in api.clusters():
             try:
                 for x in api.vms(c['id']):
                     if q == str(x.get('vmid')) or q in (x.get('name') or '').lower():
                         found.append((c, x))
             except ApiError:
                 continue
-        if not found:
-            return self.tg.send(chat, f'Nothing found for "{v.e(query)}".')
-        kb = [[self.btn(uid, f'{v.guest_button(x)} @ {v.cluster_name(c)}'[:60], 'guest',
-                        g=self._g(c['id'], v.cluster_name(c), x))] for c, x in found[:20]]
-        return self.tg.send(chat, f'Found: {len(found)}', kb)
+        return found
 
     # alert notifications -------------------------------------------------------------
     def _alert_loop(self):
@@ -782,8 +811,12 @@ class Bot(PanelUsersMixin):
                     continue
                 by_key = {f"{c['id']}:{a.get('id')}:{a.get('triggered_at')}": a for a in alerts
                           if not a.get('acked_at') and not a.get('muted_until')}
-                for key in self.store.mark_seen(uid, list(by_key)):
+                sent = []
+                for key in self.store.unseen(uid, list(by_key)):
                     a = by_key[key]
                     kb = [[self.btn(uid, '✔️ Acknowledge', 'ack', cid=c['id'], cname=v.cluster_name(c),
                                     fid=a['id'], back='none')]]
-                    self.tg.send(uid, '🔔 ' + v.alert_text(a, v.cluster_name(c)), kb)
+                    if self.tg.send(uid, '🔔 ' + v.alert_text(a, v.cluster_name(c)), kb):
+                        sent.append(key)
+                # only what reached the user counts as seen; the rest is tried again next poll
+                self.store.mark_seen(uid, sent)

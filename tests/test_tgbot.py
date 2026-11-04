@@ -69,6 +69,14 @@ class FakeApi:
         return [{'vmid': 101, 'name': 'web', 'node': 'pve1', 'type': 'qemu', 'status': 'running'},
                 {'vmid': 200, 'name': 'db', 'node': 'pve2', 'type': 'lxc', 'status': 'stopped'}]
 
+    def search(self, q):
+        self._rec('search', q)
+        if len(q) < 2:
+            raise ApiError(400, 'Search query must be at least 2 characters')
+        hits = [{'type': 'vm' if x['type'] == 'qemu' else 'ct', 'cluster_id': 'c1', 'cluster_name': 'Home', **{
+            k: x[k] for k in ('vmid', 'name', 'node', 'status')}} for x in self.vms('c1') if q in x['name']]
+        return hits + [{'type': 'node', 'cluster_id': 'c1', 'cluster_name': 'Home', 'name': 'pve1'}]
+
     def vm_action(self, cid, node, vtype, vmid, action):
         self._rec('vm_action', cid, node, vtype, vmid, action)
         return {'task': 'UPID:pve1:0001'}
@@ -374,3 +382,54 @@ def test_api_output_is_escaped_before_it_is_cut(env):
     body = out[len('<pre>'):-len('</pre>')]
     assert body.endswith('\n…') and len(body) <= 3802
     assert not re.search(r'&[a-z#0-9]*$', body[:-2])  # no half entity before the ellipsis
+
+
+def test_find_uses_one_global_search(env):
+    bot, tg, calls, _, _ = env
+    link(bot, tg)
+    calls.clear()
+    bot.handle_update(msg('/find web'))
+    assert 'clusters' not in [c[1] for c in calls]
+    assert 'Found: 1' in tg.sent[-1][1]
+    assert find_button(tg.sent[-1][2], 'web')
+
+
+def test_find_falls_back_when_search_refuses_the_query(env):
+    bot, tg, calls, _, _ = env
+    link(bot, tg)
+    calls.clear()
+    bot.handle_update(msg('/find b'))
+    assert 'clusters' in [c[1] for c in calls]
+    assert 'Found: 2' in tg.sent[-1][1]
+
+
+def test_an_alert_that_did_not_reach_telegram_is_sent_again(env):
+    bot, tg, calls, _, _ = env
+    link(bot, tg)
+    real_send = tg.send
+    tg.send = lambda *a, **k: None  # Telegram down
+    bot.poll_alerts()
+    tg.send = real_send
+    before = len(tg.sent)
+    bot.poll_alerts()
+    assert len(tg.sent) == before + 1 and 'CPU high' in tg.sent[-1][1]
+
+
+def test_an_alert_read_error_is_not_an_empty_list():
+    class Resp:
+        status_code = 200
+
+        def json(self):
+            return {'active_alerts': [], 'error': 'Alert operation failed'}
+
+    class Session:
+        def request(self, method, url, **kw):
+            return Resp()
+
+    with pytest.raises(ApiError):
+        PegaProx('https://pp:5000', TOKEN, session=Session()).active_alerts('c1')
+
+
+def test_a_bad_timestamp_is_escaped():
+    from tgbot import views
+    assert '<' not in views.when('<b>x</b>')

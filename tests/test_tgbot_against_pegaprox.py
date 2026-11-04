@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """The bot's client against the real PegaProx app: token auth, the CSRF gate on writes,
 and the token owner's permissions deciding what Telegram may do."""
+import pytest
+
 from pegaprox.utils.auth import create_api_token
 from tgbot.pegaprox_client import ApiError, PegaProx
 
@@ -68,9 +70,19 @@ def test_a_viewer_token_cannot_start_a_guest_from_telegram(api, seed):
 
 
 def test_a_revoked_token_is_refused(api, seed):
+    from pegaprox.utils.auth import revoke_api_token
     seed.user('nikita', role='admin')
-    try:
+    made = create_api_token('nikita', 'telegram')
+    client = _client(api, made['token'])
+    assert client.me()['role'] == 'admin'
+    assert revoke_api_token(made['token_id'], 'nikita')
+    with pytest.raises(ApiError) as err:
+        client.me()
+    assert err.value.status == 401
+
+
+def test_an_unknown_token_is_refused(api, seed):
+    seed.user('nikita', role='admin')
+    with pytest.raises(ApiError) as err:
         _client(api, 'pgx_ab12_' + 'z' * 43).me()
-        raise AssertionError('an unknown token was accepted')
-    except ApiError as err:
-        assert err.status == 401
+    assert err.value.status == 401

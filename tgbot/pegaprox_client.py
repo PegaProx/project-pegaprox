@@ -145,7 +145,13 @@ class PegaProx:
 
     # -- alerts -------------------------------------------------------------
     def active_alerts(self, cid):
-        return (self.get(f'/api/clusters/{_q(cid)}/active-alerts') or {}).get('active_alerts', [])
+        data = self.get(f'/api/clusters/{_q(cid)}/active-alerts') or {}
+        if data.get('error'):  # PegaProx answers 200 with an error when its database read fails
+            raise ApiError(500, data['error'])
+        return data.get('active_alerts', [])
+
+    def search(self, q):
+        return (self.get('/api/global/search', q=q, type='all') or {}).get('results', [])
 
     def ack_alert(self, cid, fired_id):
         return self.post(f'/api/clusters/{_q(cid)}/active-alerts/{_q(fired_id)}/ack')

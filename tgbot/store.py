@@ -85,6 +85,15 @@ class Store:
                 rec['notify'] = bool(on)
                 self._write()
 
+    def unseen(self, tg_id, keys):
+        """The alert ids not sent to this user yet."""
+        with self._lock:
+            rec = self._data.get(str(tg_id))
+            if not rec:
+                return []
+            known = set(rec.get('seen_alerts') or [])
+            return [k for k in keys if k not in known]
+
     def mark_seen(self, tg_id, keys, keep=500):
         """Remember alert ids already sent. Returns the ids that are new."""
         with self._lock:

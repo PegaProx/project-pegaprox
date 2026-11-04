@@ -47,6 +47,9 @@ if [ ! -f "$ENV_FILE" ]; then
     echo "Created $ENV_FILE: put the bot token (TG_BOT_TOKEN) there, then run:"
     echo "  systemctl restart pegaprox-tg-bot"
 fi
+# the file holds the bot token: keep it root-owned and unreadable to others on every run
+chown root:pegaprox-tg-bot "$ENV_FILE"
+chmod 0640 "$ENV_FILE"
 
 install -m 0644 "$SRC/deploy/pegaprox-tg-bot.service" "$UNIT"
 systemctl daemon-reload

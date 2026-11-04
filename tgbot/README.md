@@ -91,8 +91,9 @@ the user loses a permission, the bot loses it at once, since PegaProx checks eve
 
 - Tokens are stored encrypted (`accounts.json` plus the key `secret.key`, both mode 0600).
   The data directory must be readable only by the bot user.
-- A token is accepted only in a private chat; in a group the bot deletes the message and asks the
-  user to revoke the token.
+- Never post a token in a group. The bot accepts tokens only in a private chat and tries to
+  delete a token it sees anywhere else, but it can delete group messages only if it is an
+  admin there. If a token was ever exposed, revoke it in PegaProx right away.
 - Buttons are bound to the user who opened them: someone else's buttons in a group do nothing.
 - `TG_ALLOWED_IDS` closes the bot to everyone else entirely.
 

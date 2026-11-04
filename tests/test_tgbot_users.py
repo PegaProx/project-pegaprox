@@ -168,6 +168,25 @@ def test_user_management_stays_out_of_groups(env):
     assert not any(c[0] == 'panel_users' for c in calls)
 
 
+def test_a_password_is_taken_exactly_as_typed(env):
+    bot, tg, calls, _ = env
+    open_panel(bot, tg)
+    tap(bot, tg, 'olga')
+    tap(bot, tg, 'Password')
+    bot.handle_update(msg('/menu-is-not-a-command  ', mid=40))
+    assert (UID, 40) in tg.deleted
+    assert ('set_panel_password', 'olga', '/menu-is-not-a-command  ') in calls
+
+
+def test_a_bare_command_still_leaves_the_password_prompt(env):
+    bot, tg, calls, _ = env
+    open_panel(bot, tg)
+    tap(bot, tg, 'olga')
+    tap(bot, tg, 'Password')
+    bot.handle_update(msg('/help'))
+    assert not any(c[0] == 'set_panel_password' for c in calls)
+
+
 def test_change_role_disable_and_reset_2fa(env):
     bot, tg, calls, _ = env
     open_panel(bot, tg)
