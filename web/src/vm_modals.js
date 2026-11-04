@@ -194,8 +194,30 @@
 
             const isQemu = vm.type === 'qemu';
 
+            // LW Nov 2026 (#1218) - the cluster's datastores are refused to an account confined to some
+            // guests, so `storages` comes empty: the picker then lists the target node's own storages
+            const noDatastores = !(storages?.shared || []).length && !Object.keys(storages?.local || {}).length;
+            const [nodeStorages, setNodeStorages] = useState(null);
+            useEffect(() => {
+                if (!noDatastores || !cloneConfig.target_node) { setNodeStorages(null); return; }
+                let gone = false;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${encodeURIComponent(cloneConfig.target_node)}/storage`);
+                    const d = r?.ok ? await r.json().catch(() => null) : null;
+                    if (!gone) setNodeStorages(Array.isArray(d) ? d : null);
+                })();
+                return () => { gone = true; };
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [noDatastores, clusterId, cloneConfig.target_node]);
+
             // Build storage list filtered to the selected target node (shared + local on that node)
             const storageList = useMemo(() => {
+                const neededContent = isQemu ? 'images' : 'rootdir';
+                if (noDatastores && nodeStorages) {
+                    return nodeStorages
+                        .filter(s => s && s.storage && s.enabled !== 0 && s.active !== 0 && (s.content || '').includes(neededContent))
+                        .map(s => ({ name: s.storage, type: s.type, content: s.content, avail: s.avail }));
+                }
                 if (!storages) return [];
                 const target = cloneConfig.target_node;
                 const items = [];
@@ -216,9 +238,8 @@
                 // filter by content type compatible with the VM being cloned
                 // NS Aug 2026 (CodeAnt) — guard s.content: a datastore with no content field would
                 // crash the whole modal (undefined.includes). Matches the s.content && ... guards elsewhere.
-                const neededContent = isQemu ? 'images' : 'rootdir';
                 return items.length > 0 ? items.filter(s => (s.content || '').includes(neededContent)) : items;
-            }, [storages, cloneConfig.target_node, isQemu]);
+            }, [storages, cloneConfig.target_node, isQemu, noDatastores, nodeStorages]);
 
             // NS Aug 2026 — leave target_storage EMPTY by default: an empty value isn't sent to the
             // clone API, so Proxmox keeps the source VM's storage (the pre-picker behaviour). The

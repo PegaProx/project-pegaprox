@@ -3263,6 +3263,9 @@
                 cephNotInstalledDesc: 'Kein Ceph-Cluster auf diesem Proxmox-Cluster konfiguriert.',
                 cephNotInstalledOnNode: 'Ceph ist auf diesem Node nicht konfiguriert.',
                 cephInstallHint: 'Um Ceph einzurichten, öffne einen Node und nutze den Ceph-Tab zur Initialisierung.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'Kein Zugriff auf Ceph',
+                cephNoAccessDesc: 'Ihr Konto sieht nur einen Teil dieses Clusters. Ceph dient dem ganzen Cluster und wird nur Konten gezeigt, die ihn ganz sehen.',
                 cephInit: 'Ceph initialisieren',
 
                 // LW: RBD Mirroring - Mar 2026
@@ -14763,6 +14766,9 @@
                 cephNotInstalledDesc: 'No Ceph cluster has been configured on this Proxmox cluster.',
                 cephNotInstalledOnNode: 'Ceph is not configured on this node.',
                 cephInstallHint: 'To set up Ceph, open a node and use the Ceph tab to initialize.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'No access to Ceph',
+                cephNoAccessDesc: 'Your account sees part of this cluster. Ceph serves the whole cluster and is shown only to accounts that see all of it.',
                 cephInit: 'Initialize Ceph',
 
                 // RBD Mirroring
@@ -25544,6 +25550,9 @@
                 cephNotInstalledDesc: '此 Proxmox 集群上尚未配置 Ceph 集群。',
                 cephNotInstalledOnNode: '该节点上未配置 Ceph。',
                 cephInstallHint: '要设置 Ceph，请打开节点并使用 Ceph 选项卡进行初始化。',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: '无权访问 Ceph',
+                cephNoAccessDesc: '您的账户只能看到此集群的一部分。Ceph 服务于整个集群，仅向可查看整个集群的账户显示。',
                 cephInit: '初始化Ceph',
                 cephMirroring: '镜像',
                 cephMirrorMode: '镜像模式',
@@ -36011,6 +36020,9 @@
                 cephNotInstalledDesc: 'Na tym klastrze Proxmox nie skonfigurowano klastra Ceph.',
                 cephNotInstalledOnNode: 'Ceph nie jest skonfigurowany na tym węźle.',
                 cephInstallHint: 'Aby skonfigurować Ceph, otwórz węzeł i użyj zakładki Ceph do inicjalizacji.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'Brak dostępu do Ceph',
+                cephNoAccessDesc: 'Twoje konto widzi tylko część tego klastra. Ceph obsługuje cały klaster i jest pokazywany tylko kontom, które widzą go w całości.',
                 cephInit: 'Zainicjuj Ceph',
                 cephMirroring: 'Mirroring',
                 cephMirrorMode: 'Tryb mirroringu',
@@ -45995,6 +46007,9 @@
                 cephNotInstalledDesc: 'Aucun cluster Ceph n\'a été configuré sur ce cluster Proxmox.',
                 cephNotInstalledOnNode: 'Ceph n\'est pas configuré sur ce nœud.',
                 cephInstallHint: 'Pour configurer Ceph, ouvrez un nœud et utilisez l\'onglet Ceph pour initialiser.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: "Pas d'accès à Ceph",
+                cephNoAccessDesc: "Votre compte ne voit qu'une partie de ce cluster. Ceph sert tout le cluster et n'est affiché qu'aux comptes qui le voient en entier.",
                 cephInit: 'Initialiser Ceph',
 
                 // RBD Mirroring
@@ -56961,6 +56976,9 @@
                 cephNotInstalledDesc: 'No se ha configurado un cluster Ceph en este cluster Proxmix.',
                 cephNotInstalledOnNode: 'Ceph no está configurado en este nodo.',
                 cephInstallHint: 'Para configurar Ceph, abra un nodo y use la pestaña "Ceph" para inicializar',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'Sin acceso a Ceph',
+                cephNoAccessDesc: 'Su cuenta ve solo una parte de este clúster. Ceph sirve a todo el clúster y solo se muestra a las cuentas que lo ven completo.',
                 cephInit: "Inicializar Ceph",
                 cephMirrorAddPeer: "Agregar Peer",
                 cephMirrorAddSchedule: "Agregar programación",
@@ -67766,6 +67784,9 @@
                 cephNotInstalledDesc: 'Nenhum cluster Ceph foi configurado neste cluster Proxmox.',
                 cephNotInstalledOnNode: 'Ceph não está configurado neste nó.',
                 cephInstallHint: 'Para configurar o Ceph, abra um nó e use a aba Ceph para inicializar.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'Sem acesso ao Ceph',
+                cephNoAccessDesc: 'Sua conta vê apenas uma parte deste cluster. O Ceph atende o cluster inteiro e só é mostrado a contas que o veem por completo.',
                 cephInit: 'Inicializar Ceph',
 
                 // RBD Mirroring
@@ -78473,6 +78494,9 @@
                 cephNotInstalledDesc: '이 Proxmox 클러스터에 Ceph 클러스터가 구성되지 않았습니다.',
                 cephNotInstalledOnNode: '이 노드에 Ceph가 구성되지 않았습니다.',
                 cephInstallHint: 'Ceph를 설정하려면 노드를 열고 Ceph 탭을 사용하여 초기화하세요.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: 'Ceph에 대한 접근 권한 없음',
+                cephNoAccessDesc: '이 계정은 이 클러스터의 일부만 볼 수 있습니다. Ceph는 클러스터 전체에 사용되므로 클러스터 전체를 볼 수 있는 계정에만 표시됩니다.',
                 cephInit: 'Ceph 초기화',
 
                 // RBD Mirroring
@@ -89428,6 +89452,9 @@
                 cephNotInstalledDesc: 'Nessun cluster Ceph configurato su questo cluster Proxmox.',
                 cephNotInstalledOnNode: 'Ceph non è configurato su questo nodo.',
                 cephInstallHint: 'Per configurare Ceph, apri un nodo e utilizza la scheda Ceph per inizializzare.',
+                // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
+                cephNoAccess: "Nessun accesso a Ceph",
+                cephNoAccessDesc: "Il tuo account vede solo una parte di questo cluster. Ceph serve l'intero cluster ed è mostrato solo agli account che lo vedono per intero.",
                 cephInit: 'Inizializza Ceph',
 
                 // RBD Mirroring

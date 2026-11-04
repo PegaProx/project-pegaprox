@@ -1637,10 +1637,12 @@
                         ],
                     };
                     const urls = endpoints[tab] || [];
+                    // LW Nov 2026 (#1218) - the status of each answer, so a refusal is not read as "nothing there"
+                    const statuses = [];
                     // NS: Fixed - now using auth headers and credentials!
-                    const results = await Promise.all(urls.map(u => u.endsWith('/dns')
+                    const results = await Promise.all(urls.map((u, i) => u.endsWith('/dns')
                         ? fetch(u, { credentials: 'include', headers: authHeaders }).catch(() => null).then(readNodeDns)
-                        : fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null).catch(() => null)));
+                        : fetch(u, { credentials: 'include', headers: authHeaders }).then(r => { statuses[i] = r.status; return r.ok ? r.json() : null; }).catch(() => null)));
 
                     const newData = { ...data };
                     if (tab === 'summary') newData.summary = results[0];
@@ -1677,7 +1679,9 @@
                             osd: results[1] || [],
                             mon: results[2] || [],
                             pools: results[3] || [],
-                            available: results[0] !== null
+                            available: results[0] !== null,
+                            // an account confined to some guests is refused the cluster's Ceph: no "not installed"
+                            denied: statuses[0] === 403
                         };
                     }
                     setData(newData);
@@ -3824,6 +3828,12 @@
                                                 <div className="flex items-center justify-center py-12">
                                                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
                                                 </div>
+                                            ) : data.ceph?.denied ? (
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center" data-ceph-denied="">
+                                                    <Icons.Lock className="w-12 h-12 mx-auto text-gray-600 mb-4" />
+                                                    <h3 className="text-lg font-semibold mb-2">{t('cephNoAccess')}</h3>
+                                                    <p className="text-gray-400">{t('cephNoAccessDesc')}</p>
+                                                </div>
                                             ) : !data.ceph?.available ? (
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
                                                     <Icons.Database className="w-12 h-12 mx-auto text-gray-600 mb-4" />
@@ -5612,7 +5622,8 @@
                     const urls = endpoints[tab] || [];
                     if (urls.length === 0) return;
                     // LW Nov 2026 - the redesign keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
-                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'ceph' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks');
+                    // LW Nov 2026 (#1218) - Ceph always: the classic view says a refusal too, not "not configured"
+                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks') || tab === 'ceph';
                     const results = await Promise.all(urls.map(u => u.endsWith('/dns')
                         ? authFetch(u).then(readNodeDns)
                         : crKeep ? authFetch(u).then(crNdRead)
@@ -5669,7 +5680,8 @@
                         else if (tab === 'ceph') {
                             const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
                             if (crKeep) newData.cephRead = results;
-                            newData.ceph = { status: got[0], osd: got[1] || [], mon: got[2] || [], pools: got[3] || [], available: got[0] !== null };
+                            newData.ceph = { status: got[0], osd: got[1] || [], mon: got[2] || [], pools: got[3] || [], available: got[0] !== null,
+                                             denied: crNdFail(results[0])?.status === 403 };
                         }
                         return newData;
                     });
@@ -6629,7 +6641,9 @@
                                             {configSubTab === 'ceph' && !crStore && (
                                                 <div>
                                                     <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>Ceph</span>
-                                                    {data.ceph && !data.ceph.available ? (
+                                                    {data.ceph?.denied ? (
+                                                        <div className="text-center py-8" style={{color: '#728b9a'}} data-ceph-denied=""><Icons.Lock className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">{t('cephNoAccess')}</p><p className="text-[12px] mt-1">{t('cephNoAccessDesc')}</p></div>
+                                                    ) : data.ceph && !data.ceph.available ? (
                                                         <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.Database className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">Ceph not configured on this node</p></div>
                                                     ) : (
                                                         <div className="space-y-3">

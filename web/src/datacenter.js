@@ -1202,6 +1202,9 @@
                         const d = await res.json();
                         setCephData(d);
                         if (d.node && !cephNode) setCephNode(d.node);
+                    } else if (res?.status === 403) {
+                        // LW Nov 2026 (#1218) - refused to an account confined to some guests: said as such
+                        setCephData({ available: false, denied: true });
                     }
                 } catch (e) {
                     console.error('Failed to load Ceph data:', e);
@@ -7174,6 +7177,12 @@
                                 {cephLoading ? (
                                     <div className="flex items-center justify-center py-12">
                                         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
+                                    </div>
+                                ) : cephData?.denied ? (
+                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center" data-ceph-denied="">
+                                        <Icons.Lock className="w-12 h-12 mx-auto text-gray-600 mb-4" />
+                                        <h3 className="text-lg font-semibold mb-2">{t('cephNoAccess')}</h3>
+                                        <p className="text-gray-400">{t('cephNoAccessDesc')}</p>
                                     </div>
                                 ) : !cephData || !cephData.available ? (
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
