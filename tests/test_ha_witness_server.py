@@ -531,14 +531,15 @@ def _member(port, before_tls=0.0, before_head=0.0, timeout=2.0):
 
 
 def test_a_flood_from_the_members_address_leaves_its_new_connection_alone(server):
-    """300 connections a second from the member's own address that send nothing. The
-    member's new connection sent its handshake and waits a round trip for its head: the
-    silent ones of its source go first. (Before, the oldest of the source went, and the
-    member's was that after eight more.)"""
-    with _Flood(server.port, ['127.0.0.1'], 300) as flood:
+    """200 connections a second from the member's own address that send nothing, so its 32
+    places last 160 ms. The member's new connection takes 200 ms on its way in, 100 ms before
+    its handshake and 100 ms for its head: it outlives the flood only because each step counts
+    as moving on, and each step has 60 ms to spare. (At 300 a second the places lasted 107 ms
+    against a 100 ms wait, which a loaded machine lost now and then.)"""
+    with _Flood(server.port, ['127.0.0.1'], 200) as flood:
         got = []
         for _ in range(10):
-            got.append(_member(server.port, before_head=0.1))
+            got.append(_member(server.port, before_tls=0.1, before_head=0.1))
             time.sleep(0.05)
     print(f'same address, {flood.opened} connections opened: {got}')
     assert sum(1 for s in got if s == 200) >= 9, got
