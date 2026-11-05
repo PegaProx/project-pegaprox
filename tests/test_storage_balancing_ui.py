@@ -525,9 +525,17 @@ def test_runtime_the_create_dialog_explains_the_tolerance_and_starts_again_at_5(
     tol.evaluate("""(el) => { const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
                               set.call(el, '12'); el.dispatchEvent(new Event('input', { bubbles: true })); }""")
     assert tol.input_value() == '12'
+    reads = app.server.calls.count(('GET', '/api/clusters/c1/storage-clusters'))
     box.locator('button', has_text=re.compile(r'^\s*Create\s*$')).click()
     assert _wait_for_call(app, ('POST', '/api/clusters/c1/storage-clusters'))
-    assert app.server.bodies['/api/clusters/c1/storage-clusters'][-1]['tolerance'] == 12
+    # the list is read again after the create. The fake server keeps {} for that read under the
+    # same path, so [-1] was what was sent only as long as the read had not come yet
+    for _ in range(50):
+        if app.server.calls.count(('GET', '/api/clusters/c1/storage-clusters')) > reads:
+            break
+        page.wait_for_timeout(100)
+    sent = [b for b in app.server.bodies['/api/clusters/c1/storage-clusters'] if b]
+    assert sent[-1]['tolerance'] == 12
     page.wait_for_timeout(500)
     box = dialog()
     assert box.locator('input[type="range"]').nth(1).input_value() == '5'
