@@ -152,7 +152,7 @@ class _Cluster:
             return False
         return self.nodes_in_maintenance.pop(node, None) is not None
 
-    def start_node_update(self, node, reboot=False, force=False, auto_exit_maintenance=True):
+    def start_node_update(self, node, reboot=False, force=False):
         self.calls.append(('update', node))
         self._die('updating', node)
         t = UpdateTask(node, reboot=reboot)
@@ -721,7 +721,8 @@ def test_a_scheduled_run_is_kept_like_one_started_by_hand(api, seed, db, fast):
     assert row['status'] == 'completed' and row['completed_at'], row['logs']
     state = row['state']
     assert state['scheduled'] is True and state['started_by'] == 'scheduler'
-    assert state['allow_local_disks'] is True and state['pause_on_evacuation_error'] is False
+    # a guest left behind pauses it as it does a run started by hand
+    assert state['allow_local_disks'] is True and state['pause_on_evacuation_error'] is True
     assert {n: s['result'] for n, s in state['node_state'].items()} == {'pve1': 'done', 'pve2': 'done'}
 
 

@@ -6,6 +6,7 @@ SQLite database wrapper with encryption support.
 # MK: the db stuff was the worst part of the monolith, everything was just inline sql
 
 import os
+import re
 import sys
 import json
 import time
@@ -35,9 +36,21 @@ from pegaprox.constants import (
 )
 from pegaprox.models.tasks import balancer_cooldown, BALANCER_COOLDOWN_DEFAULT
 
+# an audit field with one of these cannot be encoded, see add_audit_entry
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+
 # Fallback tenant ID for existing users (mirrors pegaprox.utils.rbac.DEFAULT_TENANT_ID)
 # Defined here to avoid circular import: rbac imports from db
 DEFAULT_TENANT_ID = 'default'
+
+# Options of a run started by hand that a rolling update schedule carries too, added in
+# place; a schedule saved before them gets the safe value of the default
+UPDATE_SCHEDULE_RUN_COLUMNS = (
+    ('wait_for_reboot', 'INTEGER DEFAULT 1'),
+    ('pause_on_evacuation_error', 'INTEGER DEFAULT 1'),
+    ('ceph_health_gate', "TEXT DEFAULT 'off'"),
+    ('notify_channels', "TEXT DEFAULT '[]'"),
+)
 
 # Encryption imports
 ENCRYPTION_AVAILABLE = False
@@ -870,6 +883,9 @@ class PegaProxDB:
             for _col in ('migrate_templates', 'relax_anti_affinity'):
                 if _col not in _us_cols:
                     cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+            for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                if _col not in _us_cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
         except Exception as _e:
             logging.warning(f"update_schedules reboot_timeout migration skipped: {_e}")
 
@@ -1602,6 +1618,9 @@ class PegaProxDB:
                 for _col in ('migrate_templates', 'relax_anti_affinity'):   # #763, #954
                     if _col not in _us_cols2:
                         cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+                for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                    if _col not in _us_cols2:
+                        cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
             except Exception as _e2:
                 logging.warning(f"update_schedules reboot_timeout migration skipped: {_e2}")
             logging.info("Ensured update_schedules table exists")
@@ -5029,9 +5048,11 @@ class PegaProxDB:
             else:
                 severity = 'info'
 
-        # stored as text whatever came in, so the row reads back as it was hashed
+        # stored as text whatever came in, so the row reads back as it was hashed.
+        # NS Nov 2026 - a lone surrogate ("\ud800" in a client's JSON) has no UTF-8 form: the
+        # chain hash raised on it and the entry was lost. It is replaced before the hash.
         def _txt(v):
-            return None if v is None else str(v)
+            return None if v is None else _LONE_SURROGATE.sub('\ufffd', str(v))
         row = {'user': _txt(user), 'action': _txt(action) or '', 'details': _txt(details),
                'ip_address': _txt(ip), 'cluster': _txt(cluster) or '', 'severity': severity,
                'cluster_id': _txt(cluster_id) or ''}

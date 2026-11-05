@@ -203,8 +203,11 @@ def test_a_node_both_updates_and_maintains_in_one_entry(api, seed):
 def test_a_confined_caller_gets_the_progress_without_the_guests(api, seed):
     """The permission of /metrics, and from a maintenance only what updates/status hands a
     confined caller: the progress, not which guests are in it."""
+    # MK Nov 2026 - a confined caller reads the nodes its guests run on: one of theirs on each
+    guests = [{'vmid': 100, 'node': 'n1', 'type': 'qemu'}, {'vmid': 101, 'node': 'n2', 'type': 'qemu'}]
     mgr = types.SimpleNamespace(cluster_type='proxmox', nodes_in_maintenance={'n1': _Job(**EVACUATING)},
-                                nodes_updating={'n2': _Job(**UPDATING)})
+                                nodes_updating={'n2': _Job(**UPDATING)},
+                                get_vm_resources=lambda max_age=0: [dict(g) for g in guests])
     api.set_manager(CID, mgr)
     seed.tenant('acme', clusters=[CID])
     seed.tenant('globex', clusters=['other'])
@@ -212,6 +215,7 @@ def test_a_confined_caller_gets_the_progress_without_the_guests(api, seed):
     portal = api.as_user(seed.user('portal', role='user', tenant_id='globex',
                                    permissions=['cluster.view', 'vm.view']))
     seed.vm_acl(CID, 100, users=['portal'])
+    seed.vm_acl(CID, 101, users=['portal'])
     nobody = api.as_user(seed.user('nobody', role='user', tenant_id='acme', denied=['cluster.view']))
 
     full = operator.get(PROGRESS).get_json()['nodes']['n1']['maintenance_task']

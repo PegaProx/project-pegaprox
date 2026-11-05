@@ -617,7 +617,12 @@ def test_a_certificate_the_cluster_reports_is_the_join_fingerprint(api, seed, tl
 def test_the_bulk_migrate_judges_an_admins_token_by_the_token(api, seed, db):
     seed.user('boss', role='admin')
     seed.vm_acl('cluster_1', 100, ['boss'])
+    # MK Nov 2026 - 101 on n2 is theirs too: a confined caller moves guests onto a node of theirs
+    seed.vm_acl('cluster_1', 101, ['boss'])
     m = _cluster(api)
+    m.get_vm_resources.return_value = [{'vmid': 100, 'node': 'n1', 'type': 'qemu'},
+                                       {'vmid': 101, 'node': 'n2', 'type': 'qemu'},
+                                       {'vmid': 200, 'node': 'n1', 'type': 'qemu'}]
     m.migrate_vm_manual.return_value = {'success': True, 'task': None}
     body = {'target': 'n2', 'vms': [{'node': 'n1', 'vmid': 200, 'type': 'qemu'},
                                     {'node': 'n1', 'vmid': 100, 'type': 'qemu'}]}

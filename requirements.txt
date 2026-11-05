@@ -20,9 +20,14 @@ cryptography>=50.0.0,<52
 pyopenssl>=26.4.0
 argon2-cffi>=23.0.0
 pyasn1>=0.6.4
-# Full-DB encryption; prebuilt wheels are Linux x86_64 only — elsewhere PegaProx falls back
-# to plain SQLite + Fernet field encryption (see docs/SECURITY.md).
+# Full-DB encryption. MK Nov 2026 - one module, sqlcipher3, comes in two packages that must never
+# be installed side by side (both write sqlcipher3/, removing one breaks the other). Linux x86_64
+# keeps sqlcipher3-binary (manylinux2014, glibc 2.17), which every install there already has.
+# sqlcipher3 ships its own wheels with SQLCipher built in since 0.6.4, for aarch64 Linux (glibc
+# 2.28 or musl), macOS and Windows. Elsewhere (32-bit ARM) PegaProx stays on plain SQLite with
+# AES-256-GCM field encryption (see docs/SECURITY.md).
 sqlcipher3-binary>=0.6.0; sys_platform == "linux" and platform_machine == "x86_64"
+sqlcipher3>=0.6.4; (sys_platform == "linux" and platform_machine == "aarch64") or sys_platform == "darwin" or sys_platform == "win32"
 
 # === SSH & Console ===
 paramiko>=4.0.0

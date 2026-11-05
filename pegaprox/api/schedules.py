@@ -14,7 +14,7 @@ from flask import Blueprint, jsonify, request
 from pegaprox.constants import *
 from pegaprox.globals import *
 from pegaprox.models.permissions import *
-from pegaprox.core.db import get_db
+from pegaprox.core.db import get_db, UPDATE_SCHEDULE_RUN_COLUMNS
 from pegaprox.core import ha, rolling_runs
 from pegaprox.background.scheduler import _first_minute, _minute
 
@@ -22,10 +22,7 @@ from pegaprox.utils.auth import require_auth, load_users, build_authz_user
 from pegaprox.utils.rbac import has_permission
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import (check_cluster_access, safe_error, require_unconfined, evacuation_options,
-                                  evacuation_options_said, rolling_log, rolling_options_intro,
-                                  rolling_node_templates, rolling_moved_templates, rolling_rules_give_way,
-                                  rolling_rules_back_on, rolling_moved_guests, rolling_wind_down,
-                                  rolling_guests_left_moved)
+                                  evacuation_options_said)
 from pegaprox.api.nodes import cleanup_deleted_scripts, cleanup_orphaned_excluded_vms
 
 bp = Blueprint('schedules', __name__)
@@ -596,6 +593,77 @@ def execute_scheduled_action(action):
         logging.error(f"[SCHEDULER] Failed to execute {action_type}: {e}")
 
 
+def _channel_ids(value):
+    """value as a list of alert channel ids (GET /api/alert-channels), None when it is not
+    one: the rule of the route that starts a run by hand."""
+    if (not isinstance(value, list) or len(value) > 100
+            or not all(isinstance(c, str) and len(c) <= 128 for c in value)):
+        return None
+    return list(value)
+
+
+def _ceph_gate(value):
+    gate = str(value or 'off').lower()
+    return gate if gate in ('off', 'degraded', 'strict') else 'off'
+
+
+def _run_options_said(schedule):
+    """' (...)' for the audit line of a saved schedule: the run options that are not at their
+    defaults, so one armed to go on past guests it could not move does not read like a safe one.
+    The channels are counted, not named."""
+    said = []
+    if schedule.get('pause_on_evacuation_error') is False:
+        said.append('pause_on_evacuation_error off')
+    if _ceph_gate(schedule.get('ceph_health_gate')) != 'off':
+        said.append(f"ceph_health_gate={_ceph_gate(schedule.get('ceph_health_gate'))}")
+    if schedule.get('notify_channels'):
+        said.append(f"{len(schedule['notify_channels'])} alert channel(s)")
+    return f" ({', '.join(said)})" if said else ''
+
+
+def _scheduled_run_options(mgr, action):
+    """The options of a run a schedule starts, as run_rolling_update reads them from the state
+    of the run. One left out of the schedule (saved before it existed) takes the value that
+    is safe: pause when a guest could not be moved, wait for a rebooted node, no channels."""
+    from pegaprox.api.settings import _rolling_seconds
+    config = action.get('config') or {}
+
+    def seconds(key, default):
+        # 60 s .. 2 h as for a run started by hand; a bad stored value is the default
+        try:
+            return _rolling_seconds(config, key, default)
+        except ValueError:
+            return default
+
+    include_reboot = bool(config.get('include_reboot', False))
+    # MK Oct 2026 - the two evacuation options of the schedule (templates, negative affinity),
+    # off on one saved before they existed and on XCP-ng, as for a run started by hand
+    migrate_templates, relax_anti_affinity = evacuation_options(mgr, config)
+    return {
+        'include_reboot': include_reboot,
+        'skip_up_to_date': config.get('skip_up_to_date', True) is not False,
+        'skip_evacuation': bool(config.get('skip_evacuation', False)),
+        'wait_for_reboot': config.get('wait_for_reboot', True) is not False,
+        'pause_on_evacuation_error': config.get('pause_on_evacuation_error', True) is not False,
+        # NS - scheduled updates run unattended, so default local-disk
+        # evacuation ON: a run that pauses at 3am waiting for a human because one
+        # local-disk VM couldn't live-migrate is the worst possible outcome for an
+        # automatic update. On shared-storage clusters it's a no-op anyway. Honour a
+        # per-schedule override if one is ever stored, else evacuate everything.
+        'allow_local_disks': action.get('allow_local_disks', True) is not False,
+        'ceph_health_gate': _ceph_gate(config.get('ceph_health_gate')),
+        'migrate_templates': migrate_templates,
+        'relax_anti_affinity': relax_anti_affinity,
+        'force_all': False,
+        'evacuation_timeout': seconds('evacuation_timeout', 1800),
+        # the update task waits for its rebooted node itself (up to 600 s)
+        'update_timeout': 1800 if include_reboot else 900,
+        # the schedule's own reboot timeout
+        'reboot_timeout': seconds('reboot_timeout', 600),
+        'notify_channels': _channel_ids(config.get('notify_channels') or []) or [],
+    }
+
+
 def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
     """Execute a scheduled rolling update on a cluster
     
@@ -604,33 +672,21 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
     MK Oct 2026 - kept in rolling_update_runs like a run started by hand: not started while
     one of the cluster is running or paused, and a run a restart interrupted is paused there
     and goes on (or is cancelled) through the routes of settings.py.
+
+    NS Nov 2026 - and run by the worker of a run started by hand (settings.run_rolling_update)
+    with the options of the schedule. The copy of the loop that lived here went on after a
+    node whose update failed or never started and after an evacuation that left guests on
+    the node, never looked at Ceph and updated with force. A pause now waits for Continue or
+    Cancel like any other; the start and the end of the run are announced to the channels
+    of the schedule.
     """
+    from pegaprox.api.settings import _launch_rolling_update
     try:
-        # Get update config from action
-        config = action.get('config', {})
-        include_reboot = config.get('include_reboot', False)
-        skip_evacuation = config.get('skip_evacuation', False)
-        skip_up_to_date = config.get('skip_up_to_date', True)
-        evacuation_timeout = config.get('evacuation_timeout', 1800)
-        # MK #630: reboot timeout was hardcoded 600 here — now carried per-schedule. Clamp it the
-        # same way the manual rolling-update path does (60s..2h) so a bad stored value can't wedge.
-        try:
-            reboot_timeout = max(60, min(7200, int(config.get('reboot_timeout', 600) or 600)))
-        except (TypeError, ValueError):
-            reboot_timeout = 600
-        wait_for_reboot = config.get('wait_for_reboot', True)
-        # NS #630 - scheduled updates run unattended, so default local-disk
-        # evacuation ON: a run that pauses at 3am waiting for a human because one
-        # local-disk VM couldn't live-migrate is the worst possible outcome for an
-        # automatic update. On shared-storage clusters it's a no-op anyway. Honour a
-        # per-schedule override if one is ever stored, else evacuate everything.
-        allow_local_disks = action.get('allow_local_disks', True) is not False
-        # MK Oct 2026 (#763, #954) - the two evacuation options of the schedule, off on one
-        # saved before they existed and on XCP-ng, as for a run started by hand
-        migrate_templates, relax_anti_affinity = evacuation_options(mgr, config)
+        options = _scheduled_run_options(mgr, action)
 
         logging.info(f"[SCHEDULER] Starting scheduled rolling update for cluster {cluster_id}")
-        logging.info(f"[SCHEDULER] Config: reboot={include_reboot}, skip_evacuation={skip_evacuation}")
+        logging.info(f"[SCHEDULER] Config: reboot={options['include_reboot']}, "
+                     f"skip_evacuation={options['skip_evacuation']}")
         
         # Check if already running - or paused, which waits for an admin
         why = rolling_runs.busy(mgr, cluster_id)
@@ -647,253 +703,22 @@ def execute_scheduled_rolling_update(mgr, cluster_id: str, action: dict):
             return
         
         # Initialize rolling update state, in the table before the first step
-        state = rolling_runs.begin(mgr, cluster_id, {
+        state = rolling_runs.begin(mgr, cluster_id, dict(options, **{
             'status': 'running', 'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'include_reboot': include_reboot, 'skip_up_to_date': skip_up_to_date,
-            'skip_evacuation': skip_evacuation, 'wait_for_reboot': wait_for_reboot,
-            'pause_on_evacuation_error': False, 'force_all': False, 'allow_local_disks': allow_local_disks,
-            'migrate_templates': migrate_templates, 'relax_anti_affinity': relax_anti_affinity,
-            'evacuation_timeout': evacuation_timeout, 'update_timeout': 900, 'reboot_timeout': reboot_timeout,
             'nodes': nodes_to_update, 'current_index': 0, 'current_node': nodes_to_update[0],
             'current_step': 'starting', 'completed_nodes': [], 'skipped_nodes': [],
             'failed_nodes': [], 'rebooting_nodes': [], 'paused_reason': None, 'paused_details': None,
             'logs': [f"[{time.strftime('%H:%M:%S')}] Scheduled rolling update started"], 'scheduled': True
-        }, 'scheduler')
+        }), 'scheduler')
         if state is None:
             logging.warning(f"[SCHEDULER] Rolling update not started on {cluster_id}: another run came first")
             return
         log_audit('scheduler', 'node.rolling_update_started',
                   f"Scheduled rolling update of {len(nodes_to_update)} node(s) started"
-                  + evacuation_options_said(migrate_templates, relax_anti_affinity),
+                  + evacuation_options_said(options['migrate_templates'], options['relax_anti_affinity']),
                   cluster=getattr(mgr.config, 'name', cluster_id))
 
-        def run_scheduled_update():
-            """Run each scheduled node update and record its progress and cleanup."""
-            def _set(**kw):
-                return rolling_runs.change(mgr, **kw)
-
-            def _status():
-                return (rolling_runs.current(mgr) or {}).get('status')
-
-            def _quorum_stop(idx, node_name, phase):
-                """MK Oct 2026 - the quorum gate of settings.run_rolling_update. This worker waits
-                for nobody: a node that would cost the cluster its quorum pauses the run (reason
-                'quorum') and this worker ends - a Continue hands the run to the worker of a run
-                started by hand, which looks again. 'paused', 'cancelled' or None to go on."""
-                verdict = rolling_runs.quorum_gate(mgr, node_name, sleep=time.sleep,
-                                                   stop=lambda: _status() != 'running')
-                if verdict['ok']:
-                    if not verdict.get('skipped'):
-                        rolling_log(mgr, rolling_runs.quorum_said(verdict))
-                    return None
-                if _status() != 'running':
-                    return 'cancelled'
-                details, line = rolling_runs.quorum_hold(verdict, phase)
-                logging.warning(f"[SCHEDULER] Rolling update of {cluster_id} paused before {node_name}: "
-                                f"quorum {verdict.get('reason')}")
-                _set(status='paused', current_step='paused_quorum', paused_reason=rolling_runs.QUORUM,
-                     paused_details=details, resume_at={'index': idx, 'phase': phase}, log=line)
-                return 'paused'
-
-            rolling_log(mgr, f"Settings: skip_up_to_date={skip_up_to_date}, skip_evacuation={skip_evacuation}, "
-                             f"evacuation_timeout={evacuation_timeout}s, reboot_timeout={reboot_timeout}s, "
-                             f"migrate_templates={migrate_templates}, relax_anti_affinity={relax_anti_affinity}")
-            rolling_options_intro(mgr)
-            try:
-                for idx, node_name in enumerate(nodes_to_update):
-                    if _status() != 'running':
-                        break
-                    _set(current_index=idx, current_node=node_name, current_step='checking',
-                         node=(node_name, {'phase': 'checking'}), log=f"Processing {node_name}")
-                    if skip_up_to_date:
-                        try:
-                            mgr.refresh_node_apt(node_name); time.sleep(3)
-                            if not mgr.get_node_apt_updates(node_name):
-                                _set(add={'skipped_nodes': node_name},
-                                     node=(node_name, {'phase': 'done', 'result': 'skipped'}),
-                                     log=f"{node_name} up-to-date, skipping")
-                                continue
-                        except Exception as e:
-                            logging.warning(f"[SCHEDULER] Check failed for {node_name}: {e}")
-                    _set(current_step='maintenance', node=(node_name, {'phase': 'maintenance'}))
-                    gate = _quorum_stop(idx, node_name, 'maintenance')
-                    if gate == 'paused':
-                        return
-                    if gate:
-                        break
-                    running = []
-                    if not skip_evacuation:
-                        try:
-                            here = [r for r in (mgr.get_vm_resources() or [])
-                                    if r.get('node') == node_name and r.get('type') in ('qemu', 'lxc')]
-                            running = [v for v in here if (v.get('status') or '').lower() == 'running']
-                            rolling_node_templates(mgr, here)
-                        except Exception:
-                            pass
-                        rolling_rules_give_way(mgr, 'scheduler')   # #954, once, before the first evacuation
-                    # before each node's evacuation and its update (design 5.2)
-                    if not ha.confirm_step(f'rolling update of {node_name}'):
-                        rolling_log(mgr, "stopped: this instance does not hold the lease")
-                        break
-                    mgr.enter_maintenance_mode(node_name, skip_evacuation=skip_evacuation,
-                                               allow_local_disks=allow_local_disks,
-                                               **({'migrate_templates': True} if migrate_templates else {}))  # #763
-                    _set(node=(node_name, {'in_maintenance': True}))
-                    if not skip_evacuation:
-                        _set(current_step='evacuating', node=(node_name, {'phase': 'evacuating'}))
-                        waited = 0; evacuation_ok = False; task = None
-                        while waited < evacuation_timeout and _status() != 'cancelled':
-                            if node_name in mgr.nodes_in_maintenance:
-                                task = mgr.nodes_in_maintenance[node_name]
-                                if task.status == 'completed':
-                                    rolling_moved_templates(mgr, task)
-                                    evacuation_ok = True; break
-                                elif task.status == 'completed_with_errors':
-                                    rolling_moved_templates(mgr, task)
-                                    fv = getattr(task, 'failed_vms', [])
-                                    rolling_log(mgr, f"⚠️ Evacuation: {getattr(task,'migrated_vms',0)}/{getattr(task,'total_vms',0)} migrated, {len(fv)} failed - continuing")
-                                    evacuation_ok = True; break
-                                elif task.status == 'failed': break
-                            time.sleep(5); waited += 5
-                        if _status() == 'cancelled':
-                            break
-                        if not evacuation_ok:
-                            _set(add={'failed_nodes': {'node': node_name, 'error': 'Evacuation failed'}},
-                                 node=(node_name, {'result': 'failed'}),
-                                 log=f"✗ Evacuation failed on {node_name}, skipping")
-                            if mgr.exit_maintenance_mode(node_name):
-                                _set(node=(node_name, {'in_maintenance': False}))
-                            continue
-                        rolling_moved_guests(mgr, node_name, running, task)
-                    _set(current_step='updating', node=(node_name, {'phase': 'updating'}))
-                    gate = _quorum_stop(idx, node_name, 'updating')
-                    if gate == 'paused':
-                        return
-                    if gate:
-                        break
-                    if not ha.confirm_step(f'update of {node_name}'):
-                        rolling_log(mgr, "stopped: this instance does not hold the lease")
-                        break
-                    update_task = mgr.start_node_update(
-                        node_name, reboot=include_reboot, force=True, auto_exit_maintenance=False)
-                    if update_task:
-                        waited = 0
-                        while waited < (1800 if include_reboot else 900):
-                            if update_task.status in ['completed', 'failed']: break
-                            time.sleep(10); waited += 10
-                        if update_task.status == 'completed':
-                            node_rebooted = include_reboot and getattr(update_task, 'reboot_issued', False)
-                            back_online = bool(getattr(update_task, 'back_online', False))
-                            _set(add={'completed_nodes': node_name},
-                                 node=(node_name, {'updated': True, 'rebooted': bool(node_rebooted)}),
-                                 log=f"✓ {node_name} updated")
-                            if include_reboot and not node_rebooted:
-                                rolling_log(mgr, f"{node_name} did not require a reboot - skipping reboot wait")
-                            elif node_rebooted and back_online:
-                                rolling_log(mgr, f"✓ {node_name} rebooted during the update and is back online")
-                                # Membership can be cleared by another actor; recovery still needs to settle.
-                                time.sleep(30)
-                            elif node_rebooted:
-                                _set(current_step='rebooting', add={'rebooting_nodes': node_name},
-                                     node=(node_name, {'phase': 'rebooting', 'rebooted': True}))
-                                if wait_for_reboot:
-                                    rolling_log(mgr, f"Waiting for {node_name} to reboot...")
-                                    ow = 0
-                                    while ow < 120:
-                                        try:
-                                            ns = mgr.get_node_status()
-                                            if node_name not in ns or ns[node_name].get('status') != 'online': break
-                                        except: break
-                                        time.sleep(5); ow += 5
-                                    rw = 0
-                                    came_back = False
-                                    # #630 - the schedule's own reboot timeout, it was a fixed 600 s here
-                                    while rw < reboot_timeout and _status() != 'cancelled':
-                                        try:
-                                            ns = mgr.get_node_status()
-                                            if node_name in ns and ns[node_name].get('status') == 'online':
-                                                _set(drop={'rebooting_nodes': node_name},
-                                                     log=f"✓ {node_name} back online")
-                                                came_back = True
-                                                # NS May 2026 — give HA services time to start
-                                                # before trying to disable maintenance. 10s was
-                                                # too short → ha-manager rejected the disable
-                                                # call and node stayed in maintenance.
-                                                time.sleep(30)
-                                                break
-                                        except: pass
-                                        time.sleep(10); rw += 10
-                                    if not came_back:
-                                        rolling_log(mgr, f"⚠ {node_name} did not come back online within {reboot_timeout}s")
-                                else:
-                                    rolling_log(mgr, f"{node_name} rebooting (wait_for_reboot=False)")
-                        else:
-                            _set(add={'failed_nodes': {'node': node_name, 'error': 'Update failed'}},
-                                 node=(node_name, {'result': 'failed'}), log=f"✗ {node_name} update failed")
-                    # The update task may clear maintenance after announcing completion.
-                    # Check again after a False exit result so its concurrent auto-exit
-                    # does not become a false warning; a still-held node gets the final sweep.
-                    _set(current_step='finishing', node=(node_name, {'phase': 'finishing'}))
-                    exited = (node_name not in mgr.nodes_in_maintenance
-                              or mgr.exit_maintenance_mode(node_name))
-                    if not exited:
-                        exited = node_name not in mgr.nodes_in_maintenance
-                    if exited:
-                        _set(node=(node_name, {'in_maintenance': False}))
-                    else:
-                        rolling_log(mgr, f"⚠ {node_name} maintenance exit failed - will retry at end")
-                    if node_name in ((rolling_runs.current(mgr) or {}).get('completed_nodes') or []):
-                        _set(node=(node_name, {'phase': 'done', 'result': 'done', 'moved': []}))
-                
-                # NS May 2026 - final sweep: every node this run put into maintenance that is
-                # still in it gets one more shot, after a longer settle time. Catches the case
-                # where the node took long to reboot or HA services were still starting when we
-                # tried to exit. And the negative affinity rules come back on (#954).
-                cancelled = _status() == 'cancelled'
-                if not cancelled:
-                    _set(current_step=rolling_runs.CLEANUP)
-                undone = rolling_wind_down(mgr, 'scheduler', settle=15, sleep=time.sleep)
-
-                # Finished
-                done = rolling_runs.current(mgr) or {}
-                counts = (f"{len(done.get('completed_nodes') or [])} updated, "
-                          f"{len(done.get('skipped_nodes') or [])} skipped, "
-                          f"{len(done.get('failed_nodes') or [])} failed")
-                if cancelled:
-                    _set(cancel_report=undone + rolling_guests_left_moved(mgr), rebooting_nodes=[],
-                         log="Scheduled rolling update cancelled")
-                else:
-                    _set(status='completed', rebooting_nodes=[], log="Scheduled rolling update completed")
-                
-                # Log audit
-                log_audit('scheduler', 'scheduled.rolling_update', 
-                          f"Scheduled rolling update {'cancelled' if cancelled else 'completed'}: {counts}")
-                
-            except Exception as e:
-                logging.error(f"[SCHEDULER] Rolling update error: {e}")
-                # MK Oct 2026 - the nodes this run put into maintenance come out again, as after a
-                # cancel; the manual run does the same in its own error path
-                try:
-                    rolling_wind_down(mgr, 'scheduler', settle=15, sleep=time.sleep)
-                except Exception as wd:
-                    logging.error(f"[SCHEDULER] Rolling update cleanup after the error failed: {wd}")
-                rolling_rules_back_on(mgr, 'scheduler')   # #954, before the status says the run is over
-                _set(status='failed', error=str(e), rebooting_nodes=[], log=f"ERROR: {e}")
-
-        run_id = state.get('run_id')
-
-        def work():
-            try:
-                run_scheduled_update()
-            finally:
-                rolling_runs.detach(cluster_id, run_id)
-        
-        # the steps between the confirms (apt refresh, maintenance exit) ask at their exit (#625)
-        update_thread = threading.Thread(target=ha.as_job(work, f'rolling update of {cluster_id}'),
-                                         daemon=True)
-        rolling_runs.attach(mgr, cluster_id, update_thread)
-        update_thread.start()
-
+        _launch_rolling_update(mgr, cluster_id, 'scheduler')
         logging.info(f"[SCHEDULER] Rolling update thread started for {cluster_id}")
         
     except Exception as e:
@@ -1256,8 +1081,9 @@ def delete_schedule(schedule_id):
 # MK: Automatic rolling update scheduling (SQLite storage)
 # ============================================
 
-def load_update_schedule(cluster_id: str) -> dict:
-    """Load update schedule for a cluster from SQLite"""
+def load_update_schedule(cluster_id: str, strict: bool = False) -> dict:
+    """Load update schedule for a cluster from SQLite. strict raises when the row cannot be
+    read instead of answering with the defaults."""
     default = {
         'enabled': False,
         'schedule_type': 'recurring',
@@ -1269,6 +1095,10 @@ def load_update_schedule(cluster_id: str) -> dict:
         'evacuation_timeout': 1800,
         'migrate_templates': False,
         'relax_anti_affinity': False,
+        'wait_for_reboot': True,
+        'pause_on_evacuation_error': True,
+        'ceph_health_gate': 'off',
+        'notify_channels': [],
         'last_run': None,
         'next_run': None
     }
@@ -1308,6 +1138,9 @@ def load_update_schedule(cluster_id: str) -> dict:
             for _col in ('migrate_templates', 'relax_anti_affinity'):   # #763, #954
                 if _col not in _cols:
                     cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+            for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                if _col not in _cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
         except Exception as _mig_e:
             logging.warning(f"update_schedules reboot_timeout migration skipped: {_mig_e}")
 
@@ -1317,12 +1150,23 @@ def load_update_schedule(cluster_id: str) -> dict:
             return _update_schedule_row(row)
     except Exception as e:
         logging.error(f"Error loading update schedule: {e}")
+        if strict:
+            raise
     return default
 
 
 def _update_schedule_row(row):
     """A row of update_schedules as the routes and the scheduler read it."""
     keys = row.keys()
+
+    def on(col):
+        # the options of a run by hand (UPDATE_SCHEDULE_RUN_COLUMNS) are on unless stored off
+        return col not in keys or row[col] is None or bool(row[col])
+
+    try:
+        channels = json.loads(row['notify_channels'] or '[]') if 'notify_channels' in keys else []
+    except (TypeError, ValueError):
+        channels = []
     return {
         'enabled': bool(row['enabled']),
         'schedule_type': row['schedule_type'] or 'recurring',
@@ -1336,6 +1180,10 @@ def _update_schedule_row(row):
         # #763, #954 - off on a schedule saved before they existed
         'migrate_templates': bool(row['migrate_templates']) if 'migrate_templates' in keys else False,
         'relax_anti_affinity': bool(row['relax_anti_affinity']) if 'relax_anti_affinity' in keys else False,
+        'wait_for_reboot': on('wait_for_reboot'),
+        'pause_on_evacuation_error': on('pause_on_evacuation_error'),
+        'ceph_health_gate': _ceph_gate(row['ceph_health_gate'] if 'ceph_health_gate' in keys else None),
+        'notify_channels': _channel_ids(channels) or [],
         'last_run': row['last_run'],
         'next_run': row['next_run']
     }
@@ -1353,8 +1201,9 @@ def save_update_schedule(cluster_id: str, schedule: dict, user: str = 'system'):
             INSERT OR REPLACE INTO update_schedules
             (cluster_id, enabled, schedule_type, day, time, include_reboot, skip_evacuation,
              skip_up_to_date, evacuation_timeout, reboot_timeout, migrate_templates, relax_anti_affinity,
+             wait_for_reboot, pause_on_evacuation_error, ceph_health_gate, notify_channels,
              last_run, next_run, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             cluster_id,
             1 if schedule.get('enabled') else 0,
@@ -1368,6 +1217,10 @@ def save_update_schedule(cluster_id: str, schedule: dict, user: str = 'system'):
             schedule.get('reboot_timeout', 600),
             1 if schedule.get('migrate_templates') else 0,   # #763
             1 if schedule.get('relax_anti_affinity') else 0,   # #954
+            1 if schedule.get('wait_for_reboot', True) else 0,
+            1 if schedule.get('pause_on_evacuation_error', True) else 0,
+            _ceph_gate(schedule.get('ceph_health_gate')),
+            json.dumps(_channel_ids(schedule.get('notify_channels') or []) or []),
             schedule.get('last_run'),
             schedule.get('next_run'),
             user,
@@ -1417,6 +1270,11 @@ def get_update_schedule(cluster_id):
     if not ok: return err
     
     schedule = load_update_schedule(cluster_id)
+    from pegaprox.api.helpers import sees_whole_maintenance
+    if not sees_whole_maintenance(build_authz_user(request.session.get('user', ''), request.session),
+                                  cluster_id):
+        # as for the run itself (rolling_runs.CONFINED_HIDDEN)
+        schedule.pop('notify_channels', None)
     return jsonify(schedule)
 
 
@@ -1441,11 +1299,41 @@ def set_update_schedule(cluster_id):
     
     data = request.json or {}
     usr = getattr(request, 'session', {}).get('user', 'system')
+    # The options of a run started by hand that the schedule carries. One the body leaves out
+    # (or sends as null) keeps its stored value: the schedule dialog sends only some of them,
+    # and a save from it must not drop the channels or the Ceph gate set through the API.
+    from pegaprox.api.settings import _rolling_flag, _rolling_seconds
+    try:
+        stored = load_update_schedule(cluster_id, strict=True)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Could not read the stored update schedule')}), 500
+    notify_channels = stored['notify_channels']
+    if data.get('notify_channels') is not None:
+        notify_channels = _channel_ids(data['notify_channels'])
+        if notify_channels is None:
+            return jsonify({'error': 'notify_channels must be a list of channel ids'}), 400
+    try:
+        wait_for_reboot = _rolling_flag(data, 'wait_for_reboot', stored['wait_for_reboot'])
+        pause_on_evacuation_error = _rolling_flag(data, 'pause_on_evacuation_error',
+                                                  stored['pause_on_evacuation_error'])
+        # the older switches too: "false" as a string was truthy, so it armed a schedule or
+        # skipped the evacuation it was meant to keep
+        enabled = _rolling_flag(data, 'enabled', False)
+        include_reboot = _rolling_flag(data, 'include_reboot', True)
+        skip_evacuation = _rolling_flag(data, 'skip_evacuation', False)
+        skip_up_to_date = _rolling_flag(data, 'skip_up_to_date', True)
+        evacuation_timeout = _rolling_seconds(data, 'evacuation_timeout', 1800)
+        reboot_timeout = _rolling_seconds(data, 'reboot_timeout', 600)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    ceph_health_gate = stored['ceph_health_gate']
+    if data.get('ceph_health_gate') is not None:
+        ceph_health_gate = _ceph_gate(data['ceph_health_gate'])
 
     # MK Sep 2026 - arming this with include_reboot set schedules a node reboot, and
     # node.reboot is the permission for that (see the manual route in settings.py). It
     # was enforced nowhere, so withholding it from a role changed nothing.
-    if data.get('enabled', False) and data.get('include_reboot', True):
+    if enabled and include_reboot:
         from pegaprox.utils.rbac import has_permission as _hasp
         from pegaprox.utils.auth import build_authz_user as _bau
         if not _hasp(_bau(usr, getattr(request, 'session', {}) or {}), 'node.reboot'):
@@ -1457,16 +1345,19 @@ def set_update_schedule(cluster_id):
     # unless asked for, and off on XCP-ng as for a run started by hand
     migrate_templates, relax_anti_affinity = evacuation_options(mgr, data)
     schedule = {
-        'enabled': data.get('enabled', False),
+        'enabled': enabled,
         'schedule_type': data.get('schedule_type', 'recurring'),
         'day': data.get('day', 'sunday'),
         'time': data.get('time', '03:00'),
-        'include_reboot': data.get('include_reboot', True),
-        'skip_evacuation': data.get('skip_evacuation', False),
-        'skip_up_to_date': data.get('skip_up_to_date', True),
-        'evacuation_timeout': data.get('evacuation_timeout', 1800),
-        'reboot_timeout': data.get('reboot_timeout', 600),
-        'wait_for_reboot': data.get('wait_for_reboot', True),
+        'include_reboot': include_reboot,
+        'skip_evacuation': skip_evacuation,
+        'skip_up_to_date': skip_up_to_date,
+        'evacuation_timeout': evacuation_timeout,
+        'reboot_timeout': reboot_timeout,
+        'wait_for_reboot': wait_for_reboot,
+        'pause_on_evacuation_error': pause_on_evacuation_error,
+        'ceph_health_gate': ceph_health_gate,
+        'notify_channels': notify_channels,
         'migrate_templates': migrate_templates,
         'relax_anti_affinity': relax_anti_affinity,
         'last_run': None,
@@ -1481,7 +1372,8 @@ def set_update_schedule(cluster_id):
 
     # Log audit
     log_audit(usr, 'update.schedule', f"Update schedule {'enabled' if schedule['enabled'] else 'disabled'} for {mgr.config.name}"
-              + (evacuation_options_said(migrate_templates, relax_anti_affinity) if schedule['enabled'] else ''),
+              + (evacuation_options_said(migrate_templates, relax_anti_affinity) if schedule['enabled'] else '')
+              + _run_options_said(schedule),
               cluster=mgr.config.name)
     
     return jsonify({'success': True, 'schedule': schedule})
@@ -1648,6 +1540,10 @@ def check_scheduled_updates(minutes=None):
                         'reboot_timeout': schedule.get('reboot_timeout', 600),
                         'migrate_templates': schedule.get('migrate_templates') is True,   # #763
                         'relax_anti_affinity': schedule.get('relax_anti_affinity') is True,   # #954
+                        'wait_for_reboot': schedule.get('wait_for_reboot', True),
+                        'pause_on_evacuation_error': schedule.get('pause_on_evacuation_error', True),
+                        'ceph_health_gate': schedule.get('ceph_health_gate', 'off'),
+                        'notify_channels': schedule.get('notify_channels') or [],
                     }
                 }
                 

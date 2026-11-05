@@ -20,7 +20,8 @@ from pegaprox.utils.rbac import (
     has_permission, filter_clusters_for_user, user_can_access_vm,
     get_user_clusters,
 )
-from pegaprox.api.helpers import get_connected_manager, safe_error, check_cluster_access, scope_vm_rows
+from pegaprox.api.helpers import (get_connected_manager, safe_error, check_cluster_access, scope_vm_rows,
+                                  caller_guest_nodes)
 from pegaprox.background import guest_index
 from pegaprox.utils import search_query
 
@@ -254,7 +255,13 @@ def global_search():
         # Search Nodes
         if search_type in ['all', 'node']:
             try:
+                # MK Nov 2026 (#1218) - a caller confined to some guests finds the nodes those
+                # run on, as /metrics lists them; guests that cannot be read raise into the
+                # except below and the cluster lists no node
+                mine = caller_guest_nodes(cluster_id, user=user_data)
                 for node_name, node_data in (mgr.nodes or {}).items():
+                    if mine is not None and node_name not in mine:
+                        continue
                     node_data = node_data or {}
                     nodes.append({'node_name': node_name, 'data': node_data, 'cluster_id': cluster_id,
                                   'cluster_name': cluster_name, 'name': node_name.lower(),
@@ -472,8 +479,16 @@ def global_summary():
                 
                 # Count nodes - safely handle None
                 nodes = getattr(mgr, 'nodes', None) or {}
+                # MK Nov 2026 (#1218) - a caller confined to some guests counts the nodes those
+                # run on and their resources, what /metrics gives them; none while their guests
+                # cannot be read
+                try:
+                    mine = caller_guest_nodes(cluster_id, user=user_data)
+                except Exception as e:
+                    logging.warning(f"[summary] guests on {cluster_id} unread, its nodes not counted: {e}")
+                    mine = set()
                 for node_name, node_data in nodes.items():
-                    if not node_data:
+                    if not node_data or (mine is not None and node_name not in mine):
                         continue
                     summary['nodes']['total'] += 1
                     cluster_stats['nodes'] += 1

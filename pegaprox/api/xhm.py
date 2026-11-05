@@ -151,6 +151,13 @@ def xhm_start():
     from pegaprox.utils.sanitization import validate_storage_name
     if not validate_storage_name(data['target_storage']):
         return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    # MK Nov 2026 - {source network or NIC index: target network}. Anything else failed the
+    # migration half way, after the guest and its disks were already made on the target
+    _nm = data.get('network_map')
+    if _nm is not None and not (isinstance(_nm, dict) and all(
+            isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in _nm.items())):
+        return jsonify({'error': 'network_map maps a source network or NIC index to a target network name',
+                        'code': 'INVALID_FIELD', 'field': 'network_map'}), 400
 
     # Authorization: check source cluster access
     ok, err = check_cluster_access(data['source_cluster'])

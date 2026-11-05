@@ -720,12 +720,12 @@ AUTOMATIONS = {
     ('pegaprox/api/multi_sdn.py', 'start_scanner'): (1, 'confirm'),
     ('pegaprox/api/realtime.py', 'update_sse_subscription'): (1, 'read'),
     ('pegaprox/api/reports.py', '<module>'): (2, 'read'),
-    ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update'): (1, 'job'),
     ('pegaprox/api/schedules.py', 'start_scheduler'): (1, 'confirm'),
     ('pegaprox/api/settings.py', 'perform_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'rollback_pegaprox_update'): (1, 'local'),
     ('pegaprox/api/settings.py', 'restart_server'): (1, 'local'),
-    # the worker of a rolling update, for a start and for a Continue after a restart
+    # the worker of a rolling update, for a start (by hand or by a schedule) and for a
+    # Continue after a restart
     ('pegaprox/api/settings.py', '_launch_rolling_update'): (1, 'job'),
     ('pegaprox/api/siem.py', 'start_worker'): (1, 'read'),
     ('pegaprox/api/site_recovery.py', '_safe_spawn_failover'): (1, 'job'),
@@ -804,7 +804,8 @@ AUTOMATIONS = {
     ('pegaprox/core/vmware.py', 'load_vmware_servers'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start'): (1, 'confirm'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start_node_update'): (1, 'job'),
-    ('pegaprox/utils/concurrent.py', 'run_per_node'): (1, 'carry'),
+    # the thread fallback and the greenlets of a fan-out with a whole deadline, both on the carried tasks
+    ('pegaprox/utils/concurrent.py', 'run_per_node'): (2, 'carry'),
     ('pegaprox/utils/concurrent.py', 'gevent_to_thread'): (1, 'console'),
     ('pegaprox/utils/rbac.py', 'get_pool_membership_cache'): (1, 'read'),
     ('pegaprox/utils/realtime.py', 'push_immediate_update'): (1, 'read'),
@@ -983,8 +984,6 @@ CONFIRM_SITES = [
     # a test guest a run left behind, removed from the schedule loop
     ('pegaprox/core/backup_verify.py', 'sweep', ['remove_test_guest']),
     ('pegaprox/api/schedules.py', 'check_schedules', ['execute_scheduled_action']),
-    ('pegaprox/api/schedules.py', 'execute_scheduled_rolling_update.run_scheduled_update',
-     ['enter_maintenance_mode', 'start_node_update']),
     ('pegaprox/api/settings.py', 'run_rolling_update.run_node',
      ['enter_maintenance_mode', 'start_node_update']),
     ('pegaprox/api/snapshots.py', '_execute_policy', ['create_snapshot']),

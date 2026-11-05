@@ -532,14 +532,17 @@ def test_the_scheduler_hands_the_stored_options_to_the_run(monkeypatch):
 @pytest.fixture
 def fast_schedule(monkeypatch):
     import pegaprox.api.schedules as sch
+    import pegaprox.api.settings as st
     monkeypatch.setattr(sch, 'time', _FastTime())
+    # the scheduled run is run by the worker of a run started by hand
+    monkeypatch.setattr(st, 'time', _FastTime())
     return sch
 
 
 def _scheduled_fake(api, guests=GUESTS, cluster_type='proxmox'):
     fake, order = _cluster_manager(api, guests, cluster_type=cluster_type)
 
-    def update(node, reboot=False, force=False, auto_exit_maintenance=True):
+    def update(node, reboot=False, force=False):
         order.append(('update', node))
         t = UpdateTask(node, reboot=False)
         t.status, t.phase = 'completed', 'done'
@@ -594,7 +597,17 @@ def test_a_failed_scheduled_run_switches_the_rules_back_on(api, seed, fast_sched
         return enter(node, **kw)
     fake.enter_maintenance_mode.side_effect = enter_or_fail
     state = _run_scheduled(fast_schedule, fake, relax_anti_affinity=True)
-    assert state['status'] == 'failed'
+    # a failed node pauses the scheduled run like one started by hand; the rules stay off
+    # while it waits and come back on with its cancel
+    assert state['status'] == 'paused' and state['paused_reason'] == 'node_failure', state['logs']
+    assert ('rules on', 'scheduler') not in order
+    from pegaprox.core import rolling_runs
+    rolling_runs.change(fake, status='cancelled')
+    deadline = time.time() + 20
+    while time.time() < deadline and rolling_runs._live:
+        time.sleep(0.02)
+    state = fake._rolling_update
+    assert state['status'] == 'cancelled'
     assert order[0] == ('rules off', 'scheduler') and order[-1] == ('rules on', 'scheduler'), order
     assert state['ha_rules_held'] is False
 
@@ -632,15 +645,21 @@ def test_a_scheduled_run_without_an_evacuation_switches_nothing(api, seed, fast_
 
 
 def test_both_runs_use_the_one_helper():
-    """The two copies of the loop share what the options do (api/helpers.py)."""
+    """What the options do is in api/helpers.py, and the scheduled run has no copy of the
+    loop of its own any more: the worker of a run started by hand runs it."""
     import inspect
     import pegaprox.api.schedules as sch
     import pegaprox.api.settings as st
-    run = inspect.getsource(sch.execute_scheduled_rolling_update)
+    run = inspect.getsource(sch.execute_scheduled_rolling_update) + inspect.getsource(sch._scheduled_run_options)
     # the route starts the run, its worker (also the one of a Continue after a restart) runs it
     start = inspect.getsource(st.start_rolling_update) + inspect.getsource(st.run_rolling_update)
-    for name in ('evacuation_options(', 'rolling_rules_give_way(', 'rolling_rules_back_on(',
-                 'rolling_moved_templates(', 'rolling_options_intro(', 'rolling_node_templates(',
-                 'evacuation_options_said(', 'rolling_wind_down('):
+    for name in ('evacuation_options(', 'evacuation_options_said('):
         assert name in run and name in start, name
+    for name in ('rolling_rules_give_way(', 'rolling_rules_back_on(', 'rolling_moved_templates(',
+                 'rolling_options_intro(', 'rolling_node_templates(', 'rolling_wind_down('):
+        assert name in start, name
+    assert '_launch_rolling_update(' in run
+    whole = inspect.getsource(sch)
+    for name in ('enter_maintenance_mode', 'start_node_update', 'rolling_wind_down'):
+        assert name not in whole, f'schedules.py runs a rolling update of its own: {name}'
     assert 'suspend_negative_ha_rules' not in run + start

@@ -1788,7 +1788,8 @@ def test_the_corporate_node_view_shows_but_does_not_change_on_a_standby():
     # the sub navigation reads and stays outside the disabled part
     assert configure.index('corp-subnav-item') < configure.index('<fieldset disabled={haReadOnly} className="contents">')
     hw = body[body.index("{activeDetailTab === 'hardware' && ("):]
-    assert hw.index('<fieldset disabled={haReadOnly} className="contents">') < hw.index('<HardwareMonitoringPanel')
+    # Corporate Redesigned gives the same fieldset a class of its own
+    assert hw.index('<fieldset disabled={haReadOnly} className=') < hw.index('<HardwareMonitoringPanel')
 
 
 def test_no_efficient_snapshot_refresh_from_a_standby():
@@ -2044,9 +2045,9 @@ def test_compliance_stays_a_reading_tab_on_a_standby(dash):
     assert ("if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') "
             "|| holds('changes.view');") in dash
     # holds() decides this tab (and the sub tabs of it, with the change plans' request button),
-    # whether a standby offers a console on the active, and the console entries of a member
-    # that opens them itself
-    assert len(re.findall(r'\bholds\(', dash)) == 9
+    # whether a standby offers a console on the active, the console entries of a member
+    # that opens them itself, and whether the Corporate Redesigned dashboard reads the audit trail
+    assert len(re.findall(r'\bholds\(', dash)) == 10
     assert 'const onActiveItems = (permission, search, disabled = false) => !holds(permission) ? [] : [{' in dash
     assert 'const menuAllows = (i) => !i.perm || (i.console ? holds(i.perm) : can(i.perm));' in dash
     drift = _function(dash, 'DriftTab')
@@ -2351,7 +2352,7 @@ def test_runtime_a_refused_snapshot_delete_says_so(open_app, bulk):
     page = app.page
     if bulk:
         page.locator('tbody input[type="checkbox"]').first.check()
-        page.locator('button', has_text='deleteSelected').first.click()   # the key has no text yet (pre-existing)
+        page.locator('button', has_text='Delete selected').first.click()
     else:
         page.locator('button[title="Delete snapshot"]').first.click(force=True)
     page.get_by_text(reason).first.wait_for(timeout=5000)
@@ -3630,6 +3631,9 @@ def test_runtime_a_console_window_on_a_standby_offers_the_active(open_app, role)
     here, the window offers the same console on the active."""
     app = open_app(role=role, layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if role == 'standby':
@@ -4213,6 +4217,9 @@ def test_runtime_a_console_window_on_a_serving_member(open_app, serve):
     app = open_app(role='standby', layout='modern', clusters=[CLUSTER], resources=[VM], forward_writes=True,
                    serve_assigned=serve)
     page = app.page
+    # the dashboard asks for an update two seconds after it opened; with a bundle that takes longer
+    # to load than that, the old page asked while the window loaded. Count only the window's calls
+    page.goto('about:blank')
     before = len(app.server.calls)
     page.goto(BASE + '/?console=c1:qemu:100:pve1', wait_until='load')
     if serve:
@@ -4426,7 +4433,7 @@ def test_the_leader_only_lists_say_when_the_leader_is_away(ctx, dash):
     assert 'const away = await haLeaderAway(r);' in bell
     assert 'if (away) { setItems([]); setUnread(0); return; }' in bell
     assert '{items.length === 0 && !leaderAway && (' in bell
-    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId) => {', 'const ackAlert = ')
+    alerts = _block(dash, 'const loadActiveAlerts = async (clusterId, force) => {', 'const ackAlert = ')
     assert 'setActiveAlertsAway(await haLeaderAway(r));' in alerts
     for where in ('drift', 'inbox', 'alerts'):
         at = dash.index(f'data-ha-leader-away="{where}"')

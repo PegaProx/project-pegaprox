@@ -48,6 +48,23 @@
                 }
             };
             
+            // LW Nov 2026 - the cluster's own CPU models (its PVE version, its custom-* models), the
+            // list the VM config dialog offers too; the built-in list below stays the fallback
+            const [liveCpuTypes, setLiveCpuTypes] = useState(null);
+            useEffect(() => {
+                if (!isQemu || isXcpng) return;
+                let gone = false;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    if (!r || !r.ok) return;
+                    try {
+                        const d = await r.json();
+                        if (!gone && Array.isArray(d.cpu_types) && d.cpu_types.length) setLiveCpuTypes(d.cpu_types);
+                    } catch (e) { /* keep the built-in list */ }
+                })();
+                return () => { gone = true; };
+            }, [clusterId]);
+
             // Fetch nodes if not provided
             useEffect(() => {
                 const fetchNodes = async () => {
@@ -304,21 +321,34 @@
             // MK 2026-05-30 — host first, max second, then alphabetical (case-insensitive).
             // Matches the backend get_cpu_types() ordering; VM Config dropdown already gets
             // a sorted list from /api/hardware-options so the two surfaces look identical now.
-            const cpuTypes = (() => {
+            const cpuTypes = liveCpuTypes || (() => {
+                // qemu-server's own x86_64 list (CPUConfig.pm) with host and the x86-64-v* levels
                 const all = [
                     'host', 'max',
                     'kvm64', 'kvm32', 'qemu64', 'qemu32',
+                    'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+                    'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+                    'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
+                    'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
                     'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-                    'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Conroe', 'EPYC', 'EPYC-IBPB',
-                    'EPYC-Milan', 'EPYC-Rome', 'Haswell', 'Haswell-IBRS', 'Haswell-noTSX',
-                    'Haswell-noTSX-IBRS', 'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server',
-                    'Icelake-Server-noTSX', 'IvyBridge', 'IvyBridge-IBRS', 'KnightsMill', 'Nehalem',
-                    'Nehalem-IBRS', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-                    'Penryn', 'SandyBridge', 'SandyBridge-IBRS', 'Skylake-Client', 'Skylake-Client-IBRS',
-                    'Skylake-Client-noTSX-IBRS', 'Skylake-Server', 'Skylake-Server-IBRS',
-                    'Skylake-Server-noTSX-IBRS', 'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo',
-                    'coreduo', 'n270', 'pentium', 'pentium2', 'pentium3', 'phenom', 'x86-64-v2',
-                    'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
+                    'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+                    'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+                    'Skylake-Server-v5',
+                    'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+                    'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+                    'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
+                    'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
+                    'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+                    'Icelake-Server-v7',
+                    'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+                    'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+                    'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+                    'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+                    'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+                    'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+                    'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+                    'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
                 ];
                 const head = [];
                 const rest = [];
@@ -2863,6 +2893,8 @@
             const { t, languageLocked } = useTranslation();
             const { getAuthHeaders, user, updatePreferences, updateCurrentUser, layoutLock } = useAuth();
             const { isCorporate } = useLayout();
+            const layerRef = React.useRef(null);
+            useEscapeToClose(isOpen, onClose, layerRef);
             const [activeTab, setActiveTab] = useState('appearance');
             const [loading, setLoading] = useState(false);
             const [selectedTheme, setSelectedTheme] = useState(user?.theme || 'proxmoxDark');
@@ -3235,7 +3267,7 @@
                 : `flex-1 px-4 py-3 text-sm font-medium transition-colors flex items-center justify-center gap-2 ${active ? 'text-proxmox-orange border-b-2 border-proxmox-orange' : 'text-gray-400 hover:text-white'}`;
 
             return(
-                <div className={overlayCls} onClick={onClose}>
+                <div ref={layerRef} className={overlayCls} onClick={onClose}>
                     <div
                         className={panelCls}
                         onClick={e => e.stopPropagation()}
@@ -3436,7 +3468,7 @@
                                         <p className="text-xs text-gray-400 mb-3">
                                             {t('layoutStyleDesc') || 'Choose between modern dashboard or corporate enterprise style.'}
                                         </p>
-                                        <div className="grid grid-cols-3 gap-3">
+                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                                             {/* Modern layout card */}
                                             <button
                                                 onClick={async () => {
@@ -3508,6 +3540,49 @@
                                                 <div className="text-center">
                                                     <span className="text-xs font-medium">{t('layoutCorporate') || 'Corporate'}</span>
                                                     <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                                </div>
+                                            </button>
+                                            {/* LW Oct 2026 - Corporate Redesigned: Corporate with the redesigned skin */}
+                                            <button
+                                                data-layout-pick="corporate-redesigned"
+                                                onClick={async () => {
+                                                    const corpTheme = localStorage.getItem('corp-theme') === 'light' ? 'corporateLight' : 'corporateDark';
+                                                    const result = await updatePreferences({ ui_layout: 'corporate-redesigned', theme: corpTheme });
+                                                    if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
+                                                }}
+                                                className={`p-3 rounded-xl border-2 transition-all hover:scale-105 text-left ${
+                                                    user?.ui_layout === 'corporate-redesigned'
+                                                        ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                                        : 'border-proxmox-border hover:border-gray-500'
+                                                }`}
+                                            >
+                                                <div className="h-16 rounded mb-2 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                                    {/* the picture: slim header, inventory rail, dense rows */}
+                                                    <div className="absolute left-0 right-0 top-0 h-2" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                                        <div className="absolute top-0.5 left-1 w-3 h-1" style={{ background: '#55b6d0' }} />
+                                                    </div>
+                                                    <div className="absolute left-0 top-2 bottom-0 w-5" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                                        <div className="mt-1 ml-1 space-y-1">
+                                                            <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                            <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                        </div>
+                                                    </div>
+                                                    <div className="absolute right-1.5 left-7 bottom-1.5 space-y-1" style={{ top: 14, background: '#20333e', border: '1px solid #293d47' }}>
+                                                        <div className="h-1" style={{ background: '#263c47' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                        <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                                    </div>
+                                                    {user?.ui_layout === 'corporate-redesigned' && (
+                                                        <div className="absolute top-1 right-1 bg-proxmox-orange rounded-full p-0.5">
+                                                            <Icons.Check className="w-3 h-3 text-white" />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <div className="text-center">
+                                                    <span className="text-xs font-medium">{t('layoutCorporateRedesigned')}</span>
+                                                    <p className="text-[10px] text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                                 </div>
                                             </button>
                                             {/* Cloud layout card (Preview) — NS 2026-06-05 */}
