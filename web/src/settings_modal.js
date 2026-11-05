@@ -8026,6 +8026,8 @@
                                                     <option value="">{t('uiLockUsersChoose') || 'Users choose'}</option>
                                                     <option value="modern">{t('layoutModern') || 'Modern'}</option>
                                                     <option value="corporate">{t('layoutCorporate') || 'Corporate'}</option>
+                                                    {/* LW Nov 2026 - the redesign can be pinned too (ui_layout_lock takes it) */}
+                                                    <option value="corporate-redesigned">{t('layoutCorporateRedesigned')}</option>
                                                     <option value="cloud">Cloud ({t('preview') || 'Preview'})</option>
                                                 </select>
                                             </div>

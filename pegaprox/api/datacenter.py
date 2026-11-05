@@ -18,7 +18,7 @@ from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.sanitization import bounded_list
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, require_unconfined
-from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import upstream_failure, unread_failure
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('datacenter', __name__)
@@ -2180,7 +2180,9 @@ def get_node_lvm_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_lvm(node))
+    # MK Nov 2026 - a failed read is an error, not a node without any
+    got = manager.get_node_lvm(node)
+    return unread_failure(got, f'the LVM volume groups of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/disks/lvm', methods=['POST'])
@@ -2224,7 +2226,8 @@ def get_node_lvmthin_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_lvmthin(node))
+    got = manager.get_node_lvmthin(node)
+    return unread_failure(got, f'the LVM-Thin pools of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/disks/lvmthin', methods=['POST'])
@@ -2268,7 +2271,8 @@ def get_node_zfs_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_zfs(node))
+    got = manager.get_node_zfs(node)
+    return unread_failure(got, f'the ZFS pools of node {node}') or jsonify(got)
 
 
 # MK Oct 2026 - one pool in full: the vdev tree with state and error counts, the last

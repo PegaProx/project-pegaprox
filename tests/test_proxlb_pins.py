@@ -730,9 +730,10 @@ def test_a_confined_caller_does_not_get_the_off_pin_guests(api, seed):
     # not which guests are in it (#625); the off-pin list is such a guest list
     mgr = _manager([_guest(node=A1)], maintenance=[A1], scores={I1: 1.0})
     task = _drain(mgr, A1)
-    api.set_manager('cluster_1', types.SimpleNamespace(cluster_type='proxmox',
-                                                       nodes_in_maintenance={A1: task},
-                                                       nodes_updating={}))
+    # MK Nov 2026 - VM 100 on the drained node: a confined caller reads the nodes its guests run on
+    api.set_manager('cluster_1', types.SimpleNamespace(
+        cluster_type='proxmox', nodes_in_maintenance={A1: task}, nodes_updating={},
+        get_vm_resources=lambda max_age=0: [{'vmid': 100, 'node': A1, 'type': 'qemu'}]))
     seed.tenant('acme', clusters=['cluster_1'])
     seed.tenant('globex', clusters=['other'])
     operator = api.as_user(seed.user('operator', role='user', tenant_id='acme',

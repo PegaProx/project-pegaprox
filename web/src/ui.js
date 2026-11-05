@@ -556,7 +556,13 @@
         }
 
         // Chart.js line chart component - uses canvas for interactive charts
-        const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax }) {
+        // LW Nov 2026 - options for the diagnostic charts of the preview, each left out by every other view:
+        // tension (0 joins the samples with straight lines instead of a curve that overshoots them),
+        // thresholds ([{value, label, color}], drawn as dashed lines where they fall on the scale), legend
+        // (false when the view toggles the series itself; a dataset can come with hidden and dash),
+        // markGaps (shades the slots without any sample) and resize (draws again when the box changes width)
+        const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax,
+                                                          tension, thresholds, legend, markGaps, resize }) {
             const { t } = useTranslation();
             const canvasRef = React.useRef(null);
             const chartRef = React.useRef(null);
@@ -590,10 +596,25 @@
                 return span + '|' + chartDatasets.map(ds => {
                     const d = ds.data;
                     if (!d || d.length === 0) return '0';
-                    return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1];
+                    return d.length + ':' + d[0] + ':' + d[Math.floor(d.length/2)] + ':' + d[d.length-1] + (ds.hidden ? ':h' : '');
                 }).join('|');
             }, [chartDatasets, timestamps]);
             const rangeKey = range ? range.from + '-' + range.to : '';
+            const lines = (thresholds || []).filter(x => x && typeof x.value === 'number' && isFinite(x.value));
+            const linesKey = lines.map(x => x.value + ':' + (x.label || '') + ':' + (x.color || '')).join('|');
+            // the width the box had when it last changed, so a narrower window draws a narrower chart
+            const [boxWidth, setBoxWidth] = React.useState(0);
+            React.useEffect(() => {
+                const canvas = canvasRef.current;
+                const box = canvas && canvas.parentElement;
+                if (!resize || !box || typeof ResizeObserver === 'undefined') return undefined;
+                const ro = new ResizeObserver(() => {
+                    const w = box.clientWidth;
+                    if (w > 0 && Math.abs(w - canvas.getBoundingClientRect().width) >= 2) setBoxWidth(w);
+                });
+                ro.observe(box);
+                return () => ro.disconnect();
+            }, [resize, chartDatasets.length > 0]);
 
             // Cleanup on unmount
             React.useEffect(() => {
@@ -715,7 +736,9 @@
                         backgroundColor: (ds.color || color) + '33',
                         fill: ds.fill !== undefined ? ds.fill : true,
                         spanGaps: false,
-                        tension: 0.4,
+                        tension: typeof tension === 'number' ? tension : 0.4,
+                        ...(ds.hidden ? { hidden: true } : {}),
+                        ...(ds.dash ? { borderDash: ds.dash } : {}),
                         pointRadius: lone.some(Boolean) ? (c => lone[c.dataIndex] ? 2 : 0) : 0,
                         pointBackgroundColor: ds.color || color,
                         pointHitRadius: 8,
@@ -759,6 +782,55 @@
                     }
                 };
 
+                // the dashed lines of the thresholds a view passes, each with its label at the right end
+                const linesPlugin = {
+                    id: 'ppThresholds',
+                    afterDatasetsDraw(ch) {
+                        const a = ch.chartArea, sy = ch.scales.y;
+                        if (!a || !sy) return;
+                        const c = ch.ctx;
+                        c.save();
+                        c.font = '10px sans-serif';
+                        c.textAlign = 'right';
+                        c.textBaseline = 'bottom';
+                        lines.forEach(x => {
+                            if (x.value < sy.min || x.value > sy.max) return;
+                            const py = Math.round(sy.getPixelForValue(x.value)) + 0.5;
+                            c.strokeStyle = x.color || '#9ca3af';
+                            c.fillStyle = x.color || '#9ca3af';
+                            c.globalAlpha = 0.9;
+                            c.lineWidth = 1;
+                            c.setLineDash([5, 4]);
+                            c.beginPath(); c.moveTo(a.left, py); c.lineTo(a.right, py); c.stroke();
+                            if (x.label) { c.setLineDash([]); c.fillText(x.label, a.right - 3, py - 2); }
+                        });
+                        c.restore();
+                    }
+                };
+                // a slot no shown series has a sample for, shaded over the height of the chart
+                const gapsPlugin = {
+                    id: 'ppGaps',
+                    beforeDatasetsDraw(ch) {
+                        const a = ch.chartArea, sx = ch.scales.x;
+                        const sets = ch.data.datasets.filter((d, i) => ch.isDatasetVisible(i));
+                        if (!a || !sx || !sets.length) return;
+                        const n = ch.data.labels.length;
+                        const half = n > 1 ? Math.abs(sx.getPixelForValue(1) - sx.getPixelForValue(0)) / 2 : 0;
+                        const css = getComputedStyle(ch.canvas);
+                        const c = ch.ctx;
+                        c.save();
+                        c.fillStyle = (css.getPropertyValue('--cr-text-muted') || '').trim() || '#9ca3af';
+                        c.globalAlpha = 0.16;
+                        for (let i = 0; i < n; i++) {
+                            if (!sets.every(d => d.data[i] === null || d.data[i] === undefined)) continue;
+                            const px = sx.getPixelForValue(i);
+                            const x0 = Math.max(a.left, px - half), x1 = Math.min(a.right, px + half);
+                            if (x1 > x0) c.fillRect(x0, a.top, x1 - x0, a.bottom - a.top);
+                        }
+                        c.restore();
+                    }
+                };
+
                 const unitStr = unit || '%';
                 const ctx = canvas.getContext('2d');
 
@@ -769,7 +841,7 @@
                             labels: finalLabels,
                             datasets: processedDatasets
                         },
-                        plugins: [bandPlugin],
+                        plugins: [bandPlugin, ...(lines.length ? [linesPlugin] : []), ...(markGaps ? [gapsPlugin] : [])],
                         options: {
                             responsive: false,
                             animation: false,
@@ -781,7 +853,7 @@
                             },
                             plugins: {
                                 legend: {
-                                    display: processedDatasets.length > 1,
+                                    display: legend === false ? false : processedDatasets.length > 1,
                                     labels: { color: '#9ca3af', usePointStyle: true, boxWidth: 6 }
                                 },
                                 tooltip: {
@@ -838,7 +910,7 @@
                 } catch(e) {
                     console.error('Chart.js error for ' + label + ':', e);
                 }
-            }, [dataFingerprint, unit, yMin, yMax, rangeKey]); // re-run if data or the zoom changes
+            }, [dataFingerprint, unit, yMin, yMax, rangeKey, tension, linesKey, legend, markGaps, boxWidth]); // re-run if data or the zoom changes
 
             // the drag: pointer events on the canvas, so mouse, pen and touch work alike
             const hasCanvas = chartDatasets.length > 0;
@@ -1240,7 +1312,7 @@
                 4: 'https://netzware.at/',  // Netzware - Platinum
                 5: 'https://www.occentus.net/',  // Occentus Network - Platinum
 
-                6: null,
+                6: 'https://www.factorfx.com/',  // FactorFX - Platinum
                 7: null,
                 8: null
             };
@@ -1786,7 +1858,9 @@
             // esc to close
             React.useEffect(() => {
                 const onKey = (e) => {
-                    if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
+                    // a menu that just closed is gone from the page before this listener is removed,
+                    // and its Escape belongs to whatever the menu opened (the task log of a row)
+                    if (e.key === 'Escape' && menuRef.current) { e.stopPropagation(); onClose(); }
                 };
                 document.addEventListener('keydown', onKey, true);
                 return () => document.removeEventListener('keydown', onKey, true);
