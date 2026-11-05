@@ -9,8 +9,20 @@ The reload is held with page.route until the tags are typed, so the order is the
 every run. Drives the built bundle in headless Chromium against the fake server of
 tests/test_ha_ui.py; skips where Playwright is not installed.
 """
-from test_recovery_assurance_ui import _assurance_reads, _open_tab, _body, open_app  # noqa: F401
+import copy
+
+from test_recovery_assurance_ui import ASSURANCE, _assurance_reads, _open_tab, _body, open_app  # noqa: F401
 from test_ha_ui import _wait_for_call, browser  # noqa: F401
+
+
+def _answer_the_reload(app, panel, held):
+    """Lets the held reload through with a value that shows, and waits until it has."""
+    changed = copy.deepcopy(ASSURANCE)
+    changed['coverage']['critical']['proven'] = 2
+    app.server.extra[('GET', '/api/clusters/c1/recovery-assurance')] = (200, changed)
+    app.page.unroute('**/api/clusters/c1/recovery-assurance*')
+    held[0].fallback()
+    panel.locator('[data-rasr-tile="critical"][data-proven="2"]').wait_for(timeout=5000)
 
 
 def test_runtime_tags_typed_during_a_reload_are_the_tags_saved(open_app):
@@ -32,10 +44,7 @@ def test_runtime_tags_typed_during_a_reload_are_the_tags_saved(open_app):
     assert held, 'the panel did not load again after the withdraw'
 
     tags.fill('critical, prod')
-    page.unroute('**/api/clusters/c1/recovery-assurance*')
-    held[0].fallback()
-    panel.locator('[data-rasr-confirmation="102"]').wait_for(timeout=5000)
-    page.wait_for_timeout(300)
+    _answer_the_reload(app, panel, held)
     assert tags.input_value() == 'critical, prod', 'the reload replaced the typed tags'
 
     panel.locator('[data-rasr-save-tags]').click()
@@ -65,11 +74,31 @@ def test_runtime_saved_tags_stay_in_the_field_until_the_reload_answers(open_app)
     assert tags.input_value() == 'critical, prod', 'the field fell back to the old tags during the reload'
 
     # the answer is what counts from here on: this fake server still says "critical"
-    page.unroute('**/api/clusters/c1/recovery-assurance*')
-    held[0].fallback()
+    _answer_the_reload(app, panel, held)
+    assert tags.input_value() == 'critical', 'the draft outlived a save that went through'
+    assert not app.errors, app.errors
+
+
+def test_runtime_tags_typed_after_save_was_pressed_are_kept(open_app):
+    """The input stays open during a save, and what was typed since is not what was saved."""
+    app = open_app(extra=_assurance_reads(), layout='modern')
+    page = _open_tab(app, 'modern')
+    panel = page.locator('[data-rasr-panel="c1"]')
+    panel.wait_for(timeout=8000)
+    tags = panel.locator('[data-rasr-tags]')
+    tags.fill('critical, prod')
+
+    held = []
+    page.route('**/api/clusters/c1/recovery-assurance*', lambda route: held.append(route))
+    panel.locator('[data-rasr-save-tags]').click()
+    assert _wait_for_call(app, ('PUT', '/api/clusters/c1/recovery-settings'))
     for _ in range(50):
-        if tags.input_value() == 'critical':
+        if held:
             break
         page.wait_for_timeout(100)
-    assert tags.input_value() == 'critical', 'the draft outlived a save that went through'
+    assert held, 'the panel did not load again after the save'
+    tags.fill('critical, prod, db')
+
+    _answer_the_reload(app, panel, held)
+    assert tags.input_value() == 'critical, prod, db', 'the tags typed after the save were dropped'
     assert not app.errors, app.errors

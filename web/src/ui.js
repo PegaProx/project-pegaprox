@@ -4612,19 +4612,23 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
             useEffect(() => { load(); }, [load, stamp]);
             useEffect(() => { setTags(null); }, [clusterId]);  // a draft belongs to its cluster
 
-            const send = async (key, method, url, body, done) => {
+            const send = async (key, method, url, body, done, after) => {
                 setBusy(key);
                 try {
                     const res = await call(url, { method, headers: { 'Content-Type': 'application/json' },
                                                   body: body === undefined ? undefined : JSON.stringify(body) });
-                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); if (key === 'tags') setTags(null); }
+                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); if (after) after(); }
                     else say(await bkpError(res, t, haServing), 'error');
                 } catch (e) { say(t('connectionError'), 'error'); }
                 setBusy('');
             };
             const shownTags = tags !== null ? tags : ((data && data.critical_tags) || []).join(', ');
-            const saveTags = () => send('tags', 'PUT', `${base}/recovery-settings`,
-                { critical_tags: shownTags.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'));
+            const saveTags = () => {
+                const sent = shownTags;
+                send('tags', 'PUT', `${base}/recovery-settings`,
+                    { critical_tags: sent.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'),
+                    () => setTags(cur => (cur === sent ? null : cur)));  // what was typed since stays
+            };
             const saveConfirm = () => {
                 const body = { vmid: Number(dialog.vmid) || dialog.vmid, text: dialog.text.trim() };
                 if (String(dialog.days).trim() !== '') body.expires_days = Number(dialog.days);
