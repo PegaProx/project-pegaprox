@@ -13905,8 +13905,9 @@
             const [pbsServers, setPbsServers] = useState([]);
             const [selectedPBS, setSelectedPBS] = useState(null);
             const [pbsStatus, setPbsStatus] = useState(null);
-            const [pbsDatastoresResult, setPbsDatastoresResult] = useState({ id: null, data: [], error: false });
-            const pbsDatastoresSeq = React.useRef(0);
+            const [pbsDatastoresResult, setPbsDatastoresResult] = useState({ id: null, data: [], error: false, selection: null });
+            const pbsDatastoresSelection = React.useRef(null);
+            const pbsDatastoresInFlight = React.useRef(null);
             const [pbsSnapshots, setPbsSnapshots] = useState([]);
             const [pbsGroups, setPbsGroups] = useState([]);
             const [pbsTasks, setPbsTasks] = useState([]);
@@ -13914,8 +13915,10 @@
             const pbsJobsSeq = React.useRef(0);
             const selectedPBSIdRef = React.useRef(null);
             selectedPBSIdRef.current = selectedPBS?.id ?? null;
-            const pbsDatastores = pbsDatastoresResult.id === selectedPBS?.id ? pbsDatastoresResult.data : [];
-            const pbsDatastoresError = pbsDatastoresResult.id === selectedPBS?.id && pbsDatastoresResult.error;
+            const pbsDatastoresCurrent = pbsDatastoresResult.id === selectedPBS?.id
+                && pbsDatastoresResult.selection === pbsDatastoresSelection.current;
+            const pbsDatastores = pbsDatastoresCurrent ? pbsDatastoresResult.data : [];
+            const pbsDatastoresError = pbsDatastoresCurrent && pbsDatastoresResult.error;
             const pbsJobs = pbsJobsResult.id === selectedPBS?.id ? pbsJobsResult.data : {};
             const pbsJobsError = pbsJobsResult.id === selectedPBS?.id && pbsJobsResult.error;
             const [pbsActiveTab, setPbsActiveTab] = useState('dashboard');
@@ -17810,28 +17813,34 @@
             };
             
             /**
-             * Read datastores with status, ignoring late replies from another PBS server.
+             * Read datastores once per selection at a time, ignoring replies from earlier selections.
              * @param {string} pbsId - The PBS server whose datastores are requested.
              * @returns {Promise<void>}
              */
             const fetchPBSDatastores = async (pbsId) => {
-                const seq = ++pbsDatastoresSeq.current;
+                const selection = pbsDatastoresSelection.current;
+                if (!selection || selection.id !== pbsId || selectedPBSIdRef.current !== pbsId) return;
+                if (pbsDatastoresInFlight.current?.selection === selection) return;
+                const request = { selection };
+                pbsDatastoresInFlight.current = request;
                 try {
                     const resp = await authFetch(`${API_URL}/pbs/${pbsId}/datastores`);
                     if (resp && resp.ok) {
                         const datastores = await resp.json();
                         if (!Array.isArray(datastores)) throw new Error('Invalid PBS datastore list');
-                        if (seq === pbsDatastoresSeq.current) {
-                            setPbsDatastoresResult({ id: pbsId, data: datastores, error: false });
+                        if (pbsDatastoresSelection.current === selection && selectedPBSIdRef.current === pbsId) {
+                            setPbsDatastoresResult({ id: pbsId, data: datastores, error: false, selection });
                         }
-                    } else if (seq === pbsDatastoresSeq.current) {
-                        setPbsDatastoresResult({ id: pbsId, data: [], error: true });
+                    } else if (pbsDatastoresSelection.current === selection && selectedPBSIdRef.current === pbsId) {
+                        setPbsDatastoresResult({ id: pbsId, data: [], error: true, selection });
                     }
                 } catch (e) {
                     console.warn('PBS datastores error:', e);
-                    if (seq === pbsDatastoresSeq.current) {
-                        setPbsDatastoresResult({ id: pbsId, data: [], error: true });
+                    if (pbsDatastoresSelection.current === selection && selectedPBSIdRef.current === pbsId) {
+                        setPbsDatastoresResult({ id: pbsId, data: [], error: true, selection });
                     }
+                } finally {
+                    if (pbsDatastoresInFlight.current === request) pbsDatastoresInFlight.current = null;
                 }
             };
             
@@ -18143,8 +18152,14 @@
                 if (selectedPBS && (pbsActiveTab === 'jobs' || pbsActiveTab === 'datastores')) fetchPBSJobs(selectedPBS.id);
             }, [pbsActiveTab]);
 
-            // Load PBS when selected
+            // Load PBS when selected. Each visit owns its results and pending read.
             useEffect(() => {
+                const selection = { id: selectedPBS?.id ?? null };
+                pbsDatastoresSelection.current = selection;
+                pbsDatastoresInFlight.current = null;
+                setPbsDatastoresResult({ id: null, data: [], error: false, selection: null });
+                setShowPbsPrune(null);
+                let interval;
                 if (selectedPBS) {
                     fetchPBSStatus(selectedPBS.id);
                     fetchPBSDatastores(selectedPBS.id);
@@ -18154,13 +18169,17 @@
                     fetchPBSRemotes(selectedPBS.id);
                     fetchPBSNotifications(selectedPBS.id);
                     fetchPBSTrafficControl(selectedPBS.id);
-                    const interval = setInterval(() => {
+                    interval = setInterval(() => {
                         fetchPBSStatus(selectedPBS.id);
                         fetchPBSDatastores(selectedPBS.id);
                         fetchPBSJobs(selectedPBS.id);
                     }, 30000);
-                    return () => clearInterval(interval);
                 }
+                return () => {
+                    clearInterval(interval);
+                    if (pbsDatastoresSelection.current === selection) pbsDatastoresSelection.current = null;
+                    if (pbsDatastoresInFlight.current?.selection === selection) pbsDatastoresInFlight.current = null;
+                };
             }, [selectedPBS?.id]);
 
             // MK Apr 2026 (#273): lazy-load report data when Reports tab or sub-tab changes
@@ -18277,6 +18296,10 @@
             const pbsAction = async (action, store, data = {}) => {
                 if (!selectedPBS) return;
                 const pbsId = selectedPBS.id;
+                if (action === 'prune' && (!pbsVisibleStore
+                    || store !== (pbsVisibleStore.name || pbsVisibleStore.store)
+                    || selectedPBSIdRef.current !== pbsId
+                    || pbsDatastoresResult.selection !== pbsDatastoresSelection.current)) return;
                 try {
                     let url, method = 'POST';
                     if (action === 'gc') url = `${API_URL}/pbs/${pbsId}/datastores/${store}/gc`;
@@ -18352,6 +18375,12 @@
             
             // PBS prune dialog
             const [showPbsPrune, setShowPbsPrune] = useState(null);
+            useEffect(() => {
+                if (showPbsPrune && (!pbsVisibleStore
+                    || showPbsPrune !== (pbsVisibleStore.name || pbsVisibleStore.store))) {
+                    setShowPbsPrune(null);
+                }
+            }, [showPbsPrune, pbsVisibleStore]);
             
             // ============================================================
             // VMware Server Functions
@@ -27468,7 +27497,7 @@
                                         )}
 
                                         {/* Prune Dialog */}
-                                        {showPbsPrune && (
+                                        {showPbsPrune && pbsVisibleStore && showPbsPrune === (pbsVisibleStore.name || pbsVisibleStore.store) && (
                                             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
                                                 <div className="bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl w-full max-w-md animate-scale-in">
                                                     <div className="p-6">
