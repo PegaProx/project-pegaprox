@@ -21129,6 +21129,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS server unreachable or invalid upstream response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -21174,6 +21177,9 @@
           },
           "400": {
             "description": "Bad request"
+          },
+          "502": {
+            "description": "PBS server unreachable or invalid upstream response"
           },
           "401": {
             "description": "Not authenticated"

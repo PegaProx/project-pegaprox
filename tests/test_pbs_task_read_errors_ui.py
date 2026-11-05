@@ -187,3 +187,59 @@ def test_closing_task_log_cancels_pending_detail_read(browser):
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+def test_dashboard_task_read_failure_is_visible_and_recovers(browser, layout):
+    """The default PBS dashboard explains a failed task read and clears it on success."""
+    reads = {**READS, ('GET', '/api/pbs/p1/tasks'): (403, {'error': 'forbidden'})}
+    app = _App(browser, _FakeServer(layout=layout, role='standalone', extra=reads))
+    try:
+        page = app.page
+        page.get_by_text('backup01').first.click()
+        page.get_by_role('alert').filter(has_text='Tasks').wait_for(timeout=5000)
+        assert page.get_by_text('alpha', exact=True).count() == 0
+
+        app.server.extra[('GET', '/api/pbs/p1/tasks')] = (200, [TASK])
+        page.get_by_role('button', name='Tasks', exact=True).click()
+        page.get_by_role('button', name='Refresh', exact=True).last.click()
+        page.get_by_text('alpha', exact=True).first.wait_for(timeout=5000)
+        page.get_by_role('button', name='Dashboard', exact=True).last.click()
+        page.get_by_text('alpha', exact=True).first.wait_for(timeout=5000)
+        assert page.get_by_role('alert').filter(has_text='Tasks').count() == 0
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate'])
+def test_pending_server_task_read_is_not_a_successful_empty_result(browser, layout):
+    """An unfinished read after a server switch must not claim that no tasks exist."""
+    other = dict(PBS, id='p2', name='backup02')
+    reads = {**READS,
+             ('GET', '/api/pbs'): (200, [PBS, other]),
+             ('GET', '/api/pbs/p1/tasks'): (200, [TASK]),
+             ('GET', '/api/pbs/p2/status'): (200, {'version': {'version': '4.0'}}),
+             ('GET', '/api/pbs/p2/datastores'): (200, [])}
+    app = _App(browser, _FakeServer(layout=layout, role='standalone', extra=reads))
+    held = []
+    try:
+        page = app.page
+        page.route('**/api/pbs/p2/tasks*', lambda route: held.append(route))
+        _open_tasks(page)
+        page.get_by_text('alpha', exact=True).first.wait_for(timeout=5000)
+        with page.expect_request('**/api/pbs/p2/tasks*'):
+            page.get_by_text('backup02').first.click()
+        page.get_by_role('button', name='Tasks', exact=True).click()
+        assert len(held) == 1
+        assert page.get_by_text('alpha', exact=True).count() == 0
+        assert page.get_by_text('No tasks found', exact=True).count() == 0
+
+        held.pop(0).fulfill(status=200, content_type='application/json', body='[]')
+        page.get_by_text('No tasks found', exact=True).wait_for(timeout=5000)
+        assert page.get_by_role('alert').filter(has_text='Tasks').count() == 0
+        assert not app.errors, app.errors
+    finally:
+        for route in held:
+            route.fulfill(status=200, content_type='application/json', body='[]')
+        app.ctx.close()

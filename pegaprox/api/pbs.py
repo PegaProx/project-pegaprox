@@ -1199,6 +1199,12 @@ def _valid_pbs_task_row(row):
                for field in ('starttime', 'endtime'))
 
 
+def _valid_pbs_task_detail_fields(row, fields):
+    """Keep existing missing/null text fallbacks but reject malformed displayed values."""
+    return isinstance(row, dict) and all(
+        row.get(field) is None or isinstance(row[field], str) for field in fields)
+
+
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
@@ -1262,14 +1268,16 @@ def get_pbs_task_detail(pbs_id, upid):
     if failed:
         code, payload = failed
         return jsonify(payload), code
-    if not isinstance(status, dict) or not isinstance(status.get('data'), dict):
+    if (not isinstance(status, dict)
+            or not _valid_pbs_task_detail_fields(status.get('data'), ('status', 'exitstatus'))):
         return jsonify({'error': 'PBS returned an invalid task status', 'code': 'PBS_UPSTREAM'}), 502
     log = mgr.get_task_log(upid)
     failed = pbs_upstream_error(log)
     if failed:
         code, payload = failed
         return jsonify(payload), code
-    if not isinstance(log, dict) or not isinstance(log.get('data'), list):
+    if (not isinstance(log, dict) or not isinstance(log.get('data'), list)
+            or any(not _valid_pbs_task_detail_fields(row, ('t', 'd')) for row in log['data'])):
         return jsonify({'error': 'PBS returned an invalid task log', 'code': 'PBS_UPSTREAM'}), 502
     return jsonify({
         'status': status['data'],

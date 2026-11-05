@@ -206,3 +206,71 @@ def test_task_typefilter_preserves_pbs_substring_contract(task_client, needle):
 
     assert response.status_code == 200
     manager.get_tasks.assert_called_once_with(limit=50, typefilter=needle, running=None)
+
+
+@pytest.mark.parametrize('status', [
+    {'status': {}}, {'status': []}, {'status': 42}, {'status': True},
+    {'status': 'stopped', 'exitstatus': {}},
+    {'status': 'stopped', 'exitstatus': []},
+    {'status': 'stopped', 'exitstatus': 42},
+    {'status': 'stopped', 'exitstatus': True},
+])
+def test_task_detail_content_rejects_malformed_displayed_status(task_client, status):
+    """Malformed displayed status cannot reach the task-log React view as success."""
+    client, mgr = task_client
+    mgr.get_task_status.return_value = {'data': status}
+
+    response = client.get(f'/api/pbs/{PBS_ID}/tasks/{UPID}')
+
+    assert response.status_code == 502
+    assert response.get_json()['code'] == 'PBS_UPSTREAM'
+    mgr.get_task_log.assert_not_called()
+
+
+@pytest.mark.parametrize('entry', [
+    None, 0, 'line', [], {'t': {}}, {'t': []}, {'t': 42}, {'d': []}, {'d': True},
+])
+def test_task_detail_content_rejects_malformed_log_entries(task_client, entry):
+    """Each log entry must support the displayed text fields, not just the list."""
+    client, mgr = task_client
+    mgr.get_task_log.return_value = {'data': [{'n': 1, 't': 'valid line'}, entry]}
+
+    response = client.get(f'/api/pbs/{PBS_ID}/tasks/{UPID}')
+
+    assert response.status_code == 502
+    assert response.get_json()['code'] == 'PBS_UPSTREAM'
+
+
+@pytest.mark.parametrize('status,log', [
+    ({}, []),
+    ({'status': None, 'exitstatus': None}, [{'t': None, 'd': None}]),
+    ({'status': 'running', 'id': None}, []),
+    ({'status': 'stopped', 'exitstatus': None},
+     [{'n': 1, 't': ''}, {'t': None, 'd': 'legacy fallback'}, {}]),
+    ({'status': 'stopped', 'exitstatus': 'OK'},
+     [{'n': 1, 't': 'finished'}, {'d': 'legacy line'}, {'t': None, 'd': None}]),
+])
+def test_task_detail_content_preserves_optional_fields(task_client, status, log):
+    """Existing missing/null text fallbacks, empty logs and legacy text stay valid."""
+    client, mgr = task_client
+    mgr.get_task_status.return_value = {'data': status}
+    mgr.get_task_log.return_value = {'data': log}
+
+    response = client.get(f'/api/pbs/{PBS_ID}/tasks/{UPID}')
+
+    assert response.status_code == 200
+    assert response.get_json() == {'status': status, 'log': log}
+
+
+def test_openapi_task_read_failures_are_machine_readable(api):
+    """Generated and published task-read contracts expose their real HTTP502 response."""
+    import json
+    from pathlib import Path
+    from pegaprox.cli.gen_openapi import build
+
+    generated = build(api.app)
+    committed = json.loads((Path(__file__).parents[1] / 'docs/openapi.json').read_text())['paths']
+    for paths in (generated, committed):
+        for path in ('/api/pbs/{pbs_id}/tasks', '/api/pbs/{pbs_id}/tasks/{upid}'):
+            assert {'200', '400', '401', '403', '502'} <= set(paths[path]['get']['responses'])
+        assert '502' not in paths['/api/pbs/{pbs_id}/tasks/{upid}']['delete']['responses']

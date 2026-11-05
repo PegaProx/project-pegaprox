@@ -26805,6 +26805,9 @@
                                                 )}
 
                                                 {/* recent tasks */}
+                                                {pbsTasksError && <div role="alert" className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 text-sm text-yellow-300">
+                                                    {t('pbsLoadAllDataError') || 'Could not load all data:'} {t('tasks') || 'Tasks'}
+                                                </div>}
                                                 {pbsTasks.length > 0 && (
                                                     <div>
                                                         <h2 className={isCorporate ? 'corp-section-header' : 'text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4'}>{t('recentTasks') || 'Recent Tasks'}</h2>
@@ -27319,7 +27322,7 @@
                                                             ))}
                                                         </tbody>
                                                     </table>
-                                                    {!pbsTasksError && pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">{t('pbsNoTasksFound') || 'No tasks found'}</div>}
+                                                    {!pbsTasksError && pbsTasksResult.id === selectedPBS?.id && pbsTasks.length === 0 && <div className="text-center py-8 text-gray-500">{t('pbsNoTasksFound') || 'No tasks found'}</div>}
                                                 </div>
 
                                                 {/* Task Log Viewer */}
