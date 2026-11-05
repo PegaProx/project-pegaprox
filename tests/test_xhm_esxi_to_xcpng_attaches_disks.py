@@ -1,4 +1,4 @@
-"""ESXi -> XCP-ng migration attaches the disks it copied, and a network.
+"""ESXi -> XCP-ng migration attaches the disks it copied, and only a network the user mapped.
 
 `_run_esxi_to_xcpng` has called `_xcpng_attach_vdi` and `_xcpng_attach_network` since
 0.9.2. Neither was ever written. Each call sits in its own try, so the NameError was
@@ -7,6 +7,10 @@ network one was swallowed by a bare except, and the task ended "completed": a ne
 with no disk and no network, its copied VDIs left unattached on the SR. The PVE ->
 XCP-ng leg of the same module attaches with VBD.create and `_xcp_attach_network`; this
 leg now does the same.
+
+The missing network helper was handed the first network the pool lists, which can be
+its management or storage network. Its plan has no source NICs, so the dialog offers no
+mapping: the VM gets a network only when one is mapped, and the log says when it has none.
 
 The runner is driven to the end with the transfer faked (scp and qemu-img succeed, the
 import answers 200) and a fake XAPI that records what is created.
@@ -46,7 +50,7 @@ class _Xapi:
             get_by_uuid=lambda u: u[len('uuid-'):], get_record=lambda r: {'name_label': r, 'bridge': r})
 
 
-def _run(monkeypatch, tmp_path):
+def _run(monkeypatch, tmp_path, network_map=None):
     def _proc(argv, **kw):
         # scp and qemu-img leave their output file behind, as the real ones do
         with open(argv[-1], 'wb') as fh:
@@ -65,6 +69,7 @@ def _run(monkeypatch, tmp_path):
         config=types.SimpleNamespace(ssl_verification=False)))
     task = xhm_core.XHMigrationTask('t-attach', 'esxi_to_xcpng', ESXI, '', '5', TGT, '', 'sr1')
     task.scratch = str(tmp_path / 'scratch')
+    task.network_map = network_map or {}
     xhm_core._run_esxi_to_xcpng(task)
     return task, xapi
 
@@ -79,8 +84,15 @@ def test_the_new_vm_gets_every_copied_disk(db, monkeypatch, tmp_path):
     assert task.phase == 'completed', task.error
 
 
-def test_the_new_vm_gets_a_network(db, monkeypatch, tmp_path):
+def test_without_a_mapped_network_the_vm_joins_none_and_the_log_says_so(db, monkeypatch, tmp_path):
     task, xapi = _run(monkeypatch, tmp_path)
 
-    assert [(v['VM'], v['network'], v['device']) for v in xapi.vifs] == [('new-vm', 'net-0', '0')], (
+    assert xapi.vifs == [], f'the migrated VM joined {xapi.vifs} although no network was mapped'
+    assert any('No target network mapped' in line for line in task.log_lines), task.log_lines[-4:]
+
+
+def test_a_mapped_network_is_the_one_the_vm_joins(db, monkeypatch, tmp_path):
+    task, xapi = _run(monkeypatch, tmp_path, network_map={'0': 'net-1'})
+
+    assert [(v['VM'], v['network'], v['device']) for v in xapi.vifs] == [('new-vm', 'net-1', '0')], (
         f'the migrated VM got these VIFs: {xapi.vifs}')
