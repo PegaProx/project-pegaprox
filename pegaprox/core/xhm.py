@@ -2504,22 +2504,39 @@ def _run_esxi_to_xcpng(task):
         task.progress = 90
 
         # attach VDIs
+        # JB Nov 2026 - this leg called _xcpng_attach_vdi / _xcpng_attach_network, which never
+        # existed: the NameErrors were logged as warnings and the VM ended up without disks.
+        # Attach the way the PVE -> XCP-ng leg above does.
         task.set_phase('attaching')
         for vdi_info in created_vdis:
             try:
-                _xcpng_attach_vdi(xapi, new_vm_ref, vdi_info['ref'],
-                                  str(vdi_info['index']), vdi_info['bootable'])
+                xapi.VBD.create({
+                    'VM': new_vm_ref,
+                    'VDI': vdi_info['ref'],
+                    'userdevice': str(vdi_info['index']),
+                    'bootable': vdi_info['bootable'],
+                    'mode': 'RW',
+                    'type': 'Disk',
+                    'empty': False,
+                    'other_config': {},
+                    'qos_algorithm_type': '',
+                    'qos_algorithm_params': {},
+                })
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
             except Exception as e:
                 task.log(f"Warning: attach VDI failed: {e}")
 
-        # add default network
-        try:
-            net_refs = xapi.network.get_all()
-            if net_refs:
-                _xcpng_attach_network(xapi, new_vm_ref, net_refs[0])
-        except:
-            pass
+        # only a network the user mapped: the first one the pool lists can be its management
+        # or storage network, and the plan has no source NICs to map from
+        target_nets = [v for _, v in sorted((task.network_map or {}).items()) if v]
+        for net_idx, target_net in enumerate(target_nets[:4]):
+            try:
+                _xcp_attach_network(xapi, new_vm_ref, target_net, str(net_idx))
+                task.log(f"Attached network {target_net} as device {net_idx}")
+            except Exception as e:
+                task.log(f"Warning: network attach failed: {e}")
+        if not target_nets:
+            task.log("No target network mapped: the VM has no network interface, add one on XCP-ng")
 
         task.progress = 100
         task.set_phase('completed')
