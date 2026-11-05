@@ -14434,6 +14434,22 @@
             const globalSearchRef = React.useRef(null);
             const globalSearchTimerRef = React.useRef(null);
             const [highlightedVm, setHighlightedVm] = useState(null);  // {vmid, node} - for scrolling to VM in table
+            // LW Nov 2026 - a guest Modern opens in the detail view of its cluster's guest list ({clusterId, vmid, type}, #1229).
+            // It waits there for the list of that cluster and is dropped once the user moves on
+            const [openGuestDetail, setOpenGuestDetail] = useState(null);
+            useEffect(() => {
+                if (openGuestDetail && (openGuestDetail.clusterId !== selectedCluster?.id || activeTab !== 'resources' || resourcesSubTab !== 'management')) setOpenGuestDetail(null);
+            }, [selectedCluster?.id, activeTab, resourcesSubTab]);
+            // Modern has no guest view of its own: a guest picked in All Guests or an overview opens
+            // there, from the top of the page. The list of the cluster shown before is emptied first,
+            // so a guest with the same ID there is never the one picked. Without a type the ID alone
+            // finds it, it is unique in a cluster
+            const askGuestDetail = (cluster, guest) => {
+                if (isCorporate) return;
+                if (selectedCluster?.id !== cluster.id) setClusterResources([]);
+                setOpenGuestDetail({ clusterId: cluster.id, vmid: guest.vmid, type: guest.type || null });
+                window.scrollTo(0, 0);
+            };
             
             // NS: User Favorites state
             const [favorites, setFavorites] = useState({ vms: [], nodes: [], clusters: [] });
@@ -23138,6 +23154,8 @@
                                                             onBulkDone={() => { const cid = selectedCluster.id; setTimeout(() => fetchClusterResources(cid), 1500); }}
                                                             favorites={favorites}
                                                             onToggleFavorite={toggleGuestFavorite}
+                                                            openGuest={openGuestDetail}
+                                                            onOpenGuestDone={() => setOpenGuestDetail(null)}
                                                             onVmNavigate={isCorporate ? (vm) => {
                                                                 setSelectedSidebarVm({...vm, _clusterId: selectedCluster.id});
                                                                 setSelectedSidebarNode(null);
@@ -29922,7 +29940,7 @@
                                         clusterGroups={clusterGroups}
                                         topGuests={topGuests}
                                         onSelectCluster={(cluster) => { setSelectedGroup(null); setSelectedCluster(cluster); }}
-                                        onSelectVm={(cluster, vmid, node, guest) => { setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                        onSelectVm={(cluster, vmid, node, guest) => { askGuestDetail(cluster, guest || { vmid }); setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                         onOpenSettings={() => setShowGroupSettings(selectedGroup)}
                                         authFetch={authFetch}
                                         API_URL={API_URL}
@@ -30422,6 +30440,7 @@
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}
                                         onOpenGuest={(cluster, guest) => {
+                                            askGuestDetail(cluster, guest);
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...guest, _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);
@@ -30440,6 +30459,7 @@
                                         addToast={addToast}
                                         onSelectCluster={setSelectedCluster}
                                         onSelectVm={(cluster, vmid, node, guest) => {
+                                            askGuestDetail(cluster, guest || { vmid });
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);

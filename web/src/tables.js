@@ -1323,7 +1323,7 @@
         // NS: Added bulk select for mass operations (migration, etc.)
         // This component does a lot... might need to split it up eventually
         // NS: filtering + sorting uses useMemo below (lines 1320+)
-        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite }) {
+        function ResourceTable({ resources, clusterId, clusters, sourceCluster, onVmAction, onOpenConsole, onOpenSpice, onOpenConfig, onMigrate, onBulkMigrate, onDelete, onClone, onForceStop, onCrossClusterMigrate, nodes, datastores, onOpenTags, highlightedVm, addToast, pendingVmAction, onPendingActionConsumed, onVmNavigate, backupStatus, authFetch, onBulkDone, favorites, onToggleFavorite, openGuest, onOpenGuestDone }) {
             const { t } = useTranslation();
             const { getAuthHeaders, user, haReadOnly, haConsolesElsewhere } = useAuth();
             // #625 v2 - a standby shows the guests live but acts on none of them: no power,
@@ -1598,6 +1598,49 @@
                     setCurrentPage(1);  // Reset to first page
                 }
             }, [filteredResources.length]);  // Only when data changes
+
+            // LW Nov 2026 - a guest opened from All Guests or an overview: the detail view with that guest
+            // picked, on the page of the list that holds it and in sight, as a click in that view leaves
+            // it (#1229). Taken from this cluster's list only, which the dashboard empties before it
+            // switches the cluster
+            const pickedRowRef = useRef(null);
+            const detailListRef = useRef(null);
+            const detailPaneRef = useRef(null);
+            const openSwitchedRef = useRef(null);
+            const isOpenGuest = (r) => !!openGuest && String(r.vmid) === String(openGuest.vmid) && (!openGuest.type || r.type === openGuest.type);
+            useEffect(() => {
+                if (!openGuest || openGuest.clusterId !== clusterId) return;
+                // once per request, a view the user picks while it waits stays
+                if (openSwitchedRef.current !== openGuest) { openSwitchedRef.current = openGuest; setViewMode('detail'); }
+                const hit = (resources || []).find(isOpenGuest);
+                if (!hit) return;  // the list of the cluster is still on its way
+                setSelectedDetailVm(hit);
+                const at = filteredResources.indexOf(hit);
+                if (at >= 0) setCurrentPage(Math.floor(at / itemsPerPage) + 1);
+                onOpenGuestDone?.();
+                // once drawn, as little scrolling as it takes; the margin keeps it above the task bar.
+                // With list and panel stacked (narrow window) the panel goes up below the header
+                setTimeout(() => {
+                    if (pickedRowRef.current) pickedRowRef.current.scrollIntoView({ block: 'nearest' });
+                    const list = detailListRef.current, pane = detailPaneRef.current;
+                    if (!list || !pane || pane.getBoundingClientRect().top < list.getBoundingClientRect().bottom - 1) return;
+                    const head = document.querySelector('header');
+                    window.scrollBy(0, pane.getBoundingClientRect().top - (head ? head.getBoundingClientRect().bottom : 0) - 12);
+                }, 100);
+            }, [openGuest, resources, clusterId]);
+            // every read of this cluster's list comes as a frame, unchanged ones too: one without the
+            // guest ends the wait, it was moved or deleted since it was listed where it was clicked
+            useEffect(() => {
+                if (!openGuest || openGuest.clusterId !== clusterId) return;
+                const onFrame = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (d.cluster_id !== clusterId || !Array.isArray(d.rows) || d.rows.some(isOpenGuest)) return;
+                    addToast?.(t('guestNotInClusterList').replace('{id}', openGuest.vmid), 'warning');
+                    onOpenGuestDone?.();
+                };
+                window.addEventListener('pegaprox-resources-frame', onFrame);
+                return () => window.removeEventListener('pegaprox-resources-frame', onFrame);
+            }, [openGuest, clusterId]);
             
             const paginatedResources = useMemo(() => {
                 const startIndex = (effectivePage - 1) * itemsPerPage;
@@ -2752,7 +2795,7 @@
                             {/* VM List — LW 2026-04-24: viewport-proportional height so it
                                 matches the detail panel on the right and never exceeds the
                                 visible area. Header + list scroll independently. */}
-                            <div className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden flex flex-col"
+                            <div ref={detailListRef} className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden flex flex-col"
                                  style={{maxHeight: 'calc(100vh - 260px)', minHeight: '400px'}}>
                                 <div className="p-3 border-b border-proxmox-border bg-proxmox-dark/50 flex-shrink-0">
                                     <h3 className="text-sm font-medium text-gray-300">VMs & Container ({filteredResources.length})</h3>
@@ -2761,6 +2804,8 @@
                                     {paginatedResources.map(resource => (
                                         <div
                                             key={resource.vmid}
+                                            ref={selectedDetailVm?.vmid === resource.vmid ? pickedRowRef : null}
+                                            style={selectedDetailVm?.vmid === resource.vmid ? { scrollMarginBottom: '48px' } : undefined}
                                             onClick={() => setSelectedDetailVm(resource)}
                                             className={`flex items-center gap-3 p-3 cursor-pointer transition-all border-b border-gray-700/50 ${
                                                 selectedDetailVm?.vmid === resource.vmid
@@ -2821,7 +2866,7 @@
                             </div>
 
                             {/* Detail Panel */}
-                            <div className="lg:col-span-2">
+                            <div ref={detailPaneRef} className="lg:col-span-2">
                                 {selectedDetailVm ? (
                                     <VmDetailPanel
                                         vm={selectedDetailVm}
