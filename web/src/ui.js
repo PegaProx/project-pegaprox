@@ -4617,7 +4617,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                 try {
                     const res = await call(url, { method, headers: { 'Content-Type': 'application/json' },
                                                   body: body === undefined ? undefined : JSON.stringify(body) });
-                    if (res.ok) { say(done, 'success'); setDialog(null); if (key === 'tags') setTags(null); await load(); }
+                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); if (key === 'tags') setTags(null); }
                     else say(await bkpError(res, t, haServing), 'error');
                 } catch (e) { say(t('connectionError'), 'error'); }
                 setBusy('');

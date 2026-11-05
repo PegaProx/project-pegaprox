@@ -42,3 +42,34 @@ def test_runtime_tags_typed_during_a_reload_are_the_tags_saved(open_app):
     assert _wait_for_call(app, ('PUT', '/api/clusters/c1/recovery-settings'))
     assert _body(app, '/api/clusters/c1/recovery-settings') == {'critical_tags': ['critical', 'prod']}
     assert not app.errors, app.errors
+
+
+def test_runtime_saved_tags_stay_in_the_field_until_the_reload_answers(open_app):
+    """Dropping the draft before the reload answered showed the old tags again for that time."""
+    app = open_app(extra=_assurance_reads(), layout='modern')
+    page = _open_tab(app, 'modern')
+    panel = page.locator('[data-rasr-panel="c1"]')
+    panel.wait_for(timeout=8000)
+    tags = panel.locator('[data-rasr-tags]')
+    tags.fill('critical, prod')
+
+    held = []
+    page.route('**/api/clusters/c1/recovery-assurance*', lambda route: held.append(route))
+    panel.locator('[data-rasr-save-tags]').click()
+    assert _wait_for_call(app, ('PUT', '/api/clusters/c1/recovery-settings'))
+    for _ in range(50):
+        if held:
+            break
+        page.wait_for_timeout(100)
+    assert held, 'the panel did not load again after the save'
+    assert tags.input_value() == 'critical, prod', 'the field fell back to the old tags during the reload'
+
+    # the answer is what counts from here on: this fake server still says "critical"
+    page.unroute('**/api/clusters/c1/recovery-assurance*')
+    held[0].fallback()
+    for _ in range(50):
+        if tags.input_value() == 'critical':
+            break
+        page.wait_for_timeout(100)
+    assert tags.input_value() == 'critical', 'the draft outlived a save that went through'
+    assert not app.errors, app.errors
