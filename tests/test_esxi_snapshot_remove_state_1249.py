@@ -60,3 +60,34 @@ def test_a_remove_still_running_after_the_limit_says_so(monkeypatch):
     got, naps = _remove(monkeypatch, _Task([vim.TaskInfo.State.running]))
     assert got == {'error': 'remove timed out'}
     assert len(naps) == 120
+
+
+@pytest.mark.parametrize('error,attempts,limit', [
+    ('remove failed: Operation timed out on the datastore', 2, 120),
+    ('remove timed out', 1, 'fold'),
+    ('HTTPSConnectionPool: Read timed out', 1, 'fold'),
+])
+def test_only_a_remove_still_running_gets_the_long_wait(monkeypatch, error, attempts, limit):
+    """ESXi's own words can say "timed out" too. A task that ended in failure is not running
+    on, and with the source off the long wait for it would only be downtime."""
+    from pegaprox.core import v2p
+    from test_v2p_clone_delta_1124 import Run
+
+    limits = []
+    run = Run(monkeypatch)
+    drops = []
+
+    def _drop(vm_id, snapshot_id):
+        drops.append(snapshot_id)
+        return {'error': error}
+
+    def _wait(mgr, vm_id, backing, timeout, poll=10):
+        limits.append(timeout)
+        return True
+
+    monkeypatch.setattr(run.esxi, 'delete_snapshot', _drop)
+    monkeypatch.setattr(v2p, '_wait_clone_snap_consolidated', _wait)
+    run.go()
+    # a later clean-up asks once more where the snapshot is still there, so at least
+    assert len(drops) >= attempts, drops
+    assert limits and (limits[0] == 120 if limit == 120 else limits[0] != 120), limits
