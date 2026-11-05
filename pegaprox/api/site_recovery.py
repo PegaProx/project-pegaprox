@@ -759,6 +759,12 @@ def check_readiness(plan_id):
                 issues.append({'severity': 'warning', 'msg': f"VM {vm['vmid']}: replication job disabled"})
         else:
             issues.append({'severity': 'info', 'msg': f"VM {vm['vmid']}: no replication job linked"})
+    # MK Nov 2026 - the replica an emergency failover starts: one it cannot tell apart is
+    # refused there, so it is said here
+    from pegaprox.background.site_recovery import replica_vmids
+    for vmid, (_there, why) in replica_vmids(plan, [v for v in vms if not v.get('failed_over')]).items():
+        if why:
+            issues.append({'severity': 'error', 'msg': f"VM {vmid}: {why}"})
 
     # check target resources (basic: is there enough RAM?)
     # MK Apr 2026 (#350) — get_node_status() returns mem_total/mem_used, not the

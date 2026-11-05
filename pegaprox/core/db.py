@@ -1842,7 +1842,8 @@ class PegaProxDB:
                     target_vmid INTEGER,
                     notes TEXT DEFAULT '',
                     failed_over TEXT DEFAULT '',
-                    failed_over_at TEXT DEFAULT ''
+                    failed_over_at TEXT DEFAULT '',
+                    failed_over_vmid INTEGER
                 )
             ''')
             cursor.execute('''
@@ -1904,6 +1905,11 @@ class PegaProxDB:
                     self._sr_replay_owed = True
                     logging.info("Added failed_over columns to site_recovery_vms, their state is "
                                  "replayed from the failover events once this instance acts")
+                # MK Nov 2026 - the VMID a failed-over guest has on the DR site: its replica's
+                # after an emergency failover. NULL on a mark from before, whose run used the
+                # guest's own
+                if 'failed_over_vmid' not in vm_cols:
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_vmid INTEGER")
             except Exception as e:
                 logging.error(f"Failed to add failed_over columns: {e}")
             logging.info("Ensured site_recovery tables exist")

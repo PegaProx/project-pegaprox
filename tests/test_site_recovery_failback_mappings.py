@@ -52,7 +52,7 @@ def migrations(monkeypatch):
     """Record what _migrate_vm_cross_cluster was handed instead of migrating."""
     calls = []
 
-    def _fake(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_map):
+    def _fake(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_map, target_vmid=None):
         calls.append({'vmid': vmid, 'storage_map': dict(storage_map or {}),
                       'net_map': dict(net_map or {})})
         return True, None
