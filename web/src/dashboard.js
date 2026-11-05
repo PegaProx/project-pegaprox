@@ -18912,6 +18912,10 @@
                     if (r?.ok) setXhmMigrationDetail(await r.json());
                 } catch(e) {}
             };
+            // LW Nov 2026 - a plan into Proxmox (from XCP-ng or ESXi) asks node, storage and bridges,
+            // one into XCP-ng (from Proxmox or ESXi) an SR. Only xcpng_to_pve and pve_to_xcpng were
+            // named, so an ESXi plan had no storage to pick and its Start stayed off
+            const xhmToPve = (plan) => !!plan && String(plan.direction || '').endsWith('_to_pve');
             const fetchXhmPlan = async () => {
                 if (!xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster) return;
                 setXhmLoading(true);
@@ -30136,7 +30140,7 @@
                                                     <div className="border border-purple-500/20 rounded-xl p-4 space-y-4">
                                                         <div className="flex items-center gap-2 text-sm text-white font-medium">
                                                             <span>{xhmPlan.source.name}</span>
-                                                            <span className="text-purple-400">{xhmPlan.direction === 'xcpng_to_pve' ? '→ Proxmox' : '→ XCP-ng'}</span>
+                                                            <span className="text-purple-400">{xhmToPve(xhmPlan) ? '→ Proxmox' : '→ XCP-ng'}</span>
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-2 text-center">
                                                             <div className="bg-proxmox-dark rounded-lg p-2">
@@ -30166,7 +30170,7 @@
                                                         </div>
 
                                                         {/* Target selection */}
-                                                        {xhmPlan.direction === 'xcpng_to_pve' && xhmPlan.targets && (
+                                                        {xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div className="space-y-2">
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetNode') || 'Target Node'}</label>
@@ -30186,7 +30190,7 @@
                                                                 )}
                                                             </div>
                                                         )}
-                                                        {xhmPlan.direction === 'pve_to_xcpng' && xhmPlan.targets && (
+                                                        {!xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div>
                                                                 <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetStorage') || 'Target Storage'}</label>
                                                                 <select value={xhmForm.target_storage} onChange={e => setXhmForm({...xhmForm, target_storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -30206,7 +30210,7 @@
                                                                     <div key={i} className="flex items-center gap-2 mb-1">
                                                                         <span className="text-xs text-gray-400 w-28 truncate">{net.bridge || net.network || `net${i}`}</span>
                                                                         <span className="text-gray-600">→</span>
-                                                                        {xhmPlan.direction === 'xcpng_to_pve' ? (
+                                                                        {xhmToPve(xhmPlan) ? (
                                                                             <select value={xhmForm.network_map[net.network || net.bridge || String(i)] || ''} onChange={e => setXhmForm({...xhmForm, network_map: {...xhmForm.network_map, [net.network || net.bridge || String(i)]: e.target.value}})} className="flex-1 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
                                                                                 <option value="">vmbr0 (default)</option>
                                                                                 {(xhmPlan.targets[0]?.bridges?.[xhmForm.target_node] || ['vmbr0']).map(b => <option key={b} value={b}>{b}</option>)}
@@ -30234,7 +30238,7 @@
                                                             </label>
                                                         </div>
 
-                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmPlan?.direction === 'xcpng_to_pve' && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
+                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmToPve(xhmPlan) && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
                                                             {xhmLoading ? 'Starting...' : (t('xhmStartMigration') || 'Start Migration')}
                                                         </button>}
                                                     </div>
