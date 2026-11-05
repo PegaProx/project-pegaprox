@@ -10,12 +10,15 @@ from pegaprox.core.xcpng import XcpngManager
 class _PollingClock:
     """Advance the polling budget without real reboot or sleep."""
     def __init__(self):
+        """Start the simulated polling budget at zero."""
         self.now = 0
 
     def sleep(self, seconds):
+        """Advance the polling clock without delaying the test."""
         self.now += seconds
 
     def time(self):
+        """Report the elapsed simulated polling time."""
         return self.now
 
 
@@ -45,6 +48,7 @@ def test_recovery_requires_the_target_routed_rpc(monkeypatch, ready_after):
     calls = []
 
     def server_time(ref):
+        """Model target readiness independently of a responsive pool master."""
         calls.append(ref)
         assert ref == "target-ref"
         if ready_after is None or len(calls) < ready_after:
