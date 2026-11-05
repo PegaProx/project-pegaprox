@@ -1327,6 +1327,15 @@ def start_vmware_migration(vmware_id, vm_id):
     allowed, err_response = check_cluster_access(data['target_cluster'])
     if not allowed:
         return err_response
+    # MK Nov 2026 (#1224) - the planning step runs commands on target_node over SSH with the
+    # target cluster's key or password: one of its nodes, nothing else
+    try:
+        _tn = data['target_node']
+        _member = isinstance(_tn, str) and _tn in (cluster_managers[data['target_cluster']].nodes or {})
+    except Exception:
+        _member = False
+    if not _member:
+        return jsonify({'error': 'target_node is not a node of the target cluster'}), 400
 
     mgr = vmware_managers[vmware_id]
     # NS Aug 2026 — same stale-session guard as the migration-plan + VM-list routes: a long-lived

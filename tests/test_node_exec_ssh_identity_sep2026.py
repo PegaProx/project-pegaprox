@@ -44,10 +44,20 @@ class _Mgr:
     def ssh_diagnose(self, node): return self._diag
     def _api_post(self, *a, **k): raise RuntimeError('no API exec')
 
+    # what every PegaProxManager has: its node list, and a key login (#1224), which
+    # these nodes refuse
+    nodes = {'n1': {'node': 'n1', 'status': 'online'}}
+
+    def _ssh_connect(self, host, failure=None, **kw):
+        self.key_logins = getattr(self, 'key_logins', 0) + 1
+        failure.update(kind='auth', detail='Authentication failed.', refused=True)
+        return None
+
 
 @pytest.fixture(autouse=True)
-def _no_ip_cache():
+def _no_ip_cache(monkeypatch):
     ssh_mod._node_ip_cache.clear()
+    monkeypatch.setattr(ssh_mod, '_node_key_refused', {})
     yield
     ssh_mod._node_ip_cache.clear()
 
@@ -156,25 +166,28 @@ def test_an_api_token_cluster_with_an_ssh_key_is_still_never_offered_the_secret(
 
 
 def test_a_key_only_cluster_is_not_attempted_either(monkeypatch):
-    """Same shape without the token: a key is stored, no password. This path is
-    password-only, so trying is a guaranteed-failed root login, not a fallback."""
+    """Same shape without the token: a key is stored, no password. The key is offered
+    once (#1224); a node that refuses it gets no password login after it, which with an
+    empty password is a guaranteed-failed root login, not a fallback."""
     called = []
     monkeypatch.setattr(ssh_mod, '_ssh_exec',
                         lambda *a, **k: called.append(1) or (0, 'ok', ''))
     mgr = _Mgr(ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----', pass_='')
     rc, out, err = ssh_mod._pve_node_exec(mgr, 'n1', 'true')
     assert rc == 1 and not called
+    assert mgr.key_logins == 1
 
 
 def test_a_real_password_still_goes_through_even_with_a_key_present(monkeypatch):
-    """The guard must not turn into "a key is stored, so give up" — a cluster with both
-    still authenticates by password here, and that is the normal case."""
+    """The guard must not turn into "a key is stored, so give up". A cluster with both
+    offers the key first (#1224), and where the node refuses it, the password follows."""
     seen = {}
     monkeypatch.setattr(ssh_mod, '_ssh_exec',
                         lambda host, user, pwd, cmd, **k: seen.update(pwd=pwd) or (0, 'ok', ''))
     mgr = _Mgr(ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----', pass_='realpw')
     rc, out, err = ssh_mod._pve_node_exec(mgr, 'n1', 'true')
     assert rc == 0 and seen['pwd'] == 'realpw'
+    assert mgr.key_logins == 1
 
 
 def test_the_secret_never_reaches_the_error_text(monkeypatch):
@@ -201,8 +214,18 @@ def test_the_refusal_names_the_reason_it_actually_checked(monkeypatch):
     assert 'no SSH password is stored' in err
     assert 'ssh key' not in err.lower(), f"claims a key that was never configured: {err}"
 
+    # a key that was offered and refused, and nothing after it (#1224)
     keyed = _Boom(pass_='', ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----')
     _, _, err = ssh_mod._pve_node_exec(keyed, 'n1', 'true')
+    assert 'stored SSH key was refused' in err and 'no SSH password is stored' in err
+
+    # a manager with no key login of its own still says that the key went unused
+    class _NoKeyLogin(_Boom):
+        @property
+        def _ssh_connect(self):
+            raise AttributeError('_ssh_connect')
+    old = _NoKeyLogin(pass_='', ssh_key='-----BEGIN OPENSSH PRIVATE KEY-----')
+    _, _, err = ssh_mod._pve_node_exec(old, 'n1', 'true')
     assert 'ssh key' in err.lower() and 'password only' in err.lower()
 
     tok = _Mgr(user='root@pam!pegaprox', pass_='pve-token-secret', ssh_key='k')

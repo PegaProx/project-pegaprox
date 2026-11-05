@@ -354,6 +354,8 @@ EXITS = {
     ('pegaprox/core/manager.py', 'PegaProxManager._ha_ping_host', 'subprocess'): (1, 'local'),
     ('pegaprox/utils/ssh.py', '_ssh_exec', 'ssh-paramiko'): (5, 'guard'),
     ('pegaprox/utils/ssh.py', '_ssh_exec', 'ssh-exec'): (1, 'guard'),
+    # the stored key's leg of _pve_node_exec, on a client of _ssh_connect (#1224)
+    ('pegaprox/utils/ssh.py', '_run_on_client', 'ssh-exec'): (1, 'client'),
     ('pegaprox/utils/ssh_security.py', 'secure_ssh_client', 'ssh-paramiko'): (1, 'guard'),
     ('pegaprox/utils/ssh_pool.py', 'get_pooled_transport', 'ssh-paramiko'): (1, 'unused'),
     # TCP probes of a node before the call, and the socket _ssh_exec connects with
@@ -507,13 +509,14 @@ def test_the_inventory_counts_what_the_report_says():
     for (_f, _q, kind), (n, verdict) in EXITS.items():
         by[verdict] += n
     # S4 with the witness and the lease link, and the connection check, the three restarts
-    # asking systemctl in one helper, the join fingerprint read through tls_fingerprint:
-    # 256 calls out of this process, 151 (function, kind) pairs in 137 functions; 46 of
-    # them guarded at the exit and 85 execs on a client from a guarded factory. No route
+    # asking systemctl in one helper, the join fingerprint read through tls_fingerprint,
+    # the stored key's leg of _pve_node_exec:
+    # 257 calls out of this process, 152 (function, kind) pairs in 138 functions; 46 of
+    # them guarded at the exit and 86 execs on a client from a guarded factory. No route
     # relies on the write gate alone any more
-    assert sum(n for n, _v in EXITS.values()) == 256 and len(EXITS) == 151
-    assert len({(f, q) for f, q, _k in EXITS}) == 137
-    assert by['guard'] == 46 and by['client'] == 85
+    assert sum(n for n, _v in EXITS.values()) == 257 and len(EXITS) == 152
+    assert len({(f, q) for f, q, _k in EXITS}) == 138
+    assert by['guard'] == 46 and by['client'] == 86
 
 
 @pytest.mark.parametrize('key', sorted(k for k, v in EXITS.items() if v[1] == 'guard'),

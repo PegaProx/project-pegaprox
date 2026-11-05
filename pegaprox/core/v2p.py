@@ -16,7 +16,7 @@ import shlex
 from datetime import datetime
 
 from pegaprox.globals import cluster_managers, vmware_managers, _v2p_migrations
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, forget_key_refusal
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
 
@@ -455,6 +455,69 @@ def _node_hkc():
     return 'yes' if strict_host_keys_enabled() else 'accept-new'
 
 
+# what the tool probe of the planning step prints for a tool the node does not have
+_TOOL_MISSING = 'V2P_TOOL_MISSING'
+
+
+def _first_lines(text, limit=300):
+    """The text of a node's answer on one line, for a log line."""
+    return ' '.join(str(text or '').split())[:limit]
+
+
+def _node_cannot_reach(pve_mgr, node, host, port, wait=5):
+    """Why `node` cannot open a TCP connection to host:port, '' when it can, None when
+    the probe gave no answer (it did not run, or a node exec without output).
+
+    bash's /dev/tcp under coreutils' timeout, both on every PVE node. A filtered port
+    waits for the timeout (124), a refused or unknown one fails at once with bash's
+    reason. Host and port are arguments of the inner bash, never part of its script:
+    that one parses its string again (an IPv6 zone id may hold any character)."""
+    from pegaprox.utils.ssh import bare_host
+    from pegaprox.utils.sanitization import validate_host_address
+    addr = bare_host(host)
+    if not validate_host_address(addr):
+        return None
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"timeout {int(wait)} bash -c '</dev/tcp/\"$1\"/\"$2\"' _ {shlex.quote(addr)} {int(port)} 2>&1; "
+        f"echo V2P_TCP_RC=$?", timeout=int(wait) + 10)
+    lines = str(out or '').strip().splitlines()
+    m = re.fullmatch(r'V2P_TCP_RC=(\d+)', lines[-1].strip()) if lines else None
+    if not m:
+        return None
+    code = int(m.group(1))
+    if code == 0:
+        return ''
+    if code == 124:
+        return f'no answer within {int(wait)}s'
+    return _first_lines(' '.join(lines[:-1])) or f'exit code {code}'
+
+
+def _sshfs_mount_cmd(mnt_path, safe_pass, opts, source):
+    """The node's command for one SSHFS mount attempt (#1224).
+
+    sshfs 3 sends the stderr of the ssh it starts to /dev/null and says no more than
+    'read: Connection reset by peer'. ssh -E puts ssh's own messages in a file, printed
+    to stderr when the mount fails and removed either way. Not sshfs_debug: that hands
+    ssh the command's stderr, and an ssh that stays for the mount keeps the call open."""
+    return (
+        f"mkdir -p {mnt_path} && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && {{ "
+        f"printf '%s' {safe_pass} | sshfs -o password_stdin,{opts} "
+        f"-o \"ssh_command=ssh -E $_log\" {source} {mnt_path}; "
+        f"_rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }}"
+    )
+
+
+# what sshfs and ssh print around a failed mount that never names its cause
+_SSHFS_NOISE = ('read: Connection reset by peer', 'Warning: Permanently added')
+
+
+def _mount_said(err, out):
+    """What a failed mount attempt said, on one line, without the _SSHFS_NOISE lines
+    (unless that is all it said)."""
+    lines = [ln.strip() for ln in str(err or out or '').splitlines() if ln.strip()]
+    return _first_lines(' '.join([ln for ln in lines if not ln.startswith(_SSHFS_NOISE)] or lines))
+
+
 # what mktemp in _write_node_script prints, and nothing else
 _NODE_SCRIPT_RE = re.compile(r'/tmp/v2p-[a-z0-9-]+-[A-Za-z0-9]{10}')
 
@@ -518,6 +581,7 @@ def _run_v2p_migration(task):
             task.set_phase('failed', 'Proxmox cluster not found'); return
         
         esxi_host = task.esxi_host or vmware_mgr.host
+        esxi_addr = esxi_host   # unquoted, for the node's own probe of it
         esxi_user = task.esxi_user or 'root'
         esxi_pass = task.esxi_password
         # NS Feb 2026 - quote user/host for shell injection prevention
@@ -571,19 +635,31 @@ def _run_v2p_migration(task):
         # standard binary dirs. Either path success counts.
         _preflight = {}
         _probe_dirs = '/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin'
+        # MK Nov 2026 (#1224) - a run started by hand offers the stored key again even where
+        # a console tile saw it refused a minute ago: the operator may just have fixed that
+        forget_key_refusal(pve_mgr, task.target_node)
         for _tool in ['qemu-img', 'qemu-nbd', 'sshfs', 'sshpass']:
             # Belt-and-suspenders probe: `command -v` (POSIX builtin, honours
             # PATH) wins fast, else walk the canonical bin/sbin dirs and
             # check for executable absolute paths. The `&& exit 0` pattern
             # avoids the bash-precedence trap where `A || B; exit 1` runs
             # `exit 1` unconditionally because `;` isn't a `||`-continuation.
+            # MK Nov 2026 (#1224) - a missing tool says so on stdout; a non-zero
+            # answer without that line never ran on the node (SSH, login).
             probe = (
                 f"command -v {_tool} >/dev/null 2>&1 && exit 0; "
                 f"for d in {_probe_dirs}; do "
                 f"  [ -x \"$d/{_tool}\" ] && exit 0; "
-                f"done; exit 1"
+                f"done; echo {_TOOL_MISSING}; exit 1"
             )
-            rc_pf, out_pf, _ = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            rc_pf, out_pf, err_pf = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            if rc_pf != 0 and _TOOL_MISSING not in str(out_pf or ''):
+                _exec_err = _first_lines(err_pf or out_pf).rstrip('.') or f'exit code {rc_pf}'
+                task.set_phase('failed',
+                    f'Cannot run commands on target node {task.target_node} over SSH, so the '
+                    f'tool check could not run: {_exec_err}. Check the SSH key or password '
+                    f'stored for the cluster and that the node accepts it.')
+                return
             _preflight[_tool] = rc_pf == 0
         avail = [t for t, ok in _preflight.items() if ok]
         missing = [t for t, ok in _preflight.items() if not ok]
@@ -605,6 +681,18 @@ def _run_v2p_migration(task):
                 'that package conflicts with pve-qemu-kvm and can break '
                 'Proxmox.')
             return
+
+        # MK Nov 2026 (#1224) - the SSHFS mount and the copies run on the node, so it is
+        # the node's way to the ESXi host that has to work. The test above only proved ours.
+        _reach_err = _node_cannot_reach(pve_mgr, task.target_node, esxi_addr, 22)
+        if _reach_err:
+            task.set_phase('failed',
+                f'Target node {task.target_node} cannot reach {esxi_host} on port 22 '
+                f'({_reach_err}). The SSHFS mount and the disk copies run on the node: allow '
+                f'it in the ESXi firewall and on the network in between.')
+            return
+        if _reach_err is not None:
+            task.log(f"Port 22 of {esxi_host} reachable from {task.target_node}")
 
         # Find VM directory on ESXi datastore
         datastore = task.esxi_datastore
@@ -1011,8 +1099,11 @@ def _run_v2p_migration(task):
         #   negative_timeout=3600: cache "file not found" for 1h
         #   no_check_root: skip root dir check (faster mount)
         _hk = _node_hkc()
+        # MK Nov 2026 (#1224) - ConnectTimeout: ssh gives up inside the 30s an attempt gets,
+        # where a filtered port outlasted the call. Its reason comes back through the -E
+        # log of _sshfs_mount_cmd.
         sshfs_ssh_opts = (
-            f"StrictHostKeyChecking={_hk},"
+            f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
             "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
             "max_read=1048576,max_write=1048576,big_writes,large_read,"
@@ -1029,37 +1120,38 @@ def _run_v2p_migration(task):
             "-o IPQoS=throughput"
         )
         
-        mount_cmd = (
-            f"mkdir -p {mnt_path} && "
-            f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-            f"{sshfs_ssh_opts},{sshfs_algo_opts} "
-            f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}"
-        )
+        _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
+        mount_cmd = _sshfs_mount_cmd(mnt_path, safe_pass, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
         rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30)
+        # what the node's sshfs/ssh said goes into the log for each attempt, the last
+        # thing it said into the failure
+        _mount_err = ''
         if rc != 0:
+            _mount_err = _mount_said(err, out)
+            task.log(f"SSHFS mount attempt 1/3 failed, trying fewer options: "
+                     f"{_mount_err or f'exit code {rc}, no output'}")
             # Fallback 1: perf options but simpler SSH (no algo workaround)
-            mount_cmd2 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd2 = _sshfs_mount_cmd(mnt_path, safe_pass,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
-                f"entry_timeout=3600,attr_timeout=3600 "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
+                f"entry_timeout=3600,attr_timeout=3600", _src)
             rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30)
         if rc != 0:
+            _said = _mount_said(err, out)
+            _mount_err = _said or _mount_err
+            task.log(f"SSHFS mount attempt 2/3 failed, trying fewer options: "
+                     f"{_said or f'exit code {rc}, no output'}")
             # Fallback 2: minimal options (maximum compatibility)
-            mount_cmd3 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd3 = _sshfs_mount_cmd(mnt_path, safe_pass,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
-                f"cache=yes "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
+                f"cache=yes", _src)
             rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30)
             if rc != 0:
-                task.set_phase('failed', f'SSHFS mount failed: {err}'); return
+                _mount_err = _mount_said(err, out) or _mount_err or f'exit code {rc}, no output'
+                task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
         task.log(f"SSHFS mounted: {mnt_path}")
         
         # Verify files visible
