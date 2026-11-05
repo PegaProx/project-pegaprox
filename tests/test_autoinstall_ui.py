@@ -234,7 +234,9 @@ def test_every_layout_keeps_the_entry_off_every_standby(dash):
         assert gate not in dash, gate
         assert gate not in _read(VM_MODALS), gate
     assert dash.count('{canAutoInstall && !haStandby && (') == 2
-    assert dash.count('show: canAutoInstall && !haStandby,') == 1   # the corporate Tools section
+    # the corporate Tools section and the folded rail of Corporate Redesigned, each behind the gate
+    entries = dash.count("{ id: 'autoinstall',")
+    assert entries == dash.count("{ id: 'autoinstall', show: canAutoInstall && !haStandby,") == 2
     assert ("const { user, sessionId, logout, getAuthHeaders, isAdmin, passwordExpiry, updatePreferences, "
             "ha, haReadOnly, haStandby, haConsolesElsewhere, haServing, refreshHa } = useAuth();") in dash
 

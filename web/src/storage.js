@@ -2,8 +2,11 @@
         // PegaProx - Storage
         // DatastoreTab with storage cluster balancing
         // ═══════════════════════════════════════════════
+        // LW Nov 2026 - how long the auto-sync of an upload waits for its Proxmox VE task to end
+        const CR_DS_AUTOSYNC_WAIT = 15 * 60 * 1000;
+
         // Datastore Tab Component - with Storage Clusters for balancing
-        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, sharedDatastoreData }) {
+        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData, sharedDatastoreRead, guests, onOpenGuest, crTasks, crSub, onCrSubShown }) {
             const { t } = useTranslation();
             const { getAuthHeaders, isAdmin, user, haReadOnly } = useAuth();
             // #644: gate the storage action bar on the same fine-grained perms the API
@@ -11,12 +14,24 @@
             // check — a non-admin who holds e.g. storage.upload should get the button.
             // #625: a standby keeps the reading ones only.
             const hasPerm = (p) => (!haReadOnly || haReadPermission(p)) && (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes(p)));
-            const { isCorporate } = useLayout();
+            const { isCorporate, isCorpRedesigned } = useLayout();
             const [loading, setLoading] = useState(true);
             const [datastores, setDatastores] = useState({ shared: [], local: {}, nodes: [] });
             const [selectedStorage, setSelectedStorage] = useState(null);
             const [storageContent, setStorageContent] = useState([]);
             const [contentLoading, setContentLoading] = useState(false);
+            const [contentError, setContentError] = useState(null);
+            // LW Oct 2026 - Corporate Redesigned: why the content read failed, and the newest read
+            const [crContentError, setCrContentError] = useState(null);
+            const crContentSeq = useRef(0);
+            // LW Nov 2026 - how this tab's last read of /datastores ended ({ ok, at, msg }); the
+            // dashboard's own read comes in as sharedDatastoreRead, the later of the two counts
+            const [crDsRead, setCrDsRead] = useState(null);
+            // why the ESXi host list or the VM list of the picked host could not be read
+            const [crEsxiErr, setCrEsxiErr] = useState({ hosts: '', vms: '' });
+            const esxiVmsSeq = useRef(0);
+            // an upload that waits for its Proxmox VE task before the auto-sync copies it
+            const [crAutoSync, setCrAutoSync] = useState(null);
             const [expandedNodes, setExpandedNodes] = useState({});
             const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla, recovery
             const [syncStatus, setSyncStatus] = useState(null);
@@ -29,6 +44,8 @@
             const [slaSaving, setSlaSaving] = useState(false);
             const [slaDraftHours, setSlaDraftHours] = useState(0);
             const [slaFilter, setSlaFilter] = useState('all'); // all, breached, no-backup, warning, ok
+            // LW Nov 2026 - why the last read failed; only Corporate Redesigned shows it
+            const [slaError, setSlaError] = useState('');
 
             const refreshSla = () => {
                 setSlaLoading(true);
@@ -38,11 +55,21 @@
                         if (d && !d.error) {
                             setSlaData(d);
                             setSlaDraftHours(d.max_age_hours || 0);
-                        }
+                            setSlaError('');
+                        } else setSlaError((d && d.error) || t('crSlaNoAnswer'));
                     })
-                    .catch(() => {})
+                    .catch(() => setSlaError(t('crSlaNoAnswer')))
                     .finally(() => setSlaLoading(false));
             };
+
+            // LW Oct 2026 - Corporate Redesigned: the health of a guest links to its Backup SLA or
+            // Restore tests; the tab opens on that sub tab, read as its button reads it
+            useEffect(() => {
+                if (!isCorpRedesigned || !crSub) return;
+                if (crSub === 'sla') { setActiveTab('sla'); refreshSla(); }
+                else if (crSub === 'recovery') setActiveTab('recovery');
+                if (onCrSubShown) onCrSubShown();
+            }, [crSub]);
 
             const saveSlaConfig = async () => {
                 setSlaSaving(true);
@@ -55,6 +82,8 @@
                     if (r && r.ok) {
                         addToast(t('slaConfigSaved') || 'Backup SLA target saved', 'success');
                         refreshSla();
+                        // LW Nov 2026 - Corporate Redesigned closes its edit bar on a save that went through
+                        return true;
                     } else {
                         const err = await r?.json().catch(() => ({}));
                         addToast(err.error || (t('slaConfigSaveFailed') || 'Save failed'), 'error');
@@ -101,7 +130,9 @@
                 }, 3000);
             };
 
-            const triggerSync = async (sourceNode, storage, filename) => {
+            // LW Nov 2026 - crTracked === true: Corporate Redesigned follows the copy itself (by the
+            // time of the result, as long as scp runs) and only needs to know the server took it
+            const triggerSync = async (sourceNode, storage, filename, crTracked) => {
                 setSyncingFiles(prev => ({...prev, [filename]: true}));
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync`, {
@@ -110,6 +141,10 @@
                     });
                     if (r?.ok) {
                         addToast(`Syncing ${filename}...`, 'success');
+                        if (crTracked === true) {
+                            setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                            return true;
+                        }
                         _pollSyncResult(filename);
                     } else {
                         const d = await r?.json().catch(() => ({}));
@@ -122,7 +157,8 @@
                 }
             };
 
-            const triggerSyncAll = async () => {
+            // LW Nov 2026 - the classic button passes its click event, Corporate Redesigned passes true
+            const triggerSyncAll = async (crTracked) => {
                 setSyncingFiles({_all: true});
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/all`, {
@@ -131,6 +167,7 @@
                     });
                     if (r?.ok) {
                         addToast(t('syncAllStarted') || 'Syncing all missing files...', 'success');
+                        if (crTracked === true) { setSyncingFiles({}); return true; }
                         setTimeout(refreshSyncStatus, 10000);
                     } else {
                         const d = await r?.json().catch(() => ({}));
@@ -186,6 +223,8 @@
             const [newClusterThreshold, setNewClusterThreshold] = useState(20);
             const [newClusterTolerance, setNewClusterTolerance] = useState(5);
             const [balancingLoading, setBalancingLoading] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned: what became of the last read of the storage cluster list
+            const [crScRead, setCrScRead] = useState(null);
             
             // NS: ESXi Integration state - Dec 2025
             const [esxiHosts, setEsxiHosts] = useState([]);
@@ -195,9 +234,6 @@
             const [selectedEsxi, setSelectedEsxi] = useState(null);
             const [esxiVms, setEsxiVms] = useState([]);
             const [esxiVmsLoading, setEsxiVmsLoading] = useState(false);
-            
-            // Debounce timer for threshold updates
-            const thresholdTimer = useRef(null);
             
             /* LW: wrapped fetch with auth headers + error handling
                returns null on failure so you can do: if(!res) return; */
@@ -295,6 +331,35 @@
                 };
             };
             
+            // NS Nov 2026 - the cluster effect runs before the shared data effect: the other way
+            // round it cleared initialLoadDone right after the shared data had set it, on every
+            // mount, and a sidebar pick waited for the next 15 s refresh
+            useEffect(() => {
+                activeClusterIdRef.current = clusterId;
+                // LW: Reset ALL cluster-specific state when cluster changes
+                // This prevents showing stale data from previous cluster
+                setSelectedStorage(null);
+                setStorageContent([]);
+                setContentError(null);
+                setStorageClusters([]);  // NS: also reset storage clusters
+                setSelectedCluster(null);
+                setClusterStatus(null);
+                if (isCorpRedesigned) { setCrScRead(null); setCrDsRead(null); setCrEsxiErr({ hosts: '', vms: '' }); crDropAutoSync('crDsAutoSyncDropped'); }
+                setEsxiHosts([]);  // NS: reset ESXi hosts too
+                setSelectedEsxi(null);
+                setEsxiVms([]);
+
+                // Reset refs
+                initialLoadDone.current = false;  // Allow loading spinner again
+                datastoresRef.current = null;  // Clear cached data
+                fetchingRef.current = false;  // Reset fetch lock
+
+                if (!sharedDatastoreData || !sharedDatastoreData.shared?.length) {
+                    fetchDatastores();  // fallback: fetch independently if parent didn't pass data
+                }
+                fetchStorageClusters();
+            }, [clusterId]);
+
             // NS: use parent datastore data when available so sidebar + tab always match
             useEffect(() => {
                 if (sharedDatastoreData && sharedDatastoreData.shared?.length > 0) {
@@ -311,55 +376,40 @@
                 }
             }, [sharedDatastoreData]);
 
-            useEffect(() => {
-                activeClusterIdRef.current = clusterId;
-                // LW: Reset ALL cluster-specific state when cluster changes
-                // This prevents showing stale data from previous cluster
-                setSelectedStorage(null);
-                setStorageContent([]);
-                setStorageClusters([]);  // NS: also reset storage clusters
-                setSelectedCluster(null);
-                setClusterStatus(null);
-                setEsxiHosts([]);  // NS: reset ESXi hosts too
-                setSelectedEsxi(null);
-                setEsxiVms([]);
-
-                // Reset refs
-                initialLoadDone.current = false;  // Allow loading spinner again
-                datastoresRef.current = null;  // Clear cached data
-                fetchingRef.current = false;  // Reset fetch lock
-
-                if (!sharedDatastoreData || !sharedDatastoreData.shared?.length) {
-                    fetchDatastores();  // fallback: fetch independently if parent didn't pass data
-                }
-                fetchStorageClusters();
-            }, [clusterId]);
-
             // LW: Mar 2026 - auto-select storage from sidebar click
             // initialNode disambiguates when multiple nodes have same storage name (e.g. "local")
+            // A pick is applied once, as soon as the list has it: every 15 s refresh of the list
+            // applied it again, over a storage picked here in the tab. initialPick is the sidebar's
+            // selection, a new one per click, so the same storage clicked again opens.
+            const pendingPickRef = useRef(null);
             useEffect(() => {
-                if (!initialStorage || !initialLoadDone.current) return;
+                pendingPickRef.current = initialStorage ? { storage: initialStorage, node: initialNode || null } : null;
+            }, [initialStorage, initialNode, initialPick]);
+            useEffect(() => {
+                const pick = pendingPickRef.current;
+                if (!pick || !initialLoadDone.current) return;
+                const open = (node) => { pendingPickRef.current = null; loadStorageContent(pick.storage, node); };
                 // if node is specified, go directly to that node's storage
-                if (initialNode) {
-                    const nodeStores = datastores.local?.[initialNode];
-                    if (nodeStores?.some(s => s.storage === initialStorage)) {
-                        loadStorageContent(initialStorage, initialNode);
+                if (pick.node) {
+                    const nodeStores = datastores.local?.[pick.node];
+                    if (nodeStores?.some(s => s.storage === pick.storage)) {
+                        open(pick.node);
                         return;
                     }
                 }
                 // fallback: check shared first, then scan local
-                const found = datastores.shared?.find(s => s.storage === initialStorage);
+                const found = datastores.shared?.find(s => s.storage === pick.storage);
                 if (found) {
-                    loadStorageContent(initialStorage, null);
+                    open(null);
                 } else {
                     for (const [node, stores] of Object.entries(datastores.local || {})) {
-                        if (stores.some(s => s.storage === initialStorage)) {
-                            loadStorageContent(initialStorage, node);
+                        if (stores.some(s => s.storage === pick.storage)) {
+                            open(node);
                             return;
                         }
                     }
                 }
-            }, [initialStorage, initialNode, datastores]);
+            }, [initialStorage, initialNode, initialPick, datastores]);
 
             const fetchDatastores = async () => {
                 // prevent concurrent fetches
@@ -412,17 +462,61 @@
                         }
                         
                         initialLoadDone.current = true;
+                        if (isCorpRedesigned) setCrDsRead({ ok: true, at: Date.now() });
+                    } else if (isCorpRedesigned && clusterId === activeClusterIdRef.current) {
+                        const msg = await crReadWhy(resp);
+                        if (clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg });
                     }
                 } catch (err) {
                     console.error('fetching datastores:', err);
+                    if (isCorpRedesigned && clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg: t('crLoadFailed') });
                 } finally {
                     setLoading(false);
                     fetchingRef.current = false;
                 }
             };
+            // LW Nov 2026 - a refused or lost read as text: what its code says (the server's error is
+            // the English detail of a failed Proxmox VE read), the error and the status
+            const crCodedWhy = (b, status) => {
+                const coded = b && { UPSTREAM_AUTH: 'crNdWhyAuth', PVE_READ_FAILED: 'crNdWhyPve', PVE_UNREACHABLE: 'crNdWhyOffline' }[b.code];
+                return [coded ? t(coded) : '', b && typeof b.error === 'string' ? b.error : '', status ? `HTTP ${status}` : ''].filter(Boolean).join(' - ');
+            };
+            const crReadWhy = async (r) => {
+                if (!r) return t('crDriftOffline');
+                return crCodedWhy(await r.json().catch(() => null), r.status);
+            };
+            // the later of the two datastore reads, when it failed: hasData says an earlier read is on screen
+            const crDsFail = (() => {
+                if (!isCorpRedesigned) return null;
+                const a = crDsRead;
+                const b = sharedDatastoreRead && sharedDatastoreRead.at ? sharedDatastoreRead : null;
+                const last = !a ? b : !b ? a : (b.at > a.at ? b : a);
+                if (!last || last.ok) return null;
+                const hasData = !!((datastores.shared || []).length || Object.keys(datastores.local || {}).length);
+                return { msg: last.msg || '', hasData };
+            })();
             
+            // LW Oct 2026 - Corporate Redesigned: the same GET, but a refused, failed or late answer says so
+            // instead of leaving "no storage clusters" (or the list of the cluster before) on screen
+            const crFetchStorageClusters = async () => {
+                const cid = clusterId;
+                setCrScRead(prev => ({ ...(prev && prev.cid === cid ? prev : {}), cid, pending: true }));
+                const r = await authFetch(`${API_URL}/clusters/${cid}/storage-clusters`);
+                const body = r ? await r.json().catch(() => null) : null;
+                if (cid !== activeClusterIdRef.current) return;
+                if (r && r.ok && Array.isArray(body)) {
+                    setStorageClusters(body);
+                    setCrScRead({ cid, state: 'ok', at: Date.now() });
+                    return;
+                }
+                const msg = body && typeof body.error === 'string' ? body.error : '';
+                const state = !r ? 'offline' : r.ok ? 'malformed' : r.status === 403 ? 'forbidden' : r.status === 404 ? 'notfound' : 'error';
+                setCrScRead({ cid, state, code: r ? r.status : 0, msg });
+            };
+
             // storage clusters (ceph etc)
             const fetchStorageClusters = async () => {
+                if (isCorpRedesigned) return crFetchStorageClusters();
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters`);
                     if (r?.ok) {
@@ -433,18 +527,30 @@
                 }
             };
             
+            // a refused, failed or empty status read left the panel at "Balanced" (or at the group
+            // picked before); it now says the status could not be read. Only the answer for the
+            // group picked last is shown.
+            const statusSeq = useRef(0);
             const loadClusterStatus = async (scId) => {
+                const seq = ++statusSeq.current;
                 setBalancingLoading(true);
+                let next;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}/status`);
-                    if (response && response.ok) {
-                        setClusterStatus(await response.json());
+                    const data = response ? await response.json().catch(() => null) : null;
+                    if (response && response.ok && data && Array.isArray(data.storages)) {
+                        next = data;
+                    } else {
+                        next = { id: scId, unreadable: true,
+                                 error: data?.error || (response ? `HTTP ${response.status}` : (t('connectionError') || 'Connection error')) };
                     }
                 } catch (error) {
                     console.error('loading cluster status:', error);
-                } finally {
-                    setBalancingLoading(false);
+                    next = { id: scId, unreadable: true, error: error?.message || String(error) };
                 }
+                if (seq !== statusSeq.current) return;
+                setClusterStatus(next);
+                setBalancingLoading(false);
             };
             
             const createStorageCluster = async () => {
@@ -468,6 +574,7 @@
                         setNewClusterName('');
                         setNewClusterStorages([]);
                         setNewClusterThreshold(20);
+                        setNewClusterTolerance(5);
                         fetchStorageClusters();
                     } else {
                         const err = await response.json();
@@ -478,59 +585,65 @@
                 }
             };
             
-            const updateClusterThreshold = (scId, threshold) => {
-                // update local state immediately
-                setStorageClusters(prev => prev.map(sc => 
-                    sc.id === scId ? { ...sc, threshold } : sc
-                ));
-                if (clusterStatus?.id === scId) {
-                    setClusterStatus(prev => prev ? { ...prev, threshold } : null);
-                }
-                
-                // Debounce API call
-                if (thresholdTimer.current) clearTimeout(thresholdTimer.current);
-                thresholdTimer.current = setTimeout(async () => {
-                    try {
-                        await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ threshold })
-                        });
-                    } catch (error) {
-                        console.error('updating threshold:', error);
-                    }
-                }, 500);
+            // The switches and sliders showed the new value whatever the server answered, a 403
+            // too. A refused change goes back to the value the server last confirmed and says why.
+            const setClusterField = (scId, patch) => {
+                setStorageClusters(prev => prev.map(sc => sc.id === scId ? { ...sc, ...patch } : sc));
+                setClusterStatus(prev => prev && prev.id === scId ? { ...prev, ...patch } : prev);
             };
-            
-            const toggleClusterEnabled = async (scId, enabled) => {
-                try {
-                    await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ enabled })
-                    });
-                    setStorageClusters(prev => prev.map(sc => 
-                        sc.id === scId ? { ...sc, enabled } : sc
-                    ));
-                } catch (error) {
-                    console.error('toggling cluster:', error);
+
+            const errorText = (response, data) =>
+                data?.error || (response ? `HTTP ${response.status}` : (t('connectionError') || 'Connection error'));
+
+            // per group and field while a change of it is waiting or under way: the value the
+            // server confirmed last, the number of the last change sent, its debounce timer
+            const settingState = useRef({});
+            const fieldState = (scId, field) => {
+                const key = `${scId}:${field}`;
+                if (!settingState.current[key]) {
+                    settingState.current[key] = { key, confirmed: storageClusters.find(sc => sc.id === scId)?.[field],
+                                                  seq: 0, savedSeq: 0, inFlight: new Set(), timer: null };
                 }
+                return settingState.current[key];
             };
-            
-            const toggleAutoBalance = async (scId, auto_balance) => {
-                try {
-                    await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ auto_balance })
-                    });
-                    setStorageClusters(prev => prev.map(sc => 
-                        sc.id === scId ? { ...sc, auto_balance } : sc
-                    ));
-                } catch (error) {
-                    console.error('toggling auto-balance:', error);
+
+            const putClusterSetting = async (st, scId, field, value) => {
+                const seq = ++st.seq;
+                st.inFlight.add(seq);
+                const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ [field]: value })
+                });
+                const data = response ? await response.json().catch(() => null) : null;
+                const ok = !!(response && response.ok && data);
+                st.inFlight.delete(seq);
+                if (ok && seq > st.savedSeq) {
+                    // what the server kept, it may hold a value to its range
+                    st.savedSeq = seq;
+                    st.confirmed = field in data ? data[field] : value;
                 }
+                // a later change of this field is waiting or on its way: its answer decides
+                if (st.timer || [...st.inFlight].some(n => n > seq)) return;
+                if (!st.inFlight.size && settingState.current[st.key] === st) delete settingState.current[st.key];
+                setClusterField(scId, { [field]: st.confirmed });
+                if (!ok && seq === st.seq) addToast(errorText(response, data), 'error');
             };
+
+            // one debounce per group and field, so a threshold and a tolerance change do not cancel
+            // each other; a switch goes out at once
+            const updateClusterSetting = (scId, field, value, delay = 500) => {
+                const st = fieldState(scId, field);
+                clearTimeout(st.timer);
+                st.timer = null;
+                setClusterField(scId, { [field]: value });
+                if (!delay) return putClusterSetting(st, scId, field, value);
+                st.timer = setTimeout(() => { st.timer = null; putClusterSetting(st, scId, field, value); }, delay);
+            };
+
+            const updateClusterThreshold = (scId, threshold) => updateClusterSetting(scId, 'threshold', threshold);
+            const toggleClusterEnabled = (scId, enabled) => updateClusterSetting(scId, 'enabled', enabled, 0);
+            const toggleAutoBalance = (scId, auto_balance) => updateClusterSetting(scId, 'auto_balance', auto_balance, 0);
             
             const deleteStorageCluster = async (scId) => {
                 if (!confirm(t('confirmDeleteCluster') || 'Delete this storage cluster?')) return;
@@ -556,11 +669,12 @@
                 
                 const newStorages = [...cluster.storages, storageName];
                 try {
-                    await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ storages: newStorages })
                     });
+                    if (!response?.ok) addToast(errorText(response, response ? await response.json().catch(() => null) : null), 'error');
                     fetchStorageClusters();
                     if (selectedCluster === scId) loadClusterStatus(scId);
                 } catch (error) {
@@ -577,11 +691,12 @@
                 
                 const newStorages = cluster.storages.filter(s => s !== storageName);
                 try {
-                    await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ storages: newStorages })
                     });
+                    if (!response?.ok) addToast(errorText(response, response ? await response.json().catch(() => null) : null), 'error');
                     fetchStorageClusters();
                     if (selectedCluster === scId) loadClusterStatus(scId);
                 } catch (error) {
@@ -605,29 +720,48 @@
                         alert(t('migrationStarted') || 'Migration started!');
                         if (selectedCluster) loadClusterStatus(selectedCluster);
                     } else {
-                        const err = await response.json();
-                        alert(err.error || 'Migration failed');
+                        // no answer at all, or one that is no JSON (a proxy's error page): still say so
+                        const err = response ? await response.json().catch(() => null) : null;
+                        alert(`${t('migrationFailed') || 'Migration failed'}: ${errorText(response, err)}`);
                     }
                 } catch (error) {
                     console.error('executing migration:', error);
+                    alert(`${t('migrationFailed') || 'Migration failed'}: ${error?.message || error}`);
                 }
             };
             
             const loadStorageContent = async (storageName, node) => {
+                // LW Oct 2026 - Corporate Redesigned: only the newest click lands, and a refused read says so
+                const crSeq = ++crContentSeq.current;
+                const crStale = () => isCorpRedesigned && crSeq !== crContentSeq.current;
                 setContentLoading(true);
                 setSelectedStorage({ name: storageName, node });
+                setContentError(null);
+                if (isCorpRedesigned) setCrContentError(null);
                 try {
                     const url = node 
                         ? `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content?node=${node}`
                         : `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content`;
                     const response = await authFetch(url);
-                    if (response && response.ok) {
-                        setStorageContent(await response.json());
+                    if (crStale()) return;
+                    const data = response ? await response.json().catch(() => null) : null;
+                    if (crStale()) return;
+                    if (response && response.ok && Array.isArray(data)) {
+                        setStorageContent(data);
+                    } else {
+                        // not the previous storage's content under this one's name
+                        setStorageContent([]);
+                        setContentError(errorText(response, data));
+                        if (isCorpRedesigned) setCrContentError((data && data.code ? crCodedWhy(data, 0) : data && data.error) || t('crDsLoadFailed'));
                     }
                 } catch (error) {
                     console.error('loading content:', error);
+                    if (crStale()) return;
+                    setStorageContent([]);
+                    setContentError(error?.message || String(error));
+                    if (isCorpRedesigned) setCrContentError(t('crDsLoadFailed'));
                 } finally {
-                    setContentLoading(false);
+                    if (!crStale()) setContentLoading(false);
                 }
             };
             
@@ -649,6 +783,56 @@
                 }
             };
             
+            // LW Nov 2026 - Corporate Redesigned: with auto-sync on (the ISO Sync tab, the flag of the
+            // classic checkbox) an ISO or template uploaded to a node's own storage is copied to the
+            // other nodes once the upload task of Proxmox VE ended well. The task is read from the
+            // task list the dashboard keeps, nothing is polled for it
+            const crQueueAutoSync = (answer, filename, ct) => {
+                let on = false;
+                try { on = localStorage.getItem(`autosync-${clusterId}`) === 'true'; } catch (_) {}
+                const sel = selectedStorage;
+                if (!on || !sel || !sel.node || (datastores.shared || []).some(s => s.storage === sel.name)) return;
+                let upid = '';
+                try { upid = (JSON.parse(answer) || {}).upid; } catch (_) {}
+                if (typeof upid !== 'string' || !upid) return;
+                setCrAutoSync({ cid: clusterId, upid, node: sel.node, storage: sel.name, filename, ct });
+                addToast(crFill(t('crDsAutoSyncWaiting'), { name: filename }), 'info');
+            };
+            // a pending copy that goes without being made is said: the page or the cluster was left, or
+            // its task was not seen ending within CR_DS_AUTOSYNC_WAIT
+            const crAutoSyncNow = useRef(null);
+            crAutoSyncNow.current = { job: crAutoSync, say: (key, job) => addToast(crFill(t(key), { name: job.filename }), 'warning') };
+            const crDropAutoSync = (key) => {
+                const { job, say } = crAutoSyncNow.current || {};
+                if (!job) return;
+                crAutoSyncNow.current = { job: null, say };
+                setCrAutoSync(null);
+                say(key, job);
+            };
+            useEffect(() => () => crDropAutoSync('crDsAutoSyncDropped'), []);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                if (!crAutoSync) return;
+                const id = setTimeout(() => crDropAutoSync('crDsAutoSyncTimeout'), CR_DS_AUTOSYNC_WAIT);
+                return () => clearTimeout(id);
+            }, [crAutoSync]);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                const job = crAutoSync;
+                if (!isCorpRedesigned || !job || job.cid !== clusterId) return;
+                const task = (Array.isArray(crTasks) ? crTasks : []).find(x => x && x.upid === job.upid);
+                const state = task ? crTaskState(task) : null;
+                if (!task || state === 'running' || state === 'queued') return;
+                setCrAutoSync(null);
+                if (state !== 'done') { addToast(crFill(t('crDsAutoSyncTaskFailed'), { name: job.filename }), 'error'); return; }
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${job.cid}/iso-sync`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ source_node: job.node, storage: job.storage, filename: job.filename, content_type: job.ct }),
+                    });
+                    if (r && r.ok) addToast(crFill(t('crDsAutoSyncStarted'), { name: job.filename }), 'success');
+                    else addToast(crFill(t('crDsAutoSyncRefused'), { name: job.filename, why: await crReadWhy(r) }), 'error');
+                })();
+            }, [crAutoSync, crTasks]);  // eslint-disable-line react-hooks/exhaustive-deps
+
             const handleUpload = async () => {
                 if (!uploadFile || !selectedStorage) return;
                 
@@ -694,6 +878,7 @@
                 
                 xhr.addEventListener('load', () => {
                     if (xhr.status >= 200 && xhr.status < 300) {
+                        if (isCorpRedesigned && !isDiskImage) crQueueAutoSync(xhr.responseText, uploadFile.name, isTemplate ? 'vztmpl' : 'iso');
                         setUploadModalOpen(false);
                         setUploadFile(null);
                         setUploadProgress(0);
@@ -835,9 +1020,16 @@
             const fetchEsxiHosts = async () => {
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts`);
-                    if (r?.ok) setEsxiHosts(await r.json());
+                    if (r?.ok) {
+                        setEsxiHosts(await r.json());
+                        if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: '' }));
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        setCrEsxiErr(x => ({ ...x, hosts: why }));
+                    }
                 } catch (e) {
                     console.error('fetching esxi hosts:', e);
+                    if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: t('crLoadFailed') }));
                 }
             };
             
@@ -887,15 +1079,27 @@
             };
             
             const fetchEsxiVms = async (hostId) => {
+                // LW Nov 2026 - the list of the host picked before is not this host's, and only the
+                // newest read lands: a failed or slow read showed the other host's VMs under this one
+                const mine = ++esxiVmsSeq.current;
                 setSelectedEsxi(hostId);
+                setEsxiVms([]);
+                if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, vms: '' }));
                 setEsxiVmsLoading(true);
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}/vms`);
-                    if (r?.ok) setEsxiVms(await r.json());
+                    if (r?.ok) {
+                        const list = await r.json();
+                        if (mine === esxiVmsSeq.current) setEsxiVms(list);
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        if (mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: why }));
+                    }
                 } catch (e) {
                     console.error('fetching esxi vms:', e);
+                    if (isCorpRedesigned && mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: t('crLoadFailed') }));
                 } finally {
-                    setEsxiVmsLoading(false);
+                    if (mine === esxiVmsSeq.current) setEsxiVmsLoading(false);
                 }
             };
             
@@ -940,6 +1144,21 @@
             
             const canUploadTo = (storage) => {
                 return storage?.content?.includes('iso') || storage?.content?.includes('vztmpl');
+            };
+
+            // the picked balancing group as configured, and its members as the last status read
+            // saw them; a status that could not be read still lists the configured members
+            const balancingGroup = clusterStatus ? storageClusters.find(sc => sc.id === clusterStatus.id) : null;
+            const balancingMembers = !clusterStatus ? [] : (clusterStatus.storages
+                || (balancingGroup?.storages || []).map(name => ({ storage: name, usable: false, state: 'unreadable' })));
+            const memberStateText = (m) => {
+                const node = m.node || '-';
+                if (m.state === 'missing') return t('sbMemberMissing').replace('{node}', node);
+                if (m.state === 'disabled') return t('sbMemberDisabled').replace('{node}', node);
+                if (m.state === 'inactive') return t('sbMemberInactive').replace('{node}', node);
+                if (m.state === 'unavailable') return t('sbMemberUnavailable');
+                if (m.state === 'no_size') return t('sbMemberNoSize');
+                return t('sbMemberUnreadable');
             };
             
             if (loading) {
@@ -1053,8 +1272,9 @@
                                 <Icons.Zap style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>Storage Balancing</span>
                             </button>
+                            {/* LW Nov 2026 - Corporate Redesigned reads the sync status in CrIsoSync, once */}
                             <button onClick={() => {
-                                setActiveTab('sync'); refreshSyncStatus();
+                                setActiveTab('sync'); if (!isCorpRedesigned) refreshSyncStatus();
                             }} className={activeTab === 'sync' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
                                 <Icons.RefreshCw style={{width: 14, height: 14, flexShrink: 0}} />
                                 <span>{t('isoSync') || 'ISO Sync'}</span>
@@ -1123,7 +1343,13 @@
                     </div>
                     )}
                     
-                    {activeTab === 'sync' ? (
+                    {activeTab === 'sync' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the Sync and Sync All of the classic sub tab, drawn by CrIsoSync */
+                        <CrIsoSync key={clusterId} clusterId={clusterId} call={authFetch} datastores={datastores} dsLoading={loading}
+                            dsFail={crDsFail} onDsRetry={fetchDatastores} autoSyncWaiting={!!crAutoSync}
+                            contentType={syncContentType} onContentType={setSyncContentType} canSync={hasPerm('storage.upload')}
+                            onSync={triggerSync} onSyncAll={triggerSyncAll} addToast={addToast} />
+                    ) : activeTab === 'sync' ? (
                         /* ISO/Template Sync Tab */
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
                             <div className="flex items-center justify-between mb-4">
@@ -1220,6 +1446,11 @@
                                 </div>
                             )}
                         </div>
+                    ) : activeTab === 'sla' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the read, the draft and the Save of the classic sub tab, drawn by CrBackupSla */
+                        <CrBackupSla key={clusterId} clusterId={clusterId} data={slaData} loading={slaLoading} error={slaError} saving={slaSaving}
+                            draft={slaDraftHours} onDraft={setSlaDraftHours} onSave={saveSlaConfig} onRefresh={refreshSla}
+                            canConfig={hasPerm('cluster.config')} guests={guests} onOpenGuest={onOpenGuest} />
                     ) : activeTab === 'sla' ? (
                         /* MK May 2026 — Backup SLA Tracking sub-tab.
                            Configure max-age threshold + see compliance per VM/CT.
@@ -1342,8 +1573,32 @@
                                 </div>
                             )}
                         </div>
+                    ) : activeTab === 'recovery' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the same reads and writes, drawn by CrRestoreTests */
+                        <CrRestoreTests key={clusterId} clusterId={clusterId} addToast={addToast} />
                     ) : activeTab === 'recovery' ? (
                         <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
+                    ) : activeTab === 'browse' && isCorpRedesigned ? (
+                        /* LW Oct 2026 - Corporate Redesigned: the same state, setters and dialogs, drawn by CrStorageBrowse */
+                        <CrStorageBrowse key={clusterId} datastores={datastores} dsFail={crDsFail} onDsRetry={fetchDatastores} selected={selectedStorage}
+                            content={storageContent} loading={contentLoading} error={crContentError}
+                            onPick={loadStorageContent} may={hasPerm} canUploadTo={canUploadTo} isAdmin={isAdmin}
+                            guests={guests} onOpenGuest={onOpenGuest}
+                            run={{
+                                templates: () => { setShowTemplateModal(true); loadAvailableTemplates(); },
+                                url: () => setDownloadUrlModalOpen(true),
+                                upload: () => setUploadModalOpen(true),
+                                rescan: () => setShowRescanModal(true),
+                                restore: () => setBatchRestore('pick'),
+                                recent: () => setBatchRestore('runs'),
+                                remove: (item) => setDeleteConfirm(item),
+                            }}
+                            esxi={{
+                                hosts: esxiHosts, selected: selectedEsxi, vms: esxiVms, loading: esxiVmsLoading,
+                                hostsErr: crEsxiErr.hosts, vmsErr: crEsxiErr.vms, retryHosts: fetchEsxiHosts,
+                                pick: fetchEsxiVms, disconnect: disconnectEsxiHost, connect: () => setShowAddEsxi(true),
+                                close: () => { esxiVmsSeq.current++; setSelectedEsxi(null); setEsxiVms([]); setEsxiVmsLoading(false); setCrEsxiErr(x => ({ ...x, vms: '' })); },
+                            }} />
                     ) : activeTab === 'browse' ? (
                         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                             {/* Storage Tree */}
@@ -1642,6 +1897,12 @@
                                                     <Icons.Database className="mx-auto mb-2 opacity-50" />
                                                     <p>{t('clickStorageToView') || 'Click on a storage to view its contents'}</p>
                                                 </div>
+                                            ) : contentError ? (
+                                                <div className="text-center py-12" data-content-error="">
+                                                    <div className="flex justify-center mb-2"><Icons.AlertTriangle /></div>
+                                                    <p className="text-red-400">{t('storageContentUnreadable')}</p>
+                                                    <p className="text-sm text-gray-500 mt-1 break-all">{contentError}</p>
+                                                </div>
                                             ) : storageContent.length === 0 ? (
                                                 <div className="text-center py-12 text-gray-500">
                                                     <Icons.Folder className="mx-auto mb-2 opacity-50" />
@@ -1710,6 +1971,14 @@
                         )}
                     </div>
                 </div>
+            ) : activeTab === 'balancing' && isCorpRedesigned ? (
+                /* LW Oct 2026 - Corporate Redesigned: the group list and datastores held here, the create dialog below */
+                <CrBoundary key={clusterId} id="balancing">
+                    <CrStorageBalancing clusterId={clusterId} authFetch={authFetch} datastores={datastores}
+                        dsLoading={loading} dsFail={crDsFail} onDsRetry={fetchDatastores} list={storageClusters} listRead={crScRead && crScRead.cid === clusterId ? crScRead : null}
+                        setList={setStorageClusters} reloadList={fetchStorageClusters} may={hasPerm} standby={!!haReadOnly}
+                        guests={guests} onOpenGuest={onOpenGuest} tasks={crTasks} onCreate={() => setShowCreateCluster(true)} />
+                </CrBoundary>
             ) : (
                 /* Storage Balancing Tab with Storage Clusters */
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1784,7 +2053,7 @@
                             <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <h3 className="font-semibold">
-                                        {clusterStatus ? clusterStatus.name : (t('selectCluster') || 'Select a storage cluster')}
+                                        {clusterStatus ? (balancingGroup?.name ?? clusterStatus.name) : (t('selectCluster') || 'Select a storage cluster')}
                                     </h3>
                                 </div>
                                 <div className="p-4">
@@ -1802,13 +2071,13 @@
                                             {/* Cluster Settings */}
                                             <div className="flex items-center justify-between gap-4 p-4 bg-proxmox-dark rounded-lg flex-wrap">
                                                 <Toggle
-                                                    checked={clusterStatus.enabled}
+                                                    checked={!!(balancingGroup || clusterStatus).enabled}
                                                     onChange={(v) => toggleClusterEnabled(clusterStatus.id, v)}
                                                     label={t('enabled') || 'Enabled'}
                                                 />
                                                 <div className="flex items-center gap-4">
                                                     <Toggle
-                                                        checked={storageClusters.find(sc => sc.id === clusterStatus.id)?.auto_balance || false}
+                                                        checked={balancingGroup?.auto_balance || false}
                                                         onChange={(v) => toggleAutoBalance(clusterStatus.id, v)}
                                                         label={t('autoBalance') || 'Auto-Balance'}
                                                     />
@@ -1821,8 +2090,8 @@
                                                 </div>
                                             </div>
                                             
-                                            {/* Auto-Balance Info */}
-                                            {storageClusters.find(sc => sc.id === clusterStatus.id)?.auto_balance && (
+                                            {/* Auto-Balance Info, the worker leaves a disabled group alone */}
+                                            {balancingGroup?.auto_balance && balancingGroup?.enabled && (
                                                 <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
                                                     <div className="flex items-center gap-2 text-green-400 mb-2">
                                                         <Icons.Zap />
@@ -1839,7 +2108,7 @@
                                                 <Slider
                                                     label={t('balancingThreshold') || 'Balancing Threshold'}
                                                     description={t('thresholdDesc') || 'Trigger balancing when imbalance exceeds this value'}
-                                                    value={clusterStatus.threshold}
+                                                    value={balancingGroup?.threshold ?? clusterStatus.threshold ?? 20}
                                                     onChange={(v) => updateClusterThreshold(clusterStatus.id, v)}
                                                     min={5}
                                                     max={50}
@@ -1847,15 +2116,9 @@
                                                 />
                                                 <Slider
                                                     label={t('migrationTolerance') || 'Tolerance'}
-                                                    description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
-                                                    value={clusterStatus.tolerance ?? 5}
-                                                    onChange={(v) => {
-                                                        setClusterStatus(prev => prev ? {...prev, tolerance: v} : null);
-                                                        if (thresholdTimer.current) clearTimeout(thresholdTimer.current);
-                                                        thresholdTimer.current = setTimeout(async () => {
-                                                            try { await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${clusterStatus.id}`, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify({tolerance: v}) }); } catch(e) {}
-                                                        }, 500);
-                                                    }}
+                                                    description={t('storageToleranceDesc')}
+                                                    value={balancingGroup?.tolerance ?? clusterStatus.tolerance ?? 5}
+                                                    onChange={(v) => updateClusterSetting(clusterStatus.id, 'tolerance', v)}
                                                     min={0}
                                                     max={20}
                                                     step={1}
@@ -1863,7 +2126,28 @@
                                             </div>
                                             
                                             {/* Imbalance Status */}
-                                            <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg">
+                                            {clusterStatus.unreadable ? (
+                                                <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg" data-sb-status="unreadable">
+                                                    <div className="flex items-center gap-2 text-red-400 font-medium">
+                                                        <Icons.AlertTriangle />
+                                                        <span>{t('sbStatusUnreadable')}</span>
+                                                    </div>
+                                                    <p className="text-sm text-gray-400 mt-1">{clusterStatus.error}</p>
+                                                </div>
+                                            ) : clusterStatus.imbalance == null ? (
+                                                <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg" data-sb-status="unknown">
+                                                    <div className="flex-1">
+                                                        <div className="text-sm text-gray-400">{t('currentImbalance') || 'Current Imbalance'}</div>
+                                                        <div className="text-2xl font-bold text-gray-400">-</div>
+                                                        <div className="text-xs text-gray-500 mt-1">{t('sbCannotJudgeHint')}</div>
+                                                        {clusterStatus.read_error && (
+                                                            <div className="text-xs text-red-400 mt-1" data-sb-read-error="">{clusterStatus.read_error}</div>
+                                                        )}
+                                                    </div>
+                                                    <div className="px-4 py-2 rounded-lg bg-gray-500/20 text-gray-300">{t('sbCannotJudge')}</div>
+                                                </div>
+                                            ) : (
+                                            <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg" data-sb-status={clusterStatus.imbalance > clusterStatus.threshold ? 'over' : 'balanced'}>
                                                 <div className="flex-1">
                                                     <div className="text-sm text-gray-400">{t('currentImbalance') || 'Current Imbalance'}</div>
                                                     <div className={`text-2xl font-bold ${clusterStatus.imbalance > clusterStatus.threshold ? 'text-yellow-400' : 'text-green-400'}`}>
@@ -1874,34 +2158,39 @@
                                                     {clusterStatus.imbalance > clusterStatus.threshold ? '⚠️ ' + (t('actionRecommended') || 'Action Recommended') : '✓ ' + (t('balanced') || 'Balanced')}
                                                 </div>
                                             </div>
+                                            )}
                                             
                                             {/* Storages in Cluster */}
                                             <div>
                                                 <div className="flex items-center justify-between mb-3">
                                                     <h4 className="text-sm font-medium text-gray-400">{t('storagesInCluster') || 'Storages in Cluster'}</h4>
-                                                    {hasPerm('storage.config') && datastores.shared?.length > (clusterStatus.storages?.length || 0) && (
+                                                    {hasPerm('storage.config') && datastores.shared?.length > balancingMembers.length && (
                                                         <select
                                                             className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-sm"
                                                             onChange={(e) => { if (e.target.value) { addStorageToCluster(clusterStatus.id, e.target.value); e.target.value = ''; }}}
                                                             defaultValue=""
                                                         >
                                                             <option value="">{t('addStorage') || '+ Add Storage'}</option>
-                                                            {datastores.shared?.filter(s => !clusterStatus.storages?.some(cs => cs.storage === s.storage)).map(s => (
+                                                            {datastores.shared?.filter(s => !balancingMembers.some(cs => cs.storage === s.storage)).map(s => (
                                                                 <option key={s.storage} value={s.storage}>{s.storage}</option>
                                                             ))}
                                                         </select>
                                                     )}
                                                 </div>
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                    {clusterStatus.storages?.map(storage => (
-                                                        <div key={storage.storage} className="p-3 bg-proxmox-dark rounded-lg">
+                                                    {balancingMembers.map(storage => (
+                                                        <div key={storage.storage} className={`p-3 bg-proxmox-dark rounded-lg ${storage.usable === false ? 'opacity-60' : ''}`} data-sb-member={storage.storage} data-state={storage.state}>
                                                             <div className="flex justify-between items-center mb-2">
                                                                 <span className="font-medium">{storage.storage}</span>
                                                                 <div className="flex items-center gap-2">
+                                                                    {storage.usable === false ? (
+                                                                        <span className="text-xs text-gray-400 italic">{memberStateText(storage)}</span>
+                                                                    ) : (
                                                                     <span className={`text-sm ${storage.usage_percent > 90 ? 'text-red-400' : storage.usage_percent > 70 ? 'text-yellow-400' : 'text-green-400'}`}>
                                                                         {storage.usage_percent}%
                                                                     </span>
-                                                                    {hasPerm('storage.config') && clusterStatus.storages.length > 2 && (
+                                                                    )}
+                                                                    {hasPerm('storage.config') && balancingMembers.length > 2 && (
                                                                         <button
                                                                             onClick={() => removeStorageFromCluster(clusterStatus.id, storage.storage)}
                                                                             className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
@@ -1912,6 +2201,7 @@
                                                                     )}
                                                                 </div>
                                                             </div>
+                                                            {storage.usable !== false && (<>
                                                             <div className="w-full h-2 bg-proxmox-border rounded-full">
                                                                 <div 
                                                                     className={`h-full rounded-full ${storage.usage_percent > 90 ? 'bg-red-500' : storage.usage_percent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
@@ -1920,7 +2210,9 @@
                                                             </div>
                                                             <div className="text-xs text-gray-500 mt-1">
                                                                 {formatSize(storage.used)} / {formatSize(storage.total)}
+                                                                {storage.shared === false && <span> · {t('sbMemberLocal').replace('{node}', storage.node || '-')}</span>}
                                                             </div>
+                                                            </>)}
                                                         </div>
                                                     ))}
                                                 </div>
@@ -1942,7 +2234,11 @@
                                                                         <div className="text-xs text-gray-500">{rec.reason}</div>
                                                                     </div>
                                                                 </div>
-                                                                {hasPerm('storage.config') && (
+                                                                {rec.movable === false ? (
+                                                                    <span className="text-xs text-gray-400 text-right" data-sb-blocked={rec.blocked}>
+                                                                        {rec.blocked === 'ct_running' ? t('sbCtRunning') : rec.blocked_reason}
+                                                                    </span>
+                                                                ) : hasPerm('storage.config') && (
                                                                     <button
                                                                         onClick={() => executeMigration(rec)}
                                                                         className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
@@ -1956,7 +2252,7 @@
                                                 </div>
                                             )}
                                             
-                                            {clusterStatus.recommendations?.length === 0 && clusterStatus.imbalance <= clusterStatus.threshold && (
+                                            {clusterStatus.recommendations?.length === 0 && clusterStatus.imbalance != null && clusterStatus.imbalance <= clusterStatus.threshold && (
                                                 <div className="text-center py-6 text-gray-500">
                                                     <Icons.Check className="mx-auto mb-2 text-green-400" />
                                                     <p>{t('storageBalanced') || 'Storage is well balanced. No action needed.'}</p>
@@ -2023,7 +2319,7 @@
                                         />
                                         <Slider
                                             label={t('migrationTolerance') || 'Tolerance'}
-                                            description={t('migrationToleranceDesc') || 'Deadband to prevent ping-pong (0 = disabled)'}
+                                            description={t('storageToleranceDesc')}
                                             value={newClusterTolerance}
                                             onChange={setNewClusterTolerance}
                                             min={0}

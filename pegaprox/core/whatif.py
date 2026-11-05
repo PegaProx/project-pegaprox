@@ -1322,6 +1322,9 @@ def _headroom(run):
                            'mem_reserve': int(max(0.0, room - moved)), 'cpu_reserve': None,
                            'ok': quorate and moved <= room, 'checked': 'totals', 'basis': _CALC})
     failing = [c for c in combos if not c['ok']]
+    # the answer keeps 200 of them, the verdict counts all
+    unplaced = sum(1 for c in combos if c['unplaced'])
+    no_quorum = sum(1 for c in combos if c['quorate'] is False)
     combos.sort(key=lambda c: (c['ok'], -(c['worst_mem_pct'] or 0), c['failed']))
 
     # the nodes table: what each node carries in the worst of these failures
@@ -1337,6 +1340,7 @@ def _headroom(run):
         r['worst_when'] = w['when'] if w else None
     run.extra['headroom'] = {
         'depth': depth, 'checked': len(combos), 'failing': len(failing),
+        'unplaced': unplaced, 'no_quorum': no_quorum,
         'ok': not failing and bool(combos),
         'combinations': combos[:200], 'basis': _CALC,
     }
@@ -1790,6 +1794,8 @@ VERDICT_TEXT = {
     'over_threshold': 'Over the CPU or memory threshold afterwards: {nodes}',
     'headroom_over': '{count} failure combinations leave nodes over their threshold',
     'tenants_assumed': 'Tenants are counted per cluster, not per guest: {tenants}',
+    'guests_unknown': '{count} guests could not be judged in this run, what becomes of them is not known',
+    'configs_unread': '{count} guest configurations were not read in this run',
 }
 # the same lines for a count of one
 VERDICT_TEXT_ONE = {
@@ -1799,6 +1805,8 @@ VERDICT_TEXT_ONE = {
     'critical_affected': '1 critical guest is affected: {names}',
     'restore_unproven': '1 affected guest has no proven restore',
     'headroom_over': '1 failure combination leaves nodes over its threshold',
+    'guests_unknown': '1 guest could not be judged in this run, what becomes of it is not known',
+    'configs_unread': '1 guest configuration was not read in this run',
 }
 VERDICT_NAMES = 5       # critical guests named in the line, the rest is a count
 
@@ -1807,6 +1815,39 @@ def _vreason(level, code, **args):
     text = VERDICT_TEXT_ONE.get(code) if args.get('count') == 1 else None
     return {'level': level, 'code': code, 'args': args,
             'text': (text or VERDICT_TEXT[code]).format(**{k: _say(v) for k, v in args.items()})}
+
+
+def for_nodes(report, nodes):
+    """The report as a caller confined to some guests sees it: the rows and the names of the
+    nodes in `nodes` (where their guests run) only, no headroom combinations, which name and
+    load every node, and no reserve, the spare room of every node. The counts stay whole, as
+    they do for the guests. Changes `report` and returns it. MK Nov 2026 (#1218)"""
+    keep = set(nodes or ())
+    rows = []
+    for r in report.get('nodes') or []:
+        if r.get('node') not in keep:
+            continue
+        if r.get('worst_when') and not set(r['worst_when']) <= keep:
+            r['worst_when'] = None
+        rows.append(r)
+    report['nodes'] = rows
+    report['reserve'] = None
+    limits = []
+    for item in report.get('limits') or []:
+        args = item.get('args') or {}
+        if isinstance(args.get('nodes'), list):
+            args['nodes'] = [n for n in args['nodes'] if n in keep]
+            if not args['nodes']:
+                continue
+            item['text'] = LIMITS[item['code']].format(**{k: _say(v) for k, v in args.items()})
+        limits.append(item)
+    report['limits'] = limits
+    if isinstance(report.get('headroom'), dict):
+        report['headroom']['combinations'] = []
+    for key in ('storage', 'network'):
+        if isinstance(report.get(key), dict) and isinstance(report[key].get('nodes'), list):
+            report[key]['nodes'] = [n for n in report[key]['nodes'] if n in keep]
+    return report
 
 
 def verdict(report):
@@ -1818,12 +1859,20 @@ def verdict(report):
         blocked.append(_vreason('blocked', 'guests_down', count=down))
     head = report.get('headroom') or {}
     combos = head.get('combinations') or []
-    unplaced = sum(1 for c in combos if c.get('unplaced'))
+    # the headroom counts every combination it checked, its list keeps 200 of them
+    unplaced = head['unplaced'] if 'unplaced' in head else sum(1 for c in combos if c.get('unplaced'))
     if unplaced:
         blocked.append(_vreason('blocked', 'headroom_unplaced', count=unplaced))
-    no_quorum = sum(1 for c in combos if c.get('quorate') is False)
+    no_quorum = head['no_quorum'] if 'no_quorum' in head else sum(1 for c in combos if c.get('quorate') is False)
     if no_quorum:
         blocked.append(_vreason('blocked', 'headroom_quorum', count=no_quorum))
+    # a guest the run could not judge is no "nothing in the way": the run is incomplete
+    unknown = sum(1 for r in rows if r.get('outcome') == 'unknown')
+    if unknown:
+        warned.append(_vreason('warning', 'guests_unknown', count=unknown))
+    unread = (report.get('reads') or {}).get('configs_unread') or 0
+    if unread and not unknown:
+        warned.append(_vreason('warning', 'configs_unread', count=unread))
     risk = report.get('risk')
     crit = [r for r in rows if r.get('critical')]
     if crit:

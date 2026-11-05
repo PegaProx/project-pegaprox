@@ -326,6 +326,9 @@ def sanitize_csv_field(value) -> str:
 # everything in C0 except tab, DEL, and the C1 range - ESC among them, which is what
 # every ANSI sequence starts with
 _CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]')
+# half of a UTF-16 pair on its own: a client can send "\ud800" in JSON, and a UTF-8 log
+# handler raises on it inside emit(), so the whole line was lost
+_LONE_SURROGATE_RE = re.compile('[\ud800-\udfff]')
 
 
 def sanitize_log_message(value) -> str:
@@ -353,7 +356,8 @@ def sanitize_log_message(value) -> str:
     # line, move the cursor, repaint something else, set the window title. Stripping CR
     # and LF stopped the forged LINE and left the forged SCREEN. Tab stays: it is
     # legitimate in action strings and cannot move a cursor about.
-    return _CONTROL_CHARS_RE.sub(' ', s)
+    s = _CONTROL_CHARS_RE.sub(' ', s)
+    return _LONE_SURROGATE_RE.sub('�', s)
 
 
 

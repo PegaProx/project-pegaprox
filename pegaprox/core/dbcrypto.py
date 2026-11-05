@@ -10,12 +10,11 @@ session tokens, plugin state.  A leaked DB backup gave an attacker enough
 context to plan a follow-up attack — even without the secret.key.
 
 This module adds a transparent SQLCipher backend.  When sqlcipher3 is
-importable (Linux x86_64 via pip wheel today), every PegaProx DB connection
+importable (a pip wheel on Linux x86_64 and aarch64, macOS and Windows), every PegaProx DB connection
 is automatically AES-256-CBC + HMAC-SHA512 encrypted at rest using the
 master key resolved by `pegaprox.core.keystore`.
 
-When sqlcipher3 is NOT importable (ARM, macOS, Windows — until they ship
-wheels), we fall back to plain sqlite3.  In that case the existing
+When sqlcipher3 is NOT importable (32-bit ARM, the Debian package), we fall back to plain sqlite3.  In that case the existing
 field-level encryption + the new Multi-Tier key-location protection still
 apply — graceful degradation.
 
@@ -46,10 +45,11 @@ try:
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
     BACKEND = 'sqlite-plain'
-    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) — DB will be plain "
-              "SQLite. Field-level encryption (Fernet) still applies. To "
-              "enable full-DB encryption, install sqlcipher3-binary (Linux "
-              "x86_64) or build pysqlcipher3 from source.", _e)
+    _LOG.info("[DBCRYPTO] sqlcipher3 not available (%s) - DB will be plain "
+              "SQLite. Field-level encryption (AES-256-GCM) still applies. To "
+              "enable full-DB encryption, install the SQLCipher package of "
+              "requirements.txt (sqlcipher3-binary on Linux x86_64, sqlcipher3 "
+              "on aarch64, macOS and Windows).", _e)
 
 
 # Re-export Row, IntegrityError etc. so callers can `from .dbcrypto import Row`
@@ -129,17 +129,55 @@ if BACKEND == 'sqlcipher':
         )
 
 
+# MK Nov 2026 - the databases --keystore-status looks at, in CONFIG_DIR
+STATUS_DB_FILES = ('pegaprox.db', 'syslog.db')
+_SQLITE_MAGIC = b'SQLite format 3\x00'
+
+
+def file_state(db_path: str) -> str:
+    """'missing', 'empty', 'plain' or 'encrypted', from the first 16 bytes and without a
+    key: a plain SQLite file starts with its magic, a SQLCipher one with a random salt.
+    A file that is neither (truncated, not a database) reads as encrypted here too;
+    detect_db_state, which needs the key, tells those apart."""
+    try:
+        with open(db_path, 'rb') as fh:
+            head = fh.read(16)
+    except FileNotFoundError:
+        return 'missing'
+    except OSError as e:
+        return f'unreadable ({type(e).__name__})'
+    if not head:
+        return 'empty'
+    return 'plain' if head == _SQLITE_MAGIC else 'encrypted'
+
+
 def backend_status() -> dict:
-    """For the /api/security/db-status endpoint + admin health-indicator."""
+    """What `pegaprox_multi_cluster.py --keystore-status` prints for the databases.
+
+    MK Nov 2026 - encrypted_at_rest said whether the driver is there, so a database left
+    plain (PEGAPROX_DISABLE_AUTO_ENCRYPT, or no start since sqlcipher3 came) read as
+    encrypted. It now goes by the files in CONFIG_DIR, each listed with its state."""
+    from pegaprox.constants import CONFIG_DIR
+    files = {os.path.abspath(os.path.join(CONFIG_DIR, name)): file_state(os.path.join(CONFIG_DIR, name))
+             for name in STATUS_DB_FILES}
+    present = [s for s in files.values() if s not in ('missing', 'empty')]
+    encrypted = BACKEND == 'sqlcipher' and bool(present) and all(s == 'encrypted' for s in present)
+    if BACKEND != 'sqlcipher':
+        note = ("Full DB encryption unavailable on this platform. "
+                "Sensitive fields are still encrypted individually with AES-256-GCM.")
+    elif not present:
+        note = "SQLCipher is available. No database found in this config directory."
+    elif encrypted:
+        note = "Full database encryption is active."
+    else:
+        note = ("SQLCipher is available, but a database is still plain. The next start "
+                "encrypts it unless PEGAPROX_DISABLE_AUTO_ENCRYPT is set.")
     return {
         'backend': BACKEND,
-        'encrypted_at_rest': BACKEND == 'sqlcipher',
+        'encrypted_at_rest': encrypted,
         'cipher': 'AES-256-CBC + HMAC-SHA512 (SQLCipher 4)' if BACKEND == 'sqlcipher' else None,
-        'note': (
-            "Full database encryption is active." if BACKEND == 'sqlcipher'
-            else "Full DB encryption unavailable on this platform. "
-                 "Sensitive fields are still Fernet-encrypted individually."
-        ),
+        'files': files,
+        'note': note,
     }
 
 
@@ -593,7 +631,7 @@ def ensure_db_encrypted(db_path: str) -> dict:
         _AUTO_MIG_DONE.add(db_path)
         return {'action': 'opt-out'}
     if BACKEND != 'sqlcipher':
-        # No sqlcipher3 → can't encrypt anyway. Field-level Fernet still applies.
+        # No sqlcipher3 → can't encrypt anyway. Field-level encryption still applies.
         _AUTO_MIG_DONE.add(db_path)
         return {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
 

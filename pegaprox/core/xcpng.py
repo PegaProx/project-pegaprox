@@ -3343,10 +3343,12 @@ class XcpngManager:
 
     def get_node_time(self, node):
         """Get timezone and current time from node."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             "timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null; echo '---'; date -Iseconds")
         if rc != 0:
-            return {'timezone': 'UTC'}
+            # MK Nov 2026 - was {'timezone': 'UTC'}: a node we could not read showed as on UTC
+            from pegaprox.core.manager import UnreadDict
+            return UnreadDict(f'read over SSH, it gave no answer: {err or "no output"}'[:300])
         parts = out.split('---')
         tz = parts[0].strip().splitlines()[-1] if parts else 'UTC'
         localtime = parts[1].strip() if len(parts) > 1 else ''
@@ -3388,9 +3390,10 @@ class XcpngManager:
 
     def get_node_network_config(self, node):
         """Return list of network interfaces with IP config - same shape as Proxmox."""
+        from pegaprox.core.manager import UnreadList
         api = self._api()
         if not api:
-            return []
+            return UnreadList('the pool is not connected', offline=True)
         try:
             interfaces = []
             for pif_ref in api.PIF.get_all():
@@ -3445,7 +3448,7 @@ class XcpngManager:
             return sorted(interfaces, key=lambda x: x['iface'])
         except Exception as e:
             self.logger.error(f"get_node_network_config {node}: {e}")
-            return []
+            return UnreadList(f'XAPI did not answer ({type(e).__name__})')
 
     def create_node_network(self, node, iface, iface_type, config):
         """Create a new network (bridge) or VLAN on XCP-ng."""
@@ -3640,10 +3643,8 @@ class XcpngManager:
         if not force:
             maintenance_task = self.nodes_in_maintenance.get(node_name)
             if maintenance_task is None:
-                self.logger.error(f"Cannot update {node_name}: not in maintenance mode")
                 return None
             if maintenance_task.status not in ('completed', 'completed_with_errors'):
-                self.logger.error(f"Cannot update {node_name}: evacuation not complete")
                 return None
 
         with self.update_lock:
@@ -4110,8 +4111,13 @@ echo DONE""",
                     for cid, ok in results.items()}
         return results
 
-    def apply_node_hardening(self, node_name, controls):
-        """Apply selected CIS controls via SSH."""
+    def apply_node_hardening(self, node_name, controls, params=None):
+        """Apply selected CIS controls via SSH.
+
+        Takes params like the PVE manager, unused: no control here is templated. The
+        shared routes refuse apply and rollback on anything but Proxmox VE before they
+        get here, so this is not reached from the API today.
+        """
         results = {}
         for cid in controls:
             spec = self._CIS_CHECKS.get(cid)
@@ -4125,6 +4131,11 @@ echo DONE""",
             else:
                 results[cid] = {'success': False, 'error': out.strip()[-200:] if out else 'No output'}
         return results
+
+    def rollback_node_hardening(self, node_name, controls):
+        """No control here keeps a snapshot, so there is nothing to restore."""
+        return {cid: {'success': False, 'error': 'control has no rollback snapshot (not reversible)'
+                      if cid in self._CIS_CHECKS else 'unknown control'} for cid in controls}
 
     # ──────────────────────────────────────────
     # Node disks & storage repos - NS/LW Mar 2026
@@ -4549,25 +4560,53 @@ echo DONE""",
     # ──────────────────────────────────────────
 
     def get_node_summary(self, node):
-        """Node summary - same as get_node_details but flatter."""
-        return self.get_node_details(node)
+        """Node summary - get_node_details plus the keys of the Proxmox summary XAPI has.
+
+        MK Nov 2026 - without pveversion or uptime the node pages took the answer for an
+        empty one (the summary of a node the server could not read). Swap and the root
+        filesystem stay out: XAPI has no such figure, and 0 would read as none."""
+        d = self.get_node_details(node)
+        if not d:
+            return d
+        out = dict(d)
+        out.update(node=node, status='online', kversion=d.get('kernel_version', ''),
+                   cpuinfo={'model': d.get('cpu_model', ''), 'cpus': d.get('cpu_count', 0),
+                            'sockets': d.get('cpu_socket_count', 0)})
+        if d.get('product_version'):
+            # the same text get_node_status sends as pveversion
+            out['pveversion'] = f"{d.get('product_brand') or 'XCP-ng'} {d['product_version']}"
+        total, free = d.get('memory_total') or 0, d.get('memory_free') or 0
+        if total > 0:
+            out['memory'] = {'total': total, 'used': max(total - free, 0), 'free': free}
+        # uptime and load from the node row of the last refresh, no XAPI call of its own;
+        # 0 there is "not read", not a node that just booted
+        row = next((n for n in (self._cached_nodes or []) if n.get('node') == node), None) or {}
+        if isinstance(row.get('uptime'), (int, float)) and row['uptime'] > 0:
+            out['uptime'] = int(row['uptime'])
+        if row.get('_loadavg'):
+            out['loadavg'] = list(row['_loadavg'])
+        return out
 
     def get_node_syslog(self, node, start=0, limit=500):
         """Fetch recent syslog entries via SSH."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             f"journalctl --no-pager -n {limit} --output=short-iso 2>/dev/null || tail -n {limit} /var/log/messages 2>/dev/null",
             timeout=15)
-        if rc != 0 or not out:
+        if rc != 0:
+            from pegaprox.core.manager import UnreadList
+            return UnreadList(f'read over SSH, it gave no answer: {err or "no output"}'[:300])
+        if not out:
             return []
         lines = out.strip().splitlines()
         return [{'n': i + start, 't': line} for i, line in enumerate(lines)]
 
     def get_node_certificates(self, node):
         """Read xapi-ssl.pem certificate info."""
-        rc, out, _ = self._ssh_exec(node,
+        rc, out, err = self._ssh_exec(node,
             "openssl x509 -in /etc/xensource/xapi-ssl.pem -noout -subject -enddate -issuer 2>/dev/null")
         if rc != 0:
-            return []
+            from pegaprox.core.manager import UnreadList
+            return UnreadList(f'openssl over SSH gave no answer: {err or "no output"}'[:300])
         info = {}
         for line in out.splitlines():
             if '=' in line:
@@ -4656,7 +4695,10 @@ echo DONE""",
         return tasks  # all tasks are pool-wide anyway
 
     def get_node_task_log(self, node, upid, start=0, limit=50):
-        return self.get_task_log(node, upid, limit)
+        # NS Nov 2026 - a list of lines like the Proxmox manager; the route joins it with
+        # '\n', and the plain str came out one character per line
+        lines = self.get_task_log(node, upid, limit).split('\n')
+        return lines[max(int(start or 0), 0):]
 
     # ──────────────────────────────────────────
     # Proxmox-specific stubs (no-ops for XCP-ng)

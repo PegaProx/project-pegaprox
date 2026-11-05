@@ -2717,7 +2717,8 @@
                     let data = await response.json();
                     
                     // If node not in maintenance mode, ask user if they want to force
-                    if (!response.ok && data.error?.includes('Wartungsmodus')) {
+                    // LW Nov 2026 - the route names the refusal by code now (the German sentence of older servers still counts)
+                    if (!response.ok && (data.code === 'NOT_IN_MAINTENANCE' || data.error?.includes('Wartungsmodus'))) {
                         const forceUpdate = confirm(
                             `${t('nodeNotInMaintenance') || 'Node is not in maintenance mode.'}\n\n` +
                             `${t('forceUpdateWarning') || 'Running VMs on this node may be affected if a reboot is performed.'}\n\n` +
@@ -2811,6 +2812,7 @@
                         setUpdateStatus(json);
                         localStorage.setItem(`updateCheck_${clusterId}`, JSON.stringify({
                             time: new Date().toISOString(),
+                            user: user?.username || '',   // LW Nov 2026 - whose check, the redesign copies only its own
                             summary: json.summary,
                             nodes: json.nodes
                         }));

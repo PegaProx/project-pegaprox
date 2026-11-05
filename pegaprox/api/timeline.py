@@ -426,7 +426,8 @@ def _tasks(ask):
             continue
         if not ask.keeps(guest, {node} if node else ()):
             continue
-        status = str(t.get('status') or '')
+        # get_tasks turns a failed task into 'failed'; what Proxmox said is in exitstatus
+        status = str(t.get('exitstatus') or t.get('status') or '')
         running = not t.get('endtime') or status.lower() == 'running'
         failed = not running and status != 'OK' and not status.startswith('WARNINGS')
         backup = t.get('type') == 'vzdump'
