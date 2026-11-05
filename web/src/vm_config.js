@@ -8,7 +8,7 @@
         // Sep 2025: Major refactor to support both QEMU and LXC properly
 
         // IP Set entries sub-component for VM Firewall
-        function IpsetEntries({ clusterId, vm, ipsetName, authFetch, onRefresh, t }) {
+        function IpsetEntries({ clusterId, vm, ipsetName, authFetch, onRefresh, t, addToast }) {
             const [entries, setEntries] = useState([]);
             const [loading, setLoading] = useState(true);
             const [newCidr, setNewCidr] = useState('');
@@ -5863,6 +5863,7 @@
                                                                                 authFetch={authFetch}
                                                                                 onRefresh={fetchFirewallData}
                                                                                 t={t}
+                                                                                addToast={addToast}
                                                                             />
                                                                         </div>
                                                                     )}
