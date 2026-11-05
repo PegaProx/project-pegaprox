@@ -1493,6 +1493,10 @@ class VMwareManager:
             'cpu_count': cpu.get('count', 0) if isinstance(cpu, dict) else data.get('cpu_count', 0),
             'memory_mb': mem.get('size_MiB', 0) if isinstance(mem, dict) else data.get('memory_size_MiB', 0),
             'guest_os': data.get('guest_OS', ''),
+            # JB Nov 2026 (#1253) - the migration dialog reads these from the plan: without them
+            # an EFI guest said "Auto (bios)", while the migration read them from get_vm itself
+            'guest_OS': data.get('guest_OS', ''),
+            'hardware': data.get('hardware') or {},
             'disks': disks,
             'nics': nics,
             'total_disk_gb': sum(d.get('capacity_gb', 0) for d in disks),
