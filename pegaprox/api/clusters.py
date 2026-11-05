@@ -289,6 +289,8 @@ def export_cluster_config(cluster_id):
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
         'ssh_disabled': bool(getattr(c, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
         'transfer_network': getattr(c, 'transfer_network', '') or '',
+        'ssh_user': getattr(c, 'ssh_user', '') or '',  # JB Nov 2026 (#1251), the dialog sends it back
+        'has_ssh_key': bool(getattr(c, 'ssh_key', '')),  # that one exists, never the key
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -443,6 +445,14 @@ def reconfigure_cluster(cluster_id):
     if _xn_err:
         return _xn_err
     data.setdefault('transfer_network', getattr(old_mgr.config, 'transfer_network', '') or '')
+    # JB Nov 2026 (#1251) - the dialog cannot read a stored key back, so an empty field keeps
+    # it and only an explicit remove drops it. A move to another host keeps it too, unlike the
+    # node passwords below: a key login sends a signature, the secret stays here.
+    _remove_key = data.pop('ssh_key_remove', False) is True
+    if not data.get('ssh_key'):
+        data['ssh_key'] = '' if _remove_key else (getattr(old_mgr.config, 'ssh_key', '') or '')
+    data.setdefault('ssh_user', getattr(old_mgr.config, 'ssh_user', '') or '')
+    data.setdefault('ssh_port', getattr(old_mgr.config, 'ssh_port', 22) or 22)
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
