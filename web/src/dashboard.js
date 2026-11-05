@@ -28839,6 +28839,9 @@
                                                                                             </div>
                                                                                         )}
                                                                                         {m.current_step && <div className="text-xs text-gray-500 mt-1">{m.current_step}</div>}
+                                                                                        {(m.warnings || []).map((w, i) => (
+                                                                                            <div key={i} data-v2p-warnings className="text-xs text-yellow-300 mt-1 flex items-start gap-1"><Icons.AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" /><span>{w}</span></div>
+                                                                                        ))}
                                                                                         {m.phase === 'awaiting_confirmation' && !haReadOnly && (
                                                                                             <div className="mt-2 flex items-center gap-2">
                                                                                                 <span className="text-xs text-amber-300 flex-1">{t('awaitingCutoverShort') || 'Ready to switch over — source still running.'}</span>
@@ -29780,6 +29783,7 @@
                                                                             </div>
                                                                             <div className="flex items-center gap-3">
                                                                                 {m.total_downtime_seconds != null && <span className="text-xs text-gray-500">{t('downtime')}: {m.total_downtime_seconds}s</span>}
+                                                                                {(m.warnings || []).length > 0 && <span data-v2p-warnings title={m.warnings.join('\n')} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300 flex items-center gap-1"><Icons.AlertTriangle className="w-3 h-3" />{t('migrationWarnings')}: {m.warnings.length}</span>}
                                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
                                                                             </div>
                                                                         </div>
@@ -29859,6 +29863,13 @@
                                                         </div>
                                                         {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ {t('migrationCompleted')} VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - ${t('downtime')}: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
+                                                        {/* LW Nov 2026 - what the run left undone, e.g. VirtIO drivers not injected (#1245) */}
+                                                        {(vmwareMigrationDetail.warnings || []).length > 0 && (
+                                                            <div data-v2p-warnings className="p-3 bg-yellow-500/10 border-t border-yellow-500/20 text-yellow-300 text-xs space-y-1">
+                                                                <div className="flex items-center gap-1.5 font-semibold"><Icons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />{t('migrationWarnings')}</div>
+                                                                {vmwareMigrationDetail.warnings.map((w, i) => <div key={i}>{w}</div>)}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
                                                 
