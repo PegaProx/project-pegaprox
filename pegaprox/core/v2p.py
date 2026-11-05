@@ -214,6 +214,7 @@ class V2PMigrationTask:
         self.install_virtio_drivers = bool(self.config.get('install_virtio_drivers', False))
         self.virtio_iso_path = self.config.get('virtio_iso_path', '') or ''
         self._disk_vols = {}       # disk index -> volume id it was copied to
+        self.warnings = []         # what went wrong without failing the run (_result_warning)
 
     def record_disk_volume(self, i, vol_id):
         if vol_id:
@@ -326,7 +327,8 @@ class V2PMigrationTask:
             broadcast_sse('vmware_migration', {
                 'id': self.id, 'phase': self.phase, 'status': self.status,
                 'progress': self.progress, 'vm_name': self.vm_name,
-                'error': self.error, 'disk_progress': self.disk_progress
+                'error': self.error, 'disk_progress': self.disk_progress,
+                'warnings': list(getattr(self, 'warnings', None) or []),
             })
         except: pass
     
@@ -431,6 +433,7 @@ class V2PMigrationTask:
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'disk_progress': self.disk_progress, 'phase_times': self.phase_times,
             'total_downtime_seconds': self.total_downtime_seconds,
+            'warnings': list(getattr(self, 'warnings', None) or []),
             'log': self.log_lines[-20:],  # Last 20 log lines
             'config': {
                 'network_bridge': self.network_bridge,
@@ -1205,7 +1208,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -1651,7 +1654,7 @@ def _run_v2p_migration(task):
                 _register_uefi_fallback_loader(pve_mgr, task)
                 # must run while the VM is STILL stopped (live-NTFS guard inside)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
                 try: _maybe_convert_disks_to_qcow2(pve_mgr, task)
                 except Exception as _qe: task.log(f"  qcow2 convert skipped: {_qe}")
 
@@ -1821,7 +1824,7 @@ def _run_v2p_migration(task):
             # NS Apr 2026 — UEFI fallback loader so OVMF auto-boots Windows post-V2P
             _register_uefi_fallback_loader(pve_mgr, task)
             try: _inject_virtio_drivers(pve_mgr, task)
-            except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+            except Exception as _ve: _virtio_not_injected(task, _ve)
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
@@ -2014,7 +2017,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -2171,7 +2174,7 @@ def _run_v2p_migration(task):
             # always try; helper bails harmlessly if disk has no Microsoft loader
             _register_uefi_fallback_loader(pve_mgr, task)
         try: _inject_virtio_drivers(pve_mgr, task)
-        except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+        except Exception as _ve: _virtio_not_injected(task, _ve)
 
         if task.start_after:
             task.log("Starting VM on Proxmox...")
@@ -2434,11 +2437,43 @@ def _detect_windows_driver_subdir(version_str, build_str):
     return 'w11/amd64'
 
 
+def _result_warning(task, msg):
+    """Log msg and keep it on the task, whose result in the UI lists it next to the
+    outcome. For a problem the migration finishes despite."""
+    msg = getattr(task, '_redact', str)(msg)
+    task.log(f"WARNING: {msg}")
+    warnings = getattr(task, 'warnings', None)
+    if not isinstance(warnings, list):
+        warnings = task.warnings = []
+    if msg not in warnings:
+        warnings.append(msg)
+
+
+def _virtio_not_injected(task, why):
+    """MK Nov 2026 (#1245) - the drivers were asked for and the guest boots without them.
+    That used to be one log line under a COMPLETED. Returns False for the caller."""
+    why = str(why).strip()[:300].rstrip('. ') or 'an unexpected error'
+    _result_warning(task, f"VirtIO drivers were not injected: {why}. "
+                          "The guest boots without them, install them from the virtio-win "
+                          "ISO after the first boot.")
+    return False
+
+
+# what the node script prints right before it gives up (first one in the output wins)
+_VIRTIO_SCRIPT_FAILURES = (
+    'ISO_MOUNT_FAILED', 'NOT_A_BLOCK_DEVICE', 'RBD_PARSE_FAILED', 'RBD_MAP_FAILED',
+    'NOT_A_FILE', 'qemu-nbd missing', 'NBD_CONNECT_FAILED', 'UNSUPPORTED_STORAGE_TYPE',
+    'LOSETUP_FAILED', 'NO_NTFS_FOUND', 'NTFS_MOUNT_FAILED', 'NTFS_NOT_RW', 'NO_WINDOWS_DIR',
+    'NO_DRIVERS_COPIED', 'HIVEX_MERGE_FAILED',
+)
+
+
 def _inject_virtio_drivers(pve_mgr, task):
     """Offline-inject VirtIO drivers into the boot disk's Windows install.
 
     Touches only the first attached disk (assumed boot). Returns True on success.
-    On any error we log + return False — never aborts the migration."""
+    On any error we log, put a warning into the result and return False. It never
+    aborts the migration."""
     if not getattr(task, 'install_virtio_drivers', False):
         return False
 
@@ -2453,7 +2488,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             task.log("[VirtIO] Skipped — VM is already running (sshfs_boot live-pivot path). "
                      "Use transfer_mode=offline/auto/snapshot_zero for offline pre-staging, "
                      "or install drivers post-boot via the virtio-win.iso CD-ROM.")
-            return False
+            return _virtio_not_injected(task, "the target VM was already running")
     except Exception:
         pass  # if the status probe fails, fall through and try injection anyway
 
@@ -2493,7 +2528,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             # lines of hook output and the operator got "✗ apt install failed:" with
             # nothing after the colon.
             task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '').strip()[-600:]}")
-            return False
+            return _virtio_not_injected(task, "python3-hivex / ntfs-3g could not be installed on the node")
 
     # hivexsh is checked separately and is NOT fatal. It only feeds the version probe,
     # and the script falls back to a driver variant without it — which for a Windows 11
@@ -2518,7 +2553,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         from pegaprox.utils.sanitization import validate_node_iso_path
         if not validate_node_iso_path(task.virtio_iso_path):
             task.log("[VirtIO] ✗ virtio_iso_path must be an absolute path to an .iso file - skipping")
-            return False
+            return _virtio_not_injected(task, "the virtio-win ISO path is not an absolute path to an .iso file")
         iso_candidates.append(task.virtio_iso_path)
     iso_candidates += [
         "/var/lib/vz/template/iso/virtio-win.iso",
@@ -2534,7 +2569,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     if not iso_path:
         task.log("[VirtIO] ⚠ virtio-win.iso not found — skipping. Searched: " + ", ".join(iso_candidates))
         task.log("[VirtIO]   Hint: drop virtio-win.iso into /var/lib/vz/template/iso/ or set virtio_iso_path")
-        return False
+        return _virtio_not_injected(task, "virtio-win.iso was not found on the node")
     task.log(f"[VirtIO] ISO: {iso_path}")
 
     # 3) Build a single shell script — easier to follow + we get one rc back.
@@ -2544,16 +2579,21 @@ def _inject_virtio_drivers(pve_mgr, task):
     vol_id = task.boot_volume()
     if not vol_id:
         task.log("[VirtIO] no volume of the boot disk is known, skipping")
-        return False
+        return _virtio_not_injected(task, "no volume of the boot disk is known")
     rc, vol_path, _ = _pve_node_exec(pve_mgr, node,
         f"pvesm path {shlex.quote(vol_id)} 2>/dev/null", timeout=10)
     vol_path = str(vol_path or '').strip()
     if not vol_path:
         task.log("[VirtIO] ✗ Could not resolve boot disk path")
-        return False
+        return _virtio_not_injected(task, "the path of the boot disk could not be resolved")
     # Detect storage type so the script knows which exposure path to take
     storage_type = _pve_storage_type(pve_mgr, node, task.target_storage)
     task.log(f"[VirtIO] Target storage type: {storage_type or 'unknown'} ({vol_path})")
+    rbd_map = ''
+    if storage_type == 'rbd':
+        krbd_opts = {} if vol_path.startswith('rbd:') else \
+            _ceph_storage_opts(pve_mgr, node, task.target_storage)
+        rbd_map = ' '.join(shlex.quote(a) for a in _rbd_map_args(vol_path, krbd_opts))
 
     drivers_arg = ' '.join(_VIRTIO_DRIVERS)
     script = (
@@ -2562,6 +2602,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         f"VOL={shlex.quote(vol_path)}\n"
         f"VOL_ID={shlex.quote(vol_id)}\n"
         f"STYPE={shlex.quote(storage_type)}\n"
+        f"RBD_MAP=({rbd_map})\n"
         f"ISO={shlex.quote(iso_path)}\n"
         f"DRIVERS=\"{drivers_arg}\"\n"
         "TMP=$(mktemp -d /tmp/v2p-virtio-XXXXXX)\n"
@@ -2592,16 +2633,22 @@ def _inject_virtio_drivers(pve_mgr, task):
         "    BLK=\"$VOL\"\n"
         "    ;;\n"
         # Ceph RBD — rbd map produces /dev/rbdN
+        # MK Nov 2026 (#1245) - pool, namespace, image and the storage's conf, monitors and
+        # keyring come from the pvesm path, for krbd from the storage config (RBD_MAP, see
+        # _rbd_map_args). The volume id is <storage>:<image> and has no pool in it. A krbd
+        # image PVE has mapped is used as it is, and that map stays; only a map made here
+        # is undone by cleanup.
         "  rbd)\n"
         "    command -v rbd >/dev/null || { echo 'rbd cli missing — apt install ceph-common'; "
         "      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ceph-common >/dev/null 2>&1; }\n"
-        "    POOLIMG=$(echo \"$VOL_ID\" | sed 's|^[^:]*:||')\n"
-        "    POOL=$(echo \"$POOLIMG\" | cut -d/ -f1)\n"
-        "    IMG=$(echo \"$POOLIMG\" | cut -d/ -f2)\n"
-        "    [ -z \"$POOL\" ] || [ -z \"$IMG\" ] && { echo 'RBD_PARSE_FAILED'; exit 2; }\n"
-        "    BLK=$(rbd map -p \"$POOL\" \"$IMG\" 2>&1 | tail -1)\n"
-        "    [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $BLK\"; exit 2; }\n"
-        "    RBD=\"$BLK\"\n"
+        "    if [ -b \"$VOL\" ]; then\n"
+        "      BLK=\"$VOL\"\n"
+        "    else\n"
+        "      [ ${#RBD_MAP[@]} -gt 0 ] || { echo \"RBD_PARSE_FAILED: $VOL\"; exit 2; }\n"
+        "      BLK=$(rbd \"${RBD_MAP[@]}\" 2>\"$TMP/rbd.err\" | tail -1)\n"
+        "      [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $(tr '\\n' ' ' <\"$TMP/rbd.err\" | tail -c 300)$BLK\"; exit 2; }\n"
+        "      RBD=\"$BLK\"\n"
+        "    fi\n"
         "    ;;\n"
         # File-based (qcow2 / raw on dir/NFS/CIFS/cephfs/glusterfs/btrfs) — qemu-nbd
         "  dir|nfs|cifs|cephfs|glusterfs|btrfs)\n"
@@ -2928,7 +2975,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     sf = _write_node_script(pve_mgr, node, script, f"virtio-inject-{task.proxmox_vmid}")
     if not sf:
         task.log("[VirtIO] ✗ the injection script could not be written on the node")
-        return False
+        return _virtio_not_injected(task, "the injection script could not be written on the node")
 
     # Detect version first via a separate quick run (so we can pass VIRTIO_SUBDIR cleanly)
     # Simpler path: do a probe-only run then a real run. But to keep cost down we just
@@ -2998,7 +3045,9 @@ def _inject_virtio_drivers(pve_mgr, task):
         return True
     task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
     task.log(out_str[-400:])
-    return False
+    why = next((ln.strip() for ln in out_str.splitlines()
+                if ln.strip().startswith(_VIRTIO_SCRIPT_FAILURES)), '')
+    return _virtio_not_injected(task, why or f"the node script ended with exit code {rc}")
 
 
 # NS Apr 2026 — Snapshot-iterative ZERO-DOWNTIME V2P (transfer_mode='snapshot_zero').
@@ -3974,9 +4023,13 @@ def _parse_rbd_uri(rbd_uri):
     `pvesm path` (conf / id / keyring / mon_host are the ones PVE emits). Returns
     (pool, image, {k: v}) or (None, None, {}) when there's no parseable
     pool/image. Kept separate from the mapping so it's unit-testable without a node.
+
+    MK Nov 2026 (#1245) - PVE writes the colons inside mon_host (host:port, IPv6) as
+    '\\:', so only a bare ':' ends a field. A namespace stays in front of the image
+    (<ns>/<image>), _rbd_map_args takes it apart.
     """
     body = rbd_uri[4:] if str(rbd_uri or '').startswith('rbd:') else str(rbd_uri or '')
-    parts = body.split(':')
+    parts = [p.replace('\\:', ':') for p in re.split(r'(?<!\\):', body)]
     pool_image = parts[0].strip()
     if '/' not in pool_image:
         return None, None, {}
@@ -4007,6 +4060,83 @@ def _rbd_map_command(pool, image, opts):
     if opts.get('mon_host'):
         flags += f" -m {shlex.quote(opts['mon_host'])}"
     return f"rbd map{flags} -p {shlex.quote(pool)} {shlex.quote(image)}"
+
+
+def _rbd_map_args(vol_path, storage_opts=None):
+    """The `rbd` arguments that kernel-map the image behind a `pvesm path` answer, in the
+    order PVE's own map_volume passes them: -p, --namespace, -c, -m,
+    --auth_client_required, --id, --keyring, then `map <image>`. [] when the path names
+    no pool and image.
+
+    librbd paths are rbd:<pool>[/<ns>]/<image>[:k=v...] and carry the storage's conf,
+    monitors and keyring. krbd ones are /dev/rbd-pve/<fsid>/<pool>[/<ns>]/<image> and carry
+    none of it, so for those the settings come from storage_opts (_ceph_storage_opts)."""
+    path = str(vol_path or '').strip()
+    if path.startswith('rbd:'):
+        pool, image, opts = _parse_rbd_uri(path)
+        # PVE before Ceph 19.2.6 wrote auth_supported, which that Ceph no longer reads
+        if opts.get('auth_supported') and not opts.get('auth_client_required'):
+            opts['auth_client_required'] = opts['auth_supported']
+    else:
+        m = re.match(r'/dev/rbd(?:-pve/[^/]+)?/([^/]+)/(.+)$', path)
+        pool, image = (m.group(1), m.group(2)) if m else (None, None)
+        opts = dict(storage_opts or {})
+    ns, _, image = str(image or '').rpartition('/')
+    if not (pool and image):
+        return []
+    args = ['-p', pool] + (['--namespace', ns] if ns else [])
+    for flag, key in (('-c', 'conf'), ('-m', 'mon_host'),
+                      ('--auth_client_required', 'auth_client_required'),
+                      ('--id', 'id'), ('--keyring', 'keyring')):
+        val = opts.get(key)
+        if val:
+            # the path lists monitors with ';', PVE hands them to the CLI with ','
+            args += [flag, val.replace(';', ',') if key == 'mon_host' else val]
+    return args + ['map', image]
+
+
+# where PVE keeps a Ceph storage's own keyring and, for an external cluster, its conf
+_CEPH_PRIV_DIR = '/etc/pve/priv/ceph'
+
+
+def _ceph_mon(host):
+    # PVE's hostlist puts a bare IPv6 monitor in brackets, a port stays behind it
+    return f"[{host}]" if host.count(':') > 1 and not host.startswith('[') else host
+
+
+def _ceph_storage_opts(pve_mgr, node, storage):
+    """conf, monitors, client and keyring of an RBD storage, picked as PVE's
+    ceph_connect_option picks them. Only a krbd map needs this, its /dev path has none of
+    them. {} when the storage config cannot be read; the map then relies on the node's
+    own ceph.conf."""
+    sid = str(storage or '')
+    keyring = f"{_CEPH_PRIV_DIR}/{sid}.keyring"
+    conf = f"{_CEPH_PRIV_DIR}/{sid}.conf"
+    _rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"pvesh get /storage/{shlex.quote(sid)} --output-format json 2>/dev/null; echo; "
+        f"for f in {shlex.quote(keyring)} {shlex.quote(conf)}; do "
+        f"[ -e \"$f\" ] && echo \"HAVE $f\"; done", timeout=20)
+    lines = [ln.strip() for ln in str(out or '').splitlines()]
+    try:
+        scfg = json.loads(next(ln for ln in lines if ln.startswith('{')))
+    except (StopIteration, ValueError):
+        return {}
+    if not isinstance(scfg, dict):
+        return {}
+    have = {ln[5:] for ln in lines if ln.startswith('HAVE ')}
+    monhost = str(scfg.get('monhost') or '').strip()
+    opts = {'id': str(scfg.get('username') or 'admin')}
+    if keyring in have:
+        opts['keyring'] = keyring
+    if not monhost:
+        # pveceph-managed: the cluster's own conf, which also sets its auth
+        opts['conf'] = '/etc/pve/ceph.conf'
+        return opts
+    if conf in have:
+        opts['conf'] = conf
+    opts['mon_host'] = ','.join(_ceph_mon(h) for h in re.split(r'[\s,;]+', monhost) if h)
+    opts['auth_client_required'] = 'cephx' if 'keyring' in opts else 'none'
+    return opts
 
 
 def _map_rbd_uri_to_device(pve_mgr, node, vol_id, rbd_uri):
@@ -5045,6 +5175,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     VMware VM must already be stopped before calling this.
     """
     import time
+
+    # this path never stages drivers, and auto mode lands here too, where the form showed
+    # no notice about it
+    if getattr(task, 'install_virtio_drivers', False):
+        _virtio_not_injected(task, "the live mirror boots the VM before the drivers can be staged")
 
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the
