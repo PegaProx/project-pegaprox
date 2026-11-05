@@ -1691,12 +1691,12 @@ def _run_v2p_migration(task):
                     _err = str(_res.get('error') or '') if isinstance(_res, dict) else ''
                     if _err:
                         task.log(f"  Snapshot removal reported: {_err}")
-                    if not _err or 'timed out' in _err.lower():
+                    if not _err or _remove_still_running(_err):
                         break
                     if _try == 0:
                         time.sleep(10)
                 # a timed-out remove keeps consolidating on ESXi, any other error gets a short look
-                _limit = 120 if _err and 'timed out' not in _err.lower() else fold_limit
+                _limit = 120 if _err and not _remove_still_running(_err) else fold_limit
                 if not _wait_clone_snap_consolidated(vmware_mgr, task.vm_id, backing_before, _limit):
                     raise _VmkSwitchoverFailed(
                         f'The clone snapshot was not consolidated within {_limit}s (still listed, or a '
@@ -3288,6 +3288,13 @@ def _clone_snap_consolidated(vmware_mgr, vm_id, backing_before):
     except Exception:
         return False
     return bool(backing_before) and all(files.get(k) == f for k, f in backing_before.items())
+
+
+def _remove_still_running(err):
+    # JB Nov 2026 (#1249) - ESXi's own words can say "timed out" too, and a task that ended in
+    # failure is not running on: the long wait for it would be downtime with the source off
+    err = str(err or '').lower()
+    return 'timed out' in err and not err.startswith('remove failed')
 
 
 def _consolidation_timeout(merge_bytes):
