@@ -20688,10 +20688,61 @@
             "description": "Not authenticated"
           },
           "403": {
-            "description": "Insufficient permissions"
+            "description": "Local permission denial or PBS refused the datastore read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "description": "PBS_FORBIDDEN for PBS denial; local authorization uses its own code",
+                      "examples": [
+                        "PBS_FORBIDDEN",
+                        "MISSING_PERMISSION",
+                        "INSUFFICIENT_PERMISSIONS"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "PBS is unreachable or returned an invalid upstream response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error",
+                    "code"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "PBS_UNREACHABLE",
+                        "PBS_UPSTREAM"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
           }
         },
-        "summary": "List datastores with detailed status",
+        "summary": "List datastores with detailed status, surfacing required PBS read failures.",
+        "description": "A successful 200 with [] means the required PBS datastore configuration and usage\nreads succeeded and no datastores are visible to those reads. An upstream permission refusal is\n403 with code PBS_FORBIDDEN; a transport failure is 502 with code\nPBS_UNREACHABLE; other failed or malformed upstream reads are 502 with code\nPBS_UPSTREAM. PegaProx permission checks may also return 403.",
         "parameters": [
           {
             "name": "pbs_id",

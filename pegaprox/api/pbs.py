@@ -42,7 +42,7 @@ def pbs_upstream_error(result):
     """
     if not isinstance(result, dict) or 'error' not in result:
         return None
-    upstream = result.get('status_code')
+    upstream = result.get('upstream_status', result.get('status_code'))
     if upstream == 403:
         # PBS guards the node log with Sys.Audit on /system/log. A token minted for
         # backup work alone (Datastore.*) does not carry it, and that is the common case.
@@ -50,8 +50,9 @@ def pbs_upstream_error(result):
     if upstream is None:
         # never got an answer: DNS, refused, timed out, TLS
         return 502, {'error': 'PBS is unreachable', 'code': 'PBS_UNREACHABLE', 'upstream_status': None}
-    return 502, {'error': f'PBS returned HTTP {upstream}', 'code': 'PBS_UPSTREAM',
-                 'upstream_status': upstream}
+    reason = ('PBS returned an invalid response' if 'upstream_status' in result
+              else f'PBS returned HTTP {upstream}')
+    return 502, {'error': reason, 'code': 'PBS_UPSTREAM', 'upstream_status': upstream}
 
 
 def _link_refusal(links, empty_error):
@@ -590,7 +591,14 @@ def _gc_jobs_by_store(mgr):
 @bp.route('/api/pbs/<pbs_id>/datastores', methods=['GET'])
 @require_auth(perms=['pbs.datastore.view'])
 def get_pbs_datastores(pbs_id):
-    """List datastores with detailed status"""
+    """List datastores with detailed status, surfacing required PBS read failures.
+
+    A successful 200 with [] means the required PBS datastore configuration and usage
+    reads succeeded and no datastores are visible to those reads. An upstream permission refusal is
+    403 with code PBS_FORBIDDEN; a transport failure is 502 with code
+    PBS_UNREACHABLE; other failed or malformed upstream reads are 502 with code
+    PBS_UPSTREAM. PegaProx permission checks may also return 403.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -604,10 +612,41 @@ def get_pbs_datastores(pbs_id):
     
     # Get list of datastores
     config_resp = mgr.get_datastores()
+    failed = pbs_upstream_error(config_resp)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if (not isinstance(config_resp, dict)
+            or not isinstance(config_resp.get('data'), list)
+            or any(not isinstance(ds, dict) or not isinstance(ds.get('name'), str)
+                   or not ds['name'] for ds in config_resp['data'])):
+        return jsonify({'error': 'PBS returned an invalid datastore list', 'code': 'PBS_UPSTREAM'}), 502
+
     usage_resp = mgr.get_datastore_usage()
+    failed = pbs_upstream_error(usage_resp)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if (not isinstance(usage_resp, dict)
+            or not isinstance(usage_resp.get('data'), list)
+            or any(not isinstance(usage, dict) or not isinstance(usage.get('store'), str)
+                   or not usage['store'] or usage.get('error') is not None
+                   # PBS reports optional u64 byte counts; namespace-only rows omit them.
+                   or any(value is not None and (
+                              type(value) is not int or not 0 <= value <= (1 << 64) - 1)
+                          for value in (usage.get('used'), usage.get('total'), usage.get('avail')))
+                   for usage in usage_resp['data'])):
+        return jsonify({'error': 'PBS returned an invalid datastore usage list', 'code': 'PBS_UPSTREAM'}), 502
     
-    datastores = config_resp.get('data', [])
-    usage_list = {u.get('store'): u for u in usage_resp.get('data', [])}
+    datastores = config_resp['data']
+    usage_list = {u.get('store'): u for u in usage_resp['data']}
+    configured_names = {ds['name'] for ds in datastores}
+    if any(store not in configured_names for store in usage_list):
+        return jsonify({
+            'error': 'PBS returned datastore usage without matching configuration; '
+                     'check Datastore.Audit access or retry the read',
+            'code': 'PBS_UPSTREAM',
+        }), 502
     gc_jobs = _gc_jobs_by_store(mgr)
     
     # Merge config with usage
