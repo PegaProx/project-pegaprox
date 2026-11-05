@@ -168,7 +168,9 @@ class XHMigrationTask:
         self.log_lines = []
         self.cancel_event = threading.Event()
         # options
-        self.network_map = self.config.get('network_map', {})
+        # MK Nov 2026 - every leg reads it as {source network or NIC index: target network}
+        _nm = self.config.get('network_map')
+        self.network_map = _nm if isinstance(_nm, dict) else {}
         self.start_after = self.config.get('start_after', True)
         self.remove_source = self.config.get('remove_source', False)
         self._last_sse_progress = 0
@@ -1396,19 +1398,7 @@ def _run_pve_to_xcpng(task):
         # configure VM
         try:
             # remove template VBDs first (they have empty disks)
-            for old_vbd in xapi.VM.get_VBDs(new_vm_ref):
-                try:
-                    old_vbd_rec = xapi.VBD.get_record(old_vbd)
-                    if old_vbd_rec.get('type') == 'Disk':
-                        old_vdi = old_vbd_rec.get('VDI', 'OpaqueRef:NULL')
-                        xapi.VBD.destroy(old_vbd)
-                        if old_vdi != 'OpaqueRef:NULL':
-                            try:
-                                xapi.VDI.destroy(old_vdi)
-                            except:
-                                pass
-                except:
-                    pass
+            _xcp_drop_template_disks(xapi, new_vm_ref)
 
             # set properties
             xapi.VM.set_name_description(new_vm_ref,
@@ -1443,19 +1433,7 @@ def _run_pve_to_xcpng(task):
         # attach VDIs
         for vdi_info in created_vdis:
             try:
-                vbd_rec = {
-                    'VM': new_vm_ref,
-                    'VDI': vdi_info['ref'],
-                    'userdevice': str(vdi_info['index']),
-                    'bootable': vdi_info['bootable'],
-                    'mode': 'RW',
-                    'type': 'Disk',
-                    'empty': False,
-                    'other_config': {},
-                    'qos_algorithm_type': '',
-                    'qos_algorithm_params': {},
-                }
-                xapi.VBD.create(vbd_rec)
+                xapi.VBD.create(_xcp_disk_vbd(new_vm_ref, vdi_info))
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
             except Exception as e:
                 task.log(f"Warning: VBD attach failed for device {vdi_info['index']}: {e}")
@@ -1683,6 +1661,45 @@ def _ssh_cleanup(ssh, path):
         pass
 
 
+def _xcp_drop_template_disks(api, vm_ref):
+    """Destroy the Disk VBDs (and their VDIs) a VM cloned from a template brought along.
+    Best effort, as each step was: a template that cannot be read has nothing to drop."""
+    try:
+        old_vbds = api.VM.get_VBDs(vm_ref)
+    except Exception:
+        return
+    for old_vbd in old_vbds:
+        try:
+            old_vbd_rec = api.VBD.get_record(old_vbd)
+            if old_vbd_rec.get('type') == 'Disk':
+                old_vdi = old_vbd_rec.get('VDI', 'OpaqueRef:NULL')
+                api.VBD.destroy(old_vbd)
+                if old_vdi != 'OpaqueRef:NULL':
+                    try:
+                        api.VDI.destroy(old_vdi)
+                    except:
+                        pass
+        except:
+            pass
+
+
+def _xcp_disk_vbd(vm_ref, vdi_info):
+    """The VBD record that attaches a migrated VDI as disk `index` of the VM. MK Nov 2026 -
+    one record for both legs into XCP-ng, which had drifted apart once."""
+    return {
+        'VM': vm_ref,
+        'VDI': vdi_info['ref'],
+        'userdevice': str(vdi_info['index']),
+        'bootable': vdi_info['bootable'],
+        'mode': 'RW',
+        'type': 'Disk',
+        'empty': False,
+        'other_config': {},
+        'qos_algorithm_type': '',
+        'qos_algorithm_params': {},
+    }
+
+
 def _xcp_attach_network(api, vm_ref, net_ident, device='0'):
     """Attach a VIF to an XCP-ng VM. net_ident can be UUID or name."""
     net_ref = None
@@ -1837,7 +1854,11 @@ def plan_esxi_to_xcpng(source_cluster_id, source_vmid, target_cluster_id):
             'vcpus': data.get('cpu_count', 1),
             'memory_mb': data.get('memory_mb', 1024),
             'disks': disks_info,
-            'networks': [],
+            # MK Nov 2026 - each adapter with its port group; no 'bridge', so the dialog keys
+            # the map by the NIC's index, which is what the runner sorts by
+            'networks': [{'network': n.get('network') or n.get('label') or f'NIC {i}',
+                          'label': n.get('label', ''), 'mac': n.get('mac_address', '')}
+                         for i, n in enumerate(data.get('nics') or [])],
             'template': xcp_template,
             'guest_os': guest_os,
         },
@@ -2501,6 +2522,9 @@ def _run_esxi_to_xcpng(task):
             return
 
         task.log(f"Created XCP-ng VM from template: {xcp_template}")
+        # MK Nov 2026 - as the PVE leg: a template that carries a disk at device 0 would refuse
+        # the boot disk below
+        _xcp_drop_template_disks(xapi, new_vm_ref)
         task.progress = 90
 
         # attach VDIs
@@ -2508,27 +2532,31 @@ def _run_esxi_to_xcpng(task):
         # existed: the NameErrors were logged as warnings and the VM ended up without disks.
         # Attach the way the PVE -> XCP-ng leg above does.
         task.set_phase('attaching')
+        attached, unattached = [], []
         for vdi_info in created_vdis:
             try:
-                xapi.VBD.create({
-                    'VM': new_vm_ref,
-                    'VDI': vdi_info['ref'],
-                    'userdevice': str(vdi_info['index']),
-                    'bootable': vdi_info['bootable'],
-                    'mode': 'RW',
-                    'type': 'Disk',
-                    'empty': False,
-                    'other_config': {},
-                    'qos_algorithm_type': '',
-                    'qos_algorithm_params': {},
-                })
+                xapi.VBD.create(_xcp_disk_vbd(new_vm_ref, vdi_info))
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
+                attached.append(vdi_info)
             except Exception as e:
-                task.log(f"Warning: attach VDI failed: {e}")
+                unattached.append(vdi_info)
+                task.log(f"Warning: attaching disk {vdi_info['index']} (VDI {vdi_info['uuid']}) failed: {e}")
+        # MK Nov 2026 - a VM without its boot disk did not migrate: failed, with what is left on
+        # the pool, instead of "completed" with a guest that cannot start
+        if created_vdis and (not attached or any(v['bootable'] for v in unattached)):
+            task.set_phase('failed', f"{len(unattached)} of {len(created_vdis)} disk(s) could not be attached, "
+                                     f"the boot disk among them; VM {task.vm_name} and its VDIs "
+                                     f"({', '.join(v['uuid'] for v in unattached)}) are left on the pool")
+            return
 
         # only a network the user mapped: the first one the pool lists can be its management
-        # or storage network, and the plan has no source NICs to map from
-        target_nets = [v for _, v in sorted((task.network_map or {}).items()) if v]
+        # or storage network, and the plan has no source NICs to map from. NIC indexes in
+        # their numeric order ('10' after '2'), names after them
+        mapped = sorted(task.network_map.items(),
+                        key=lambda kv: (0, int(kv[0]), '') if str(kv[0]).isdigit() else (1, 0, str(kv[0])))
+        target_nets = [v for _, v in mapped if v]
+        if len(target_nets) > 4:
+            task.log(f"{len(target_nets)} networks mapped, the first 4 are attached")
         for net_idx, target_net in enumerate(target_nets[:4]):
             try:
                 _xcp_attach_network(xapi, new_vm_ref, target_net, str(net_idx))
@@ -2540,7 +2568,10 @@ def _run_esxi_to_xcpng(task):
 
         task.progress = 100
         task.set_phase('completed')
-        task.log(f"Migration complete: ESXi -> XCP-ng")
+        if unattached:
+            task.log(f"Migration complete: ESXi -> XCP-ng, {len(unattached)} data disk(s) not attached")
+        else:
+            task.log(f"Migration complete: ESXi -> XCP-ng")
 
     except Exception as e:
         logger.error(f"[XHM:{task.id}] ESXi->XCP failed: {e}")
