@@ -115,10 +115,12 @@ def test_every_import_of_the_package_has_a_depends_entry():
 def test_without_defusedxml_in_depends_it_goes_red():
     """The counterproof: the gap this file was written for, put back."""
     text = _control()
-    assert '         python3-defusedxml\n' in text
-    without = text.replace('         python3-xenapi,\n         python3-defusedxml\n',
-                           '         python3-xenapi\n')
-    assert without != text
+    assert 'python3-defusedxml' in depends_of(text)
+    # drop the entry wherever it sits; as the last one it takes the comma before it along
+    without = re.sub(r'^[ \t]+python3-defusedxml,\n', '', text, flags=re.M)
+    if without == text:
+        without = re.sub(r',\n[ \t]+python3-defusedxml\n', '\n', text)
+    assert 'python3-defusedxml' not in depends_of(without)
     found = problems(third_party_imports(), depends_of(without))
     assert len(found) == 1 and found[0].startswith('defusedxml (pegaprox/core/xcpng.py:'), found
 
