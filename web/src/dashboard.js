@@ -132,7 +132,7 @@
         }
 
         // Task Bar Component with Task Viewer
-        function TaskBar({ tasks, onClear, onClose, onCancel, onRefresh, clusterId, autoExpandEnabled = true }) {
+        function TaskBar({ tasks, onClear, onClose, onCancel, onRefresh, clusterId, clusterName = '', autoExpandEnabled = true, crNav }) {
             const { t } = useTranslation();
             const [expanded, setExpanded] = useState(false);
             const [selectedTask, setSelectedTask] = useState(null);
@@ -140,6 +140,7 @@
             const [taskLogLoading, setTaskLogLoading] = useState(false);
             const [filter, setFilter] = useState('all'); // all, running, error, today
             const { getAuthHeaders } = useAuth();
+            const { isCorpRedesigned } = useLayout();
             const seenRunningIds = React.useRef(null);  // #738: UPIDs already seen running (null = not yet seeded)
             
             // LW: Resizable height - Feb 2026
@@ -302,6 +303,122 @@
                 fetchTaskLog(task);
             };
             
+            // Task Detail Modal - LW Oct 2026: one render for both, so the redesigned task center shows
+            // the same dialog with its own log, state colour and cluster (o); without o it is the classic one
+            const renderTaskDetail = (task, o = {}) => {
+                if (!task) return task;
+                const log = o.log !== undefined ? o.log : taskLog;
+                const logLoading = o.loading !== undefined ? o.loading : taskLogLoading;
+                const close = o.close || (() => setSelectedTask(null));
+                const look = o.tone || (task.status === 'running' ? 'info' : task.status === 'failed' || task.status === 'error' ? 'error' : /^WARNINGS/.test(task.status || '') ? 'warning' : 'success');
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={close}>
+                        <div className="w-full max-w-3xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                            {/* Header */}
+                            <div className="flex items-center justify-between p-4 border-b border-proxmox-border bg-proxmox-dark">
+                                <div className="flex items-center gap-3">
+                                    <span className={`w-3 h-3 rounded-full ${
+                                        look === 'info' ? 'bg-blue-500 animate-pulse' :
+                                        look === 'error' ? 'bg-red-500' :
+                                        look === 'warning' ? 'bg-yellow-500' :
+                                        'bg-green-500'
+                                    }`} />
+                                    <div>
+                                        <h3 className="text-white font-semibold">
+                                            {formatTaskType(task.type)} {task.vmid ? `(${task.vmid})` : ''}
+                                        </h3>
+                                        <p className="text-xs text-gray-400">
+                                            {task.node} • {task.pegaprox_user || (task.user ? task.user.split('@')[0] : '-')}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button onClick={close} className="p-2 hover:bg-proxmox-border rounded" aria-label={o.close ? t('close') : undefined}>
+                                    <Icons.X />
+                                </button>
+                            </div>
+                            
+                            {/* Info Grid */}
+                            <div className="p-4 border-b border-proxmox-border grid grid-cols-4 gap-4 text-sm">
+                                <div>
+                                    <span className="text-gray-500 block">{t('status')}</span>
+                                    <span className={`font-medium ${
+                                        look === 'info' ? 'text-blue-400' :
+                                        look === 'error' ? 'text-red-400' :
+                                        look === 'warning' ? 'text-yellow-400' :
+                                        'text-green-400'
+                                    }`}>{o.statusText || task.status || '-'}</span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('startTime')}</span>
+                                    <span className="text-white">
+                                        {task.starttime ? fmtDate(task.starttime * 1000) : '-'}
+                                    </span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('endTime')}</span>
+                                    <span className="text-white">
+                                        {task.endtime ? fmtDate(task.endtime * 1000) : '-'}
+                                    </span>
+                                </div>
+                                <div>
+                                    <span className="text-gray-500 block">{t('duration')}</span>
+                                    <span className="text-white">{o.duration || formatDuration(task.starttime, task.endtime)}</span>
+                                </div>
+                            </div>
+                            {o.progress}
+                            
+                            {/* Task Log */}
+                            <div className="p-4">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="text-sm text-gray-400">{t('taskOutput')}</span>
+                                    <button 
+                                        onClick={() => (o.refresh ? o.refresh() : fetchTaskLog(task))}
+                                        className="text-xs text-gray-400 hover:text-white"
+                                        aria-label={o.refresh ? t('refresh') : undefined}
+                                    >
+                                        <Icons.RefreshCw />
+                                    </button>
+                                </div>
+                                <div className={`h-64 overflow-auto rounded-lg font-mono text-xs p-3 ${
+                                    look === 'error'
+                                        ? 'bg-red-500/5 border border-red-500/20 text-red-300'
+                                        : 'bg-proxmox-darker border border-proxmox-border text-gray-300'
+                                }`} tabIndex={o.refresh ? 0 : undefined} aria-label={o.refresh ? t('taskOutput') : undefined}>
+                                    {logLoading ? (
+                                        <span className="text-gray-500">{t('loading')}...</span>
+                                    ) : (
+                                        <pre className="whitespace-pre-wrap">{log || task.error || task.exitstatus || t('noOutput')}</pre>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            {/* Actions */}
+                            {task.status === 'running' && onCancel && (
+                                <div className="p-4 border-t border-proxmox-border bg-proxmox-dark">
+                                    <button
+                                        onClick={() => { (o.cancel || onCancel)(task); close(); }}
+                                        className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
+                                    >
+                                        {t('cancelTask')}
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+            const taskDetail = renderTaskDetail(selectedTask);
+
+            // LW Oct 2026 - Corporate Redesigned: the same list, open state and dialog, its own bar and drawer
+            if (isCorpRedesigned) {
+                return (
+                    <CrTaskCenter tasks={safeTasks} expanded={expanded} setExpanded={setExpanded}
+                        clusterId={clusterId} clusterName={clusterName} onRefresh={onRefresh}
+                        onClose={onClose} onCancel={onCancel} formatTaskType={formatTaskType} formatDuration={formatDuration}
+                        renderDetail={renderTaskDetail} nav={crNav} />
+                );
+            }
+
             return (
                 <div 
                     className={`pp-taskbar fixed bottom-0 left-0 right-0 z-40 transition-all ${isResizing ? '' : 'duration-300'}`}
@@ -322,97 +439,7 @@
                     )}
                     
                     {/* Task Detail Modal */}
-                    {selectedTask && (
-                        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70" onClick={() => setSelectedTask(null)}>
-                            <div className="w-full max-w-3xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" onClick={e => e.stopPropagation()}>
-                                {/* Header */}
-                                <div className="flex items-center justify-between p-4 border-b border-proxmox-border bg-proxmox-dark">
-                                    <div className="flex items-center gap-3">
-                                        <span className={`w-3 h-3 rounded-full ${
-                                            selectedTask.status === 'running' ? 'bg-blue-500 animate-pulse' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'bg-red-500' :
-                                            'bg-green-500'
-                                        }`} />
-                                        <div>
-                                            <h3 className="text-white font-semibold">
-                                                {formatTaskType(selectedTask.type)} {selectedTask.vmid ? `(${selectedTask.vmid})` : ''}
-                                            </h3>
-                                            <p className="text-xs text-gray-400">
-                                                {selectedTask.node} • {selectedTask.pegaprox_user || (selectedTask.user ? selectedTask.user.split('@')[0] : '-')}
-                                            </p>
-                                        </div>
-                                    </div>
-                                    <button onClick={() => setSelectedTask(null)} className="p-2 hover:bg-proxmox-border rounded">
-                                        <Icons.X />
-                                    </button>
-                                </div>
-                                
-                                {/* Info Grid */}
-                                <div className="p-4 border-b border-proxmox-border grid grid-cols-4 gap-4 text-sm">
-                                    <div>
-                                        <span className="text-gray-500 block">{t('status')}</span>
-                                        <span className={`font-medium ${
-                                            selectedTask.status === 'running' ? 'text-blue-400' :
-                                            selectedTask.status === 'failed' || selectedTask.status === 'error' ? 'text-red-400' :
-                                            'text-green-400'
-                                        }`}>{selectedTask.status || '-'}</span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('startTime')}</span>
-                                        <span className="text-white">
-                                            {selectedTask.starttime ? fmtDate(selectedTask.starttime * 1000) : '-'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('endTime')}</span>
-                                        <span className="text-white">
-                                            {selectedTask.endtime ? fmtDate(selectedTask.endtime * 1000) : '-'}
-                                        </span>
-                                    </div>
-                                    <div>
-                                        <span className="text-gray-500 block">{t('duration')}</span>
-                                        <span className="text-white">{formatDuration(selectedTask.starttime, selectedTask.endtime)}</span>
-                                    </div>
-                                </div>
-                                
-                                {/* Task Log */}
-                                <div className="p-4">
-                                    <div className="flex items-center justify-between mb-2">
-                                        <span className="text-sm text-gray-400">{t('taskOutput')}</span>
-                                        <button 
-                                            onClick={() => fetchTaskLog(selectedTask)}
-                                            className="text-xs text-gray-400 hover:text-white"
-                                        >
-                                            <Icons.RefreshCw />
-                                        </button>
-                                    </div>
-                                    <div className={`h-64 overflow-auto rounded-lg font-mono text-xs p-3 ${
-                                        selectedTask.status === 'failed' || selectedTask.status === 'error'
-                                            ? 'bg-red-500/5 border border-red-500/20 text-red-300'
-                                            : 'bg-proxmox-darker border border-proxmox-border text-gray-300'
-                                    }`}>
-                                        {taskLogLoading ? (
-                                            <span className="text-gray-500">{t('loading')}...</span>
-                                        ) : (
-                                            <pre className="whitespace-pre-wrap">{taskLog || selectedTask.error || selectedTask.exitstatus || t('noOutput')}</pre>
-                                        )}
-                                    </div>
-                                </div>
-                                
-                                {/* Actions */}
-                                {selectedTask.status === 'running' && onCancel && (
-                                    <div className="p-4 border-t border-proxmox-border bg-proxmox-dark">
-                                        <button
-                                            onClick={() => { onCancel(selectedTask); setSelectedTask(null); }}
-                                            className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-white text-sm"
-                                        >
-                                            {t('cancelTask')}
-                                        </button>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
+                    {taskDetail}
                     
                     <div className="h-full bg-proxmox-darker border-t border-proxmox-border flex flex-col">
                         {/* Header Bar */}
@@ -519,7 +546,9 @@
                                                 // ('OK' = success, anything else = failure). #590: failed backups came back
                                                 // as 'stopped' + a non-OK exitstatus and slipped through to the green bucket.
                                                 const _ex = task.exitstatus || '';
-                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK');
+                                                // "WARNINGS: n" ended, like in Proxmox: yellow, not red
+                                                const isWarn = !isRunning && /^WARNINGS/.test(_ex);
+                                                const isFailed = task.status === 'failed' || task.status === 'error' || (!isRunning && _ex && _ex !== 'OK' && !isWarn);
                                                 
                                                 return (
                                                     <tr 
@@ -531,6 +560,7 @@
                                                             <span className={`inline-block w-2 h-2 rounded-full ${
                                                                 isRunning ? 'bg-blue-500 animate-pulse' :
                                                                 isFailed ? 'bg-red-500' :
+                                                                isWarn ? 'bg-yellow-500' :
                                                                 'bg-green-500'
                                                             }`} />
                                                         </td>
@@ -553,9 +583,11 @@
                                                             <span className={`px-2 py-0.5 rounded text-xs ${
                                                                 isRunning ? 'bg-blue-500/20 text-blue-400' : 
                                                                 isFailed ? 'bg-red-500/20 text-red-400' : 
+                                                                isWarn ? 'bg-yellow-500/20 text-yellow-400' :
                                                                 'bg-green-500/20 text-green-400'
-                                                            }`}>
-                                                                {task.status || '-'}
+                                                            }`} title={_ex && _ex !== task.status ? _ex : undefined}>
+                                                                {/* a failed task says what Proxmox said, not just 'failed' */}
+                                                                {isFailed && _ex ? _ex : (task.status || '-')}
                                                             </span>
                                                         </td>
                                                     </tr>
@@ -1406,7 +1438,7 @@
         }
 
         // Cluster Sidebar Item Component - NS Jan 2026
-        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu, hwHealth, onCheckConnection }) {
+        function ClusterSidebarItem({ cluster, idx, selectedCluster, setSelectedCluster, nodeAlerts, clusterGroups, isAdmin, handleDeleteCluster, setShowAssignGroup, setRenamingCluster, setRenameValue, setReconfigureCluster, t, getAuthHeaders, fetchClusters, addToast, isCorporate, expandedSidebarClusters, toggleSidebarCluster, onContextMenu, hwHealth, onCheckConnection, treeItem }) {
             const offlineNodesCount = Object.values(nodeAlerts || {})
                 .filter(alert => alert.cluster_id === cluster.id && alert.status === 'offline')
                 .length;
@@ -1429,7 +1461,12 @@
                     <div
                         onClick={() => setSelectedCluster(cluster)}
                         tabIndex={0}
-                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedCluster(cluster); } }}
+                        role={treeItem ? 'treeitem' : undefined} aria-level={treeItem ? 1 : undefined}
+                        aria-expanded={treeItem ? !!isExpanded : undefined} aria-selected={treeItem ? isSelected : undefined}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedCluster(cluster); }
+                            else if (treeItem) crTreeKey(e, !!isExpanded, () => toggleSidebarCluster && toggleSidebarCluster(cluster.id));
+                        }}
                         onContextMenu={(e) => { e.preventDefault(); onContextMenu?.('cluster', cluster, {x: e.clientX, y: e.clientY}); }}
                         className="corp-tree-item cursor-pointer flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5"
                         style={isSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
@@ -2043,9 +2080,10 @@
         // NS: Mar 2026 - Topology View redesign (#142)
         // SVG bezier connectors, donut gauges, card elevation
         // MK: added diagram view with pan/zoom + export capability
-        function TopologyView({ clusterName, nodes, resources, pbsServers, isCorporate, onVmClick, clusterId, multiCluster }) {
+        function TopologyView({ clusterName, nodes, resources, pbsServers, isCorporate, onVmClick, clusterId, multiCluster, onNodeClick, onClusterClick, onGuestOpen }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
+            const { isCorpRedesigned } = useLayout();
 
             // NS: Snapshot props on mount — topology layout stays frozen until component re-mounts
             // Prevents SSE metric updates from causing constant re-layout/jumping
@@ -2148,6 +2186,7 @@
             // NS: cluster-wide affinity rules (fetched lazily — only when diagram is open)
             const [affinityRules, setAffinityRules] = useState([]);
             const [showAffinity, setShowAffinity] = useState(false);
+            const [affinityUnread, setAffinityUnread] = useState(false);
             // NS May 2026 — storage / network tier toggles. Default OFF so diagram
             // stays uncluttered for users who don't care about infra layers.
             const [showStorage, setShowStorage] = useState(() => {
@@ -2899,6 +2938,22 @@
             const vbX = (effSvgW - vbW) / 2 - pan.x / zoom;
             const vbY = (effSvgH - vbH) / 2 - pan.y / zoom;
 
+            // LW Oct 2026 - Corporate Redesigned draws the same snapshot and answers its own way
+            if (isCorpRedesigned) {
+                return (
+                    <CrTopology multi={isMultiCluster || Array.isArray(multiCluster)} clusterId={clusterId} clusterName={clusterName}
+                        frozenNodes={frozenNodes} frozenResources={frozenResources} frozenPbs={frozenPbs}
+                        frozenMultiCluster={frozenMultiCluster} revision={topoRevision} onRefresh={refreshTopology}
+                        networkData={networkData} storageData={storageData} buildStorages={buildStorageList}
+                        vmStorages={vmStoragesAll} vmBridges={vmBridgesAll}
+                        showStorage={showStorage} onToggleStorage={toggleStorageTier}
+                        showNetwork={showNetwork} onToggleNetwork={toggleNetworkTier}
+                        affinityRules={affinityRules} setAffinityRules={setAffinityRules}
+                        showAffinity={showAffinity} setShowAffinity={setShowAffinity}
+                        onVmClick={onGuestOpen || onVmClick} onNodeClick={onNodeClick} onClusterClick={onClusterClick} />
+                );
+            }
+
             return (
                 <div className={isCorporate
                     ? 'corp-topo-frame'
@@ -3051,11 +3106,19 @@
                                 <button
                                     onClick={() => {
                                         // lazy-fetch affinity rules the first time the user opens the toggle
+                                        // no authFetch in this view, the click used to throw before it toggled
                                         if (!showAffinity && affinityRules.length === 0 && clusterId) {
-                                            authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`)
-                                                .then(r => r && r.ok ? r.json() : null)
-                                                .then(d => setAffinityRules(Array.isArray(d) ? d : (d?.rules || [])))
-                                                .catch(() => {});
+                                            fetch(`${API_URL}/clusters/${clusterId}/affinity-rules`, {
+                                                headers: getAuthHeaders(), credentials: 'include'
+                                            })
+                                                .then(r => r.ok ? r.json() : null)
+                                                .then(d => {
+                                                    const rules = Array.isArray(d) ? d : d?.rules;
+                                                    // a refused or failed read is not "no rules"
+                                                    setAffinityUnread(!Array.isArray(rules) || !!d?.error);
+                                                    setAffinityRules(Array.isArray(rules) ? rules : []);
+                                                })
+                                                .catch(() => setAffinityUnread(true));
                                         }
                                         setShowAffinity(v => !v);
                                     }}
@@ -3068,6 +3131,11 @@
                                     title={t('toggleAffinityEdges') || 'Show / hide affinity rule connections'}>
                                     {showAffinity ? '●' : '○'} {t('affinity') || 'Affinity'}
                                 </button>
+                                {showAffinity && affinityUnread && (
+                                    <span role="status" data-affinity-unread="1" style={{fontSize: 11, color: '#f7b428'}}>
+                                        {t('affinityRulesUnread')}
+                                    </span>
+                                )}
                                 <button
                                     onClick={toggleLegend}
                                     style={{
@@ -4631,10 +4699,13 @@
 
         // MK May 2026 — Network Topology Visualization. Plain SVG, no D3 dep.
         // Three rows: cluster → nodes → bridges → VMs (grouped under bridge).
-        function TopologyTab({ clusterId, authFetch, addToast, t }) {
+        function TopologyTab({ clusterId, authFetch, addToast, t, cluster, nav }) {
+            const { isCorpRedesigned } = useLayout();
             const [graph, setGraph] = React.useState(null);
             const [loading, setLoading] = React.useState(false);
             const [highlight, setHighlight] = React.useState(null);
+            // LW Nov 2026 - whether the last read came back; Corporate Redesigned says so, classic draws what it has
+            const [readErr, setReadErr] = React.useState(null);
 
             const refresh = async () => {
                 if (!clusterId) return;
@@ -4642,6 +4713,7 @@
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/topology`).then(x => x?.json()).catch(() => null);
                     if (r && r.nodes) setGraph(r);
+                    setReadErr(r && r.nodes ? null : { why: (r && typeof r.error === 'string' && r.error) || '' });
                 } finally { setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId]);
@@ -4826,6 +4898,16 @@
                     (l.target === highlight && l.source === id)
                 );
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same read as node lanes and an interface table (cr_modules.js)
+            if (isCorpRedesigned) {
+                const own = graph && (!graph.cluster || !graph.cluster.id || graph.cluster.id === clusterId) ? graph : null;
+                return (
+                    <CrBoundary key={clusterId} id="net-topology">
+                        <CrNetTopo cluster={cluster || { id: clusterId }} graph={own} loading={loading} readErr={readErr} onRefresh={refresh} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5017,9 +5099,13 @@
 
         // MK May 2026 — Power & Carbon Tracking. Same shape as Cost Dashboard
         // (rates editor + summary + per-VM table) but in kWh / kg CO₂.
-        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function PowerCarbonTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5046,7 +5132,10 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
             React.useEffect(() => { refresh(); /* eslint-disable-line */ }, [clusterId, days]);
@@ -5314,6 +5403,21 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, rates and host profiles (cr_modules.js); every
+            // write is the handler above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="power">
+                        <CrPower cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onHosts={openHosts} hostForm={hostForm} setHost={setHost} onCloseHosts={() => setHostForm(null)} onSaveHosts={saveHosts}
+                            savingHosts={savingHosts} onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -5634,9 +5738,13 @@
             );
         }
 
-        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function CostDashboardTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, cluster, nav }) {
             // the admin buttons here change things: on a standby they are the active's (#625)
             const { haReadOnly } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // LW Nov 2026 - whether the last summary read came back; Corporate Redesigned says so, classic keeps the last figures
+            const [readErr, setReadErr] = React.useState(null);
+            const [rowsErr, setRowsErr] = React.useState(null);
             const canAct = isAdmin && !haReadOnly;
             const [summary, setSummary] = React.useState(null);
             const [rows, setRows] = React.useState([]);
@@ -5659,7 +5767,10 @@
                     ]);
                     if (mine !== asked.current) return;
                     if (s && !s.error) setSummary(s);
+                    setReadErr(s && !s.error ? null : { why: (s && typeof s.error === 'string' && s.error) || '' });
                     if (p && p.rows) setRows(p.rows);
+                    // LW Nov 2026 - the per guest read on its own: Corporate Redesigned says it failed, not "no VMs"
+                    setRowsErr(p && Array.isArray(p.rows) ? null : { why: (p && typeof p.error === 'string' && p.error) || '' });
                 } finally { if (mine === asked.current) setLoading(false); }
             };
 
@@ -5849,6 +5960,19 @@
                     addToast('PDF export failed', 'error');
                 }
             };
+
+            // LW Nov 2026 - Corporate Redesigned draws the same reads and rates (cr_modules.js); the write is saveRates above
+            if (isCorpRedesigned) {
+                const own = summary && (!summary.cluster_id || summary.cluster_id === clusterId) ? summary : null;
+                return (
+                    <CrBoundary key={clusterId} id="costs">
+                        <CrCosts cluster={cluster || { id: clusterId, name: clusterName }} summary={own} rows={own ? rows : []} loading={loading} readErr={readErr} rowsErr={rowsErr}
+                            days={days} onDays={setDays} canAct={canAct} onRefresh={refresh} onRates={openRates} rateForm={rateForm} setRateForm={setRateForm}
+                            showRates={showRates} onCloseRates={() => setShowRates(false)} onSaveRates={saveRates} savingRates={savingRates}
+                            onCsv={exportCsv} onPdf={exportPdf} nav={nav} />
+                    </CrBoundary>
+                );
+            }
 
             return (
                 <div className="space-y-4">
@@ -6358,10 +6482,12 @@
         // firewall, ha_rules, backup_jobs, access).
         // Admin can rescan, set baseline, acknowledge/promote events.
         const DRIFT_KINDS = ['vm_config', 'storage', 'network', 'cluster_options', 'firewall', 'ha_rules', 'backup_jobs', 'access'];
-        function DriftTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin }) {
+        function DriftTab({ clusterId, clusterName, authFetch, addToast, t, isAdmin, crNav, crFocus, onCrFocus }) {
             // the admin buttons here change things: a standby hands them to the active (#625)
             const { haReadOnly } = useAuth();
             const canAct = isAdmin && !haReadOnly;
+            // LW Oct 2026 - Corporate Redesigned draws its own page (CrDrift) with its own reads
+            const { isCorpRedesigned } = useLayout();
             const [status, setStatus] = React.useState(null);
             const [events, setEvents] = React.useState([]);
             const [filter, setFilter] = React.useState('open');
@@ -6376,9 +6502,33 @@
             const [catFilter, setCatFilter] = React.useState('');
             const [policy, setPolicy] = React.useState([]);
             const [allowDraft, setAllowDraft] = React.useState({});
+            // NS Nov 2026 - how the last read of status and findings went: null before the first
+            // answer, then { ok, error }. A read that failed is no empty list
+            const [readState, setReadState] = React.useState(null);
+            // the same for the policy checks, which have their own read
+            const [policyRead, setPolicyRead] = React.useState(null);
+            // every refresh takes a number; an answer whose number is no longer the latest (another
+            // cluster, another filter, a second click) is dropped instead of drawn over a newer one
+            const readSeq = React.useRef(0);
+            const clusterNow = React.useRef(clusterId);
+            clusterNow.current = clusterId;
+            const shownFor = React.useRef(clusterId);
+
+            // another cluster picked: the last one's counts, rows and checks go before the paint,
+            // and whatever of it is still on the way is dropped
+            React.useLayoutEffect(() => {
+                if (shownFor.current === clusterId) return;
+                shownFor.current = clusterId;
+                readSeq.current++;
+                setStatus(null); setEvents([]); setPolicy([]); setPolicyRead(null);
+                setReadState(null); setExpanded({}); setAllowDraft({}); setBusy(false);
+            }, [clusterId]);
 
             const refresh = async () => {
-                if (!clusterId) return;
+                // a handler of the last cluster that ends after the switch asks for nothing
+                if (!clusterId || isCorpRedesigned || clusterNow.current !== clusterId) return;
+                const mine = ++readSeq.current;
+                const stale = () => mine !== readSeq.current;
                 setBusy(true);
                 try {
                     const q = `status=${filter}&limit=200` + (kindFilter ? `&kind=${kindFilter}` : '') + (catFilter ? `&category=${catFilter}` : '');
@@ -6387,23 +6537,33 @@
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/events?${q}`),
                         authFetch(`${API_URL}/clusters/${clusterId}/drift/policy`),
                     ]);
+                    if (stale()) return;
                     const away = (await haLeaderAway(sr)) || (await haLeaderAway(er));
+                    if (stale()) return;
                     setLeaderAway(away);
                     if (away) { setStatus(null); setEvents([]); setPolicy([]); return; }
                     const s = await sr?.json().catch(() => null);
                     const e = await er?.json().catch(() => null);
                     const pj = await pr?.json().catch(() => null);
-                    if (s && !s.error) setStatus(s);
-                    if (e && e.events) setEvents(e.events);
-                    if (pj && pj.checks) {
-                        setPolicy(pj.checks);
+                    if (stale()) return;
+                    // what failed is dropped, so neither old counts nor old rows stand in for it
+                    const statusOk = !!(sr && sr.ok && s && !s.error);
+                    const eventsOk = !!(er && er.ok && e && Array.isArray(e.events));
+                    const policyOk = !!(pr && pr.ok && pj && Array.isArray(pj.checks));
+                    const why = (j) => (j && typeof j.error === 'string' ? j.error : '');
+                    setStatus(statusOk ? s : null);
+                    setEvents(eventsOk ? e.events : []);
+                    setReadState({ ok: statusOk && eventsOk, error: (!eventsOk && why(e)) || (!statusOk && why(s)) || '' });
+                    setPolicy(policyOk ? pj.checks : []);
+                    setPolicyRead({ ok: policyOk, error: policyOk ? '' : why(pj) });
+                    if (policyOk) {
                         setAllowDraft(d => {
                             const next = { ...d };
                             pj.checks.forEach(c => { if (c.allow && next[c.id] === undefined) next[c.id] = c.allow.join(', '); });
                             return next;
                         });
                     }
-                } finally { setBusy(false); }
+                } finally { if (!stale()) setBusy(false); }
             };
 
             // again when forwarding comes or goes: the list is the leader's then, or not
@@ -6423,7 +6583,10 @@
                     } else {
                         addToast(t('driftPolicySaveFailed') || 'Policy not saved', 'error');
                     }
+                    // LW Oct 2026 - the answer, for a caller that shows what the server said
+                    return r;
                 } catch (e) { addToast(t('driftPolicySaveFailed') || 'Policy not saved', 'error'); }
+                return null;
             };
 
             const markIncident = async (ev, flag) => {
@@ -6452,7 +6615,19 @@
                         body: JSON.stringify({ seed: status && status.baselines === 0 }),
                     });
                     if (r?.ok) {
-                        const j = await r.json();
+                        const j = await r.json().catch(() => ({}));
+                        // a skipped scan answers 200 as well (cluster offline, nothing answered, one
+                        // already running): it compared nothing, so it is no "Scan complete"
+                        if (j.ok !== true) {
+                            const why = j.error === 'cluster offline' ? (t('clusterOffline') || 'Cluster unreachable')
+                                : j.error === 'cluster did not answer' ? (t('driftSkipNoAnswer') || 'Cluster did not answer')
+                                : j.error === 'a scan of this cluster is already running' ? (t('driftScanRunning') || 'A scan of this cluster is already running')
+                                : (j.error || '');
+                            const head = j.status === 'skipped' ? (t('driftScanSkipped') || 'Scan skipped, nothing was compared')
+                                : (t('driftScanFailed') || 'Scan failed');
+                            addToast(why ? `${head}: ${why}` : head, j.status === 'skipped' ? 'warning' : 'error');
+                            return;
+                        }
                         const m = j.seeded_baselines > 0
                             ? `${t('driftSeeded') || 'baseline seeded'}: ${j.seeded_baselines}`
                             : `${j.events_count || 0} ${t('driftEvents') || 'events'}`;
@@ -6551,6 +6726,16 @@
                 return String(v).slice(0, 200);
             };
 
+            if (isCorpRedesigned) {
+                return (
+                    <CrBoundary id="drift">
+                        <CrDrift clusterId={clusterId} clusterName={clusterName} authFetch={authFetch} addToast={addToast} t={t}
+                            savePolicy={savePolicy} kindLabel={kindLabel} catLabel={catLabel} nav={crNav}
+                            focus={crFocus} onFocusDone={onCrFocus} />
+                    </CrBoundary>
+                );
+            }
+
             return (
                 <div className="space-y-4">
                     <div className="flex items-center justify-between flex-wrap gap-2">
@@ -6560,7 +6745,7 @@
                                 {t('driftDetection') || 'Config Drift Detection'}
                             </h2>
                             <p className="text-xs text-gray-500 mt-0.5">
-                                {t('driftDetectionDesc') || 'Snapshots cluster config nightly. Flags any change vs the admin-set baseline.'}
+                                {t('driftDetectionDesc') || 'Snapshots cluster config every 6 hours. Flags any change vs the admin-set baseline.'}
                             </p>
                         </div>
                         <div className="flex gap-2">
@@ -6698,16 +6883,46 @@
                         </div>
                     )}
 
+                    {!leaderAway && policyRead && !policyRead.ok && (
+                        <div data-drift-policy-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-3 text-sm">
+                            <div className="text-red-400">{t('driftPolicyReadFailed') || 'The policy checks could not be read.'}</div>
+                            {policyRead.error && <div className="text-xs text-gray-500 mt-1">{policyRead.error}</div>}
+                        </div>
+                    )}
+
+                    {!leaderAway && readState && !readState.ok && (
+                        <div data-drift-read-failed className="bg-proxmox-card border border-red-500/30 rounded-xl p-6 text-center text-sm">
+                            <div className="text-red-400">{t('driftReadFailed') || 'The drift status or events could not be read, so this view does not know whether the cluster matches its baseline.'}</div>
+                            {readState.error && <div className="text-xs text-gray-500 mt-1">{readState.error}</div>}
+                            <button onClick={refresh} disabled={busy}
+                                className="mt-3 px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white disabled:opacity-50">
+                                {t('retry') || 'Retry'}
+                            </button>
+                        </div>
+                    )}
+
                     {leaderAway ? (
                         <div data-ha-leader-away="drift" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-400">
                             {t('pgHaLeaderAwayView')}
                         </div>
-                    ) : events.length === 0 ? (
-                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
-                            {filter === 'open' ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
-                                              : (t('driftNoEvents') || 'No events for this filter.')}
+                    ) : events.length === 0 ? (!readState ? (
+                        <div data-drift-empty="loading" className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {t('loading') || 'Loading...'}
                         </div>
-                    ) : (
+                    ) : readState.ok && status && (
+                        // "matches baseline" only for the whole open list, every kind compared.
+                        // status too: the setters above render one by one outside an event.
+                        // The kinds live in memory: after a start nothing was compared until the
+                        // first scan, which is its own case and not "some kinds were not"
+                        <div data-drift-empty className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 text-center text-sm text-gray-500">
+                            {filter !== 'open' || kindFilter || catFilter ? (t('driftNoEvents') || 'No events for this filter.')
+                                : !status.last_scan_at || !Object.keys(status.kinds || {}).length
+                                    ? (t('driftNoScanYet') || 'No scan has run since this server started. Use Scan now.')
+                                : status.baselines > 0 && DRIFT_KINDS.every(k => (status.kinds || {})[k] === 'checked')
+                                    ? (t('driftNoOpen') || 'No open drift events. Cluster matches baseline.')
+                                    : (t('driftNoOpenUnchecked') || 'No open drift events, but not every kind was compared with a baseline.')}
+                        </div>
+                    )) : (
                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl divide-y divide-proxmox-border/40">
                             {events.map(ev => {
                                 const open = expanded[ev.id];
@@ -7225,11 +7440,21 @@
                 default: return e.title || e.kind;
             }
         }
+        // what Corporate Redesigned's table (CrTimeline, cr_nodemisc.js) needs to say the same as this list
+        const TL_SHARED = Object.freeze({ kinds: TL_KINDS, ranges: TL_RANGES, views: TL_VIEWS, text: tlText, fill: tlFill });
 
-        function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab }) {
+        function TimelineView({ clusterId, node, vmid, authFetch, t, compact, onOpenGuest, onOpenNode, onOpenTab, pick }) {
+            const { isCorpRedesigned } = useLayout();
             const [hours, setHours] = React.useState(24);
-            const [kind, setKind] = React.useState('');
-            const [severity, setSeverity] = React.useState('');
+            // LW Nov 2026 - pick: a kind and a severity to start with ({kind, severity, seq}), taken again when seq changes
+            const [kind, setKind] = React.useState((pick && pick.kind) || '');
+            const [severity, setSeverity] = React.useState((pick && pick.severity) || '');
+            const pickSeq = pick ? pick.seq : null;
+            React.useEffect(() => {
+                if (pickSeq == null) return;
+                setKind(pick.kind || '');
+                setSeverity(pick.severity || '');
+            }, [pickSeq]);
             const [rows, setRows] = React.useState([]);
             const [next, setNext] = React.useState(null);
             const [sources, setSources] = React.useState({});
@@ -7284,6 +7509,21 @@
             }, [load]);
 
             if (!clusterId) return null;
+            const evidence = !node && vmid == null ? (
+                <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
+                    getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
+            ) : null;
+            // LW Nov 2026 - Corporate Redesigned draws the same reads, filters and pages as a table (cr_nodemisc.js)
+            if (isCorpRedesigned) {
+                return (
+                    <CrTimeline scope={vmid != null ? 'guest' : node ? 'node' : 'cluster'} node={node} hours={hours} kind={kind}
+                        severity={severity} onHours={setHours} onKind={setKind} onSeverity={setSeverity} rows={rows} next={next}
+                        sources={sources} linkWindow={linkWindow} loaded={loaded} failed={failed} loading={loading} leaderAway={leaderAway}
+                        open={open} onToggle={id => setOpen(o => ({ ...o, [id]: !o[id] }))} onRefresh={() => load(null)}
+                        onMore={b => load(b)} compact={compact} evidence={evidence} onOpenGuest={onOpenGuest}
+                        onOpenNode={onOpenNode} onOpenTab={onOpenTab} tl={TL_SHARED} />
+                );
+            }
             const selectCls = 'bg-proxmox-dark border border-proxmox-border rounded-lg px-2 py-1 text-xs text-gray-300';
             const when = (ts) => { const d = new Date(ts); return isNaN(d) ? (ts || '') : d.toLocaleString(); };
             const before = (s) => s >= 60 ? tlFill(t, 'tlMinBefore', { m: Math.round(s / 60) }) : tlFill(t, 'tlSecBefore', { s });
@@ -7326,10 +7566,7 @@
                             </button>
                         </div>
                     </div>
-                    {!node && vmid == null && (
-                        <TimelineEvidence clusterId={clusterId} authFetch={authFetch} t={t}
-                            getQuery={() => ({ from: from.current || new Date(Date.now() - hours * 3600 * 1000).toISOString(), kinds: kind, severity })} />
-                    )}
+                    {evidence}
                     {leaderAway && <div className="text-xs text-yellow-400" data-tl-leader-away>{t('pgHaLeaderAwayView')}</div>}
                     {failed && <div className="text-xs text-red-400" data-tl-error>{t('tlLoadError')}</div>}
                     {!loaded && !failed && !leaderAway && <div className="text-xs text-gray-500">{t('loading')}...</div>}
@@ -7366,7 +7603,7 @@
                                                     className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.Monitor />{guestLabel(e)}</button>
                                             ) : <span className="flex items-center gap-1 text-gray-400"><Icons.Monitor />{guestLabel(e)}</span>)}
                                             {view && (
-                                                <button type="button" onClick={() => onOpenTab(view)} data-tl-open-view={view}
+                                                <button type="button" onClick={() => onOpenTab(view, e)} data-tl-open-view={view}
                                                     className="flex items-center gap-1 text-blue-400 hover:text-blue-300"><Icons.ExternalLink />{t('tlOpenView')}</button>
                                             )}
                                         </div>
@@ -10380,6 +10617,9 @@
             const [refreshTick, setRefreshTick] = useState(0);
             // LW Oct 2026 - the custom hardening profiles, offered next to the built-in ones
             const [customProfiles, setCustomProfiles] = useState(null);
+            // LW Oct 2026 - Corporate Redesigned: its own page, and when this browser last got the answers
+            const { isCorpRedesigned } = useLayout();
+            const [checkedAt, setCheckedAt] = useState(null);
 
             // #717 — the server answers with a machine code; the sentence the operator reads
             // is chosen here, so it lands in their language. The English error/hint the API
@@ -10391,23 +10631,55 @@
 
             const sshReason = (info) => ({
                 SSH_NO_CREDENTIALS: [t('sshNoCredentials'), t('sshNoCredentialsHint')],
+                // LW Nov 2026 - SSH switched off for the cluster, and a node list that could not be read
+                SSH_DISABLED:       [t('cmpSshOff'),        t('cmpSshOffHint')],
+                NODES_UNREAD:       [t('cmpNodesUnread').replace('{code}', info?.error ? `HTTP ${info.error}` : t('crAlNoAnswer')), t('cmpNodesUnreadHint')],
                 NODE_BACKOFF:       [t('sshNodeBackoff'),   t('sshNodeBackoffHint')],
                 SSH_FAILED:         [t('sshFailed'),        t('sshFailedHint')],
             }[info?.code] || [info?.error, info?.hint]);
 
             // Fetch hardening data for one cluster (all nodes)
+            // LW Nov 2026 - each check is an SSH audit of one node: CMP_PARALLEL run at a time and the page
+            // gets every answer as it comes (in node order), with how many are in. A cause that is the
+            // whole cluster's (no credentials, SSH switched off) stops asking the rest. A node list that
+            // could not be read is said as such, not drawn as a cluster nobody checked. A newer run (another
+            // profile, Refresh) makes the answers of the one before go nowhere
+            const CMP_PARALLEL = 6;
+            const cmpRun = useRef({});
+            const [cmpProgress, setCmpProgress] = useState(null);  // {cid, done, total}
             const fetchCluster = async (cluster) => {
                 if (!cluster) return;
-                setLoadingCluster(cluster.id);
+                const cid = cluster.id;
+                const run = (cmpRun.current[cid] || 0) + 1;
+                cmpRun.current[cid] = run;
+                const current = () => cmpRun.current[cid] === run;
+                setLoadingCluster(cid);
                 try {
-                    const nodesRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes`);
-                    if (!nodesRes || !nodesRes.ok) return;
-                    const nodesData = await nodesRes.json();
-                    const nodes = (nodesData?.data || nodesData || []).map(n => n.node).filter(Boolean);
+                    const nodesRes = await authFetch(`${API_URL}/clusters/${cid}/nodes`);
+                    if (!current()) return;
+                    const nodesData = nodesRes && nodesRes.ok ? await nodesRes.json().catch(() => null) : null;
+                    const list = nodesData && (Array.isArray(nodesData) ? nodesData : nodesData.data);
+                    if (!Array.isArray(list)) {
+                        setResults(prev => ({ ...prev, [cid]: { _cluster: { error: nodesRes ? nodesRes.status : '', code: 'NODES_UNREAD' } } }));
+                        setCmpProgress(null);
+                        return;
+                    }
+                    const nodes = list.map(n => n && n.node).filter(Boolean);
                     const perNode = {};
-                    for (const n of nodes) {
+                    let stop = null;
+                    let done = 0;
+                    const publish = () => {
+                        if (!current()) return;
+                        const ordered = {};
+                        nodes.forEach(n => { if (perNode[n]) ordered[n] = perNode[n]; });
+                        if (stop) ordered._cluster = stop;
+                        setResults(prev => ({ ...prev, [cid]: ordered }));
+                        setCmpProgress({ cid, done, total: nodes.length });
+                    };
+                    setCmpProgress({ cid, done: 0, total: nodes.length });
+                    const checkOne = async (n) => {
                         try {
-                            const r = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
+                            const r = await authFetch(`${API_URL}/clusters/${cid}/nodes/${n}/hardening?profile=${encodeURIComponent(profile)}`);
                             if (!r || !r.ok) {
                                 // #717 — the reason is in the body. Carry it so the node shows a
                                 // sentence rather than "err 502", and when the cause is the whole
@@ -10417,14 +10689,11 @@
                                 try {
                                     const body = r ? await r.json() : null;
                                     if (body) info = { error: body.error || info.error, code: body.code,
-                                                       hint: body.hint, clusterWide: !!body.cluster_wide };
+                                                       hint: body.hint, clusterWide: !!body.cluster_wide || body.code === 'SSH_DISABLED' };
                                 } catch (_) {}
                                 perNode[n] = info;
-                                if (info.clusterWide) {
-                                    setResults(prev => ({ ...prev, [cluster.id]: { ...perNode, _cluster: info } }));
-                                    return;
-                                }
-                                continue;
+                                if (info.clusterWide && !stop) stop = info;
+                                return;
                             }
                             const d = await r.json();
                             const ctrls = d.controls || {};
@@ -10436,10 +10705,22 @@
                         } catch (e) {
                             perNode[n] = { error: String(e) };
                         }
-                    }
-                    setResults(prev => ({ ...prev, [cluster.id]: perNode }));
+                    };
+                    let next = 0;
+                    const worker = async () => {
+                        while (next < nodes.length && !stop && current()) {
+                            const n = nodes[next++];
+                            await checkOne(n);
+                            done++;
+                            publish();
+                        }
+                    };
+                    await Promise.all(Array.from({ length: Math.min(CMP_PARALLEL, nodes.length) }, worker));
+                    if (!current()) return;
+                    publish();
+                    if (!stop) setCheckedAt(Date.now());
                 } finally {
-                    setLoadingCluster(null);
+                    if (current()) setLoadingCluster(l => (l === cid ? null : l));
                 }
             };
 
@@ -11124,6 +11405,19 @@
                 });
                 addToast(t('reportReady') || 'Report ready', 'success');
             };
+
+            if (isCorpRedesigned) {
+                return (
+                    <CrCompliance t={t} selectedCluster={selectedCluster} profile={profile} setProfile={setProfile}
+                        customProfiles={customProfiles} customSel={customSel}
+                        perNode={selectedCluster ? results[selectedCluster.id] : null}
+                        loading={!!selectedCluster && loadingCluster === selectedCluster.id} checkedAt={checkedAt}
+                        progress={cmpProgress && selectedCluster && cmpProgress.cid === selectedCluster.id ? cmpProgress : null}
+                        frameworks={frameworks} frameworkScore={frameworkScore} verdictOf={verdictOf} sshReason={sshReason}
+                        titles={allTitles} overallScore={overallScore} onRefresh={() => setRefreshTick(x => x + 1)}
+                        onReport={downloadFrameworkReport} auditCounts={auditCounts} />
+                );
+            }
 
             return (
                 <div className={isCorporate ? 'p-4 space-y-4' : 'space-y-6'}>
@@ -13481,7 +13775,7 @@
         }
 
         function PegaProxDashboard() {
-            const { t } = useTranslation();
+            const { t, language } = useTranslation();
             const { user, sessionId, logout, getAuthHeaders, isAdmin, passwordExpiry, updatePreferences, ha, haReadOnly, haStandby, haConsolesElsewhere, haServing, refreshHa } = useAuth();
             // #625: a standby shows the clusters read-only, or none at all with its live view off.
             // Since forwarding, haReadOnly holds only while it does not forward, haStandby on
@@ -13498,7 +13792,9 @@
             // not can(): the auto-install routes also refuse tenant/cluster-confined callers
             // (capped admins included), the server folds that into this flag for us
             const canAutoInstall = !!user?.autoinstall_access;
-            const { isCorporate, isCloud, layoutLocked } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
+            const { isCorporate, isCorpRedesigned, isCloud, layoutLocked } = useLayout(); // LW: Feb 2026 - corporate layout / NS 2026-06: + cloud (Preview)
+            // LW Nov 2026 - the redesign formats numbers and dates in the language drawn here (cr.js)
+            if (isCorpRedesigned) crUiLocale(language);
             const [clusters, setClusters] = useState([]);
             const [clusterGroups, setClusterGroups] = useState([]); // NS Jan 2026 - for grouping
             const [collapsedGroups, setCollapsedGroups] = useState({}); // Track which groups are collapsed
@@ -13520,6 +13816,15 @@
             const [knownNodes, setKnownNodes] = useState({}); // NS: Track all nodes ever seen to show offline ones
             const [clusterResources, setClusterResources] = useState([]);
             const [clusterDatastores, setClusterDatastores] = useState({ shared: [], local: {} }); // LW: Mar 2026 - sidebar datastore list
+            // LW Nov 2026 - how the last /datastores read of each cluster ended ({ ok, at, msg }), Corporate Redesigned says a failed one.
+            // The ref has every read (its time decides against the Datastore tab's own read), the state only a change, so a
+            // poll that ends as the one before draws nothing
+            const [crDsReads, setCrDsReads] = useState({});
+            const crDsReadsRef = useRef({});
+            const crNoteDsRead = (cid, next) => {
+                crDsReadsRef.current = { ...crDsReadsRef.current, [cid]: next };
+                setCrDsReads(prev => (prev[cid] && prev[cid].ok === next.ok && prev[cid].msg === next.msg ? prev : { ...prev, [cid]: next }));
+            };
             const [clusterNetworks, setClusterNetworks] = useState([]); // NS: Mar 2026 - network view
             const [loadingNetworks, setLoadingNetworks] = useState(false);
             const [lastUpdate, setLastUpdate] = useState(null);
@@ -13616,6 +13921,9 @@
             const [pbsActiveTab, setPbsActiveTab] = useState('dashboard');
             // NS May 2026 — VM backup status map (vmid -> {status, last_age, ...})
             const [vmsBackupStatus, setVmsBackupStatus] = useState({});
+            // LW Oct 2026 - Corporate Redesigned: which cluster the map above is of, when it was read,
+            // and the status of a read that failed since (the map keeps its last answer)
+            const [vmsBackupFor, setVmsBackupFor] = useState(null);
             // NS May 2026 — running backup progress pane (UPID + node)
             const [activeBackupProgress, setActiveBackupProgress] = useState(null);  // {upid, node}
             // listen for cross-component events to open the progress pane
@@ -13996,8 +14304,20 @@
             const [showTaskBar, setShowTaskBar] = useState(true);  // localStorage.getItem('showTaskBar') !== 'false'
             const [actionLoading, setActionLoading] = useState({});
             const [warningBannerDismissed, setWarningBannerDismissed] = useState(false);
+            // LW Nov 2026 - classic Corporate only gets fixes from now on. The bar under its header
+            // says so until it is closed in this browser, the header button stays
+            const [corpClassicNoticeClosed, setCorpClassicNoticeClosed] = useState(() => {
+                try { return localStorage.getItem('corp-classic-notice') === 'closed'; } catch (_) { return false; }
+            });
+            // LW Nov 2026 - the kind and severity the alert strip of Corporate Redesigned opens the Timeline with
+            const [crTimelinePick, setCrTimelinePick] = useState(null);
             // LW: Feb 2026 - corporate sidebar resize
             const [sidebarWidth, setSidebarWidth] = useState(() => parseInt(localStorage.getItem('corp-sidebar-w')) || 224);
+            // LW Oct 2026 - Corporate Redesigned keeps its own width and fold state (cr.js)
+            const [crSidebarW, setCrSidebarW] = useState(crSidebarWidth);
+            const [crSidebarFolded, setCrSidebarFolded] = useState(() => crRead('cr-sidebar-collapsed') === '1');
+            const crSetSidebarW = (w) => { setCrSidebarW(w); crWrite('cr-sidebar-w', w); };
+            const crFoldSidebar = (folded) => { setCrSidebarFolded(folded); crWrite('cr-sidebar-collapsed', folded ? '1' : '0'); };
             // #189 - on phones the sidebar is an off-canvas drawer. Purely visual, CSS drives it.
             const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
             // Close the drawer whenever navigation actually lands somewhere. Watching the
@@ -14194,11 +14514,16 @@
             
             // NS: Reports/Analytics state
             const [reportData, setReportData] = useState(null);
+            const [reportFailed, setReportFailed] = useState(false);
             const [reportPeriod, setReportPeriod] = useState('day');
             const [reportLoading, setReportLoading] = useState(false);
-            const [topVms, setTopVms] = useState([]);
+            // the top lists: null until the first answer, false when the read failed
+            const [topVms, setTopVms] = useState(null);
+            const [topVmsMem, setTopVmsMem] = useState(null);
             const [reportSubTab, setReportSubTab] = useState('summary');
             const [complianceSubTab, setComplianceSubTab] = useState('hardening');
+            // LW Oct 2026 - Corporate Redesigned: the drift finding a timeline row asked to open
+            const [crDriftFocus, setCrDriftFocus] = useState(null);
             // NS Oct 2026 - hardening and drift read with admin.audit or node.maintenance, the change
             // plans with changes.view; each account gets the sub tabs it can read
             const complianceSubs = [
@@ -14216,10 +14541,13 @@
             const [cveScanLoading, setCveScanLoading] = useState(false);
             const [cveExpandedNodes, setCveExpandedNodes] = useState({});
             const [debsecanInstalling, setDebsecanInstalling] = useState(false);
+            // LW Nov 2026 - why the last scan failed ({ code, reason }); Corporate Redesigned shows it with a retry
+            const [cveError, setCveError] = useState(null);
 
             // MK: clear stale CVE results when switching clusters
             useEffect(() => {
                 setCveResults(null);
+                setCveError(null);
                 setCveScanLoading(false);
                 setCveExpandedNodes({});
                 setDebsecanInstalling(false);
@@ -14608,8 +14936,9 @@
                     if (idx > 0) all[idx - 1].focus();
                 };
 
+                const crTree = isCorpRedesigned;
                 return (
-                    <div className="ml-5 corp-inline-tree">
+                    <div className="ml-5 corp-inline-tree" role={crTree ? 'group' : undefined}>
                         {/* Nodes first */}
                         {filteredNodes.map(({ name: nodeName, metrics: nodeMetrics, online: nodeOnline }) => {
                             const isMaint = nodeMetrics?.maintenance_mode;
@@ -14623,10 +14952,12 @@
                                     tabIndex={0}
                                     onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'node', target: {nodeName, clusterId, online: nodeOnline, maintenance: isMaint}, position: {x: e.clientX, y: e.clientY}}); }}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isNodeSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarNode({ name: nodeName, clusterId }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null); setActiveTab('overview'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     style={isNodeSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: nodeOnline ? 'var(--corp-text-secondary)' : 'var(--corp-text-muted)'}}
                                     onMouseEnter={(e) => {
@@ -14665,10 +14996,12 @@
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     tabIndex={0}
                                     onClick={openQ}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isQSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); openQ(); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     style={isQSelected ? {background: 'rgba(73,175,217,0.10)', borderLeft: '2px solid var(--corp-accent)', color: 'var(--color-text)'} : {color: 'var(--corp-text-secondary)'}}
                                     onMouseEnter={(e) => { if (!isQSelected) { e.currentTarget.style.background = 'var(--color-hover)'; e.currentTarget.style.color = 'var(--color-text)'; } }}
@@ -14690,10 +15023,12 @@
                                     tabIndex={0}
                                     onClick={() => { if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                     onContextMenu={(e) => { e.preventDefault(); setCtxMenu({type: 'vm', target: {...vm, _clusterId: clusterId}, position: {x: e.clientX, y: e.clientY}}); }}
+                                    role={crTree ? 'treeitem' : undefined} aria-level={crTree ? 2 : undefined} aria-selected={crTree ? isVmSelected : undefined}
                                     onKeyDown={(e) => {
                                         if (e.key === 'Enter') { e.preventDefault(); if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId)); setSelectedSidebarVm({...vm, _clusterId: clusterId}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null); setActiveTab('resources'); setResourcesSubTab('management'); }
                                         else if (e.key === 'ArrowDown') treeNavDown(e);
                                         else if (e.key === 'ArrowUp') treeNavUp(e);
+                                        else if (crTree) crTreeKey(e);
                                     }}
                                     className="corp-tree-child flex items-center gap-1.5 pl-1 pr-2 py-0.5 text-[13px] leading-5 cursor-pointer"
                                     data-vmid={vm.name ? vm.vmid : undefined}
@@ -14997,13 +15332,27 @@
                 const sharedStores = (cDatastores.shared || []).sort((a, b) => (a.storage || '').localeCompare(b.storage || ''));
                 const localByNode = Object.entries(cDatastores.local || {}).sort(([a], [b]) => a.localeCompare(b));
                 const sharedNames = new Set(sharedStores.map(s => s.storage)); // avoid dupes under node sections
+                // LW Nov 2026 - Corporate Redesigned: a failed read is said with a retry, never "No datastores"
+                const crDsFail = isCorpRedesigned && crDsReads[clusterId] && crDsReads[clusterId].ok === false ? crDsReads[clusterId] : null;
 
-                if (sharedStores.length === 0 && localByNode.length === 0) {
+                if (sharedStores.length === 0 && localByNode.length === 0 && !crDsFail) {
                     return (
                         <div className="ml-5 py-1 text-[12px]" style={{color: '#728b9a', fontStyle: 'italic'}}>
                             {t('noDatastores') || 'No datastores'}
                         </div>
                     );
+                }
+
+                // LW Oct 2026 - Corporate Redesigned: the same rows and the same way in, with meter and state
+                if (isCorpRedesigned) {
+                    return <CrDsTree clusterId={clusterId} shared={sharedStores} local={localByNode} skip={sharedNames}
+                        picked={selectedSidebarDatastore} fail={crDsFail} onRetry={() => fetchClusterDatastores(clusterId)}
+                        onOpen={(store, node) => {
+                            if (!selectedCluster || selectedCluster.id !== clusterId) setSelectedCluster(clusters.find(c => c.id === clusterId));
+                            setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId });
+                            setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                            setActiveTab('datastore');
+                        }} />;
                 }
 
                 const renderStoreItem = (store, node) => {
@@ -15616,8 +15965,11 @@
             // ============================================
             
             const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+            // LW Nov 2026 - why the last overview read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [snapshotsReadErr, setSnapshotsReadErr] = useState(null);
             const fetchGlobalSnapshots = async (clusterId = null, filterDate = null) => {
                 setSnapshotsLoading(true);
+                setSnapshotsReadErr(null);
                 try {
                     const body = {};
                     if (clusterId) body.cluster_id = clusterId;
@@ -15633,10 +15985,13 @@
                         const data = await res.json();
                         setGlobalSnapshots(data.snapshots ?? data ?? []);
                     } else {
+                        const d = res ? await res.json().catch(() => null) : null;
+                        setSnapshotsReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', res ? `HTTP ${res.status}` : ''].filter(Boolean).join(' - ') });
                         setGlobalSnapshots([]);
                     }
                 } catch (err) {
                     console.error('Snapshot fetch failed:', err);
+                    setSnapshotsReadErr({ why: err && err.message ? err.message : '' });
                     setGlobalSnapshots([]);
                 }
                 setSnapshotsLoading(false);
@@ -16019,8 +16374,15 @@
             };
 
             // NS #501 — currently-firing incidents (ack + escalation)
-            const loadActiveAlerts = async (clusterId) => {
+            const loadActiveAlerts = async (clusterId, force) => {
                 if (!clusterId) return;
+                // LW Nov 2026 - Corporate Redesigned reads them through the store the alert strip and the
+                // Datacenter page share (one read per cluster and minute, again at once after a write);
+                // the list below takes the answer as this read did (crAutoAlerts)
+                if (isCorpRedesigned) {
+                    crAlertsRead(authFetch, clusterId, force);
+                    return;
+                }
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${clusterId}/active-alerts`);
                     setActiveAlertsAway(await haLeaderAway(r));
@@ -16028,11 +16390,21 @@
                     else setActiveAlerts([]);
                 } catch (e) { setActiveAlerts([]); }
             };
+            const crAutoAlerts = crUseAlertsStore(isCorpRedesigned && activeTab === 'automation' ? (selectedCluster?.id || null) : null);
+            // LW Nov 2026 - a failed read of them is said above the list (with Retry) instead of an empty list
+            const [crAutoAlertsUnread, setCrAutoAlertsUnread] = useState(null);
+            useEffect(() => {
+                if (!crAutoAlerts) { setCrAutoAlertsUnread(null); return; }
+                const v = crAlAutomationView(crAutoAlerts);
+                setActiveAlertsAway(v.away);
+                setActiveAlerts(v.rows);
+                setCrAutoAlertsUnread(v.unread);
+            }, [crAutoAlerts]);
             const ackAlert = async (firedId) => {
                 if (!selectedCluster?.id) return;
                 try {
                     const r = await authFetch(`${API_URL}/clusters/${selectedCluster.id}/active-alerts/${firedId}/ack`, { method: 'POST' });
-                    if (r && r.ok) { addToast(t('alertAcked') || 'Alert acknowledged', 'success'); loadActiveAlerts(selectedCluster.id); }
+                    if (r && r.ok) { addToast(t('alertAcked') || 'Alert acknowledged', 'success'); loadActiveAlerts(selectedCluster.id, true); }
                 } catch (e) { console.error('Failed to ack alert:', e); }
             };
 
@@ -16057,7 +16429,7 @@
                     if (r && r.ok) {
                         addToast(t('alertMuteDone'), 'success');
                         loadAlertMutes(selectedCluster.id);
-                        loadActiveAlerts(selectedCluster.id);
+                        loadActiveAlerts(selectedCluster.id, true);
                     } else if (r) {
                         const d = await r.json().catch(() => ({}));
                         addToast(d.error || t('error') || 'Error', 'error');
@@ -16071,7 +16443,7 @@
                     if (r && r.ok) {
                         addToast(t('alertUnmuteDone'), 'success');
                         setAlertMutes(prev => prev.filter(m => m.id !== muteId));
-                        loadActiveAlerts(selectedCluster.id);
+                        loadActiveAlerts(selectedCluster.id, true);
                     }
                 } catch (e) { console.error('Failed to lift mute:', e); }
             };
@@ -16126,20 +16498,29 @@
             // Cluster Affinity Rules Functions - NS Jan 2026
             // ============================================
             
+            // LW Nov 2026 - why the last read failed ({why}), for Corporate Redesigned; classic never draws it
+            const [affinityReadErr, setAffinityReadErr] = useState(null);
+            const [affinityLoading, setAffinityLoading] = useState(false);
             const loadClusterAffinityRules = async (clusterId) => {
                 if (!clusterId) return;
+                setAffinityReadErr(null);
+                setAffinityLoading(true);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/affinity-rules`);
                     if (response && response.ok) {
                         const data = await response.json();
                         setClusterAffinityRules(data.rules || []);
                     } else {
+                        const d = response ? await response.json().catch(() => null) : null;
+                        setAffinityReadErr({ why: [d && typeof d.error === 'string' ? d.error : '', response ? `HTTP ${response.status}` : ''].filter(Boolean).join(' - ') });
                         setClusterAffinityRules([]);
                     }
                 } catch (err) {
                     console.error('Failed to load affinity rules:', err);
+                    setAffinityReadErr({ why: err && err.message ? err.message : '' });
                     setClusterAffinityRules([]);
                 }
+                setAffinityLoading(false);
             };
             
             const createClusterAffinityRule = async (ruleData) => {
@@ -16168,10 +16549,12 @@
                     });
                     if (response && response.ok) {
                         setClusterAffinityRules(prev => prev.filter(r => r.id !== ruleId));
+                        return true;
                     }
                 } catch (err) {
                     console.error('Failed to delete affinity rule:', err);
                 }
+                return false;  // classic ignores it, Corporate Redesigned says the rule is still there
             };
             
             // ============================================
@@ -16179,24 +16562,32 @@
             // Now cluster-based, not global
             // ============================================
             
-            const loadReportSummary = async (period = 'day', clusterId = null) => {
+            // LW Oct 2026 - range ({from, to}): a read of the Corporate Redesigned summary for a preset
+            // the period cannot name, or for its zoom; it leaves the classic state alone. Every read
+            // hands back { ok, status, body }, so that page tells a refusal from an empty history
+            const loadReportSummary = async (period = 'day', clusterId = null, range = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
-                setReportLoading(true);
+
+                if (!range) setReportLoading(true);
+                let read = { ok: false, status: 0, body: null };
                 try {
-                    const response = await authFetch(`${API_URL}/clusters/${clId}/reports/summary?period=${period}`);
+                    const query = range ? `from=${Math.floor(range.from)}&to=${Math.ceil(range.to)}` : `period=${period}`;
+                    const response = await authFetch(`${API_URL}/clusters/${clId}/reports/summary?${query}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setReportData(data);
+                        if (!range) { setReportData(data); setReportFailed(false); }
+                        read = { ok: true, status: response.status, body: data };
                     } else {
-                        setReportData(null);
+                        if (!range) { setReportData(null); setReportFailed(true); }
+                        if (response) read = { ok: false, status: response.status, body: await response.json().catch(() => null) };
                     }
                 } catch (err) {
                     console.error('Failed to load report:', err);
-                    setReportData(null);
+                    if (!range) { setReportData(null); setReportFailed(true); }
                 }
-                setReportLoading(false);
+                if (!range) setReportLoading(false);
+                return read;
             };
             
             // LW Oct 2026 - the CPU and memory charts of the report zoom together. The report is
@@ -16207,6 +16598,30 @@
                 metrics: { cpu: d.cpu?.samples || [], memory: d.memory?.samples || [] },
             } : null;
             const reportSeries = React.useMemo(() => reportToSeries(reportData), [reportData]);
+            // NS (Nov 2026): the figures of the tiles, null where the server says it could not read
+            // them (live.unread: the cluster is not connected, the node status or the guest list
+            // did not answer). A stored sample still counts for CPU and memory.
+            const reportNow = React.useMemo(() => {
+                if (!reportData) return null;
+                const live = reportData.live || {}, unread = live.unread || [];
+                const stored = m => (reportData[m]?.samples?.length || 0) > 0;
+                const nodes = !unread.includes('nodes'), guests = !unread.includes('guests');
+                return {
+                    cpu: (stored('cpu') || nodes) ? (reportData.cpu?.current ?? live.cpu_percent ?? 0) : null,
+                    memory: (stored('memory') || nodes) ? (reportData.memory?.current ?? live.mem_percent ?? 0) : null,
+                    // a live 0 running is a figure, not a reason to show an older snapshot's count
+                    vms: guests ? (live.vms_running ?? reportData.vms_running?.current ?? 0) : null,
+                    cts: guests ? (live.cts_running ?? 0) : null,
+                };
+            }, [reportData]);
+            // where a gauge would be: the same room, a dash and why
+            const reportUnreadGauge = (label, what) => (
+                <div className="gauge-container flex flex-col items-center justify-center" data-report-unread={what}>
+                    <span className="text-3xl font-bold text-gray-500">-</span>
+                    <span className="text-xs text-gray-400 mt-1 font-medium">{label}</span>
+                    <span className="text-[11px] text-gray-500 text-center">{t('reportValueUnread')}</span>
+                </div>
+            );
             const reportZoom = useChartZoom({
                 preset: reportPeriod, loaded: reportSeries, resetKey: selectedCluster?.id,
                 loadRange: (from, to) => authFetch(`${API_URL}/clusters/${selectedCluster?.id}/reports/summary?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
@@ -16216,18 +16631,20 @@
             const loadTopVms = async (metric = 'cpu', limit = 10, clusterId = null) => {
                 const clId = clusterId || selectedCluster?.id;
                 if (!clId) return;
-                
+                // the memory list is a ranking of its own: the ten busiest CPUs re-sorted by memory left
+                // out the guests with the most memory in use
+                const put = metric === 'memory' ? setTopVmsMem : setTopVms;
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/top-vms?metric=${metric}&limit=${limit}`);
                     if (response && response.ok) {
                         const data = await response.json();
-                        setTopVms(data);
+                        put(Array.isArray(data) ? data : false);
                     } else {
-                        setTopVms([]);
+                        put(false);
                     }
                 } catch (err) {
                     console.error('Failed to load top VMs:', err);
-                    setTopVms([]);
+                    put(false);
                 }
             };
             
@@ -16239,6 +16656,7 @@
 
                 setCveScanLoading(true);
                 setCveResults(null);
+                setCveError(null);
                 try {
                     const response = await authFetch(`${API_URL}/clusters/${clId}/reports/cve-scan`, {
                         method: 'POST'
@@ -16247,12 +16665,15 @@
                         const data = await response.json();
                         setCveResults(data);
                     } else {
-                        const errData = await response?.json().catch(() => null);
-                        const reason = errData?.error || errData?.message || `HTTP ${response?.status}`;
+                        // authFetch answers null for a lost or aborted connection: no status to name
+                        const errData = response ? await response.json().catch(() => null) : null;
+                        const reason = errData?.error || errData?.message || (response ? `HTTP ${response.status}` : t('cveScanNoAnswer'));
+                        setCveError({ code: response ? response.status : 0, reason });
                         addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + reason, 'error');
                     }
                 } catch (err) {
                     console.error('CVE scan error:', err);
+                    setCveError({ code: 0, reason: err.message || t('cveScanNoAnswer') });
                     addToast((t('cveScanFailed') || 'CVE scan failed') + ': ' + err.message, 'error');
                 }
                 setCveScanLoading(false);
@@ -16284,6 +16705,15 @@
                 setDebsecanInstalling(false);
             };
 
+            // NS Nov 2026 - controls whose apply changes nothing on the node, the server answers them
+            // noop. The catalog of GET /api/hardening/profiles marks them; a server without that field
+            // gets the old list: the informational VS-NfD group and net_protocols, which fs_modules covers
+            const hardenNoopIds = () => {
+                const catalog = Array.isArray(hardenProfiles?.catalog) ? hardenProfiles.catalog : [];
+                if (catalog.some(c => c && 'noop' in c)) return new Set(catalog.filter(c => c && c.noop).map(c => c.id));
+                return new Set(['net_protocols', ...Object.keys(hardeningControlInfo(t).vsnfdControls)]);
+            };
+
             // CIS hardening check/apply
             const checkHardening = async (nodeName, verbose = false, profile = '') => {
                 if (!selectedCluster?.id || !nodeName) return;
@@ -16303,12 +16733,13 @@
                         setHardenStatus(data);
                         // pre-select all controls that are NOT yet applied
                         const sel = {};
+                        const noop = hardenNoopIds();
                         Object.entries(data.controls || {}).forEach(([id, v]) => {
                             // verbose: v is {status, evidence}, non-verbose: v is bool. LW Oct 2026 -
                             // null is a control that was not checked: its state is unknown, so it
                             // is not ticked for an apply on its own
                             const applied = (v && typeof v === 'object') ? v.status : v;
-                            if (applied === false) sel[id] = true;
+                            if (applied === false && !noop.has(id)) sel[id] = true;
                         });
                         setHardenSelected(sel);
                     } else {
@@ -16351,6 +16782,7 @@
                 // ones like fail2ban). Per-control HTTP overhead is negligible vs. SSH runtime.
                 const accumulated = {};
                 let appliedOk = 0;
+                let refused = '';
                 try {
                     for (let i = 0; i < toApply.length; i++) {
                         const ctrlId = toApply[i];
@@ -16374,14 +16806,23 @@
                             } else {
                                 const errData = await resp?.json().catch(() => ({}));
                                 accumulated[ctrlId] = { success: false, error: errData?.error || `HTTP ${resp?.status}` };
+                                // not a Proxmox VE cluster: every control gets the same answer
+                                if (errData?.code === 'PVE_ONLY') refused = errData.error;
                             }
                         } catch (perCtrlErr) {
                             accumulated[ctrlId] = { success: false, error: String(perCtrlErr) };
                         }
                         // Live UI update — show per-control result as it lands
                         setHardenResults({ ...accumulated });
+                        if (refused) break;
                     }
-                    addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`, appliedOk === toApply.length ? 'success' : 'warning');
+                    // success only counts what ran and passed its check afterwards; the ones that
+                    // change nothing (noop) are not applied and get named apart
+                    const noopCount = Object.values(accumulated).filter(r => r.noop).length;
+                    if (refused) addToast(refused, 'error');
+                    else addToast(`${appliedOk}/${toApply.length} ${t('controlsApplied') || 'controls applied'}`
+                        + (noopCount ? ` · ${fillText(t('hardenNoopCount'), { n: noopCount })}` : ''),
+                        appliedOk === toApply.length ? 'success' : 'warning');
                     // refresh status
                     checkHardening(hardenNode, hardenVerbose, hardenProfile);
                 } catch (e) {
@@ -16410,7 +16851,11 @@
                         const data = await resp.json();
                         setHardenResults({ ...(data.results || {}) });
                         const n = data.restored || 0;
-                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`, n === toRoll.length ? 'success' : 'warning');
+                        // restored counts full rollbacks only; one that brought back some of its files is named apart
+                        const partial = Object.values(data.results || {}).filter(r => r && r.partial).length;
+                        addToast(`${n}/${toRoll.length} ${t('controlsRolledBack') || 'controls rolled back'}`
+                            + (partial ? ` · ${fillText(t('hardenRollbackPartialCount'), { n: partial })}` : ''),
+                            n === toRoll.length ? 'success' : 'warning');
                         checkHardening(hardenNode, hardenVerbose, hardenProfile);
                     } else {
                         const errData = await resp?.json().catch(() => ({}));
@@ -16434,6 +16879,15 @@
             useEffect(() => {
                 if (activeTab === 'automation' && automationSubTab === 'hardening') loadHardenProfiles();
             }, [activeTab, automationSubTab]);
+            // LW Nov 2026 - only Corporate Redesigned has the updates tab
+            useEffect(() => {
+                if (!isCorpRedesigned && activeTab === 'updates') setActiveTab('settings');
+            }, [isCorpRedesigned, activeTab]);
+            // the Timeline filters the alert strip picked hold for that one visit of that cluster
+            const crPickCid = selectedCluster ? selectedCluster.id : null;
+            useEffect(() => {
+                setCrTimelinePick(p => (p && (activeTab !== 'timeline' || p.cid !== crPickCid) ? null : p));
+            }, [activeTab, crPickCid]);
             // a selected profile that is gone (deleted here or elsewhere) falls back to all controls
             useEffect(() => {
                 if (hardenProfiles && hardenProfile.startsWith('custom:')
@@ -16480,12 +16934,15 @@
             }, [user]);
             
             // Load reports when tab changes to reports OR cluster changes
+            // LW Oct 2026 - the Corporate Redesigned summary reads for itself while it is open, and
+            // ranks from the guest list, so it needs no top-vms read
             useEffect(() => {
-                if (activeTab === 'reports' && selectedCluster?.id) {
+                if (activeTab === 'reports' && selectedCluster?.id && !isCorpRedesigned) {
                     loadReportSummary(reportPeriod, selectedCluster.id);
                     loadTopVms('cpu', 10, selectedCluster.id);
+                    loadTopVms('memory', 10, selectedCluster.id);
                 }
-            }, [activeTab, reportPeriod, selectedCluster?.id]);
+            }, [activeTab, reportPeriod, selectedCluster?.id, isCorpRedesigned]);
             
             // Load automation data when tab changes to automation OR cluster changes
             useEffect(() => {
@@ -16697,12 +17154,13 @@
             };
 
             // Cancel a running task
-            const cancelTask = async (task) => {
-                if (!selectedCluster || !task || !task.upid || !task.node) return;
+            // LW Oct 2026 - the redesigned task center lists other clusters' tasks too and names the cluster
+            const cancelTask = async (task, clusterId = selectedCluster?.id) => {
+                if (!clusterId || !task || !task.upid || !task.node) return;
 
                 try {
                     const response = await authFetch(
-                        `${API_URL}/clusters/${selectedCluster.id}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}`,
+                        `${API_URL}/clusters/${clusterId}/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}`,
                         { method: 'DELETE' }
                     );
                     
@@ -16712,6 +17170,7 @@
                         setTasks(prev => prev.map(t => 
                             t && t.upid === task.upid ? { ...t, status: 'cancelled' } : t
                         ));
+                        if (crTaskFeed.active) crTaskFeed.mark(clusterId, task.upid, { status: 'cancelled' });
                     } else {
                         const err = await response?.json();
                         addToast(err?.error || t('taskCancelFailed'), 'error');
@@ -16731,6 +17190,8 @@
                     const response = await authFetch(`${API_URL}/clusters/${clusterId}/tasks`);
                     if (response && response.ok) {
                         const data = await response.json();
+                        // LW Oct 2026 - the redesigned task center tells loading from empty by this answer
+                        if (crTaskFeed.active) crTaskFeed.loaded(clusterId, data);
                         // a cluster switch since this was asked makes it another cluster's list,
                         // the initial fetch too, which skips the timestamp check below
                         if (gen !== taskFetchGen.current || selectedClusterRef.current?.id !== clusterId) return;
@@ -16767,11 +17228,18 @@
                                     .slice(0, 50);
                             });
                         }
+                    } else if (crTaskFeed.active) {
+                        crTaskFeed.failed(clusterId, response ? response.status : 0);
                     }
                 } catch (err) {
+                    if (crTaskFeed.active) crTaskFeed.failed(clusterId, 0);
                     console.error('fetching tasks:', err);
                 }
             };
+
+            // LW Oct 2026 - Corporate Redesigned: the task feed stays on while the variant is, so a hidden
+            // task bar still knows what the reads answered when it comes back
+            useEffect(() => (isCorpRedesigned ? crTaskFeed.attach() : undefined), [isCorpRedesigned]);
 
             // Fetch tasks when cluster changes
             useEffect(() => {
@@ -16813,9 +17281,18 @@
                 let isClosing = false;
                 let sseToken = null;
                 let tokenRefreshInterval = null;
+                // LW Nov 2026 - after a server restart the tab asked for a token several times a second until
+                // someone signed in again: a refused token left the old one in use, the stream answered 401 with
+                // it, and the health check started the backoff over every 10 s. Now our own 401 on the token
+                // ends it (sessionGone, the session overlay), a token request that may work later comes back
+                // with the backoff, and an answer without a token (a standby) still means "no stream, poll instead"
+                let sessionGone = false;
+                let tokenFailed = false;
+                let connecting = false;
                 
                 // Get SSE token (more secure than session ID in URL)
                 const getSseToken = async () => {
+                    tokenFailed = false;
                     try {
                         const resp = await authFetch(`${API_URL}/sse/token`, { method: 'POST' });
                         if (resp && resp.ok) {
@@ -16824,19 +17301,42 @@
                             console.log('SSE token obtained (expires in', data.expires_in, 's)');
                             return true;
                         }
+                        sseToken = null;
+                        // worth another try later: no answer, a busy or failing server. A 403 or 404 stays as it is
+                        tokenFailed = !resp || resp.status >= 500 || resp.status === 429;
+                        // authFetch leaves /sse alone, so the token read says it here
+                        const body = resp && resp.status === 401 ? await resp.json().catch(() => null) : null;
+                        if (PegaProxApiErrors.sessionLost(body)) {
+                            sessionGone = true;
+                            setSessionExpired(true);
+                        }
                     } catch (e) {
+                        tokenFailed = true;
                         console.warn('Failed to get SSE token, falling back to session:', e);
                     }
                     return false;
                 };
                 
+                // one retry at a time, with the backoff: the error handler, a failed token request and the
+                // health check all come through here
+                const scheduleRetry = () => {
+                    if (isClosing || sessionGone || reconnectTimeout) return;
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    reconnectAttempts++;
+                    console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+                    reconnectTimeout = setTimeout(() => { reconnectTimeout = null; connectSSE(); }, delay);
+                };
+                
                 const connectSSE = async () => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting) return;
                     
                     console.log('Connecting to SSE...');
                     
                     // Try to get SSE token first (preferred - doesn't expose session in logs)
+                    connecting = true;
                     await getSseToken();
+                    connecting = false;
+                    if (isClosing || sessionGone) return;
                     
                     // Use token if available, otherwise skip
                     let sseUrl;
@@ -16850,6 +17350,10 @@
                     } else {
                         // LW Mar 2026 - don't expose session ID in URL, just skip SSE
                         console.warn('SSE: Token unavailable, skipping SSE connection');
+                        // a refusal that will not change lets the closed stream go, or the health check
+                        // would ask again for it every round
+                        if (tokenFailed) scheduleRetry();
+                        else eventSource = null;
                         return;
                     }
                     
@@ -16899,6 +17403,8 @@
                                 sseClientIdRef.current = data.client_id;
                                 console.log('SSE authenticated, client:', data.client_id);
                             } else if (data.type === 'tasks') {
+                                // LW Oct 2026 - the redesigned task center keeps every cluster's frame for its All clusters view
+                                if (crTaskFeed.active) crTaskFeed.push(data.cluster_id, data.data);
                                 // Tasks kommen mit cluster_id - nur vom aktuellen Cluster anzeigen
                                 if (currentCluster && data.cluster_id === currentCluster.id) {
                                     if (Array.isArray(data.data)) {
@@ -17221,17 +17727,8 @@
                             eventSource.close();
                         }
                         
-                        if (!isClosing) {
-                            // NS: Get fresh token before reconnecting
-                            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-                            reconnectAttempts++;
-                            console.log(`SSE: Reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
-                            reconnectTimeout = setTimeout(async () => {
-                                // Get fresh token first
-                                await getSseToken();
-                                connectSSE();
-                            }, delay);
-                        }
+                        // NS: Get fresh token before reconnecting (connectSSE asks for it)
+                        if (!isClosing) scheduleRetry();
                     };
                 };
                 
@@ -17241,17 +17738,18 @@
                 // NS May 2026 — also: if SSE looks "open" but no messages for >30s,
                 // server-side broadcast loop is stuck — force-reconnect anyway.
                 const healthCheckInterval = setInterval(() => {
-                    if (isClosing) return;
+                    if (isClosing || sessionGone || connecting || reconnectTimeout) return;
                     const sinceLast = Date.now() - (lastSseMessageAt.current || 0);
                     const looksClosed = eventSource?.readyState === EventSource.CLOSED;
                     const wedged = lastSseMessageAt.current > 0 && sinceLast > 30000;
                     if (looksClosed || wedged) {
                         console.log(`SSE: ${looksClosed ? 'closed' : 'wedged ('+Math.round(sinceLast/1000)+'s no msg)'}, reconnecting`);
-                        reconnectAttempts = 0;
                         if (eventSource) {
                             try { eventSource.close(); } catch (_) {}
                         }
-                        connectSSE();
+                        // a stream that went quiet while open starts over at once; a closed one keeps its backoff
+                        if (looksClosed) scheduleRetry();
+                        else { reconnectAttempts = 0; connectSSE(); }
                     }
                 }, 10000);
                 
@@ -18457,6 +18955,10 @@
                     if (r?.ok) setXhmMigrationDetail(await r.json());
                 } catch(e) {}
             };
+            // LW Nov 2026 - a plan into Proxmox (from XCP-ng or ESXi) asks node, storage and bridges,
+            // one into XCP-ng (from Proxmox or ESXi) an SR. Only xcpng_to_pve and pve_to_xcpng were
+            // named, so an ESXi plan had no storage to pick and its Start stayed off
+            const xhmToPve = (plan) => !!plan && String(plan.direction || '').endsWith('_to_pve');
             const fetchXhmPlan = async () => {
                 if (!xhmForm.source_cluster || !xhmForm.source_vmid || !xhmForm.target_cluster) return;
                 setXhmLoading(true);
@@ -18735,7 +19237,11 @@
                                 } else if (!statusResp || statusResp.status === 503 || statusResp.status === 504 || statusResp.status === 502) {
                                     // #594: a null here means the request aborted (timeout) or the network
                                     // failed — treat a slow cluster the same as a 5xx and back it off.
-                                    bumpBackoff();
+                                    // A 502 that names the reads Proxmox refused came back at once, there is
+                                    // no load to take off it: poll it next round like a good one
+                                    const said = statusResp && statusResp.status === 502
+                                        ? await statusResp.json().catch(() => null) : null;
+                                    if (!(said && Array.isArray(said.unread))) bumpBackoff();
                                 }
 
                                 // get vms/cts for the top guests table + topology
@@ -18842,8 +19348,16 @@
                         for (const x of arr) map[x.vmid] = x;
                         if (selectedClusterRef.current?.id !== clusterId) return;
                         setVmsBackupStatus(map);
+                        setVmsBackupFor({ cluster: clusterId, at: Date.now() });
+                    } else if (selectedClusterRef.current?.id === clusterId) {
+                        setVmsBackupFor(prev => ({ cluster: clusterId, at: prev && prev.cluster === clusterId ? prev.at : null, failed: r ? r.status : 0 }));
                     }
-                } catch (_) { /* keep last */ }
+                } catch (_) {
+                    /* keep last */
+                    if (selectedClusterRef.current?.id === clusterId) {
+                        setVmsBackupFor(prev => ({ cluster: clusterId, at: prev && prev.cluster === clusterId ? prev.at : null, failed: 0 }));
+                    }
+                }
             };
 
             const fetchClusterResources = async (clusterId) => {
@@ -18946,11 +19460,19 @@
                     const res = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`, { timeout: POLL_TIMEOUT_MS });
                     if (res && res.ok) {
                         const dsData = await res.json();
+                        crNoteDsRead(clusterId, { ok: true, at: Date.now() });
                         setSidebarClusterData(prev => ({ ...prev, [clusterId]: { ...(prev[clusterId] || {}), datastores: dsData } }));
                         if (selectedClusterRef.current?.id !== clusterId) return;
                         setClusterDatastores(dsData);
+                    } else {
+                        const body = res ? await res.json().catch(() => null) : null;
+                        const msg = res ? [body && typeof body.error === 'string' ? body.error : '', `HTTP ${res.status}`].filter(Boolean).join(' - ') : t('crDriftOffline');
+                        crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg });
                     }
-                } catch (e) { /* not critical for sidebar */ }
+                } catch (e) {
+                    /* not critical for sidebar */
+                    crNoteDsRead(clusterId, { ok: false, at: Date.now(), msg: t('crLoadFailed') });
+                }
             };
 
             // NS: keep storage fresh for clusters expanded in the sidebar (not just the
@@ -19789,6 +20311,9 @@
             const [lxcShellVm, setLxcShellVm] = useState(null);
             const [corpMetricsVm, setCorpMetricsVm] = useState(null); // LW: Feb 2026 - metrics modal for corporate view
             const [configVm, setConfigVm] = useState(null);
+            // LW Oct 2026 - the tab the configuration opens on (Corporate Redesigned links to one)
+            const [configTab, setConfigTab] = useState(null);
+            const [crDsSub, setCrDsSub] = useState(null);
             // NS: Mar 2026 - dashboard-level modals triggered from context menu + CorporateVmDetailView
             const [dashMigrateVm, setDashMigrateVm] = useState(null);
             const [dashCloneVm, setDashCloneVm] = useState(null);
@@ -19860,14 +20385,16 @@
                 });
             };
 
-            const handleOpenConfig = (resource) => {
+            const handleOpenConfig = (resource, tab) => {
                 setConfigVm(resource);
+                setConfigTab(typeof tab === 'string' ? tab : null);
             };
 
             const handleCloseConfig = () => {
                 // NS: Feb 2026 - Refresh correct cluster's resources after config changes
                 const cId = configVm?._clusterId || selectedCluster?.id;
                 setConfigVm(null);
+                setConfigTab(null);
                 if (cId) fetchClusterResources(cId);
             };
 
@@ -20082,11 +20609,13 @@
                                 label: p.poolid,
                                 icon: <Icons.Folder className="w-3.5 h-3.5" style={{color: '#E86F2D'}} />,
                                 onClick: async () => {
+                                    // JB Nov 2026 (#1238) - the members routes, not PUT /pools/<id>: that one edits
+                                    // the pool itself and needs admin.users, these ask pool.assign and check the guest
                                     try {
-                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}`, {
-                                            method: 'PUT',
+                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}/members`, {
+                                            method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ add_members: [vm.vmid] })
+                                            body: JSON.stringify({ vmid: vm.vmid, type: vm.type || 'qemu' })
                                         });
                                         if (res && res.ok) {
                                             addToast(`${vm.name || vm.vmid} → ${p.poolid}`, 'success');
@@ -20105,10 +20634,8 @@
                                 const currentPool = poolsForCluster.find(p => (p.members || []).some(m => String(m.vmid || m.id) === String(vm.vmid)));
                                 if (!currentPool) { addToast('VM is not in a pool', 'info'); return; }
                                 try {
-                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ remove_members: [vm.vmid] })
+                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}/members/${vm.vmid}`, {
+                                        method: 'DELETE'
                                     });
                                     if (res && res.ok) {
                                         addToast(`${vm.name || vm.vmid} removed from ${currentPool.poolid}`, 'success');
@@ -20339,6 +20866,574 @@
                 );
             }
 
+            // LW Oct 2026 - the header controls as values: the classic header below and the
+            // Corporate Redesigned header (CrHeader) render the very same elements
+            const hdrDrawerToggle = (
+                <button className="pp-drawer-toggle"
+                    aria-label={t('toggleNavigation') || 'Toggle navigation'}
+                    aria-expanded={mobileSidebarOpen}
+                    onClick={() => setMobileSidebarOpen(o => !o)}>
+                    <span /><span /><span />
+                </button>
+            );
+            const hdrLogo = (
+                <button
+                    onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); }}
+                    className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
+                    title={t('allClustersOverview') || 'All Clusters Overview'}
+                >
+                    {/* PegaProx Logo */}
+                    <img
+                        src={getLogoSrc()}
+                        alt="PegaProx"
+                        className={`${isCorporate ? 'w-8 h-8' : 'w-12 h-12 rounded-xl'} object-contain`}
+                        onError={(e) => {
+                            e.target.style.display = 'none';
+                            e.target.nextSibling.style.display = 'flex';
+                        }}
+                    />
+                    <div className={`${isCorporate ? 'w-6 h-6 bg-proxmox-orange' : 'w-10 h-10 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 shadow-lg glow-orange'} items-center justify-center hidden`}>
+                        <svg viewBox="0 0 24 24" className={`${isCorporate ? 'w-3.5 h-3.5' : 'w-6 h-6'} text-white`} fill="currentColor">
+                            <path d="M12 2C9.5 2 7 3.5 6 6c-1.5 0-3 1-3 3 0 1.5 1 2.5 2 3l1 6c0 1 1 2 2 2h8c1 0 2-1 2-2l1-6c1-.5 2-1.5 2-3 0-2-1.5-3-3-3-1-2.5-3.5-4-6-4zm0 2c2 0 3.5 1 4 3H8c.5-2 2-3 4-3zM5 9h14c.5 0 1 .5 1 1s-.5 1.5-1 2l-1 5H6l-1-5c-.5-.5-1-1-1-2s.5-1 1-1zm7 1a2 2 0 100 4 2 2 0 000-4z"/>
+                        </svg>
+                    </div>
+                    {isCorporate ? (
+                        <span className="text-[13px] font-semibold">PegaProx</span>
+                    ) : (
+                        <div className="text-left">
+                            <h1 className="text-xl font-bold">PegaProx</h1>
+                            <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
+                        </div>
+                    )}
+                </button>
+            );
+            const hdrSearch = (
+                <div className="relative pp-header-search">
+                    <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
+                        <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
+                        <input
+                            ref={globalSearchRef}
+                            type="text"
+                            placeholder={isCorporate ? (t('searchAllInventories') || 'Search in all inventories...') : (t('searchAllClusters') || 'Search all clusters...')}
+                            value={globalSearchQuery}
+                            onChange={(e) => {
+                                setGlobalSearchQuery(e.target.value);
+                                debouncedSearch(e.target.value);
+                            }}
+                            onFocus={() => setShowGlobalSearch(true)}
+                            onKeyDown={(e) => {
+                                const items = globalSearchResults?.results || [];
+                                if (e.key === 'ArrowDown') {
+                                    e.preventDefault();
+                                    setGlobalSearchIndex(prev => Math.min(prev + 1, Math.min(items.length - 1, 19)));
+                                } else if (e.key === 'ArrowUp') {
+                                    e.preventDefault();
+                                    setGlobalSearchIndex(prev => Math.max(prev - 1, 0));
+                                } else if (e.key === 'Enter' && items.length > 0) {
+                                    e.preventDefault();
+                                    navigateToResult(items[globalSearchIndex]);
+                                } else if (e.key === 'Escape') {
+                                    setShowGlobalSearch(false);
+                                    e.target.blur();
+                                }
+                            }}
+                            className={`${isCorporate ? 'w-48 md:w-72 lg:w-96 px-2 py-1' : 'w-48 md:w-72 lg:w-80 px-2 py-2'} bg-transparent text-white placeholder-gray-500 focus:outline-none text-sm`}
+                        />
+                        {/* above the click-away layer of the open dropdown */}
+                        <span className="relative z-50 mr-2 flex items-center flex-shrink-0">
+                            <SearchSyntaxHelp t={t} onPick={(example) => {
+                                setGlobalSearchQuery(example);
+                                performGlobalSearch(example);
+                                setShowGlobalSearch(true);
+                                globalSearchRef.current?.focus();
+                            }} />
+                        </span>
+                        {globalSearchLoading ? (
+                            <Icons.RotateCw className="w-4 h-4 mr-3 text-gray-400 animate-spin flex-shrink-0" />
+                        ) : (
+                            <kbd className={`hidden md:inline-flex mr-3 px-1.5 py-0.5 text-xs rounded border flex-shrink-0 ${isCorporate ? 'text-[#5a7a8a] bg-[#1a2e38] border-[#344955]' : 'text-gray-500 bg-proxmox-dark border-proxmox-border'}`}>
+                                {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}K
+                            </kbd>
+                        )}
+                    </div>
+                    
+                    {/* Search Results Dropdown */}
+                    {showGlobalSearch && globalSearchResults && (
+                        <>
+                            <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
+                            <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
+                                {/* Header with count and prefix hints */}
+                                <div className="p-3 border-b border-proxmox-border">
+                                    <div className="flex justify-between items-center">
+                                        <span className="text-sm text-gray-400">
+                                            {globalSearchResults.count} {t('results') || 'results'}
+                                            {globalSearchResults.query?.startsWith('tag:') && ' (Tag-Suche)'}
+                                        </span>
+                                        <button onClick={() => setShowGlobalSearch(false)} className="text-gray-500 hover:text-white">
+                                            <Icons.X className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                    {globalSearchResults.syntaxError && (
+                                        <div data-search-syntax-error className="text-xs text-red-400 mt-1">
+                                            {searchSyntaxMessage(t, globalSearchResults.syntaxError)}
+                                        </div>
+                                    )}
+                                    {/* MK: clickable tag pills for quick filtering */}
+                                    {/* LW Oct 2026 - a pill completes the last term (after AND/OR too), the rest stays */}
+                                    {globalSearchResults.tag_suggestions?.length > 0 && (globalSearchResults.tag_complete || !globalSearchQuery.startsWith('tag:')) && (
+                                        <div className="flex flex-wrap gap-1 mt-2">
+                                            <span className="text-xs text-gray-500 mr-1">Tags:</span>
+                                            {globalSearchResults.tag_suggestions.slice(0, 6).map((tag, i) => (
+                                                <button key={i} data-search-tag-pill={tag} onClick={() => {
+                                                    const next = searchWithTag(globalSearchResults, tag);
+                                                    setGlobalSearchQuery(next);
+                                                    performGlobalSearch(next);
+                                                }} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 transition-colors">
+                                                    {tag}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                {globalSearchResults.syntaxError ? null : globalSearchResults.results.length === 0 ? (
+                                    <div className="p-6 text-center text-gray-500">
+                                        <Icons.Search className="mx-auto mb-2 opacity-50" />
+                                        <p>{t('noResults') || 'No results'}</p>
+                                        <p className="text-xs mt-2 text-gray-600">
+                                            Tipp: tag:web, node:pve1, ip:192.168
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <div className="divide-y divide-proxmox-border">
+                                        {globalSearchResults.results.slice(0, 20).map((result, idx) => (
+                                            <div
+                                                key={idx}
+                                                className={`p-3 hover:bg-proxmox-hover cursor-pointer flex items-center gap-3 transition-colors ${idx === globalSearchIndex ? 'bg-proxmox-orange/10 border-l-2 border-proxmox-orange' : 'border-l-2 border-transparent'}`}
+                                                onClick={() => navigateToResult(result)}
+                                                onMouseEnter={() => setGlobalSearchIndex(idx)}
+                                            >
+                                                <span className="text-lg flex-shrink-0">
+                                                    {result.type === 'node' ? '🖧' : result.type === 'ct' ? '📦' : '🖥️'}
+                                                </span>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2 flex-wrap">
+                                                        <span className="font-medium truncate">{result.name}</span>
+                                                        {result.vmid && (
+                                                            <span className="text-xs text-gray-500">#{result.vmid}</span>
+                                                        )}
+                                                        <span className={`px-1.5 py-0.5 text-xs rounded ${
+                                                            result.status === 'running' ? 'bg-green-500/20 text-green-400' :
+                                                            result.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
+                                                            'bg-yellow-500/20 text-yellow-400'
+                                                        }`}>
+                                                            {result.status}
+                                                        </span>
+                                                        {result.match_field === 'tag' && (
+                                                            <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400">Tag-Match</span>
+                                                        )}
+                                                        {/* LW Oct 2026 - a hit by MAC, notes or an address other than the one shown below */}
+                                                        {SEARCH_INDEX_FIELDS.includes(result.match_field) && result.match_value && result.match_value !== result.ip && (
+                                                            <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400 truncate max-w-full" data-search-match={result.match_field}>
+                                                                {searchMatchLabel(t, result.match_field)}: {result.match_value}{result.match_net ? ` (${result.match_net})` : ''}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
+                                                        <span>{result.cluster_name}</span>
+                                                        {result.node && <span>• {result.node}</span>}
+                                                        {result.ip && <span>• {result.ip}</span>}
+                                                    </div>
+                                                    {/* tags - highlight matching ones in orange */}
+                                                    {result.tags && (
+                                                        <div className="flex flex-wrap gap-1 mt-1">
+                                                            {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).slice(0, 4).map((tag, i) => (
+                                                                <span key={i} className={`px-1.5 py-0.5 text-xs rounded ${
+                                                                    (globalSearchResults.highlight || globalSearchQuery.toLowerCase().replace('tag:', '').split(',')).some(q => q.trim() && tag.trim().toLowerCase().includes(q.trim()))
+                                                                    ? 'bg-proxmox-orange/30 text-proxmox-orange ring-1 ring-proxmox-orange/50'
+                                                                    : 'bg-proxmox-dark text-gray-400'
+                                                                }`}>
+                                                                    {tag.trim()}
+                                                                </span>
+                                                            ))}
+                                                            {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length > 4 && (
+                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-proxmox-dark text-gray-500">
+                                                                    +{(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length - 4}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        toggleFavorite(result.type, result.cluster_id, result.vmid, result.type === 'vm' ? 'qemu' : 'lxc', result.name);
+                                                    }}
+                                                    className="p-1 hover:bg-proxmox-dark rounded text-gray-500 hover:text-yellow-400 flex-shrink-0"
+                                                    title={t('toggleFavorite') || 'Toggle favorite'}
+                                                >
+                                                    <Icons.Star className={`w-4 h-4 ${isFavorite(result.type, result.cluster_id, result.vmid, result.name) ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                                {/* Keyboard hints */}
+                                {globalSearchResults.results.length > 0 && (
+                                    <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-3">
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">↑↓</kbd>
+                                            navigate
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↵</kbd>
+                                            {t('pressEnterToOpen') || 'jump to VM'}
+                                        </span>
+                                        <span className="flex items-center gap-1">
+                                            <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">esc</kbd>
+                                            close
+                                        </span>
+                                    </div>
+                                )}
+                                {/* Keyboard hint */}
+                                {globalSearchResults.results.length > 0 && (
+                                    <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-2">
+                                        <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↑µ</kbd>
+                                        <span>{t('pressEnterToOpen') || 'Press Enter to jump to VM'}</span>
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+            // not under a pinned Corporate: the server refuses the switch there (#1189)
+            const offerCorpRedesigned = isCorporate && !isCorpRedesigned && !layoutLocked;
+            // the palette stays, the redesign is Corporate underneath. useLayout paints it again
+            // for the new layout from corp-theme, so a 'system' choice survives the switch
+            const switchToCorpRedesigned = async () => {
+                const result = await updatePreferences({ ui_layout: 'corporate-redesigned' });
+                if (result.success) addToast(`${t('layoutStyle')}: ${t('layoutCorporateRedesigned')}`, 'success');
+                else addToast(result.error || t('saveError'), 'error');
+            };
+            const hdrCorpSwitch = offerCorpRedesigned && (
+                <button type="button" data-corp-switch="" onClick={switchToCorpRedesigned}
+                    className="flex items-center gap-1 px-2 py-0.5 rounded border border-proxmox-border text-[12px] text-gray-300 hover:text-white hover:border-proxmox-orange/50 transition-colors whitespace-nowrap"
+                    title={t('corpClassicSwitchTitle')}>
+                    {t('layoutCorporateRedesigned')}
+                    <Icons.ArrowRight className="w-3.5 h-3.5" />
+                </button>
+            );
+            const hdrThemeToggle = isCorporate && (
+                <button
+                    onClick={() => {
+                        const order = { system: 'light', light: 'dark', dark: 'system' };
+                        const next = order[corpMode] || 'system';
+                        const theme = next === 'system' ? 'system'
+                                    : (next === 'light' ? 'corporateLight' : 'corporateDark');
+                        // in system mode applyTheme() owns data-corp-theme and the
+                        // local toggle must stop claiming to know better
+                        if (next === 'system') {
+                            localStorage.removeItem('corp-theme');
+                        } else {
+                            document.body.dataset.corpTheme = next === 'light' ? 'light' : '';
+                            localStorage.setItem('corp-theme', next === 'light' ? 'light' : '');
+                        }
+                        applyTheme(theme);
+                        setCorpMode(next);
+                        setCorpLight(next === 'light' ||
+                            (next === 'system' && document.body.dataset.corpTheme === 'light'));
+                        // MK May 2026 - also persist on server so checkSession on next
+                        // F5 doesn't apply a stale user.theme that mismatches the local
+                        // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
+                        // light-on-dark when toggle and server preference drifted).
+                        // LW Oct 2026 (#1189) - not while an admin pins Corporate over the
+                        // user's own layout: the stored theme is that layout's and would
+                        // paint it in a Corporate palette once the lock is lifted. The
+                        // pinned Corporate goes by corp-theme in this browser anyway.
+                        if (layoutLocked && user?.ui_layout !== 'corporate' && user?.ui_layout !== 'corporate-redesigned') return;
+                        fetch(`${API_URL}/user/preferences`, {
+                            method: 'PUT', credentials: 'include',
+                            headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                            body: JSON.stringify({ theme })
+                        }).catch(() => {});
+                    }}
+                    className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
+                    title={corpMode === 'system' ? (t('lightMode') || 'Light Mode')
+                         : corpMode === 'light' ? (t('darkMode') || 'Dark Mode')
+                         : (t('followSystem') || 'Follow system')}
+                >
+                    {corpMode === 'system' ? <Icons.Monitor />
+                     : corpMode === 'light' ? <Icons.Moon /> : <Icons.Sun />}
+                </button>
+            );
+            const hdrSettings = isAdmin && (
+                <button
+                    onClick={() => setShowSettings(true)}
+                    className={`${isCorporate ? 'p-1' : 'p-2.5'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors text-gray-400 hover:text-white`}
+                    title={t('pegaproxSettings')}
+                >
+                    <Icons.Settings className={isCorporate ? 'w-4 h-4' : undefined} />
+                </button>
+            );
+            const hdrTaskToggle = !showTaskBar && (
+                <button
+                    onClick={() => setShowTaskBar(true)}
+                    className="relative flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors"
+                    title={t('tasks')}
+                    data-cr-tasks-show={isCorpRedesigned ? '' : undefined}
+                >
+                    <Icons.Layers />
+                    {tasks.filter(task => task && task.status === 'running').length > 0 && (
+                        <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 rounded-full text-xs flex items-center justify-center animate-pulse">
+                            {tasks.filter(task => task && task.status === 'running').length}
+                        </span>
+                    )}
+                    {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length > 0 && (
+                        <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-xs flex items-center justify-center">
+                            {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length}
+                        </span>
+                    )}
+                </button>
+            );
+            const hdrUserMenu = (
+                <div className="relative z-50">
+                    <button
+                        onClick={() => setShowUserMenu(!showUserMenu)}
+                        data-user-menu=""
+                        className={`flex items-center gap-2 ${isCorporate ? 'px-2 py-1' : 'px-3 py-2'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors`}
+                    >
+                        <UserAvatar
+                            user={user}
+                            sizeClass={isCorporate ? 'w-6 h-6' : 'w-8 h-8'}
+                            textClass={isCorporate ? 'text-[11px]' : 'text-sm'}
+                        />
+                        {!isCorporate && <span className="text-sm text-gray-300 hidden sm:inline">{user?.display_name || user?.username}</span>}
+                        <Icons.ChevronDown className={isCorporate ? 'w-3 h-3' : undefined} />
+                    </button>
+                    
+                    {showUserMenu && (
+                        <>
+                            <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                            <div className="absolute right-0 top-full mt-2 w-56 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
+                                <div className="p-3 border-b border-proxmox-border">
+                                    <p className="font-medium text-white">{user?.display_name || user?.username}</p>
+                                    <p className="text-xs text-gray-400">{user?.role === 'admin' ? t('roleAdmin') : user?.role === 'user' ? t('roleUser') : t('roleViewer')}</p>
+                                </div>
+                                <div className="py-1">
+                                    <button
+                                        onClick={() => {
+                                            setShowUserMenu(false);
+                                            setShowProfile(true);
+                                        }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.User />
+                                        {t('myProfile')}
+                                    </button>
+                                    {isAdmin && (
+                                        <button
+                                            onClick={() => {
+                                                setShowUserMenu(false);
+                                                setShowSettings(true);
+                                            }}
+                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                        >
+                                            <Icons.Settings />
+                                            {t('pegaproxSettings')}
+                                        </button>
+                                    )}
+                                    {/* MK May 2026 - discoverability: hotkey list */}
+                                    <button
+                                        onClick={() => { setShowUserMenu(false); setShowShortcutsModal(true); }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.Keyboard />
+                                        <span className="flex-1">{t('keyboardShortcuts') || 'Keyboard shortcuts'}</span>
+                                        <kbd className="text-[10px] opacity-60 px-1 rounded" style={{ border: '1px solid #485764' }}>?</kbd>
+                                    </button>
+                                    <button
+                                        onClick={() => { setShowUserMenu(false); setShowApiReference(true); }}
+                                        className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.Book />
+                                        {t('apiRefTitle')}
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            setShowUserMenu(false);
+                                            logout();
+                                        }}
+                                        className="w-full px-4 py-2 text-left text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
+                                    >
+                                        <Icons.LogOut />
+                                        {t('logout')}
+                                    </button>
+                                </div>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+
+            // LW Oct 2026 - Corporate Redesigned: the context picker and the breadcrumb trail as
+            // data, read from the same state as the classic trail in the header below
+            // the backup server or ESXi host on screen, and leaving both (the state keeps its old name)
+            const crServer = selectedPBS ? { kind: 'pbs', name: selectedPBS.name } : (selectedVMware ? { kind: 'esxi', name: selectedVMware.name } : null);
+            const crLeaveServers = () => { setSelectedPBS(null); setSelectedVMware(null); setSelectedGroup(null); };
+            // the inventory as an ARIA tree (only the node/guest view is a tree)
+            const crSideTree = isCorpRedesigned && sidebarViewMode === 'tree';
+            const crGoAll = () => {
+                crLeaveServers(); setSelectedCluster(null);
+                setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
+                setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false);
+            };
+            const crClearPick = () => {
+                setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                setSelectedSidebarDatastore(null); setSelectedSidebarQdevice(null);
+            };
+            // the task center of the redesign: where a row leads (out of every global view into its
+            // cluster) and the inventory it checks first. Lists are what the server let this user see
+            const crIntoCluster = (cid) => {
+                const cl = clusters.find(c => c.id === cid);
+                if (!cl) return null;
+                crLeaveServers();
+                setSidebarTopology(false); setSidebarWorldmap(false); setSidebarXHM(false);
+                setSidebarMultiSdn(false); setSidebarAutoInstall(false); setSidebarGuests(false);
+                setSelectedCluster(cl);
+                setExpandedSidebarClusters(prev => ({...prev, [cl.id]: true}));
+                return cl;
+            };
+            const crTaskNav = isCorpRedesigned ? {
+                clusters, authFetch, may: can,
+                guestsOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterResources
+                    : (sidebarClusterData[cid]?.resources || allClusterGuests[cid] || null)),
+                nodesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterMetrics : (sidebarClusterData[cid]?.metrics || null)),
+                storesOf: (cid) => (selectedCluster && selectedCluster.id === cid ? clusterDatastores : (sidebarClusterData[cid]?.datastores || null)),
+                // which lists of a cluster came back once: the empty seed of a cluster switch or a failed read is not "none"
+                listsRead: (cid) => {
+                    const d = sidebarClusterData[cid] || {};
+                    return { guests: Array.isArray(d.resources) || Array.isArray(allClusterGuests[cid]),
+                             nodes: !!(d.metrics && typeof d.metrics === 'object'), stores: !!(d.datastores && typeof d.datastores === 'object') };
+                },
+                openGuest: (cid, guest) => {
+                    const cl = crIntoCluster(cid);
+                    if (!cl) return;
+                    setSelectedSidebarVm({...guest, _clusterId: cl.id}); setSelectedSidebarNode(null); setSelectedSidebarDatastore(null);
+                    setActiveTab('resources'); setResourcesSubTab('management');
+                },
+                openNode: (cid, name) => {
+                    if (!crIntoCluster(cid)) return;
+                    setSelectedSidebarNode({ name, clusterId: cid }); setSelectedSidebarVm(null); setSelectedSidebarDatastore(null);
+                    setActiveTab('overview');
+                },
+                openStorage: (cid, store, node) => {
+                    if (!crIntoCluster(cid)) return;
+                    setSelectedSidebarDatastore({ name: store.storage, type: store.type, node: node || null, clusterId: cid });
+                    setSelectedSidebarVm(null); setSelectedSidebarNode(null);
+                    setActiveTab('datastore');
+                },
+                openCluster: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('overview'); } },
+                openBulkRun: (id) => setBulkRunOpen(id),
+                // a module page of a cluster: Reports > Insights / What-if, Compliance > Drift, a Datacenter section
+                openReports: (cid, sub) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('reports'); setReportSubTab(sub || 'summary'); } },
+                openCompliance: (cid, sub) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('compliance'); if (sub) setComplianceSubTab(sub); } },
+                openDatacenter: (cid, section) => { if (crIntoCluster(cid)) { crClearPick(); setDatacenterSection(section || null); setActiveTab('datacenter'); } },
+                // LW Nov 2026 - the QDevice view of a cluster, as its sidebar entry opens it
+                openQdevice: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setSelectedSidebarQdevice(cid); setActiveTab('overview'); } },
+                // LW Nov 2026 - the alert strip: Automation > Alerts of a cluster, and its Timeline with a kind and a severity picked
+                openAlerts: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('alerts'); } },
+                openTimeline: (cid, pick) => {
+                    if (!crIntoCluster(cid)) return;
+                    crClearPick();
+                    setCrTimelinePick(p => ({ cid, kind: (pick && pick.kind) || '', severity: (pick && pick.severity) || '', seq: ((p && p.seq) || 0) + 1 }));
+                    setActiveTab('timeline');
+                },
+            } : undefined;
+            const crGlobalView = sidebarTopology ? (t('topologyView') || 'Topology')
+                : sidebarWorldmap ? (t('worldMap') || 'World Map')
+                : sidebarGuests ? t('allGuestsTitle')
+                : sidebarXHM ? (t('xhmTitle') || 'Hypervisor Migration')
+                : sidebarMultiSdn ? (t('mcevpnTitle') || 'Multi-Cluster EVPN')
+                : sidebarAutoInstall ? t('autoInstall') : '';
+            const crCrumbs = [];
+            if (isCorpRedesigned) {
+                crCrumbs.push({ key: 'all', label: t('breadcrumbAll') || 'All', icon: <Icons.Database />, onClick: crGoAll });
+                if (crGlobalView) crCrumbs.push({ key: 'view', label: crGlobalView });
+                // LW Nov 2026 - the group stays in the state when the sidebar picks a cluster or server elsewhere:
+                // it is in the trail only on its own overview or above one of its clusters
+                if (selectedGroup && !crServer && (!selectedCluster || selectedCluster.group_id === selectedGroup.id)) {
+                    crCrumbs.push({ key: 'group', label: selectedGroup.name, icon: <Icons.Folder /> });
+                }
+                if (crServer) crCrumbs.push({ key: crServer.kind, label: crServer.name, icon: crServer.kind === 'pbs' ? <Icons.Shield /> : <Icons.Cloud /> });
+                if (selectedCluster) {
+                    crCrumbs.push({ key: 'cluster', label: clusterLabel(selectedCluster), icon: <Icons.Server />,
+                                    onClick: () => { crClearPick(); setActiveTab('overview'); } });
+                    if (activeTab) {
+                        // a plugin tab is named after its plugin, two tabs have their own key
+                        const plugin = String(activeTab).startsWith('plugin:') && (enabledPlugins || []).find(p => `plugin:${p.id}` === activeTab);
+                        const label = plugin ? (plugin.name || plugin.id) : t({ timeline: 'tlTab', 'site-recovery': 'siteRecovery', updates: 'crUpdTab' }[activeTab] || activeTab);
+                        crCrumbs.push({ key: 'tab', label, onClick: crClearPick });
+                    }
+                    if (selectedSidebarQdevice && activeTab === 'overview') crCrumbs.push({ key: 'qdevice', label: t('qdeviceTitle'), icon: <Icons.Scale /> });
+                    if (selectedSidebarNode && activeTab === 'overview') crCrumbs.push({ key: 'node', label: selectedSidebarNode.name, icon: <Icons.Server /> });
+                    if (selectedSidebarVm && activeTab === 'resources') {
+                        crCrumbs.push({ key: 'guest', label: selectedSidebarVm.name || `${selectedSidebarVm.type === 'lxc' ? 'CT' : 'VM'} ${selectedSidebarVm.vmid}`,
+                                        icon: selectedSidebarVm.type === 'lxc' ? <Icons.Box /> : <Icons.Monitor /> });
+                    }
+                    if (selectedSidebarDatastore && activeTab === 'datastore') crCrumbs.push({ key: 'datastore', label: selectedSidebarDatastore.name, icon: <Icons.Database /> });
+                    // the sub tab of the reports and compliance tabs, as their strips name it
+                    const sub = activeTab === 'reports' ? ({ summary: t('summary') || 'Summary', cve: t('cveScanner') || 'CVE Scanner', insights: t('insights') || 'Insights',
+                                                             costs: t('costDashboard') || 'Costs', power: t('powerTitle') || 'Power & Carbon', topology: t('topologyTitle') || 'Topology',
+                                                             whatif: t('whatifTitle'), 'api-health': t('apiHealth') || 'API Health' })[reportSubTab]
+                        : activeTab === 'compliance' ? (complianceSubs.find(x => x.id === complianceSub) || {}).label : null;
+                    if (sub && sub !== (crCrumbs[crCrumbs.length - 1] || {}).label) crCrumbs.push({ key: 'sub', label: sub });
+                }
+            }
+
+            // LW Oct 2026 - the tabs of a cluster, for the classic strip and for the one of
+            // Corporate Redesigned
+            const clusterTabList = (() => {
+                // NS May 2026 (#381) - splice plugin frontend tabs between
+                // the management Plugins tab and Settings. Plugin tabs only
+                // render when the manifest declared has_frontend AND the
+                // server normalised frontend_route to /api/plugins/<id>/...
+                // (server-side validation in pegaprox/api/plugins.py).
+                // #642 - and only on the clusters it was limited to
+                const pluginFrontendTabs = (enabledPlugins || [])
+                    .filter(p => p && p.has_frontend && p.frontend_route)
+                    .filter(p => pluginAppliesToCluster(p, selectedCluster?.id))
+                    .map(p => ({
+                        id: `plugin:${p.id}`,
+                        label: p.name || p.id,  // shown verbatim
+                        icon: Icons.Package,
+                        _plugin: p,
+                    }));
+                return [
+                    { id: 'overview', labelKey: 'overview', icon: Icons.Activity },
+                    { id: 'resources', labelKey: 'resources', icon: Icons.Server },
+                    { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
+                    { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
+                    { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
+                    { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
+                    { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
+                    { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
+                    { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
+                    { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
+                    ...pluginFrontendTabs,
+                    // LW Nov 2026 - Corporate Redesigned draws the update manager here, not in Settings
+                    ...(isCorpRedesigned ? [{ id: 'updates', labelKey: 'crUpdTab', icon: Icons.Download }] : []),
+                    { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
+                ];
+            })().filter(tab => {
+                // #390 - admin role always passes (matches backend has_permission shortcut).
+                if (tab.id === 'site-recovery') return can('site_recovery.view');
+                if (tab.id === 'plugins') return can('plugins.view');
+                // compliance only reads, so a standby keeps it (#625)
+                if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') || holds('changes.view');
+                if (typeof tab.id === 'string' && tab.id.startsWith('plugin:')) return can('plugins.view');
+                return true;
+            });
+
             // NS #727 — Firefox drives text-selection autoscroll into overflow:hidden boxes
             // (Chrome doesn't), which can shove the whole shell off-screen horizontally with no
             // scrollbar left to recover it. overflow-x:clip pins the shell on the x-axis; y stays
@@ -20352,7 +21447,8 @@
                     <HaCopiesBanner onOpenHa={openHaSettings} />
                     <HaLeaderBanner onOpenHa={openHaSettings} />
 
-                    {/* Node Offline Alert Banner */}
+                    {/* Node Offline Alert Banner (LW Nov 2026 - the alert strip of Corporate Redesigned takes its place there) */}
+                    {!isCorpRedesigned && (
                     <NodeAlertBanner 
                         alerts={nodeAlerts} 
                         currentClusterId={selectedCluster?.id}
@@ -20362,12 +21458,18 @@
                             return newAlerts;
                         })}
                     />
+                    )}
                     
                     {/* Background gradient mesh - hidden in corporate mode via CSS */}
                     {!isCorporate && <div className="fixed inset-0 gradient-mesh pointer-events-none" />}
                     
                     {/* LW: Feb 2026 - header, compact in corporate */}
                     {/* LW: Mar 2026 - z-50 so search dropdown renders above content area (#corp-search-overlap) */}
+                    {isCorpRedesigned ? (
+                        <CrHeader drawerToggle={hdrDrawerToggle} logo={hdrLogo} search={hdrSearch}
+                            themeToggle={hdrThemeToggle} settings={hdrSettings} taskToggle={hdrTaskToggle}
+                            userMenu={hdrUserMenu} crumbs={crCrumbs} onOpenPalette={() => setShowCommandPalette(true)} />
+                    ) : (
                     <header className={`sticky top-0 z-50 border-b border-proxmox-border ${isCorporate ? 'bg-proxmox-darker' : 'bg-proxmox-dark/80 backdrop-blur-xl'}`}>
                         <div className={`${isCorporate ? 'max-w-full px-3 py-1' : 'max-w-[1600px] mx-auto px-6 py-4'}`}>
                             <div className="flex items-center justify-between pp-header-row">
@@ -20375,41 +21477,8 @@
                                 <div className="flex items-center gap-3">
                                 {/* #189 - drawer toggle. In the header so it is always reachable and
                                     can never paint on top of the content. Hidden above 820px. */}
-                                <button className="pp-drawer-toggle"
-                                    aria-label={t('toggleNavigation') || 'Toggle navigation'}
-                                    aria-expanded={mobileSidebarOpen}
-                                    onClick={() => setMobileSidebarOpen(o => !o)}>
-                                    <span /><span /><span />
-                                </button>
-                                <button
-                                    onClick={() => { setSelectedCluster(null); setSelectedPBS(null); setSelectedVMware(null); }}
-                                    className={`flex items-center ${isCorporate ? 'gap-2' : 'gap-4'} hover:opacity-80 transition-opacity`}
-                                    title={t('allClustersOverview') || 'All Clusters Overview'}
-                                >
-                                    {/* PegaProx Logo */}
-                                    <img
-                                        src={getLogoSrc()}
-                                        alt="PegaProx"
-                                        className={`${isCorporate ? 'w-8 h-8' : 'w-12 h-12 rounded-xl'} object-contain`}
-                                        onError={(e) => {
-                                            e.target.style.display = 'none';
-                                            e.target.nextSibling.style.display = 'flex';
-                                        }}
-                                    />
-                                    <div className={`${isCorporate ? 'w-6 h-6 bg-proxmox-orange' : 'w-10 h-10 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 shadow-lg glow-orange'} items-center justify-center hidden`}>
-                                        <svg viewBox="0 0 24 24" className={`${isCorporate ? 'w-3.5 h-3.5' : 'w-6 h-6'} text-white`} fill="currentColor">
-                                            <path d="M12 2C9.5 2 7 3.5 6 6c-1.5 0-3 1-3 3 0 1.5 1 2.5 2 3l1 6c0 1 1 2 2 2h8c1 0 2-1 2-2l1-6c1-.5 2-1.5 2-3 0-2-1.5-3-3-3-1-2.5-3.5-4-6-4zm0 2c2 0 3.5 1 4 3H8c.5-2 2-3 4-3zM5 9h14c.5 0 1 .5 1 1s-.5 1.5-1 2l-1 5H6l-1-5c-.5-.5-1-1-1-2s.5-1 1-1zm7 1a2 2 0 100 4 2 2 0 000-4z"/>
-                                        </svg>
-                                    </div>
-                                    {isCorporate ? (
-                                        <span className="text-[13px] font-semibold">PegaProx</span>
-                                    ) : (
-                                        <div className="text-left">
-                                            <h1 className="text-xl font-bold">PegaProx</h1>
-                                            <p className="text-xs text-gray-500">{t('clusterManagement')}</p>
-                                        </div>
-                                    )}
-                                </button>
+                                {hdrDrawerToggle}
+                                {hdrLogo}
                                 {/* LW: Feb 2026 - corporate breadcrumb, MK: Mar 2026 icons + segment classes */}
                                 {isCorporate && (
                                     <div className="flex items-center gap-1 text-[13px] ml-1 border-l border-proxmox-border pl-3">
@@ -20442,248 +21511,12 @@
                                 </div>
                                 <div className={`flex items-center pp-header-actions ${isCorporate ? 'gap-2 justify-end' : 'gap-3'}`}>
                                     {/* NS: Global Search - now with tag search + ctrl+k, LW: fixed width in corporate */}
-                                    <div className="relative pp-header-search">
-                                        <div className={`flex items-center ${isCorporate ? 'bg-[#17242b]' : 'bg-proxmox-dark'} border border-proxmox-border rounded-lg overflow-hidden focus-within:border-proxmox-orange/50 transition-colors`}>
-                                            <Icons.Search className="w-4 h-4 ml-3 text-gray-500 flex-shrink-0" />
-                                            <input
-                                                ref={globalSearchRef}
-                                                type="text"
-                                                placeholder={isCorporate ? (t('searchAllInventories') || 'Search in all inventories...') : (t('searchAllClusters') || 'Search all clusters...')}
-                                                value={globalSearchQuery}
-                                                onChange={(e) => {
-                                                    setGlobalSearchQuery(e.target.value);
-                                                    debouncedSearch(e.target.value);
-                                                }}
-                                                onFocus={() => setShowGlobalSearch(true)}
-                                                onKeyDown={(e) => {
-                                                    const items = globalSearchResults?.results || [];
-                                                    if (e.key === 'ArrowDown') {
-                                                        e.preventDefault();
-                                                        setGlobalSearchIndex(prev => Math.min(prev + 1, Math.min(items.length - 1, 19)));
-                                                    } else if (e.key === 'ArrowUp') {
-                                                        e.preventDefault();
-                                                        setGlobalSearchIndex(prev => Math.max(prev - 1, 0));
-                                                    } else if (e.key === 'Enter' && items.length > 0) {
-                                                        e.preventDefault();
-                                                        navigateToResult(items[globalSearchIndex]);
-                                                    } else if (e.key === 'Escape') {
-                                                        setShowGlobalSearch(false);
-                                                        e.target.blur();
-                                                    }
-                                                }}
-                                                className={`${isCorporate ? 'w-48 md:w-72 lg:w-96 px-2 py-1' : 'w-48 md:w-72 lg:w-80 px-2 py-2'} bg-transparent text-white placeholder-gray-500 focus:outline-none text-sm`}
-                                            />
-                                            {/* above the click-away layer of the open dropdown */}
-                                            <span className="relative z-50 mr-2 flex items-center flex-shrink-0">
-                                                <SearchSyntaxHelp t={t} onPick={(example) => {
-                                                    setGlobalSearchQuery(example);
-                                                    performGlobalSearch(example);
-                                                    setShowGlobalSearch(true);
-                                                    globalSearchRef.current?.focus();
-                                                }} />
-                                            </span>
-                                            {globalSearchLoading ? (
-                                                <Icons.RotateCw className="w-4 h-4 mr-3 text-gray-400 animate-spin flex-shrink-0" />
-                                            ) : (
-                                                <kbd className={`hidden md:inline-flex mr-3 px-1.5 py-0.5 text-xs rounded border flex-shrink-0 ${isCorporate ? 'text-[#5a7a8a] bg-[#1a2e38] border-[#344955]' : 'text-gray-500 bg-proxmox-dark border-proxmox-border'}`}>
-                                                    {navigator.platform?.includes('Mac') ? '⌘' : 'Ctrl+'}K
-                                                </kbd>
-                                            )}
-                                        </div>
-                                        
-                                        {/* Search Results Dropdown */}
-                                        {showGlobalSearch && globalSearchResults && (
-                                            <>
-                                                <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
-                                                <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
-                                                    {/* Header with count and prefix hints */}
-                                                    <div className="p-3 border-b border-proxmox-border">
-                                                        <div className="flex justify-between items-center">
-                                                            <span className="text-sm text-gray-400">
-                                                                {globalSearchResults.count} {t('results') || 'results'}
-                                                                {globalSearchResults.query?.startsWith('tag:') && ' (Tag-Suche)'}
-                                                            </span>
-                                                            <button onClick={() => setShowGlobalSearch(false)} className="text-gray-500 hover:text-white">
-                                                                <Icons.X className="w-4 h-4" />
-                                                            </button>
-                                                        </div>
-                                                        {globalSearchResults.syntaxError && (
-                                                            <div data-search-syntax-error className="text-xs text-red-400 mt-1">
-                                                                {searchSyntaxMessage(t, globalSearchResults.syntaxError)}
-                                                            </div>
-                                                        )}
-                                                        {/* MK: clickable tag pills for quick filtering */}
-                                                        {/* LW Oct 2026 - a pill completes the last term (after AND/OR too), the rest stays */}
-                                                        {globalSearchResults.tag_suggestions?.length > 0 && (globalSearchResults.tag_complete || !globalSearchQuery.startsWith('tag:')) && (
-                                                            <div className="flex flex-wrap gap-1 mt-2">
-                                                                <span className="text-xs text-gray-500 mr-1">Tags:</span>
-                                                                {globalSearchResults.tag_suggestions.slice(0, 6).map((tag, i) => (
-                                                                    <button key={i} data-search-tag-pill={tag} onClick={() => {
-                                                                        const next = searchWithTag(globalSearchResults, tag);
-                                                                        setGlobalSearchQuery(next);
-                                                                        performGlobalSearch(next);
-                                                                    }} className="px-1.5 py-0.5 text-xs rounded bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 transition-colors">
-                                                                        {tag}
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                    {globalSearchResults.syntaxError ? null : globalSearchResults.results.length === 0 ? (
-                                                        <div className="p-6 text-center text-gray-500">
-                                                            <Icons.Search className="mx-auto mb-2 opacity-50" />
-                                                            <p>{t('noResults') || 'No results'}</p>
-                                                            <p className="text-xs mt-2 text-gray-600">
-                                                                Tipp: tag:web, node:pve1, ip:192.168
-                                                            </p>
-                                                        </div>
-                                                    ) : (
-                                                        <div className="divide-y divide-proxmox-border">
-                                                            {globalSearchResults.results.slice(0, 20).map((result, idx) => (
-                                                                <div
-                                                                    key={idx}
-                                                                    className={`p-3 hover:bg-proxmox-hover cursor-pointer flex items-center gap-3 transition-colors ${idx === globalSearchIndex ? 'bg-proxmox-orange/10 border-l-2 border-proxmox-orange' : 'border-l-2 border-transparent'}`}
-                                                                    onClick={() => navigateToResult(result)}
-                                                                    onMouseEnter={() => setGlobalSearchIndex(idx)}
-                                                                >
-                                                                    <span className="text-lg flex-shrink-0">
-                                                                        {result.type === 'node' ? '🖧' : result.type === 'ct' ? '📦' : '🖥️'}
-                                                                    </span>
-                                                                    <div className="flex-1 min-w-0">
-                                                                        <div className="flex items-center gap-2 flex-wrap">
-                                                                            <span className="font-medium truncate">{result.name}</span>
-                                                                            {result.vmid && (
-                                                                                <span className="text-xs text-gray-500">#{result.vmid}</span>
-                                                                            )}
-                                                                            <span className={`px-1.5 py-0.5 text-xs rounded ${
-                                                                                result.status === 'running' ? 'bg-green-500/20 text-green-400' :
-                                                                                result.status === 'stopped' ? 'bg-gray-500/20 text-gray-400' :
-                                                                                'bg-yellow-500/20 text-yellow-400'
-                                                                            }`}>
-                                                                                {result.status}
-                                                                            </span>
-                                                                            {result.match_field === 'tag' && (
-                                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400">Tag-Match</span>
-                                                                            )}
-                                                                            {/* LW Oct 2026 - a hit by MAC, notes or an address other than the one shown below */}
-                                                                            {SEARCH_INDEX_FIELDS.includes(result.match_field) && result.match_value && result.match_value !== result.ip && (
-                                                                                <span className="px-1.5 py-0.5 text-xs rounded bg-purple-500/20 text-purple-400 truncate max-w-full" data-search-match={result.match_field}>
-                                                                                    {searchMatchLabel(t, result.match_field)}: {result.match_value}{result.match_net ? ` (${result.match_net})` : ''}
-                                                                                </span>
-                                                                            )}
-                                                                        </div>
-                                                                        <div className="text-xs text-gray-500 flex items-center gap-2 mt-0.5">
-                                                                            <span>{result.cluster_name}</span>
-                                                                            {result.node && <span>• {result.node}</span>}
-                                                                            {result.ip && <span>• {result.ip}</span>}
-                                                                        </div>
-                                                                        {/* tags - highlight matching ones in orange */}
-                                                                        {result.tags && (
-                                                                            <div className="flex flex-wrap gap-1 mt-1">
-                                                                                {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).slice(0, 4).map((tag, i) => (
-                                                                                    <span key={i} className={`px-1.5 py-0.5 text-xs rounded ${
-                                                                                        (globalSearchResults.highlight || globalSearchQuery.toLowerCase().replace('tag:', '').split(',')).some(q => q.trim() && tag.trim().toLowerCase().includes(q.trim()))
-                                                                                        ? 'bg-proxmox-orange/30 text-proxmox-orange ring-1 ring-proxmox-orange/50'
-                                                                                        : 'bg-proxmox-dark text-gray-400'
-                                                                                    }`}>
-                                                                                        {tag.trim()}
-                                                                                    </span>
-                                                                                ))}
-                                                                                {(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length > 4 && (
-                                                                                    <span className="px-1.5 py-0.5 text-xs rounded bg-proxmox-dark text-gray-500">
-                                                                                        +{(Array.isArray(result.tags) ? result.tags : result.tags.split(';')).filter(t => t.trim()).length - 4}
-                                                                                    </span>
-                                                                                )}
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
-                                                                    <button
-                                                                        onClick={(e) => {
-                                                                            e.stopPropagation();
-                                                                            toggleFavorite(result.type, result.cluster_id, result.vmid, result.type === 'vm' ? 'qemu' : 'lxc', result.name);
-                                                                        }}
-                                                                        className="p-1 hover:bg-proxmox-dark rounded text-gray-500 hover:text-yellow-400 flex-shrink-0"
-                                                                        title={t('toggleFavorite') || 'Toggle favorite'}
-                                                                    >
-                                                                        <Icons.Star className={`w-4 h-4 ${isFavorite(result.type, result.cluster_id, result.vmid, result.name) ? 'fill-yellow-400 text-yellow-400' : ''}`} />
-                                                                    </button>
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                    {/* Keyboard hints */}
-                                                    {globalSearchResults.results.length > 0 && (
-                                                        <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-3">
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">↑↓</kbd>
-                                                                navigate
-                                                            </span>
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↵</kbd>
-                                                                {t('pressEnterToOpen') || 'jump to VM'}
-                                                            </span>
-                                                            <span className="flex items-center gap-1">
-                                                                <kbd className="px-1 py-0.5 bg-proxmox-dark rounded text-gray-400">esc</kbd>
-                                                                close
-                                                            </span>
-                                                        </div>
-                                                    )}
-                                                    {/* Keyboard hint */}
-                                                    {globalSearchResults.results.length > 0 && (
-                                                        <div className="p-2 border-t border-proxmox-border text-xs text-gray-500 flex items-center gap-2">
-                                                            <kbd className="px-1.5 py-0.5 bg-proxmox-dark rounded text-gray-400">↑µ</kbd>
-                                                            <span>{t('pressEnterToOpen') || 'Press Enter to jump to VM'}</span>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
+                                    {hdrSearch}
+
+                                    {hdrCorpSwitch}
                                     
                                     {/* light/dark toggle for corporate */}
-                                    {isCorporate && (
-                                        <button
-                                            onClick={() => {
-                                                const order = { system: 'light', light: 'dark', dark: 'system' };
-                                                const next = order[corpMode] || 'system';
-                                                const theme = next === 'system' ? 'system'
-                                                            : (next === 'light' ? 'corporateLight' : 'corporateDark');
-                                                // in system mode applyTheme() owns data-corp-theme and the
-                                                // local toggle must stop claiming to know better
-                                                if (next === 'system') {
-                                                    localStorage.removeItem('corp-theme');
-                                                } else {
-                                                    document.body.dataset.corpTheme = next === 'light' ? 'light' : '';
-                                                    localStorage.setItem('corp-theme', next === 'light' ? 'light' : '');
-                                                }
-                                                applyTheme(theme);
-                                                setCorpMode(next);
-                                                setCorpLight(next === 'light' ||
-                                                    (next === 'system' && document.body.dataset.corpTheme === 'light'));
-                                                // MK May 2026 — also persist on server so checkSession on next
-                                                // F5 doesn't apply a stale user.theme that mismatches the local
-                                                // corp-theme toggle (caused taskbar bg-proxmox-dark/50 to render
-                                                // light-on-dark when toggle and server preference drifted).
-                                                // LW Oct 2026 (#1189) - not while an admin pins Corporate over the
-                                                // user's own layout: the stored theme is that layout's and would
-                                                // paint it in a Corporate palette once the lock is lifted. The
-                                                // pinned Corporate goes by corp-theme in this browser anyway.
-                                                if (layoutLocked && user?.ui_layout !== 'corporate') return;
-                                                fetch(`${API_URL}/user/preferences`, {
-                                                    method: 'PUT', credentials: 'include',
-                                                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                                                    body: JSON.stringify({ theme })
-                                                }).catch(() => {});
-                                            }}
-                                            className="p-1.5 rounded hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
-                                            title={corpMode === 'system' ? (t('lightMode') || 'Light Mode')
-                                                 : corpMode === 'light' ? (t('darkMode') || 'Dark Mode')
-                                                 : (t('followSystem') || 'Follow system')}
-                                        >
-                                            {corpMode === 'system' ? <Icons.Monitor />
-                                             : corpMode === 'light' ? <Icons.Moon /> : <Icons.Sun />}
-                                        </button>
-                                    )}
+                                    {hdrThemeToggle}
 
                                     {/* language switcher + settings */}
                                     {!isCorporate && <LanguageSwitcher />}
@@ -20693,15 +21526,7 @@
                                         <PushBellButton authFetch={authFetch} addToast={addToast} t={t} />
                                     )}
 
-                                    {isAdmin && (
-                                        <button
-                                            onClick={() => setShowSettings(true)}
-                                            className={`${isCorporate ? 'p-1' : 'p-2.5'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors text-gray-400 hover:text-white`}
-                                            title={t('pegaproxSettings')}
-                                        >
-                                            <Icons.Settings className={isCorporate ? 'w-4 h-4' : undefined} />
-                                        </button>
-                                    )}
+                                    {hdrSettings}
 
                                     {/* Live Status Indicator (corporate: status in bottom panel) */}
                                     {!isCorporate && (
@@ -20757,114 +21582,50 @@
                                     )}
                                     
                                     {/* Task Bar Toggle — brings the bar back after it's been closed (#648; show it whenever the bar is hidden so there's no dead end, per si458's #649) */}
-                                    {!showTaskBar && (
-                                        <button
-                                            onClick={() => setShowTaskBar(true)}
-                                            className="relative flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors"
-                                            title={t('tasks')}
-                                        >
-                                            <Icons.Layers />
-                                            {tasks.filter(task => task && task.status === 'running').length > 0 && (
-                                                <span className="absolute -top-1 -right-1 w-4 h-4 bg-blue-500 rounded-full text-xs flex items-center justify-center animate-pulse">
-                                                    {tasks.filter(task => task && task.status === 'running').length}
-                                                </span>
-                                            )}
-                                            {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length > 0 && (
-                                                <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-xs flex items-center justify-center">
-                                                    {tasks.filter(task => task && (task.status === 'failed' || task.status === 'error')).length}
-                                                </span>
-                                            )}
-                                        </button>
-                                    )}
+                                    {hdrTaskToggle}
                                     
                                     {/* LW: Feb 2026 - user menu, compact in corporate */}
-                                    <div className="relative z-50">
-                                        <button
-                                            onClick={() => setShowUserMenu(!showUserMenu)}
-                                            data-user-menu=""
-                                            className={`flex items-center gap-2 ${isCorporate ? 'px-2 py-1' : 'px-3 py-2'} bg-proxmox-dark border border-proxmox-border rounded-lg hover:border-proxmox-orange/50 transition-colors`}
-                                        >
-                                            <UserAvatar
-                                                user={user}
-                                                sizeClass={isCorporate ? 'w-6 h-6' : 'w-8 h-8'}
-                                                textClass={isCorporate ? 'text-[11px]' : 'text-sm'}
-                                            />
-                                            {!isCorporate && <span className="text-sm text-gray-300 hidden sm:inline">{user?.display_name || user?.username}</span>}
-                                            <Icons.ChevronDown className={isCorporate ? 'w-3 h-3' : undefined} />
-                                        </button>
-                                        
-                                        {showUserMenu && (
-                                            <>
-                                                <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
-                                                <div className="absolute right-0 top-full mt-2 w-56 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
-                                                    <div className="p-3 border-b border-proxmox-border">
-                                                        <p className="font-medium text-white">{user?.display_name || user?.username}</p>
-                                                        <p className="text-xs text-gray-400">{user?.role === 'admin' ? t('roleAdmin') : user?.role === 'user' ? t('roleUser') : t('roleViewer')}</p>
-                                                    </div>
-                                                    <div className="py-1">
-                                                        <button
-                                                            onClick={() => {
-                                                                setShowUserMenu(false);
-                                                                setShowProfile(true);
-                                                            }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.User />
-                                                            {t('myProfile')}
-                                                        </button>
-                                                        {isAdmin && (
-                                                            <button
-                                                                onClick={() => {
-                                                                    setShowUserMenu(false);
-                                                                    setShowSettings(true);
-                                                                }}
-                                                                className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                            >
-                                                                <Icons.Settings />
-                                                                {t('pegaproxSettings')}
-                                                            </button>
-                                                        )}
-                                                        {/* MK May 2026 — discoverability: hotkey list */}
-                                                        <button
-                                                            onClick={() => { setShowUserMenu(false); setShowShortcutsModal(true); }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.Keyboard />
-                                                            <span className="flex-1">{t('keyboardShortcuts') || 'Keyboard shortcuts'}</span>
-                                                            <kbd className="text-[10px] opacity-60 px-1 rounded" style={{ border: '1px solid #485764' }}>?</kbd>
-                                                        </button>
-                                                        <button
-                                                            onClick={() => { setShowUserMenu(false); setShowApiReference(true); }}
-                                                            className="w-full px-4 py-2 text-left text-gray-300 hover:bg-proxmox-hover transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.Book />
-                                                            {t('apiRefTitle')}
-                                                        </button>
-                                                        <button
-                                                            onClick={() => {
-                                                                setShowUserMenu(false);
-                                                                logout();
-                                                            }}
-                                                            className="w-full px-4 py-2 text-left text-red-400 hover:bg-red-500/10 transition-colors flex items-center gap-2"
-                                                        >
-                                                            <Icons.LogOut />
-                                                            {t('logout')}
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </>
-                                        )}
-                                    </div>
+                                    {hdrUserMenu}
                                 </div>
                             </div>
                         </div>
                     </header>
+                    )}
+
+                    {/* LW Nov 2026 - Corporate Redesigned: one strip in the flow under the header for the node,
+                        cluster and hardware banners, the active alerts of the selected cluster and the live link */}
+                    {isCorpRedesigned && (
+                        <CrBoundary id="alerts">
+                            <CrAlertStrip clusters={clusters} status={allClusterMetrics} selectedId={selectedCluster?.id || null}
+                                nodes={clusterMetrics} sideData={sidebarClusterData} haAlerts={nodeAlerts} live={wsConnected} nav={crTaskNav} />
+                        </CrBoundary>
+                    )}
+
+                    {offerCorpRedesigned && !corpClassicNoticeClosed && (
+                        <div className="corp-info-banner" data-corp-classic-notice="">
+                            <div className="flex items-center gap-2">
+                                <Icons.Info className="w-4 h-4 flex-shrink-0" />
+                                <span>{t('corpClassicDeprecated')}</span>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                                <button type="button" className="corp-info-action" onClick={switchToCorpRedesigned}>
+                                    {t('corpClassicSwitchNow')}
+                                </button>
+                                <button type="button" className="corp-info-dismiss" onClick={() => {
+                                    setCorpClassicNoticeClosed(true);
+                                    try { localStorage.setItem('corp-classic-notice', 'closed'); } catch (_) {}
+                                }}>
+                                    {t('dismiss') || 'DISMISS'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
 
                     {/* LW: Feb 2026 - corporate warning banner */}
                     {/* NS May 2026 (#380): include affected cluster/node names in the
                         message so admins know WHICH ones are down. Truncate long lists
                         with "+N more" so the banner doesn't blow up at scale. */}
-                    {isCorporate && !warningBannerDismissed && (() => {
+                    {isCorporate && !isCorpRedesigned && !warningBannerDismissed && (() => {
                         const fmt = (template, vars) => String(template).replace(/\{(\w+)\}/g, (_, k) => vars[k] != null ? vars[k] : '');
                         const truncateNames = (names, max = 3) => {
                             if (!names || names.length === 0) return '';
@@ -20917,11 +21678,32 @@
                         {mobileSidebarOpen && <div className="pp-drawer-backdrop" onClick={() => setMobileSidebarOpen(false)} />}
                         <div className={`flex pp-main-row ${isCorporate ? 'gap-0' : 'gap-6'}`}>
                             {/* LW: Feb 2026 - sidebar, resizable in corporate */}
-                            <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}`} style={isCorporate ? {width: sidebarWidth + 'px'} : undefined}>
+                            <div className={`pp-sidebar ${mobileSidebarOpen ? 'pp-sidebar-open' : ''} ${isCorporate ? 'flex-shrink-0 corporate-sidebar' : 'w-72 flex-shrink-0'}${isCorpRedesigned ? (crSidebarFolded ? ' cr-sidebar cr-sidebar-folded' : ' cr-sidebar') : ''}`}
+                                style={isCorporate ? {width: (isCorpRedesigned ? (crSidebarFolded ? CR_SIDEBAR.rail : crSidebarW) : sidebarWidth) + 'px'} : undefined}
+                                {...(isCorpRedesigned ? { role: 'navigation', 'aria-label': t('crInventory') } : {})}>
                                 {/* #189 - the drawer covers the header, so the header toggle cannot close it */}
                                 <button className="pp-drawer-close"
                                     aria-label={t('close') || 'Close'}
                                     onClick={() => setMobileSidebarOpen(false)}>&times;</button>
+                                {/* LW Oct 2026 - Corporate Redesigned: folded to a rail of icons */}
+                                {isCorpRedesigned && crSidebarFolded && (
+                                    <CrSidebarRail active={sidebarViewMode} onView={setSidebarViewMode} onExpand={() => crFoldSidebar(false)}
+                                        // LW Nov 2026 - the Tools section of the unfolded sidebar, same conditions
+                                        tools={clusters.length > 0 ? [
+                                            { id: 'guests', show: true, active: sidebarGuests, label: t('allGuestsTitle'), onClick: openGuests, icon: Icons.Monitor },
+                                            { id: 'topology', show: true, active: sidebarTopology, label: t('topologyView') || 'Topology', onClick: openTopology, icon: Icons.Network },
+                                            { id: 'worldmap', show: true, active: sidebarWorldmap, label: t('worldMap') || 'World Map', onClick: openWorldmap, icon: Icons.Globe },
+                                            { id: 'autoinstall', show: canAutoInstall && !haStandby, active: sidebarAutoInstall, label: t('autoInstall'), onClick: () => openAutoInstall(), icon: Icons.Disc },
+                                            { id: 'xhm', show: hasXhmPair, active: sidebarXHM, label: t('xhmTitle') || 'Hypervisor Migration', onClick: openXhm, icon: Icons.FolderInput },
+                                            { id: 'mcevpn', show: clusters.length >= 2, active: sidebarMultiSdn, label: t('mcevpnTitle') || 'Multi-Cluster EVPN', onClick: openMultiSdn, icon: Icons.Layers },
+                                        ].filter(tool => tool.show) : []}
+                                        views={[
+                                            { id: 'tree', icon: Icons.Server, label: t('treeView') || 'Hosts & VMs' },
+                                            { id: 'pools', icon: Icons.Folder, label: t('poolView') || 'Pools' },
+                                            { id: 'datastores', icon: Icons.Database, label: t('datastoreView') || 'Datastores' },
+                                            { id: 'networks', icon: Icons.Network, label: t('networkView') || 'Networks' },
+                                        ]} />
+                                )}
                                 <div className={`sticky top-6 ${isCorporate ? 'space-y-0.5 px-1 py-2' : 'space-y-3 pr-1'} pb-4`} style={{ maxHeight: 'calc(100vh - 3rem)', overflowY: 'auto', overflowX: 'hidden', scrollbarWidth: 'thin', scrollbarColor: '#4a4a4a transparent' }}>
                                     {/* LW: view switcher (tree/pools/datastores) - horizontal icon toggle */}
                                     {isCorporate && (
@@ -20941,6 +21723,12 @@
                                                     <view.icon className="w-4 h-4" />
                                                 </button>
                                             ))}
+                                            {isCorpRedesigned && (
+                                                <button type="button" className="cr-side-fold" onClick={() => crFoldSidebar(true)}
+                                                    data-cr-fold="" aria-label={t('crCollapseSidebar')} title={t('crCollapseSidebar')}>
+                                                    <Icons.ChevronLeft className="w-4 h-4" />
+                                                </button>
+                                            )}
                                         </div>
                                     )}
                                     {/* LW: Mar 2026 - sidebar quick-filter + NS: type chips */}
@@ -21212,6 +22000,8 @@
                                                             <button
                                                                 onClick={() => setCollapsedGroups(prev => ({...prev, [group.id]: !prev[group.id]}))}
                                                                 className="w-4 h-4 flex items-center justify-center text-gray-500 hover:text-white"
+                                                                aria-label={isCorpRedesigned ? (isCollapsed ? t('crExpandNamed') : t('crCollapseNamed')).replace('{name}', group.name) : undefined}
+                                                                aria-expanded={isCorpRedesigned ? !isCollapsed : undefined}
                                                             >
                                                                 {isCollapsed ? <Icons.ChevronRight className="w-3 h-3" /> : <Icons.ChevronDown className="w-3 h-3" />}
                                                             </button>
@@ -21228,7 +22018,8 @@
                                                         
                                                         {/* Group Clusters */}
                                                         {!isCollapsed && (
-                                                            <div className={isCorporate ? 'ml-5 space-y-0' : 'ml-4 space-y-1.5'}>
+                                                            <div className={isCorporate ? 'ml-5 space-y-0' : 'ml-4 space-y-1.5'}
+                                                                role={crSideTree ? 'tree' : undefined} aria-label={crSideTree ? group.name : undefined}>
                                                                 {groupClusters.map((cluster, idx) => (
                                                                     <React.Fragment key={cluster.id}>
                                                                         <ClusterSidebarItem
@@ -21254,6 +22045,7 @@
                                                                             hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                             onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                             onCheckConnection={setConnCheckCluster}
+                                                                            treeItem={crSideTree}
                                                                         />
                                                                         {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
                                                                         {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: 'var(--corp-border-subtle)', marginLeft: '20px'}} />}
@@ -21271,9 +22063,11 @@
                                                 if (ungroupedClusters.length === 0) return null;
                                                 
                                                 return (
-                                                    <div className={isCorporate ? (clusterGroups.length > 0 ? 'space-y-0 pt-3' : 'space-y-0') : 'space-y-1.5'}>
+                                                    <div className={isCorporate ? (clusterGroups.length > 0 ? 'space-y-0 pt-3' : 'space-y-0') : 'space-y-1.5'}
+                                                        role={crSideTree ? 'tree' : undefined} aria-label={crSideTree ? (clusterGroups.length > 0 ? t('ungrouped') : t('crInventory')) : undefined}>
                                                         {clusterGroups.length > 0 && (
-                                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`}>
+                                                            <div className={`flex items-center gap-2 px-2 ${isCorporate ? 'py-0.5' : 'py-1.5'} text-gray-500`}
+                                                                aria-hidden={crSideTree || undefined}>
                                                                 <Icons.Server className={isCorporate ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
                                                                 <span className="text-xs uppercase tracking-wider">{t('ungrouped')}</span>
                                                             </div>
@@ -21303,6 +22097,7 @@
                                                                     hwHealth={allClusterMetrics[cluster.id]?.data?.hardware?.health}
                                                                     onContextMenu={(type, target, pos) => setCtxMenu({type, target, position: pos})}
                                                                     onCheckConnection={setConnCheckCluster}
+                                                                    treeItem={crSideTree}
                                                                 />
                                                                 {sidebarViewMode === 'datastores' ? renderDatastoreTree(cluster.id) : sidebarViewMode === 'pools' ? renderPoolTree(cluster.id) : sidebarViewMode === 'networks' ? renderNetworkTree(cluster.id) : renderInlineNodeTree(cluster.id)}
                                                                         {expandedSidebarClusters[cluster.id] && <div className="h-px my-0.5" style={{background: 'var(--corp-border-subtle)', marginLeft: '20px'}} />}
@@ -21627,9 +22422,12 @@
                                 </div>
                             </div>
                             {/* LW: sidebar resize handle */}
-                            {isCorporate && (
+                            {isCorporate && (isCorpRedesigned ? (
+                                <CrSidebarHandle width={crSidebarW} collapsed={crSidebarFolded} onCommit={crSetSidebarW}
+                                    onToggle={() => crFoldSidebar(!crSidebarFolded)} />
+                            ) : (
                                 <div className="corp-resize-handle" onMouseDown={handleSidebarResizeStart} title="Drag to resize" />
-                            )}
+                            ))}
                             {/* NS: hover tooltip popover */}
                             {sidebarTooltip && (() => {
                                 const { type, data, pos } = sidebarTooltip;
@@ -21674,53 +22472,20 @@
                                 }
                                 return null;
                             })()}
-                            <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}`}>
+                            <div className={`flex-1 min-w-0 ${isCorporate ? 'px-3 py-2' : ''}${isCorpRedesigned ? ' cr-main' : ''}`}
+                                id={isCorpRedesigned ? 'cr-main' : undefined} tabIndex={isCorpRedesigned ? -1 : undefined}>
                                 {selectedCluster ? (
                                     <div key={selectedCluster?.id} className={isCorporate ? 'space-y-3 corp-content-fade' : 'space-y-6'}>
                                         {/* LW: Feb 2026 - tabs, underline in corporate vs pills in modern */}
+                                        {isCorpRedesigned ? (
+                                            <CrTabs id="cluster" active={activeTab} onChange={setActiveTab} label={clusterLabel(selectedCluster)}
+                                                tabs={clusterTabList.map(tab => ({ id: tab.id, label: tab.labelKey ? t(tab.labelKey) : tab.label, icon: <tab.icon /> }))} />
+                                        ) : (
                                         <div className={isCorporate
                                             ? 'corp-tab-strip'
                                             : 'flex items-center gap-1 p-1 bg-proxmox-card border border-proxmox-border rounded-xl w-fit flex-wrap'
                                         }>
-                                            {(() => {
-                                                // NS May 2026 (#381) — splice plugin frontend tabs between
-                                                // the management Plugins tab and Settings. Plugin tabs only
-                                                // render when the manifest declared has_frontend AND the
-                                                // server normalised frontend_route to /api/plugins/<id>/...
-                                                // (server-side validation in pegaprox/api/plugins.py).
-                                                // #642 - and only on the clusters it was limited to
-                                                const pluginFrontendTabs = (enabledPlugins || [])
-                                                    .filter(p => p && p.has_frontend && p.frontend_route)
-                                                    .filter(p => pluginAppliesToCluster(p, selectedCluster?.id))
-                                                    .map(p => ({
-                                                        id: `plugin:${p.id}`,
-                                                        label: p.name || p.id,  // shown verbatim
-                                                        icon: Icons.Package,
-                                                        _plugin: p,
-                                                    }));
-                                                return [
-                                                    { id: 'overview', labelKey: 'overview', icon: Icons.Activity },
-                                                    { id: 'resources', labelKey: 'resources', icon: Icons.Server },
-                                                    { id: 'datacenter', labelKey: 'datacenter', icon: Icons.HardDrive },
-                                                    { id: 'datastore', labelKey: 'datastore', icon: Icons.Database },
-                                                    { id: 'automation', labelKey: 'automation', icon: Icons.Zap },
-                                                    { id: 'reports', labelKey: 'reports', icon: Icons.BarChart },
-                                                    { id: 'timeline', labelKey: 'tlTab', icon: Icons.Clock },
-                                                    { id: 'compliance', labelKey: 'compliance', icon: Icons.Lock },
-                                                    { id: 'site-recovery', labelKey: 'siteRecovery', icon: Icons.Shield },
-                                                    { id: 'plugins', labelKey: 'plugins', icon: Icons.Package },
-                                                    ...pluginFrontendTabs,
-                                                    { id: 'settings', labelKey: 'settings', icon: Icons.Settings },
-                                                ];
-                                            })().filter(tab => {
-                                                // #390 — admin role always passes (matches backend has_permission shortcut).
-                                                if (tab.id === 'site-recovery') return can('site_recovery.view');
-                                                if (tab.id === 'plugins') return can('plugins.view');
-                                                // compliance only reads, so a standby keeps it (#625)
-                                                if (tab.id === 'compliance') return holds('admin.audit') || holds('node.maintenance') || holds('changes.view');
-                                                if (typeof tab.id === 'string' && tab.id.startsWith('plugin:')) return can('plugins.view');
-                                                return true;
-                                            }).map(tab => (
+                                            {clusterTabList.map(tab => (
                                                 <button
                                                     key={tab.id}
                                                     onClick={() => setActiveTab(tab.id)}
@@ -21738,6 +22503,7 @@
                                                 </button>
                                             ))}
                                         </div>
+                                        )}
 
                                         {/* Overview Tab */}
                                         {activeTab === 'overview' && (
@@ -21748,6 +22514,7 @@
                                                 node={selectedSidebarNode.name}
                                                 clusterId={selectedSidebarNode.clusterId}
                                                 clusterHost={selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster?.host : (clusters.find(c => c.id === selectedSidebarNode.clusterId)?.host || '')}
+                                                clusterName={clusterLabel(selectedSidebarNode.clusterId === selectedCluster?.id ? selectedCluster : clusters.find(c => c.id === selectedSidebarNode.clusterId))}
                                                 clusterMetrics={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterMetrics : (sidebarClusterData[selectedSidebarNode.clusterId]?.metrics || {})}
                                                 clusterResources={selectedSidebarNode.clusterId === selectedCluster?.id ? clusterResources : (sidebarClusterData[selectedSidebarNode.clusterId]?.resources || [])}
                                                 onBack={() => setSelectedSidebarNode(null)}
@@ -21757,6 +22524,7 @@
                                                 onStartUpdate={handleStartUpdate}
                                                 onSelectVm={(vm) => { setSelectedSidebarVm({...vm, _clusterId: selectedSidebarNode.clusterId}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                                 addToast={addToast}
+                                                crKind={isCorpRedesigned ? ((clusters.find(c => c.id === selectedSidebarNode.clusterId) || {}).cluster_type || 'proxmox') : undefined}
                                             />
                                             ) : isCorporate && selectedSidebarQdevice ? (
                                             <QdeviceDetail
@@ -21768,7 +22536,14 @@
                                             ) : (
                                             <div className={isCorporate ? 'space-y-3' : 'grid grid-cols-1 xl:grid-cols-3 gap-6'}>
                                                 {/* LW: Mar 2026 - content header strip for corporate overview */}
-                                                {isCorporate && selectedCluster && (
+                                                {isCorporate && selectedCluster && (isCorpRedesigned ? (
+                                                    <CrClusterHeader cluster={selectedCluster} status={allClusterMetrics[selectedCluster.id]?.data}
+                                                        healthBadge={selectedCluster.connected && <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />}
+                                                        onRefresh={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }}
+                                                        onRename={haReadOnly ? undefined : () => { setRenamingCluster(selectedCluster); setRenameValue(selectedCluster.display_name || selectedCluster.name || ''); }}
+                                                        onReconfigure={!haReadOnly && isAdmin ? () => setReconfigureCluster(selectedCluster) : undefined}
+                                                        onDelete={!haReadOnly && isAdmin ? () => handleDeleteCluster(selectedCluster.id) : undefined} />
+                                                ) : (
                                                     <div className="corp-content-header">
                                                         <div className="flex items-center gap-2">
                                                             <Icons.Database className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
@@ -21795,11 +22570,12 @@
                                                                 <ClusterHealthBadge clusterId={selectedCluster.id} authFetch={authFetch} apiUrl={API_URL} />
                                                             )}
                                                         </div>
-                                                        <button onClick={() => loadTabData('overview')} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
+                                                        {/* NS Nov 2026 - loadTabData only exists in the node modal, the click threw; same reads as the Cloud shell's refresh */}
+                                                        <button onClick={() => { const cid = selectedCluster.id; fetchClusterMetrics(cid); fetchClusterResources(cid); fetchClusterDatastores(cid); fetchClusterNetworks(cid); fetchClusterPools(cid); fetchTasks(cid); }} className="text-xs" style={{color: 'var(--corp-text-muted)', background: 'none', border: 'none', cursor: 'pointer'}}>
                                                             <Icons.RotateCw className="w-3 h-3 inline mr-1" />{t('refreshData') || 'Refresh'}
                                                         </button>
                                                     </div>
-                                                )}
+                                                ))}
                                                 {/* NS: cluster overview summary cards with donut gauges */}
                                                 {isCorporate && selectedCluster && (() => {
                                                     const metrics = Object.values(clusterMetrics).filter(m => m && m.cpu_percent != null);
@@ -21838,6 +22614,17 @@
                                                             </svg>
                                                         );
                                                     };
+                                                    if (isCorpRedesigned) {
+                                                        const cpuKnown = (_dcRes && _dcRes.cpu && _dcRes.cpu.percent != null) || metrics.length > 0;
+                                                        return (
+                                                            <CrClusterSummary cpu={cpuKnown ? avgCpu : null} cpuSub={`${metrics.length} ${t('nodes').toLowerCase()}`}
+                                                                mem={totalMem > 0 ? { used: usedMem, total: totalMem, pct: memPct } : null}
+                                                                storage={totalStorage > 0 ? { used: usedStorage, total: totalStorage, pct: storagePct } : null}
+                                                                guests={{ running: runningVms, total: allVms.length }}>
+                                                                <CapacityOutlookCard clusterId={selectedCluster?.id} t={t} getAuthHeaders={getAuthHeaders} />
+                                                            </CrClusterSummary>
+                                                        );
+                                                    }
                                                     return (
                                                         <div className="corp-overview-grid">
                                                             <div className="corp-overview-card">
@@ -21887,6 +22674,10 @@
                                                     const clusterStatus = allClusterMetrics[selectedCluster.id]?.data?.cluster;
                                                     // #326: standalone nodes have no corosync -> no quorum concept, don't show red badge
                                                     const isStandalone = clusterStatus?.standalone === true;
+                                                    // no status read yet (or every read refused): no guess from the node rows,
+                                                    // that is when the quorum is most in doubt. A read status without quorate
+                                                    // (XCP-ng) keeps the guess it always had
+                                                    const quorumUnread = !clusterStatus;
                                                     const isQuorate = clusterStatus?.quorate != null ? !!clusterStatus.quorate : onlineCount > (totalNodes || onlineCount) / 2;
                                                     return (
                                                         <div className="corp-services-bar">
@@ -21900,6 +22691,8 @@
                                                                 <span className="corp-svc-label">{isStandalone ? 'Mode' : 'Quorum'}</span>
                                                                 {isStandalone ? (
                                                                     <span className="corp-badge" style={{background: 'rgba(56,139,253,0.12)', color: '#58a6ff', border: '1px solid rgba(56,139,253,0.25)', fontSize: 11, padding: '0 5px'}}>Standalone</span>
+                                                                ) : quorumUnread ? (
+                                                                    <span className="corp-badge corp-quorum-unread" style={{color: 'var(--corp-text-muted)', border: '1px solid var(--corp-border-medium)', fontSize: 11, padding: '0 5px'}}>-</span>
                                                                 ) : (
                                                                     <span className="corp-badge" style={isQuorate
                                                                         ? {background: 'rgba(96,181,21,0.12)', color: '#60b515', border: '1px solid rgba(96,181,21,0.25)', fontSize: 11, padding: '0 5px'}
@@ -22192,12 +22985,12 @@
                                                                     if (d < 86400) return `${Math.floor(d / 3600)}h ${t('timeAgo')}`;
                                                                     return `${Math.floor(d / 86400)}d ${t('timeAgo')}`;
                                                                 };
-                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : '#728b9a';
+                                                                const statusColor = (s) => s === 'running' ? '#49afd9' : s === 'OK' || s === 'ok' ? '#60b515' : s === 'error' || s === 'failed' ? '#f54f47' : /^WARNINGS/.test(s || '') ? '#f7b428' : '#728b9a';
                                                                 return (
                                                                     <div>
                                                                         {recent.map((task, i) => (
                                                                             <div key={task.upid || i} className="corp-tasks-item">
-                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK') ? 'failed' : (task.status || task.exitstatus))}}></span>
+                                                                                <span className="corp-tasks-status" style={{background: statusColor((task.status !== 'running' && task.exitstatus && task.exitstatus !== 'OK' && !/^WARNINGS/.test(task.exitstatus)) ? 'failed' : (task.status || task.exitstatus))}}></span>
                                                                                 <span className="corp-tasks-desc">{task.type || task.worker_type || '?'}{task.id ? ` ${task.id}` : ''}</span>
                                                                                 <span className="corp-tasks-node">{task.node || ''}</span>
                                                                                 <span className="corp-tasks-time">{relTime(task.starttime || task.pstart)}</span>
@@ -22238,6 +23031,8 @@
                                                     <CorporateVmDetailView
                                                         vm={selectedSidebarVm}
                                                         clusterId={selectedSidebarVm._clusterId || selectedCluster.id}
+                                                        clusterType={(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster).cluster_type || 'proxmox'}
+                                                        clusterName={clusterLabel(clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || selectedCluster)}
                                                         onAction={handleVmAction}
                                                         onOpenConsole={handleOpenConsole}
                                                         onOpenSpice={handleOpenSpice}
@@ -22254,6 +23049,18 @@
                                                         onShowMetrics={(vm) => setCorpMetricsVm(vm)}
                                                         addToast={addToast}
                                                         authFetch={authFetch}
+                                                        backupStatus={isCorpRedesigned ? vmsBackupStatus : undefined}
+                                                        backupFor={isCorpRedesigned ? vmsBackupFor : undefined}
+                                                        crKind={isCorpRedesigned ? ((clusters.find(c => c.id === (selectedSidebarVm._clusterId || selectedCluster.id)) || {}).cluster_type || 'proxmox') : undefined}
+                                                        crNav={crTaskNav}
+                                                        crOpen={isCorpRedesigned ? (what, cid) => {
+                                                            // LW Oct 2026 - the module behind a line of the guest's health
+                                                            if (!crIntoCluster(cid)) return;
+                                                            crClearPick();
+                                                            if (what === 'ha') { setDatacenterSection('ha'); setActiveTab('datacenter'); }
+                                                            else if (what === 'drift') { setComplianceSubTab('drift'); setActiveTab('compliance'); }
+                                                            else { setCrDsSub(what); setActiveTab('datastore'); }
+                                                        } : undefined}
                                                     />
                                                 ) : (<>
                                                 {/* Sub-Tab Navigation */}
@@ -22398,7 +23205,18 @@
                                                 )}
                                                 
                                                 {/* Snapshot Overview Sub-Tab @gyptazy */}
-                                                {resourcesSubTab === 'snapshots' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same list, read, filter, selection and deletes as a table */}
+                                                {resourcesSubTab === 'snapshots' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="snapshots">
+                                                        <CrSnapOverview cluster={selectedCluster} rows={globalSnapshots} loading={snapshotsLoading} readErr={snapshotsReadErr}
+                                                            filterDate={snapshotFilterDate} onFilterDate={setSnapshotFilterDate}
+                                                            onFilter={() => applySnapshotFilter(selectedCluster.id)} onRefresh={() => fetchGlobalSnapshots(selectedCluster.id)}
+                                                            canDelete={canDeleteSnaps} selected={selectedSnaps} onSelect={setSelectedSnaps} keyOf={snapKey}
+                                                            onDelete={(snap) => deleteGlobalSnapshot(snap, selectedCluster.id)}
+                                                            onDeleteSelected={() => deleteSelectedSnapshots(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {resourcesSubTab === 'snapshots' && !isCorpRedesigned && (
                                                     <div className={isCorporate
                                                         ? 'corp-snap-overview'
                                                         : 'bg-proxmox-card border border-proxmox-border rounded-xl p-6 space-y-4'
@@ -22865,6 +23683,12 @@
                                                             setSelectedSidebarDatastore(null);
                                                             setExpandedSidebarClusters(prev => ({...prev, [selectedCluster.id]: true}));
                                                         } : undefined}
+                                                        onNodeClick={isCorpRedesigned ? (cid, name) => {
+                                                            setSelectedSidebarNode({ name, clusterId: cid });
+                                                            setSelectedSidebarVm(null);
+                                                            setSelectedSidebarDatastore(null);
+                                                            setActiveTab('overview');
+                                                        } : undefined}
                                                     />
                                                 )}
                                                 </>)}
@@ -22874,12 +23698,19 @@
                                         {/* Datacenter Tab */}
                                         {activeTab === 'datacenter' && (
                                             <DatacenterTab clusterId={selectedCluster.id} addToast={addToast}
-                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)} />
+                                                initialSection={datacenterSection} onSectionShown={() => setDatacenterSection(null)}
+                                                crDc={isCorpRedesigned ? { cluster: selectedCluster, entry: allClusterMetrics[selectedCluster.id], metrics: clusterMetrics,
+                                                    guests: clusterResources, stores: clusterDatastores, qdevice: qdeviceByCluster[selectedCluster.id], nav: crTaskNav } : undefined} />
                                         )}
 
                                         {/* Datastore Tab */}
                                         {activeTab === 'datastore' && (
-                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} sharedDatastoreData={clusterDatastores} />
+                                            <DatastoreTab clusterId={selectedCluster.id} addToast={addToast} initialStorage={selectedSidebarDatastore?.name || null} initialNode={selectedSidebarDatastore?.node || null} initialPick={selectedSidebarDatastore} sharedDatastoreData={clusterDatastores}
+                                                guests={isCorpRedesigned ? clusterResources : undefined}
+                                                crTasks={isCorpRedesigned ? tasks : undefined}
+                                                sharedDatastoreRead={isCorpRedesigned ? crDsReadsRef.current[selectedCluster.id] : undefined}
+                                                crSub={isCorpRedesigned ? crDsSub : undefined} onCrSubShown={isCorpRedesigned ? () => setCrDsSub(null) : undefined}
+                                                onOpenGuest={isCorpRedesigned ? (g) => crTaskNav.openGuest(selectedCluster.id, g) : undefined} />
                                         )}
 
                                         {/* Automation Tab - NS Jan 2026 - Combines Schedules, Tags, Alerts, Affinity, Scripts */}
@@ -22900,7 +23731,7 @@
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
                                                         { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
-                                                        { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield }
+                                                        { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield },
                                                     ].map(sub => (
                                                         <button
                                                             key={sub.id}
@@ -23074,6 +23905,18 @@
                                                                 <span>{t('pgHaLeaderAwayView')}</span>
                                                             </div>
                                                         )}
+                                                        {isCorpRedesigned && crAutoAlertsUnread && (
+                                                            <div data-cr-auto-alerts-unread={crAutoAlertsUnread.code || 0} role="alert" className="flex items-center gap-2 p-3 rounded-lg border border-proxmox-border bg-proxmox-dark text-sm text-gray-400">
+                                                                <Icons.AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                                                                <span className="min-w-0">{t('crAutoAlertsUnread').replace('{code}', crAutoAlertsUnread.code && crAutoAlertsUnread.code < 300 && crAutoAlertsUnread.error ? crAutoAlertsUnread.error : crAutoAlertsUnread.code ? `HTTP ${crAutoAlertsUnread.code}` : t('crAlNoAnswer'))}</span>
+                                                                {selectedCluster?.id && (
+                                                                    <button type="button" onClick={() => loadActiveAlerts(selectedCluster.id, true)} data-cr-auto-alerts-retry=""
+                                                                        className="ml-auto px-3 py-1.5 text-xs bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg shrink-0">
+                                                                        {t('retry')}
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        )}
                                                         {activeAlerts.length > 0 && (
                                                             <div className="space-y-2">
                                                                 <div className="text-sm font-semibold text-gray-300 flex items-center gap-2">
@@ -23227,6 +24070,14 @@
 
                                                 {/* Affinity Sub-Tab */}
                                                 {automationSubTab === 'affinity' && (
+                                                    /* LW Nov 2026 - Corporate Redesigned: the same rules, dialog and DELETE as a table */
+                                                    isCorpRedesigned && selectedCluster?.id ? (
+                                                    <CrBoundary key={selectedCluster.id} id="affinity">
+                                                        <CrAffinity cluster={selectedCluster} rules={clusterAffinityRules} readErr={affinityReadErr} loading={affinityLoading} canEdit={!haReadOnly}
+                                                            onNew={() => setShowAffinityModal(true)} onDelete={deleteClusterAffinityRule}
+                                                            onRefresh={() => loadClusterAffinityRules(selectedCluster.id)} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                    ) : (
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-center">
                                                             <p className="text-sm text-gray-400">{t('affinityDesc') || 'Keep VMs together or separate across nodes'}</p>
@@ -23267,6 +24118,7 @@
                                                             </div>
                                                         )}
                                                     </div>
+                                                    )
                                                 )}
                                                 
                                                 {/* Custom Scripts Sub-Tab */}
@@ -23457,8 +24309,24 @@
                                                     />
                                                 )}
 
+                                                {/* LW Nov 2026 - Corporate Redesigned draws its own Harden tab on the same routes,
+                                                    node, profile and values; the profile dialog is the classic one */}
+                                                {automationSubTab === 'hardening' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="harden">
+                                                        <CrHarden selectedCluster={selectedCluster} nodes={Object.keys(clusterMetrics).sort()} metrics={clusterMetrics}
+                                                            node={hardenNode} setNode={setHardenNode} profile={hardenProfile} pickProfile={pickHardenProfile}
+                                                            profiles={hardenProfiles} canManage={canManageHardenProfiles}
+                                                            onManage={() => setHardenProfilesDlg({})} onSaveSelection={(draft) => setHardenProfilesDlg({ draft })}
+                                                            params={hardenParams} setParams={setHardenParams} authFetch={authFetch}
+                                                            dialogs={hardenProfilesDlg && hardenProfiles ? (
+                                                                <HardeningProfilesDialog data={hardenProfiles} draft={hardenProfilesDlg.draft}
+                                                                    authFetch={authFetch} addToast={addToast} t={t}
+                                                                    onClose={() => setHardenProfilesDlg(null)} onChanged={hardenProfilesChanged} />
+                                                            ) : null} />
+                                                    </CrBoundary>
+                                                )}
                                                 {/* Harden PVE Node Sub-Tab - MK Mar 2026 */}
-                                                {automationSubTab === 'hardening' && (
+                                                {automationSubTab === 'hardening' && !isCorpRedesigned && (
                                                     <div className="space-y-4">
                                                         <div className="flex justify-between items-start">
                                                             <div>
@@ -23563,7 +24431,8 @@
                                                                 const notChecked = (id in controls) && _notChecked(ctrlData);
                                                                 const evidence = isVerboseData ? (ctrlData.evidence || '') : '';
                                                                 const checkCmd = isVerboseData ? (ctrlData.command || '') : '';
-                                                                const failed = hardenResults?.[id]?.success === false;
+                                                                // a noop answer is "nothing to apply", not a failed apply
+                                                                const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                 // NS Apr 2026 — three live states during apply:
                                                                 //   inFlight = this control is currently being applied (spinner)
                                                                 //   queued   = selected but not yet processed (dim badge)
@@ -23613,7 +24482,7 @@
                                                                                 {applied && <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded">{t('applied') || 'Applied'}</span>}
                                                                                 {notChecked && <span className="text-xs bg-gray-500/20 text-gray-300 px-2 py-0.5 rounded" title={(isVerboseData && ctrlData.not_checked) || t('hardenNotCheckedHint') || 'The check did not return a result, so it is neither passed nor failed and the score leaves it out'}>{t('hardenNotCheckedBadge') || 'Not checked'}</span>}
                                                                                 {applied && info.reboot && <span className="text-xs bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded font-semibold">{t('rebootRequired') || 'Reboot required'}</span>}
-                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded">{t('failed') || 'Failed'}</span>}
+                                                                                {failed && <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded" title={hardenResults[id].error || undefined}>{t('failed') || 'Failed'}</span>}
                                                                             </div>
                                                                             <p className="text-xs text-gray-400 mt-1">{info.desc}</p>
                                                                             <p className="text-xs text-gray-600 mt-0.5">{t('pveImpact') || 'PVE Impact'}: {info.impact}</p>
@@ -23739,7 +24608,7 @@
                                                                         const v = controls[id];
                                                                         const isObj = v && typeof v === 'object';
                                                                         const applied = isObj ? v.status === true : v === true;
-                                                                        const failed = hardenResults?.[id]?.success === false;
+                                                                        const failed = hardenResults?.[id]?.success === false && !hardenResults[id].noop;
                                                                         return [info.ref || '-', info.title || id, statusLbl(applied, failed, (id in controls) && _notChecked(v)), (info.impact || '').slice(0, 90)];
                                                                     });
                                                                     blocks.push({
@@ -23955,7 +24824,8 @@
                                                                     <div className="flex gap-3 text-xs">
                                                                         <button onClick={() => {
                                                                             const sel = {};
-                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false) sel[id] = true; });
+                                                                            const noop = hardenNoopIds();
+                                                                            Object.entries(controls).forEach(([id, v]) => { const applied = (v && typeof v === 'object') ? v.status : v; if (applied === false && !noop.has(id)) sel[id] = true; });
                                                                             setHardenSelected(sel);
                                                                         }} className="text-blue-400 hover:text-blue-300">{t('selectAll') || 'Select all'}</button>
                                                                         <button onClick={() => setHardenSelected({})} className="text-gray-500 hover:text-gray-400">{t('deselectAll') || 'Deselect all'}</button>
@@ -24017,8 +24887,19 @@
                                                     ))}
                                                 </div>
 
+                                                {/* LW Oct 2026 - Corporate Redesigned: the summary with its own read states, the
+                                                    rankings and guest counts from the guest list the dashboard holds */}
+                                                {reportSubTab === 'summary' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="reports">
+                                                    <CrReportsSummary cluster={selectedCluster} load={loadReportSummary}
+                                                        guests={clusterResources} nodes={clusterMetrics} nav={crTaskNav}
+                                                        guestsRead={Array.isArray(sidebarClusterData[selectedCluster.id]?.resources) || Array.isArray(allClusterGuests[selectedCluster.id])}
+                                                        onSub={setReportSubTab} onTab={setActiveTab} />
+                                                    </CrBoundary>
+                                                )}
+
                                                 {/* Summary Sub-Tab */}
-                                                {reportSubTab === 'summary' && (
+                                                {reportSubTab === 'summary' && !isCorpRedesigned && (
                                                     <div className="space-y-6">
                                                         <div className="flex justify-end">
                                                             <div className="flex items-center gap-2">
@@ -24046,7 +24927,7 @@
                                                                     </button>
                                                                 ))}
                                                                 <button
-                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); }}
+                                                                    onClick={() => { loadReportSummary(reportPeriod); loadTopVms(); loadTopVms('memory'); }}
                                                                     className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
                                                                     title={t('refresh') || 'Refresh'}
                                                                 >
@@ -24087,8 +24968,11 @@
                                                                 <button
                                                                     onClick={() => {
                                                                         const period = reportPeriod === 'hour' ? 'Last Hour' : reportPeriod === 'day' ? 'Last 24h' : 'Last Week';
-                                                                        const topCpuRows = topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]);
-                                                                        const topMemRows = [...topVms].sort((a,b)=>(b.mem_percent||0)-(a.mem_percent||0)).slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]);
+                                                                        // a list or figure that was not read says so, it is no 0 and no empty list
+                                                                        const unreadRow = [['-', 'Could not be read', '-']];
+                                                                        const said = (v, unit = '') => v == null ? '-' : `${v}${unit}`;
+                                                                        const topCpuRows = Array.isArray(topVms) ? topVms.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${((vm.cpu||0)*100).toFixed(1)}%`]) : unreadRow;
+                                                                        const topMemRows = Array.isArray(topVmsMem) ? topVmsMem.slice(0,10).map((vm,i) => [i+1, vm.name||vm.vmid, `${(vm.mem_percent||0).toFixed(1)}%`]) : unreadRow;
                                                                         generatePegaProxPDF({
                                                                             title: 'Cluster Report',
                                                                             subtitle: period,
@@ -24096,10 +24980,10 @@
                                                                             filename: `pegaprox-report-${selectedCluster?.name || 'cluster'}.pdf`,
                                                                             content: [
                                                                                 { type: 'stats', data: [
-                                                                                    { label: 'CPU', value: `${reportData?.cpu?.current || 0}%`, color: '#3b82f6' },
-                                                                                    { label: 'Memory', value: `${reportData?.memory?.current || 0}%`, color: '#22c55e' },
-                                                                                    { label: 'VMs', value: String(reportData?.live?.vms_running || 0), color: '#f97316' },
-                                                                                    { label: 'Containers', value: String(reportData?.live?.cts_running || 0), color: '#a855f7' },
+                                                                                    { label: 'CPU', value: said(reportNow?.cpu, '%'), color: '#3b82f6' },
+                                                                                    { label: 'Memory', value: said(reportNow?.memory, '%'), color: '#22c55e' },
+                                                                                    { label: 'VMs', value: said(reportNow?.vms), color: '#f97316' },
+                                                                                    { label: 'Containers', value: said(reportNow?.cts), color: '#a855f7' },
                                                                                 ]},
                                                                                 { type: 'spacer', height: 4 },
                                                                                 { type: 'table', title: 'Top VMs by CPU', columns: ['#', 'VM', 'CPU'], rows: topCpuRows },
@@ -24121,12 +25005,25 @@
                                                             </div>
                                                         ) : (
                                                             <div id="report-summary-content" className="space-y-6">
+                                                                {/* a summary that could not be read shows no 0 % and no 0 VMs */}
+                                                                {reportFailed && (
+                                                                    <div data-report-unread="summary" className="bg-proxmox-card border border-yellow-500/30 rounded-xl p-4 flex flex-wrap items-center gap-3 text-sm text-yellow-400">
+                                                                        <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                                                        <span className="flex-1 min-w-0">{t('reportUnread')}</span>
+                                                                        <button onClick={() => loadReportSummary(reportPeriod)}
+                                                                            className="px-3 py-1 text-xs rounded border border-proxmox-border text-gray-300 hover:text-white hover:border-gray-500">
+                                                                            {t('retry') || 'Retry'}
+                                                                        </button>
+                                                                    </div>
+                                                                )}
                                                                 {/* Live Metrics — Gauge circles + counters */}
-                                                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                                                {reportNow && <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                                                     {/* CPU Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.cpu?.current || reportData?.live?.cpu_percent || 0} label="CPU" color="#3b82f6" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.cpu != null
+                                                                            ? <Gauge value={reportNow.cpu} label="CPU" color="#3b82f6" />
+                                                                            : reportUnreadGauge('CPU', 'cpu')}
+                                                                        {reportData?.data_points > 0 && reportData?.cpu?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.cpu?.avg || 0}% &middot; {reportData?.cpu?.min || 0}%-{reportData?.cpu?.max || 0}%
                                                                             </div>
@@ -24137,8 +25034,10 @@
                                                                     </div>
                                                                     {/* Memory Gauge */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center">
-                                                                        <Gauge value={reportData?.memory?.current || reportData?.live?.mem_percent || 0} label="Memory" color="#22c55e" />
-                                                                        {reportData?.data_points > 0 && (
+                                                                        {reportNow.memory != null
+                                                                            ? <Gauge value={reportNow.memory} label="Memory" color="#22c55e" />
+                                                                            : reportUnreadGauge('Memory', 'memory')}
+                                                                        {reportData?.data_points > 0 && reportData?.memory?.avg != null && (
                                                                             <div className="text-[11px] text-gray-500 mt-1">
                                                                                 avg {reportData?.memory?.avg || 0}% &middot; {reportData?.memory?.min || 0}%-{reportData?.memory?.max || 0}%
                                                                             </div>
@@ -24149,18 +25048,20 @@
                                                                     </div>
                                                                     {/* VMs count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-orange-400">{reportData?.live?.vms_running || reportData?.vms_running?.current || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.vms == null ? 'text-gray-500' : 'text-orange-400'}`} data-report-unread={reportNow.vms == null ? 'vms' : undefined}>{reportNow.vms ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">VMs {t('running').toLowerCase()}</div>
+                                                                        {reportNow.vms == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                         {reportData?.vms_running?.samples?.length > 2 && (
                                                                             <div className="mt-2"><Sparkline data={reportData.vms_running.samples} width={80} height={20} color="#f97316" /></div>
                                                                         )}
                                                                     </div>
                                                                     {/* Container count */}
                                                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4 flex flex-col items-center justify-center">
-                                                                        <div className="text-4xl font-bold text-purple-400">{reportData?.live?.cts_running || 0}</div>
+                                                                        <div className={`text-4xl font-bold ${reportNow.cts == null ? 'text-gray-500' : 'text-purple-400'}`} data-report-unread={reportNow.cts == null ? 'cts' : undefined}>{reportNow.cts ?? '-'}</div>
                                                                         <div className="text-sm text-gray-500 mt-1">Container</div>
+                                                                        {reportNow.cts == null && <div className="text-[11px] text-gray-500 mt-0.5">{t('reportValueUnread')}</div>}
                                                                     </div>
-                                                                </div>
+                                                                </div>}
 
                                                                 {/* Timeline Charts — CPU & Memory over time */}
                                                                 {reportData?.timestamps?.length > 2 && reportData?.cpu?.samples?.length > 2 && (
@@ -24207,7 +25108,9 @@
                                                                             {t('topVmsCpu') || 'Highest CPU Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
+                                                                            {topVms === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-cpu">{t('reportValueUnread')}</p>
+                                                                            ) : topVms?.length > 0 ? topVms.slice(0, 5).map((vm, idx) => {
                                                                                 const cpuPct = Math.min((vm.cpu || 0) * 100, 100);
                                                                                 const barColor = cpuPct > 80 ? '#ef4444' : cpuPct > 50 ? '#eab308' : '#3b82f6';
                                                                                 return (
@@ -24221,7 +25124,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{cpuPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVms && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -24234,7 +25137,9 @@
                                                                             {t('topVmsMem') || 'Highest Memory Usage'}
                                                                         </h3>
                                                                         <div className="space-y-1.5">
-                                                                            {topVms.length > 0 ? [...topVms].sort((a, b) => (b.mem_percent || 0) - (a.mem_percent || 0)).slice(0, 5).map((vm, idx) => {
+                                                                            {topVmsMem === false ? (
+                                                                                <p className="text-gray-500 text-center py-4 text-sm" data-report-unread="top-mem">{t('reportValueUnread')}</p>
+                                                                            ) : topVmsMem?.length > 0 ? topVmsMem.slice(0, 5).map((vm, idx) => {
                                                                                 const memPct = Math.min(vm.mem_percent || 0, 100);
                                                                                 const barColor = memPct > 80 ? '#ef4444' : memPct > 50 ? '#eab308' : '#22c55e';
                                                                                 return (
@@ -24248,7 +25153,7 @@
                                                                                     </div>
                                                                                     <span className="font-mono text-xs w-10 text-right font-bold" style={{color: barColor}}>{memPct.toFixed(0)}%</span>
                                                                                 </div>);
-                                                                            }) : (
+                                                                            }) : topVmsMem && (
                                                                                 <p className="text-gray-500 text-center py-4 text-sm">{t('noRunningVms') || 'No running VMs'}</p>
                                                                             )}
                                                                         </div>
@@ -24287,7 +25192,15 @@
                                                 )}
 
                                                 {/* CVE Scanner Sub-Tab */}
-                                                {reportSubTab === 'cve' && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the scan state and the two POSTs of this tab, drawn as tiles and a node table */}
+                                                {reportSubTab === 'cve' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="cve">
+                                                    <CrCveScan cluster={selectedCluster} results={cveResults} error={cveError} loading={cveScanLoading} installing={debsecanInstalling}
+                                                        readOnly={haReadOnly} onScan={() => runCveScan()} onInstall={() => installDebsecan()}
+                                                        onOpenUpdates={() => setActiveTab('updates')} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
+                                                {reportSubTab === 'cve' && !isCorpRedesigned && (
                                                     <div className="space-y-6">
                                                         <div className="flex justify-between items-center">
                                                             <div className="flex items-center gap-2">
@@ -24344,7 +25257,7 @@
                                                                                             type: 'table',
                                                                                             title: `${node.node} — ${node.cve_count || 0} CVEs, ${node.total_count || 0} updates`,
                                                                                             columns: ['CVE', 'Package', 'Severity', 'Fix'],
-                                                                                            rows: node.cves.map(c => [c.cve_id || '-', c.package || '-', c.severity || '-', c.fix_type || '-'])
+                                                                                            rows: node.cves.map(c => [c.cve || '-', c.package || '-', c.urgency || '-', c.fix_type || '-'])
                                                                                         });
                                                                                     }
                                                                                 });
@@ -24552,7 +25465,8 @@
                                                                                                 <tbody>
                                                                                                     {node.cves.sort((a, b) => {
                                                                                                         const order = { high: 0, medium: 1, low: 2 };
-                                                                                                        return (order[a.urgency] || 1) - (order[b.urgency] || 1);
+                                                                                                        // high is 0, so || would file it with medium
+                                                                                                        return (order[a.urgency] ?? 1) - (order[b.urgency] ?? 1);
                                                                                                     }).map((cve, cIdx) => (
                                                                                                         <tr key={cIdx} className={`border-b border-proxmox-border/50 ${
                                                                                                             cve.urgency === 'high' ? 'bg-red-500/5' : ''
@@ -24674,8 +25588,18 @@
                                                     </div>
                                                 )}
 
+                                                {/* LW Oct 2026 - Corporate Redesigned: forecast and right-sizing read apart, top
+                                                    talkers and rollups from the guest lists the dashboard holds */}
+                                                {reportSubTab === 'insights' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="insights">
+                                                    <CrInsights cluster={selectedCluster} clusters={clusters}
+                                                        authFetch={authFetch} addToast={addToast} isAdmin={isAdmin} nav={crTaskNav}
+                                                        onOpenConfig={(g) => handleOpenConfig({ ...g, _clusterId: selectedCluster.id }, g.type === 'lxc' ? 'resources' : 'hardware')} />
+                                                    </CrBoundary>
+                                                )}
+
                                                 {/* MK May 2026 — Insights as Reports sub-tab */}
-                                                {reportSubTab === 'insights' && (
+                                                {reportSubTab === 'insights' && !isCorpRedesigned && (
                                                     <InsightsTab
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
@@ -24695,6 +25619,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -24707,6 +25633,8 @@
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
@@ -24717,16 +25645,24 @@
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
+                                                        cluster={selectedCluster}
+                                                        nav={crTaskNav}
                                                     />
                                                 )}
 
-                                                {/* LW Oct 2026 - what-if simulator of the cluster */}
-                                                {reportSubTab === 'whatif' && selectedCluster?.id && (
-                                                    <WhatIfTab clusterId={selectedCluster.id} authFetch={authFetch} />
+                                                {/* LW Oct 2026 - what-if simulator of the cluster; Corporate Redesigned draws its own
+                                                    page on the same routes, with the capacity figures of Insights beside it */}
+                                                {reportSubTab === 'whatif' && selectedCluster?.id && (isCorpRedesigned
+                                                    ? <CrBoundary key={selectedCluster.id} id="whatif"><CrWhatIf cluster={selectedCluster} authFetch={authFetch} nav={crTaskNav} onSub={setReportSubTab} /></CrBoundary>
+                                                    : <WhatIfTab clusterId={selectedCluster.id} authFetch={authFetch} />
                                                 )}
 
                                                 {/* MK May 2026 — API latency dashboard */}
-                                                {reportSubTab === 'api-health' && selectedCluster?.id && (
+                                                {/* LW Nov 2026 - Corporate Redesigned: the same route and poll, with a state for no samples */}
+                                                {reportSubTab === 'api-health' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="api-health"><CrApiHealth cluster={selectedCluster} authFetch={authFetch} /></CrBoundary>
+                                                )}
+                                                {reportSubTab === 'api-health' && !isCorpRedesigned && selectedCluster?.id && (
                                                     <ApiLatencyDashboard
                                                         clusterId={selectedCluster.id}
                                                         authFetch={authFetch}
@@ -24750,6 +25686,7 @@
                                                     clusterId={selectedCluster.id}
                                                     authFetch={authFetch}
                                                     t={t}
+                                                    pick={isCorpRedesigned && crTimelinePick && crTimelinePick.cid === selectedCluster.id ? crTimelinePick : undefined}
                                                     onOpenGuest={(vmid) => {
                                                         const guest = (clusterResources || []).find(r => Number(r.vmid) === Number(vmid));
                                                         if (!guest) return;
@@ -24766,7 +25703,19 @@
                                                         setSelectedSidebarVm(null);
                                                         setSelectedSidebarNode({ name, clusterId: selectedCluster.id });
                                                     }}
-                                                    onOpenTab={(tab) => setActiveTab(tab)}
+                                                    onOpenTab={(tab, ev) => {
+                                                        // LW Nov 2026 - Corporate Redesigned keeps the update manager on its own tab, a run opens its history
+                                                        if (isCorpRedesigned && ev && ev.kind === 'rolling_update') {
+                                                            crUpdWantTab(selectedCluster.id, 'history');
+                                                            setActiveTab('updates');
+                                                            return;
+                                                        }
+                                                        setActiveTab(tab);
+                                                        if (isCorpRedesigned && ev && ev.kind === 'drift' && ev.source) {
+                                                            setComplianceSubTab('drift');
+                                                            setCrDriftFocus({ cluster: selectedCluster.id, id: ev.source.id, status: (ev.params || {}).status });
+                                                        }
+                                                    }}
                                                 />
                                             </div>
                                         )}
@@ -24819,11 +25768,14 @@
                                                 {complianceSub === 'drift' && (
                                                     <DriftTab
                                                         clusterId={selectedCluster?.id}
-                                                        clusterName={selectedCluster?.name}
+                                                        clusterName={selectedCluster ? clusterLabel(selectedCluster) : undefined}
                                                         authFetch={authFetch}
                                                         addToast={addToast}
                                                         t={t}
                                                         isAdmin={isAdmin}
+                                                        crNav={crTaskNav}
+                                                        crFocus={isCorpRedesigned ? crDriftFocus : undefined}
+                                                        onCrFocus={isCorpRedesigned ? setCrDriftFocus : undefined}
                                                     />
                                                 )}
                                             </div>
@@ -24937,6 +25889,15 @@
                                                 </div>
                                             );
                                         })()}
+
+                                        {/* LW Nov 2026 - the update manager of Corporate Redesigned, its own tab beside Settings:
+                                            the classic routes, nothing read from the nodes before a click; a CVE scan of this
+                                            session lends it the security class the update list does not carry */}
+                                        {activeTab === 'updates' && isCorpRedesigned && selectedCluster?.id && (
+                                            <CrBoundary key={selectedCluster.id} id="updates">
+                                                <CrUpdates cluster={selectedCluster} metrics={clusterMetrics} nav={crTaskNav} authFetch={authFetch} cve={cveResults} />
+                                            </CrBoundary>
+                                        )}
 
                                         {/* Settings Tab */}
                                         {activeTab === 'settings' && (
@@ -25514,7 +26475,9 @@
 
                                                 {/* Update Manager Section */}
                                                 <div className="lg:col-span-2" data-update-manager>
-                                                    <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />
+                                                    {isCorpRedesigned
+                                                        ? <CrUpdatesLink onOpen={() => setActiveTab('updates')} />
+                                                        : <UpdateManagerSection key={selectedCluster.id} clusterId={selectedCluster.id} clusterName={selectedCluster.display_name || selectedCluster.name} addToast={addToast} />}
                                                 </div>
                                                 
                                                 {/* SMBIOS Auto-Configurator Section */}
@@ -29006,6 +29969,7 @@
                                                                     name: n,
                                                                     status: 'online',  // VMs implies node is up
                                                                     cpu_percent: 0, mem_percent: 0,
+                                                                    _derived: true,
                                                                 });
                                                             }
                                                         }
@@ -29019,6 +29983,7 @@
                                                             name: `node-${i + 1}`,
                                                             status: i < onl ? 'online' : 'offline',
                                                             cpu_percent: 0, mem_percent: 0,
+                                                            _placeholder: true,
                                                         }));
                                                     }
                                                     const clusterPbs = pbsServers.filter(p =>
@@ -29040,6 +30005,36 @@
                                                         setSidebarTopology(false);
                                                     }
                                                 }}
+                                                onGuestOpen={isCorpRedesigned ? (vm) => {
+                                                    const cl = clusters.find(c => c.id === vm._clusterId);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setSelectedSidebarVm({...vm, _clusterId: cl.id});
+                                                    setSelectedSidebarNode(null);
+                                                    setSelectedSidebarDatastore(null);
+                                                    setActiveTab('resources');
+                                                    setResourcesSubTab('management');
+                                                    setExpandedSidebarClusters(prev => ({...prev, [cl.id]: true}));
+                                                    setSidebarTopology(false);
+                                                } : undefined}
+                                                onNodeClick={isCorpRedesigned ? (cid, name) => {
+                                                    const cl = clusters.find(c => c.id === cid);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setSelectedSidebarNode({ name, clusterId: cid });
+                                                    setSelectedSidebarVm(null);
+                                                    setSelectedSidebarDatastore(null);
+                                                    setActiveTab('overview');
+                                                    setExpandedSidebarClusters(prev => ({...prev, [cid]: true}));
+                                                    setSidebarTopology(false);
+                                                } : undefined}
+                                                onClusterClick={isCorpRedesigned ? (cid) => {
+                                                    const cl = clusters.find(c => c.id === cid);
+                                                    if (!cl) return;
+                                                    setSelectedCluster(cl);
+                                                    setActiveTab('overview');
+                                                    setSidebarTopology(false);
+                                                } : undefined}
                                             />
                                             {clusters.filter(c => c.connected).length === 0 && (
                                                 <div className="p-8 text-center text-sm" style={{color: 'var(--corp-text-muted)'}}>
@@ -29191,7 +30186,7 @@
                                                     <div className="border border-purple-500/20 rounded-xl p-4 space-y-4">
                                                         <div className="flex items-center gap-2 text-sm text-white font-medium">
                                                             <span>{xhmPlan.source.name}</span>
-                                                            <span className="text-purple-400">{xhmPlan.direction === 'xcpng_to_pve' ? '→ Proxmox' : '→ XCP-ng'}</span>
+                                                            <span className="text-purple-400">{xhmToPve(xhmPlan) ? '→ Proxmox' : '→ XCP-ng'}</span>
                                                         </div>
                                                         <div className="grid grid-cols-4 gap-2 text-center">
                                                             <div className="bg-proxmox-dark rounded-lg p-2">
@@ -29221,7 +30216,7 @@
                                                         </div>
 
                                                         {/* Target selection */}
-                                                        {xhmPlan.direction === 'xcpng_to_pve' && xhmPlan.targets && (
+                                                        {xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div className="space-y-2">
                                                                 <div>
                                                                     <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetNode') || 'Target Node'}</label>
@@ -29241,7 +30236,7 @@
                                                                 )}
                                                             </div>
                                                         )}
-                                                        {xhmPlan.direction === 'pve_to_xcpng' && xhmPlan.targets && (
+                                                        {!xhmToPve(xhmPlan) && xhmPlan.targets && (
                                                             <div>
                                                                 <label className="text-xs text-gray-500 mb-1 block">{t('xhmTargetStorage') || 'Target Storage'}</label>
                                                                 <select value={xhmForm.target_storage} onChange={e => setXhmForm({...xhmForm, target_storage: e.target.value})} className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
@@ -29261,7 +30256,7 @@
                                                                     <div key={i} className="flex items-center gap-2 mb-1">
                                                                         <span className="text-xs text-gray-400 w-28 truncate">{net.bridge || net.network || `net${i}`}</span>
                                                                         <span className="text-gray-600">→</span>
-                                                                        {xhmPlan.direction === 'xcpng_to_pve' ? (
+                                                                        {xhmToPve(xhmPlan) ? (
                                                                             <select value={xhmForm.network_map[net.network || net.bridge || String(i)] || ''} onChange={e => setXhmForm({...xhmForm, network_map: {...xhmForm.network_map, [net.network || net.bridge || String(i)]: e.target.value}})} className="flex-1 px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
                                                                                 <option value="">vmbr0 (default)</option>
                                                                                 {(xhmPlan.targets[0]?.bridges?.[xhmForm.target_node] || ['vmbr0']).map(b => <option key={b} value={b}>{b}</option>)}
@@ -29289,7 +30284,7 @@
                                                             </label>
                                                         </div>
 
-                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmPlan?.direction === 'xcpng_to_pve' && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
+                                                        {!haReadOnly && <button onClick={startXhmMigration} disabled={xhmLoading || !xhmForm.target_storage || (xhmToPve(xhmPlan) && !xhmForm.target_node)} className="w-full py-2.5 rounded-lg bg-purple-500 text-white font-medium hover:bg-purple-600 disabled:opacity-50 text-sm">
                                                             {xhmLoading ? 'Starting...' : (t('xhmStartMigration') || 'Start Migration')}
                                                         </button>}
                                                     </div>
@@ -29461,20 +30456,30 @@
                                             setResourcesSubTab('management');
                                         }}
                                         onOpenClusterTab={(cluster, tab, section) => {
+                                            // LW Nov 2026 - Corporate Redesigned has its update manager in a tab of its own
+                                            const crUpd = isCorpRedesigned && section === 'updates';
+                                            if (crUpd) tab = 'updates';
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm(null);
                                             setSelectedSidebarNode(null);
                                             setSelectedSidebarDatastore(null);
                                             setDatacenterSection(tab === 'datacenter' ? section : null);
                                             setActiveTab(tab);
+                                            // LW Oct 2026 - Corporate Redesigned: the section of a reports or compliance link is its sub tab
+                                            if (isCorpRedesigned && section && tab === 'reports') setReportSubTab(section);
+                                            if (isCorpRedesigned && section && tab === 'compliance') setComplianceSubTab(section);
                                             // the update manager sits further down the settings tab
-                                            if (section === 'updates') setTimeout(() => {
+                                            if (section === 'updates' && !crUpd) setTimeout(() => {
                                                 const el = document.querySelector('[data-update-manager]');
                                                 if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
                                             }, 300);
                                         }}
                                         onAutoInstall={user?.autoinstall_access === 'manage' ? () => openAutoInstall({ wizard: true }) : undefined}
                                         onOpenGuests={openGuests}
+                                        onOpenTopology={isCorpRedesigned ? openTopology : undefined}
+                                        recentEvents={corpEventLog}
+                                        canAudit={holds('admin.audit')}
+                                        authFetch={authFetch}
                                     />
                                 )}
                             </div>
@@ -29828,6 +30833,7 @@
                             onClose={handleCloseConfig}
                             addToast={addToast}
                             isCorporate={isCorporate}
+                            initialTab={configTab || undefined}
                         />
                     )}
 
@@ -30043,7 +31049,7 @@
 
                     {/* Console tab bar — only when 2+ open or when one is open and minimisable */}
                     {consoleStack.length >= 2 && (
-                        <div style={{
+                        <div className={isCorpRedesigned ? 'cr-console-tabs' : undefined} style={{
                             position: 'fixed', bottom: 0, left: 0, right: 0,
                             zIndex: 60, pointerEvents: 'none',
                             display: 'flex', justifyContent: 'center',
@@ -30541,6 +31547,17 @@
                             })()}
                             <div className="corp-status-bar-item">
                                 {(() => {
+                                    // LW Nov 2026 - Corporate Redesigned on All Clusters: the guests of every cluster with a
+                                    // current status, as the dashboard tiles count them (no cluster is selected, so the list
+                                    // below would say 0/0)
+                                    if (isCorpRedesigned && !selectedCluster) {
+                                        const s = crInventory(clusters, allClusterMetrics, { now: Date.now() }).sum;
+                                        if (!s.vms && !s.cts) return <span data-cr-status-guests="">- VMs</span>;
+                                        const run = (s.vms ? s.vms.running : 0) + (s.cts ? s.cts.running : 0);
+                                        const all = (s.vms ? s.vms.total : 0) + (s.cts ? s.cts.total : 0);
+                                        return <span data-cr-status-guests="" title={s.uncounted.length ? crFill(t('crDashUncountedHint'), { clusters: s.uncounted.join(', ') }) : undefined}>
+                                            <strong>{run}</strong>/{all} VMs{s.uncounted.length ? ' *' : ''}</span>;
+                                    }
                                     const vms = clusterResources.filter(r => r.type === 'qemu' || r.type === 'lxc');
                                     const running = vms.filter(r => r.status === 'running').length;
                                     return <span><strong>{running}</strong>/{vms.length} VMs</span>;
@@ -31557,11 +32574,14 @@
                     {showApiReference && <ApiReferenceModal onClose={() => setShowApiReference(false)} />}
 
                     {/* NS — connection-loss banner only after WS is dropped >4s */}
+                    {/* LW Nov 2026 - Corporate Redesigned says it in its alert strip */}
+                    {!isCorpRedesigned && (
                     <div style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 95, pointerEvents: 'none' }}>
                         <div style={{ pointerEvents: 'auto' }}>
                             <ConnectionLostBanner connected={wsConnected} />
                         </div>
                     </div>
+                    )}
 
                     {/* NS May 2026 — live backup progress pane */}
                     {activeBackupProgress && selectedCluster && (
@@ -32118,7 +33138,9 @@
                             onCancel={cancelTask}
                             onRefresh={() => selectedCluster && fetchTasks(selectedCluster.id)}
                             clusterId={selectedCluster?.id}
+                            clusterName={selectedCluster ? clusterLabel(selectedCluster) : ''}
                             autoExpandEnabled={user?.taskbar_auto_expand !== false}
+                            crNav={crTaskNav}
                         />
                     )}
                 </div>
@@ -32294,7 +33316,7 @@
 
             return (
                 <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[100] p-4">
-                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl shadow-2xl">
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-3xl shadow-2xl">
                         <div className="p-6">
                             <div className="flex items-center gap-3 mb-2">
                                 <div className="p-2 bg-proxmox-orange/20 rounded-lg">
@@ -32308,7 +33330,7 @@
                                 {t('layoutSelectionDesc') || 'Choose your preferred interface style. You can change this anytime under My Profile \u2192 Layout Style.'}
                             </p>
 
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+                            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                                 {/* Modern */}
                                 <button
                                     onClick={() => pickLayout('modern')}
@@ -32366,6 +33388,40 @@
                                     <div className="text-center">
                                         <span className="text-sm font-medium text-white">{t('layoutCorporate') || 'Corporate'}</span>
                                         <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateDesc') || 'Enterprise style, dense'}</p>
+                                    </div>
+                                </button>
+                                {/* LW Nov 2026 - Corporate Redesigned, offered from the first login on as under My Profile */}
+                                <button
+                                    onClick={() => pickLayout('corporate-redesigned')}
+                                    disabled={saving}
+                                    data-layout-pick="corporate-redesigned"
+                                    className={`p-4 rounded-xl border-2 transition-all hover:scale-[1.03] text-left ${
+                                        user?.ui_layout === 'corporate-redesigned'
+                                            ? 'border-proxmox-orange ring-2 ring-proxmox-orange/30'
+                                            : 'border-proxmox-border hover:border-gray-500'
+                                    } disabled:opacity-60`}
+                                >
+                                    <div className="h-20 rounded mb-3 relative overflow-hidden border" style={{ background: '#17242c', borderColor: '#344954' }}>
+                                        <div className="absolute left-0 right-0 top-0 h-2.5" style={{ background: '#1c2c35', borderBottom: '1px solid #344954' }}>
+                                            <div className="absolute top-0.5 left-1.5 w-4 h-1" style={{ background: '#55b6d0' }} />
+                                        </div>
+                                        <div className="absolute left-0 top-2.5 bottom-0 w-6" style={{ background: '#1c2c35', borderRight: '1px solid #344954' }}>
+                                            <div className="mt-1.5 ml-1.5 space-y-1">
+                                                <div className="w-3 h-0.5" style={{ background: '#55b6d0' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                                <div className="w-2.5 h-0.5 ml-1" style={{ background: '#718792' }} />
+                                            </div>
+                                        </div>
+                                        <div className="absolute right-2 left-8 bottom-2 space-y-1" style={{ top: 16, background: '#20333e', border: '1px solid #293d47' }}>
+                                            <div className="h-1.5" style={{ background: '#263c47' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                            <div className="mx-1 h-0.5" style={{ background: '#344954' }} />
+                                        </div>
+                                    </div>
+                                    <div className="text-center">
+                                        <span className="text-sm font-medium text-white">{t('layoutCorporateRedesigned')}</span>
+                                        <p className="text-xs text-gray-500 mt-0.5">{t('layoutCorporateRedesignedDesc')}</p>
                                     </div>
                                 </button>
                                 {/* LW Oct 2026 - Cloud, offered from the first login on as under My Profile */}

@@ -40,7 +40,8 @@
         // Settings > Server. A public read, so the login page knows the language as well.
         // Whatever goes wrong here counts as no lock, the server holds the line anyway.
         const NO_UI_LOCK = { layout: '', language: '', admins: false };
-        const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'cloud'];
+        // LW Nov 2026 - the redesign can be pinned as well (UI_LAYOUT_LOCKS of api/helpers.py)
+        const UI_LOCK_LAYOUTS = ['modern', 'corporate', 'corporate-redesigned', 'cloud'];
 
         function cleanUiLock(d) {
             if (!d || typeof d !== 'object') return null;
@@ -292,7 +293,8 @@
         // the user's own Corporate or Cloud layout for the server default.
         function lockedTheme(theme, u, lockedLayout, defaultTheme) {
             if (lockedLayout === 'cloud') return 'cloud';
-            if (lockedLayout === 'corporate' && theme !== 'system') {
+            // LW Nov 2026 - a pinned Corporate Redesigned wears the Corporate palette as well
+            if ((lockedLayout === 'corporate' || lockedLayout === 'corporate-redesigned') && theme !== 'system') {
                 let light = false;
                 try { light = localStorage.getItem('corp-theme') === 'light'; } catch (_) {}
                 return light ? 'corporateLight' : 'corporateDark';
@@ -478,7 +480,8 @@
                                 // LW Sep 2026 (#743) - 'system' is a deliberate choice and outranks
                                 // the local toggle; reading corp-theme here would turn "follow my
                                 // desktop" into whatever the toggle was last set to.
-                                if (d.user?.ui_layout === 'corporate' && userTheme !== 'system') {
+                                // LW Oct 2026 - corporate-redesigned is Corporate underneath, same palettes
+                                if ((d.user?.ui_layout === 'corporate' || d.user?.ui_layout === 'corporate-redesigned') && userTheme !== 'system') {
                                     const isLight = localStorage.getItem('corp-theme') === 'light';
                                     userTheme = isLight ? 'corporateLight' : 'corporateDark';
                                 }
@@ -589,7 +592,7 @@
                         // NS: Apply user's theme (with fallback to default)
                         let userTheme = data.user?.theme || data.default_theme || 'proxmoxDark';
                         try {
-                            if (data.user?.ui_layout === 'corporate' && userTheme !== 'system') {
+                            if ((data.user?.ui_layout === 'corporate' || data.user?.ui_layout === 'corporate-redesigned') && userTheme !== 'system') {
                                 const isLight = localStorage.getItem('corp-theme') === 'light';
                                 userTheme = isLight ? 'corporateLight' : 'corporateDark';
                             }
@@ -818,14 +821,21 @@
             const { user, layoutLock } = useAuth();
             // a pinned layout (#1189) wins over the user's own, which stays stored
             const layout = layoutLock || user?.ui_layout || 'modern';
-            const isCorporate = layout === 'corporate';
+            // LW Oct 2026 - Corporate Redesigned is Corporate plus a scoped skin:
+            // every isCorporate branch stays, the body keeps data-layout="corporate" and
+            // gets data-corp-variant on top. A corporate lock gives plain 'corporate' here,
+            // a corporate-redesigned lock the redesign
+            const isCorpRedesigned = layout === 'corporate-redesigned';
+            const isCorporate = layout === 'corporate' || isCorpRedesigned;
             // NS 2026-06-05 — Cloud skin (Preview). Third layout alongside modern/corporate.
             const isCloud = layout === 'cloud';
 
             // Set data-layout on body whenever layout changes
             // also force matching theme so modern themes dont bleed into corporate
             useEffect(() => {
-                document.body.setAttribute('data-layout', layout);
+                document.body.setAttribute('data-layout', isCorpRedesigned ? 'corporate' : layout);
+                if (isCorpRedesigned) document.body.dataset.corpVariant = 'redesigned';
+                else delete document.body.dataset.corpVariant;
                 if (isCorporate) {
                     // LW Sep 2026 (#743) - applyTheme('system') resolves and sets the
                     // corp gate itself, so the stored choice wins over the local toggle
@@ -864,5 +874,5 @@
                 }
             }, [isCorporate, user?.sidebar_show_vmid]);
 
-            return { layout, isCorporate, isCloud, layoutLocked: !!layoutLock };
+            return { layout, isCorporate, isCorpRedesigned, isCloud, layoutLocked: !!layoutLock };
         }

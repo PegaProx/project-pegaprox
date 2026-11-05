@@ -11562,6 +11562,67 @@
         ]
       }
     },
+    "/api/clusters/{cluster_id}/vms/{node}/qemu/{vmid}/pending": {
+      "get": {
+        "operationId": "vms.get_vm_pending_api_get",
+        "tags": [
+          "vms"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "What of a VM's config waits for its next start, as PVE itself reports it. Read only: the keys with a pending value or a pending delete, nothing else.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "vmid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.view"
+        ]
+      }
+    },
     "/api/clusters/{cluster_id}/vms/{node}/{vm_type}/{vmid}/lock": {
       "get": {
         "operationId": "vms.get_vm_lock_status_api_get",
@@ -15189,7 +15250,7 @@
           }
         },
         "summary": "Get available hardware options (CPU types, SCSI controllers, etc.)",
-        "description": "NS: Extended Dec 2025 with machine types",
+        "description": "NS: Extended Dec 2025 with machine types\n\nMK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are\nread live from one of its nodes, so they follow its PVE version and its custom models. The\nfirst registered cluster used to answer for every dialog, an XCP-ng pool with its two types\nor an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller\nmay see.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -16668,6 +16729,59 @@
         ],
         "x-pegaprox-permissions": [
           "node.network"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/nodes/{node}/network/changes": {
+      "get": {
+        "operationId": "nodes.get_node_network_changes_api_get",
+        "tags": [
+          "nodes"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "node.view"
         ]
       }
     },
@@ -32788,7 +32902,7 @@
           }
         },
         "summary": "Get summary report across all clusters",
-        "description": "Query params:\n- period: 'hour', 'day', 'week' (default: day)",
+        "description": "Query params:\n- period: 'hour', 'day', 'week' (default: day)\n\nA cluster's vms_running is null when no snapshot of the window has a guest count.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -32853,7 +32967,7 @@
           }
         },
         "summary": "Get timeline data for charts",
-        "description": "Query params:\n- period: 'hour', 'day', 'week'\n- cluster_id: Optional - filter to specific cluster\n- metric: 'cpu', 'memory', 'vms' (default: all)",
+        "description": "Query params:\n- period: 'hour', 'day', 'week'\n- cluster_id: Optional - filter to specific cluster\n- metric: 'cpu', 'memory', 'vms' (default: all)\n\nA series holds null at a snapshot without that figure (no totals for CPU or memory,\na guest list that was not read for vms).",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -32883,7 +32997,7 @@
           }
         },
         "summary": "Get top VMs by resource usage",
-        "description": "Query params:\n- metric: 'cpu' or 'memory' (default: cpu)\n- limit: Number of results (default: 10)",
+        "description": "Query params:\n- metric: 'cpu' or 'memory' (default: cpu)\n- limit: Number of results (default: 10)\n\nThe body is the list of guests. A cluster whose guest list could not be read (not\nconnected, or the read did not answer) has no rows in it and is named in the\nX-Unread-Clusters header, a JSON list of cluster ids, so a partial ranking does not\npass for the whole one. The header is absent when every cluster was read.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -33089,7 +33203,7 @@
           }
         },
         "summary": "The custom hardening profiles, the built-in ones and the controls both pick from.",
-        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults) and whether it can be rolled back. can_manage: whether the\ncaller may create, change and delete custom profiles.",
+        "description": "custom: id, name, description, controls, params ({control: {parameter: value}}),\ndropped_controls (stored ids this version has no control for), created_at, updated_at,\nand for those who may manage them created_by and updated_by. builtin: id and the\ncontrols it runs. catalog: per control whether it takes parameters (templated,\nparam_keys, defaults), whether it can be rolled back and whether its apply changes\nnothing on the node (noop). can_manage: whether the caller may create, change and\ndelete custom profiles.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {
@@ -33606,7 +33720,7 @@
           }
         },
         "summary": "Get report summary for a specific cluster",
-        "description": "Returns both historical data (if available) and current live data\n\nQuery params:\n- period: 'hour', 'day', 'week' (default: day)\n- from, to: unix seconds, instead of period: a range picked on the charts, at full\n  resolution as far as the stored history reaches (a year apart at most)",
+        "description": "Returns both historical data (if available) and current live data\n\nQuery params:\n- period: 'hour', 'day', 'week' (default: day)\n- from, to: unix seconds, instead of period: a range picked on the charts, at full\n  resolution as far as the stored history reaches (a year apart at most)\n\nlive.unread names what the live read did not get ('nodes' for CPU and memory,\n'guests' for the running counts) and is absent after a complete read. Without stored\nsamples, cpu, memory and vms_running then carry null rather than 0.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -35201,7 +35315,7 @@
           }
         },
         "summary": "Start a rolling update across all cluster nodes",
-        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False), needs node.reboot\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- skip_evacuation: bool - Update without moving the guests off first (default: False, not recommended)\n- wait_for_reboot: bool - Wait until a rebooted node is back before the next one (default: True)\n- pause_on_evacuation_error: bool - Pause the run when a guest cannot be moved (default: True)\n- allow_local_disks: bool - Live-migrate guests on local storage with --with-local-disks\n  instead of skipping them (default: False); the disks are copied over the network\n- migrate_templates: bool - Move the node's templates with it, offline (default: False, Proxmox only)\n- relax_anti_affinity: bool - Let negative affinity rules give way during the run (default: False, Proxmox only)\n- ceph_health_gate: str - 'off', 'degraded' or 'strict': hold the run when Ceph does not\n  come back healthy after a node (default: 'off')\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)\n  (the three timeouts are clamped to 60-7200)\n- notify_channels: list - Alert channel ids (GET /api/alert-channels) that get\n  rolling_update.started, rolling_update.finished and rolling_update.interrupted (default: none)\n\nMK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused\nwhile another one of the cluster is running or paused, across restarts too.",
+        "description": "MK: Fixed GitHub Issue - skip up-to-date nodes and configurable timeout\n\nParameters (via JSON body):\n- include_reboot: bool - Whether to reboot nodes after update (default: False), needs node.reboot\n- node_order: list - Custom order of nodes to update\n- skip_up_to_date: bool - Skip nodes that have no updates available (default: True)\n- force_all: bool - Force update all nodes even if up-to-date (default: False)\n- skip_evacuation: bool - Update without moving the guests off first (default: False, not recommended)\n- wait_for_reboot: bool - Wait until a rebooted node is back before the next one (default: True)\n- pause_on_evacuation_error: bool - Pause the run when a guest cannot be moved (default: True)\n- allow_local_disks: bool - Live-migrate guests on local storage with --with-local-disks\n  instead of skipping them (default: False); the disks are copied over the network\n- migrate_templates: bool - Move the node's templates with it, offline (default: False, Proxmox only)\n- relax_anti_affinity: bool - Let negative affinity rules give way during the run (default: False, Proxmox only)\n- ceph_health_gate: str - 'off', 'degraded' or 'strict': hold the run when Ceph does not\n  come back healthy after a node (default: 'off')\n- evacuation_timeout: int - Timeout in seconds for VM evacuation (default: 1800 = 30 min)\n- update_timeout: int - Timeout in seconds for apt upgrade (default: 900 = 15 min)\n- reboot_timeout: int - Timeout in seconds for node reboot (default: 600 = 10 min)\n  (the three timeouts are clamped to 60-7200)\n- notify_channels: list - Alert channel ids (GET /api/alert-channels) that get\n  rolling_update.started, rolling_update.paused, rolling_update.interrupted and\n  rolling_update.finished (default: none)\n\nMK Oct 2026 - the run is kept in rolling_update_runs (core/rolling_runs.py) and refused\nwhile another one of the cluster is running or paused, across restarts too.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -35753,6 +35867,7 @@
           }
         },
         "summary": "Get top VMs by resource usage for a specific cluster",
+        "description": "503 when the cluster is not connected or its guest list did not answer, 500 when a\nrow cannot be ranked: an error, no empty list that reads as \"no running VMs\".",
         "parameters": [
           {
             "name": "cluster_id",
@@ -43926,7 +44041,7 @@
           }
         ],
         "x-pegaprox-permissions": [
-          "insights.view"
+          "cluster.view"
         ]
       }
     },

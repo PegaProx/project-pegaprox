@@ -47,8 +47,10 @@ def test_runtime_cloud_is_offered_and_brings_its_theme(browser):  # noqa: F811
         app.ctx.close()
 
 
+# LW Nov 2026 - four cards since Corporate Redesigned is offered here too:
+# one row from 768 px, two by two above 640, stacked on a phone
 @pytest.mark.parametrize('width', [1280, 390])
-def test_runtime_three_cards_fit_without_scrolling_sideways(browser, width):  # noqa: F811
+def test_runtime_the_cards_fit_without_scrolling_sideways(browser, width):  # noqa: F811
     app, _ = _first_login(browser, width=width)
     try:
         page = app.page
@@ -58,11 +60,11 @@ def test_runtime_three_cards_fit_without_scrolling_sideways(browser, width):  # 
         boxes = page.evaluate("""() => Array.from(document.querySelectorAll('button'))
             .filter(b => /Modern|Corporate|Cloud/.test(b.innerText) && b.querySelector('.h-20'))
             .map(b => { const r = b.getBoundingClientRect(); return [r.left, r.top, r.right]; })""")
-        assert len(boxes) == 3, boxes
-        if width >= 640:
+        assert len(boxes) == 4, boxes
+        if width >= 768:
             assert len({round(t) for _, t, _ in boxes}) == 1, boxes   # one row
         else:
-            assert len({round(t) for _, t, _ in boxes}) == 3, boxes   # stacked
+            assert len({round(t) for _, t, _ in boxes}) == 4, boxes   # stacked
         assert all(r <= width for _, _, r in boxes), boxes
     finally:
         app.ctx.close()

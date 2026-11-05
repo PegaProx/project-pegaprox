@@ -1,12 +1,11 @@
 """Handlers that catch sqlite3's exception classes on a dbcrypto connection.
 
-On the install requirements.txt produces for Linux x86_64 — the only platform it pulls
-sqlcipher3-binary for — dbcrypto opens every database through sqlcipher3. That driver is a
+On every install where requirements.txt pulls a SQLCipher package (sqlcipher3-binary on Linux
+x86_64, sqlcipher3 on aarch64, macOS and Windows) dbcrypto opens every database through sqlcipher3. That driver is a
 pysqlite fork and builds its own exception tree straight off Exception, so
 sqlite3.IntegrityError does not match what a SQLCipher connection raises and the handler is
-dead code. It stays invisible because it is correct everywhere the suite usually runs:
-macOS, ARM and Windows have no sqlcipher3, dbcrypto falls back to sqlite3, and the same
-handler matches. Reported Sep 2026 with the class identities measured on the shipping wheel.
+dead code. It stayed invisible because it is correct where there is no sqlcipher3: dbcrypto
+falls back to sqlite3 there (32-bit ARM, the Debian package), and the same handler matches. Reported Sep 2026 with the class identities measured on the shipping wheel.
 
 Two sites had it — the WebAuthn duplicate-key path (500 instead of 409) and the syslog FTS
 fallback (couldn't fall back). The AST check below is the part that matters going forward.

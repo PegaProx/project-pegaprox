@@ -26,7 +26,7 @@ the first hit for the lifetime of the process.
 | 1 | `PEGAPROX_DB_KEY` env var | Docker secrets, k8s, CI | Accepts urlsafe-base64 (44 chars) **or** hex (64 chars) |
 | 2 | `${CREDENTIALS_DIRECTORY}/db-key` | systemd `LoadCredentialEncrypted=` | TPM2- or host-key-bound. Strongest at-rest option |
 | 3 | `PEGAPROX_KEY_FILE` env var → file | Custom path, e.g. NFS mount | chmod 0600 (or 0640 root:pegaprox) |
-| 4 | `/etc/pegaprox/secret.key` | **System-service install default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
+| 4 | `/etc/pegaprox/secret.key` | **`deploy.sh` install default** | chmod **0640** root:pegaprox - group-read required so the systemd unit (running as `pegaprox`) can load it. 0600 root:pegaprox is unreadable for the service. |
 | 5 | `~/.config/pegaprox/secret.key` | Single-user / dev install | chmod 0600 (owner = user running PegaProx) |
 | 6 | `config/.pegaprox.key` (CONFIG_DIR) | **Legacy** - pre-0.9.9.3 | Triggers deprecation warning on every boot |
 
@@ -48,11 +48,15 @@ chip or host key - not even root can read it directly without unsealing.
 
 ### Inspecting the active tier
 
+Run it as the service user from the directory the service runs in, because
+`config/` is relative to it (`/opt/PegaProx` for deploy.sh, `/var/lib/pegaprox` for the
+Debian package):
+
 ```bash
-sudo -u pegaprox python3 pegaprox_multi_cluster.py --keystore-status
+cd /opt/PegaProx && sudo -u pegaprox ./venv/bin/python pegaprox_multi_cluster.py --keystore-status
 ```
 
-JSON output:
+It only reads: where it finds no key it says so instead of creating one. JSON output:
 
 ```json
 {
@@ -60,6 +64,7 @@ JSON output:
     "ok": true,
     "source": "/etc/pegaprox/secret.key",
     "source_path": "/etc/pegaprox/secret.key",
+    "config_dir": "/opt/PegaProx/config",
     "is_legacy": false,
     "tier": 4,
     "recommendation": "Key is outside the DB directory which is good. Consider upgrading to systemd LoadCredentialEncrypted..."
@@ -67,13 +72,19 @@ JSON output:
   "db": {
     "backend": "sqlcipher",
     "encrypted_at_rest": true,
-    "cipher": "AES-256-CBC / HMAC-SHA512 (SQLCipher v4)"
+    "cipher": "AES-256-CBC + HMAC-SHA512 (SQLCipher 4)",
+    "files": {
+      "/opt/PegaProx/config/pegaprox.db": "encrypted",
+      "/opt/PegaProx/config/syslog.db": "encrypted"
+    },
+    "note": "Full database encryption is active."
   }
 }
 ```
 
-A green pill in the admin UI's *Security* card consumes the same data via
-`GET /api/security/keystore-status`.
+`files` comes from each file's first 16 bytes (a plain SQLite file starts with
+`SQLite format 3`), so it shows a database that is still plain even where SQLCipher is
+installed; `encrypted_at_rest` is true only when every database found is encrypted.
 
 ---
 
@@ -86,20 +97,26 @@ each page carries an HMAC-SHA512 tag.
 
 ### Platform matrix
 
-| Platform | sqlcipher3-binary wheel | Encryption status |
-|----------|------------------------|-------------------|
-| Linux x86_64 | ✅ shipped | **Full DB encryption** |
-| Linux aarch64 | ❌ no wheel | Plain SQLite + field-level Fernet |
-| macOS (any) | ❌ no wheel | Plain SQLite + field-level Fernet |
-| Windows | ❌ no wheel | Plain SQLite + field-level Fernet |
-| Docker `python:3.12-slim` | ✅ (x86_64 base image) | **Full DB encryption** |
+| Platform | Package from requirements.txt | Encryption status |
+|----------|-------------------------------|-------------------|
+| Linux x86_64 | `sqlcipher3-binary` | **Full DB encryption** |
+| Linux aarch64 | `sqlcipher3` (0.6.4 or later, wheels with SQLCipher built in) | **Full DB encryption** |
+| macOS | `sqlcipher3` | **Full DB encryption** |
+| Windows | `sqlcipher3` | **Full DB encryption** |
+| 32-bit ARM (armv7) | none, no wheel | Plain SQLite + field-level AES-256-GCM |
+| Docker image, amd64 and arm64 | as above | **Full DB encryption** |
+| Docker image, arm/v7 | none | Plain SQLite + field-level AES-256-GCM |
+| Debian package, appliances | none, Debian has no Python binding | Plain SQLite + field-level AES-256-GCM |
+
+The two packages install the same `sqlcipher3` module and must never be installed side by
+side; the markers in requirements.txt give every platform one of them at most.
 
 The fallback is *not* unencrypted - sensitive fields (cluster passwords,
 2FA secrets, OIDC client secrets, API tokens) are still individually
-Fernet-encrypted with the same master key. The fallback gives up on
+encrypted with AES-256-GCM, under their own key file `config/.pegaprox_aes256.key`. The fallback gives up on
 metadata-at-rest (table names, audit-log timestamps, session IDs).
 
-You can force-disable SQLCipher by uninstalling `sqlcipher3-binary` and
+You can force-disable SQLCipher by uninstalling the SQLCipher package (`sqlcipher3-binary` or `sqlcipher3`) and
 restarting - the connection layer detects the missing module and falls
 back transparently. **Note**: any DB already encrypted will become
 unreadable until the module is reinstalled - there is no automatic
@@ -148,7 +165,7 @@ longer way back.
 Set `PEGAPROX_DISABLE_AUTO_ENCRYPT=1` in the service environment to skip
 the auto-encrypt step on boot. Useful for: taking your own backup first,
 running custom pre-flight checks, or staying on plain SQLite for a
-debugging window. With opt-out enabled, the field-level Fernet
+debugging window. With opt-out enabled, the field-level AES-256-GCM
 encryption still applies and you can run the manual CLI tool whenever
 you're ready.
 
@@ -201,7 +218,7 @@ somewhere safe right after the migration and delete that copy yourself.
 | Code | Meaning |
 |------|---------|
 | 0 | Migration successful, encrypted DB is now active |
-| 2 | `sqlcipher3` not installed - install `sqlcipher3-binary` first |
+| 2 | `sqlcipher3` not installed - install the SQLCipher package of requirements.txt first |
 | 3 | Existing DB already encrypted with a **different** key (refuses to clobber) |
 | 4 | Source DB is corrupt - repair before retrying |
 | 5 | Row-count verification failed - encrypted DB *not* swapped in |
@@ -325,10 +342,10 @@ exactly this case.
    with new key via `--migrate-db --rotate-from=<old-key-file>`, restart.
    The `--rotate-from` flag is on the roadmap; for now it's manual ATTACH +
    `sqlcipher_export`.
-2. **Field-level Fernet keys are not separately rotated.** Master key
-   rotation does not re-wrap existing Fernet-encrypted fields. This is
-   acceptable since both rely on the same master key - when the master
-   key changes, both layers change together.
+2. **The field key is not rotated with the master key.** Sensitive fields
+   are sealed with their own key file, `config/.pegaprox_aes256.key`, and
+   master key rotation does not re-wrap them. A backup of `config/` holds
+   that key file, so treat it as secret.
 3. **No second-factor at the DB layer.** A compromised host running
    PegaProx can read the DB. Compartmentalization (running clusters in
    separate VMs with separate keys) is the only mitigation.
