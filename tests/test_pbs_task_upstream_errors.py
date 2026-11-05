@@ -144,3 +144,54 @@ def test_invalid_json_cannot_turn_a_snapshot_read_error_into_http_200(task_clien
     result = client.get(f'/api/pbs/{PBS_ID}/datastores/store/snapshots')
 
     assert result.status_code == 502
+
+
+@pytest.mark.parametrize('field', ['upid', 'worker_type', 'worker_id', 'user', 'status'])
+@pytest.mark.parametrize('value', [{}, ['value'], 42, True])
+@pytest.mark.parametrize('scoped', [False, True])
+def test_invalid_task_text_fields_are_upstream_errors(task_client, monkeypatch, field, value, scoped):
+    """Reject malformed displayed/action fields before rendering or tenant filtering."""
+    import pegaprox.api.pbs as pbs_api
+
+    client, mgr = task_client
+    monkeypatch.setattr(pbs_api, 'acts_as_admin', lambda user: False)
+    monkeypatch.setattr(pbs_api, '_caller_is_scoped_here', lambda manager, user: scoped)
+    mgr.get_tasks.return_value = {'data': [{field: value}]}
+
+    result = client.get(f'/api/pbs/{PBS_ID}/tasks')
+
+    assert result.status_code == 502
+    assert result.get_json()['code'] == 'PBS_UPSTREAM'
+
+
+@pytest.mark.parametrize('field', ['starttime', 'endtime'])
+@pytest.mark.parametrize('value', [{}, [], '123', True, 1.5])
+def test_invalid_task_timestamp_fields_are_upstream_errors(task_client, field, value):
+    """PBS task timestamps are integer seconds, not structured or coerced values."""
+    client, mgr = task_client
+    mgr.get_tasks.return_value = {'data': [{field: value}]}
+
+    result = client.get(f'/api/pbs/{PBS_ID}/tasks')
+
+    assert result.status_code == 502
+    assert result.get_json()['code'] == 'PBS_UPSTREAM'
+
+
+@pytest.mark.parametrize('row', [
+    {},
+    {'worker_type': None, 'worker_id': None, 'status': None, 'endtime': None},
+    {'upid': UPID, 'worker_type': 'backup', 'worker_id': None,
+     'starttime': 1756045056, 'user': 'root@pam'},
+    {'upid': UPID, 'worker_type': 'backup', 'worker_id': 'store1:vm/100/68ab1f00',
+     'starttime': 1756045056, 'endtime': 1756045057, 'status': 'WARNINGS: 1',
+     'user': 'root@pam'},
+])
+def test_valid_optional_task_fields_remain_unchanged(task_client, row):
+    """Optional running-task fields stay optional and successful rows are preserved."""
+    client, mgr = task_client
+    mgr.get_tasks.return_value = {'data': [row]}
+
+    result = client.get(f'/api/pbs/{PBS_ID}/tasks')
+
+    assert result.status_code == 200
+    assert result.get_json() == [row]

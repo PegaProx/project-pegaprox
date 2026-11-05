@@ -1188,6 +1188,22 @@ def pbs_delete_snapshot(pbs_id, store):
     return jsonify(result)
 
 
+def _valid_pbs_task_row(row):
+    """Validate task fields consumed by the table without requiring optional values.
+
+    PBS task labels are strings and timestamps are integer seconds. Keep absent
+    and null values unchanged, including worker IDs and unfinished task fields.
+    """
+    if not isinstance(row, dict):
+        return False
+    text_fields = ('upid', 'worker_type', 'worker_id', 'user', 'status')
+    if any(row.get(field) is not None and not isinstance(row[field], str)
+           for field in text_fields):
+        return False
+    return all(row.get(field) is None or type(row[field]) is int
+               for field in ('starttime', 'endtime'))
+
+
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
@@ -1213,7 +1229,7 @@ def get_pbs_tasks(pbs_id):
         status, payload = failed
         return jsonify(payload), status
     if (not isinstance(result, dict) or not isinstance(result.get('data'), list)
-            or any(not isinstance(row, dict) for row in result['data'])):
+            or any(not _valid_pbs_task_row(row) for row in result['data'])):
         return jsonify({'error': 'PBS returned an invalid task list', 'code': 'PBS_UPSTREAM'}), 502
     # sec (audit) — the report path scopes these very rows; the raw list didn't, so a scoped
     # caller read every guest's backup history off the same server. Rows with no guest (gc,
