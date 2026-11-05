@@ -3183,6 +3183,15 @@
         // storages that keep a qcow2 file, which carries its snapshots along
         const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
 
+        /** Return missing devices from PVE's semicolon or whitespace-delimited boot order. */
+        function migrationBootOrderIssues(config, vmType, allowImplicitNet0 = false) {
+            const boot = typeof config.boot === 'string' ? config.boot : '';
+            const order = boot.split(',').find(part => part.startsWith('order='));
+            return order ? order.slice(6).split(/[;\s]+/)
+                .filter(device => device && !config[device] && !(device === 'net0' && vmType === 'qemu' && allowImplicitNet0)) : [];
+        }
+
+        /** Configure a migration to another node in the same cluster. */
         function MigrateModal({ vm, nodes, clusterId, onMigrate, onClose }) {
             const { t } = useTranslation();
             const { getAuthHeaders } = useAuth();
@@ -3211,6 +3220,7 @@
             useEffect(() => {
                 if(!vm || !vm.node || !clusterId) return;
                 
+                /** Refresh migration warnings from the latest VM configuration. */
                 const processVmConfig = (data) => {
                     const config = data.raw || data;
                     
@@ -3254,18 +3264,7 @@
                     setHasCdDvd(foundIsos.length > 0);
                     setDetectedIsos(foundIsos);
                     
-                    // Check boot order for non-existent disks
-                    const bootOrder = config.boot || '';
-                    const bootDevices = bootOrder.includes('order=') 
-                        ? bootOrder.split('order=')[1].split(';')[0].split(',')
-                        : [];
-                    const issues = [];
-                    bootDevices.forEach(device => {
-                        if(device && !config[device] && device !== 'net0') {
-                            issues.push(device);
-                        }
-                    });
-                    setBootOrderIssues(issues);
+                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type, true));
 
                     // a VM with virtiofs does not migrate live (qemu-server check_local_resources), and
                     // offline only to a node its directory mappings cover
@@ -3508,7 +3507,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
@@ -4605,6 +4604,7 @@
         // Cross-Cluster Migration Modal
         // NS: The big one - SSH tunnel based migration between clusters
         // Uses same ISO detection logic as MigrateModal (copy-paste, I know...)
+        /** Configure a migration to another cluster and show source configuration warnings. */
         function CrossClusterMigrateModal({ vm, sourceCluster, clusters, onMigrate, onClose }) {
             const { getAuthHeaders, haReadOnly } = useAuth();
             const { t } = useTranslation();
@@ -4666,6 +4666,7 @@
             // Check for CD/DVD and boot order issues
             // NS: Now uses SSE events for live updates
             useEffect(() => {
+                /** Refresh cross-cluster migration warnings from the latest VM configuration. */
                 const processVmConfig = (config) => {
                     // Check for CD/DVD drives with ISO mounted
                     const cdDvdKeys = Object.keys(config).filter(k => 
@@ -4688,18 +4689,7 @@
                     setHasCdDvd(foundIsos.length > 0);
                     setDetectedIsos(foundIsos);
                     
-                    // Check boot order for non-existent disks
-                    const bootOrder = config.boot || '';
-                    const bootDevices = bootOrder.includes('order=') 
-                        ? bootOrder.split('order=')[1].split(';')[0].split(',')
-                        : [];
-                    const issues = [];
-                    bootDevices.forEach(device => {
-                        if(device && !config[device] && device !== 'net0') {
-                            issues.push(device);
-                        }
-                    });
-                    setBootOrderIssues(issues);
+                    setBootOrderIssues(migrationBootOrderIssues(config, vm.type));
                     
                     // Calculate total disk size for large VM warning
                     let totalDiskGb = 0;
@@ -5016,7 +5006,7 @@
                                             <div>
                                                 <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
                                                 <p className="text-yellow-300/70 text-xs">
-                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                    {t('bootOrderWarning')}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
                                                 </p>
                                             </div>
                                         </div>
