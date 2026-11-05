@@ -594,7 +594,7 @@ def get_pbs_datastores(pbs_id):
     """List datastores with detailed status, surfacing required PBS read failures.
 
     A successful 200 with [] means the required PBS datastore configuration and usage
-    reads succeeded and there are no datastores. An upstream permission refusal is
+    reads succeeded and no datastores are visible to those reads. An upstream permission refusal is
     403 with code PBS_FORBIDDEN; a transport failure is 502 with code
     PBS_UNREACHABLE; other failed or malformed upstream reads are 502 with code
     PBS_UPSTREAM. PegaProx permission checks may also return 403.
@@ -636,6 +636,13 @@ def get_pbs_datastores(pbs_id):
     
     datastores = config_resp['data']
     usage_list = {u.get('store'): u for u in usage_resp['data']}
+    configured_names = {ds['name'] for ds in datastores}
+    if any(store not in configured_names for store in usage_list):
+        return jsonify({
+            'error': 'PBS returned datastore usage without matching configuration; '
+                     'check Datastore.Audit access or retry the read',
+            'code': 'PBS_UPSTREAM',
+        }), 502
     gc_jobs = _gc_jobs_by_store(mgr)
     
     # Merge config with usage

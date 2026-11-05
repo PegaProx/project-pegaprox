@@ -205,3 +205,34 @@ def test_usage_without_error_metrics_remains_valid(admin, pbs):
     assert result.status_code == 200
     assert result.get_json() == [{'name': 'backup', 'store': 'backup',
                                    'error': None, 'detail': {}}]
+
+
+@pytest.mark.parametrize('with_matching_store', [False, True])
+def test_usage_only_datastore_cannot_be_silently_discarded(admin, pbs, with_matching_store):
+    """Filtered configuration reads cannot hide stores present in PBS usage."""
+    configurations = []
+    usages = [{'store': 'backup', 'total': 1024, 'used': 128}]
+    if with_matching_store:
+        configurations.append({'name': 'healthy'})
+        usages.append({'store': 'healthy', 'total': 1024, 'used': 64})
+    pbs.get_datastores.return_value = {'data': configurations}
+    pbs.get_datastore_usage.return_value = {'data': usages}
+
+    response = admin.get(PATH)
+
+    assert response.status_code == 502
+    assert response.get_json()['code'] == 'PBS_UPSTREAM'
+    assert 'Datastore.Audit' in response.get_json()['error']
+    pbs.get_gc_jobs.assert_not_called()
+    pbs.get_datastore_status.assert_not_called()
+
+
+def test_configured_datastore_without_usage_stays_visible(admin, pbs):
+    """A configuration row is still useful when PBS omits its usage metrics."""
+    pbs.get_datastores.return_value = {'data': [{'name': 'backup'}]}
+    pbs.get_datastore_status.return_value = {'data': {}}
+
+    response = admin.get(PATH)
+
+    assert response.status_code == 200
+    assert response.get_json() == [{'name': 'backup', 'detail': {}}]
