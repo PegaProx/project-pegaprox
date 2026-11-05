@@ -436,6 +436,9 @@ def reconfigure_cluster(cluster_id):
     for field in ['name', 'host', 'user']:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
+    # JB Nov 2026 (#1251) - the dialog cannot read a stored key back, so an empty field keeps it
+    # and the stored key goes only on an explicit remove, a real true like the other flags
+    _remove_key = data.pop('ssh_key_remove', False) is True
     if not data.get('pass') and not data.get('ssh_key'):
         return jsonify({'error': 'Password or SSH key is required'}), 400
     if 'pass' not in data:
@@ -477,7 +480,7 @@ def reconfigure_cluster(cluster_id):
         if key not in data and hasattr(old_cfg, key):
             data[key] = copy.deepcopy(getattr(old_cfg, key))
     if not data.get('ssh_key'):
-        data['ssh_key'] = getattr(old_cfg, 'ssh_key', '') or ''
+        data['ssh_key'] = '' if _remove_key else getattr(old_cfg, 'ssh_key', '') or ''
     if 'fallback_hosts' not in data and _host_key(data.get('host')) == _host_key(old_cfg.host):
         data['fallback_hosts'] = list(getattr(old_cfg, 'fallback_hosts', None) or [])
 
