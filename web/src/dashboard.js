@@ -18145,6 +18145,8 @@
 
             // Load PBS when selected
             useEffect(() => {
+                setPbsTasksResult({ id: null, data: [], error: false });
+                setPbsTaskLog(null);
                 if (selectedPBS) {
                     fetchPBSStatus(selectedPBS.id);
                     fetchPBSDatastores(selectedPBS.id);
@@ -18159,7 +18161,11 @@
                         fetchPBSDatastores(selectedPBS.id);
                         fetchPBSJobs(selectedPBS.id);
                     }, 30000);
-                    return () => clearInterval(interval);
+                    return () => {
+                        clearInterval(interval);
+                        ++pbsTasksSeq.current;
+                        ++pbsTaskLogSeq.current;
+                    };
                 }
             }, [selectedPBS?.id]);
 
