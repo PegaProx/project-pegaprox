@@ -5421,6 +5421,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         held = False
         if recheck:
             from_phase, held = _recheck(node_name, from_phase, info)
+            if _status() != 'running':
+                return 'stop'
         start = rolling_runs.PHASES.index(from_phase)
 
         def todo(phase):
