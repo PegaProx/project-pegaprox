@@ -173,3 +173,35 @@ def test_valid_required_entries_still_merge_usage_and_details(admin, pbs):
                                    'store': 'backup', 'total': 1024,
                                    'detail': {'used': 128}}]
     pbs.get_datastore_status.assert_called_once_with('backup')
+
+
+@pytest.mark.parametrize('error', ['cannot open datastore', '', {'message': 'bad response'}])
+@pytest.mark.parametrize('with_healthy_store', [False, True])
+def test_per_store_usage_error_is_an_upstream_failure(admin, pbs, error, with_healthy_store):
+    """A row-level PBS failure cannot become a healthy zero-usage datastore."""
+    pbs.get_datastores.return_value = {'data': [{'name': 'backup'}]}
+    rows = [{'store': 'backup', 'error': error}]
+    if with_healthy_store:
+        pbs.get_datastores.return_value['data'].append({'name': 'healthy'})
+        rows.append({'store': 'healthy', 'total': 1024, 'used': 128})
+    pbs.get_datastore_usage.return_value = {'data': rows}
+
+    result = admin.get(PATH)
+
+    assert result.status_code == 502
+    assert result.get_json()['code'] == 'PBS_UPSTREAM'
+    pbs.get_gc_jobs.assert_not_called()
+    pbs.get_datastore_status.assert_not_called()
+
+
+def test_usage_without_error_metrics_remains_valid(admin, pbs):
+    """PBS namespace-only entries may omit metrics without reporting a failure."""
+    pbs.get_datastores.return_value = {'data': [{'name': 'backup'}]}
+    pbs.get_datastore_usage.return_value = {'data': [{'store': 'backup', 'error': None}]}
+    pbs.get_datastore_status.return_value = {'data': {}}
+
+    result = admin.get(PATH)
+
+    assert result.status_code == 200
+    assert result.get_json() == [{'name': 'backup', 'store': 'backup',
+                                   'error': None, 'detail': {}}]

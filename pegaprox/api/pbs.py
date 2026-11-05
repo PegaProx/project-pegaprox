@@ -630,7 +630,8 @@ def get_pbs_datastores(pbs_id):
     if (not isinstance(usage_resp, dict)
             or not isinstance(usage_resp.get('data'), list)
             or any(not isinstance(usage, dict) or not isinstance(usage.get('store'), str)
-                   or not usage['store'] for usage in usage_resp['data'])):
+                   or not usage['store'] or usage.get('error') is not None
+                   for usage in usage_resp['data'])):
         return jsonify({'error': 'PBS returned an invalid datastore usage list', 'code': 'PBS_UPSTREAM'}), 502
     
     datastores = config_resp['data']
