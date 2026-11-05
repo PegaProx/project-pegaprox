@@ -599,7 +599,10 @@ class _FakeServer:
             body = json.loads(req.post_data) if req.post_data else {}
         except Exception:
             body = {}
-        self.bodies.setdefault(path, []).append(body)
+        # JB Nov 2026 - what was sent, not what was read: a list read again after a write has
+        # the same path, and its {} became bodies[path][-1] whenever it came before the test looked
+        if req.method != 'GET':
+            self.bodies.setdefault(path, []).append(body)
 
         def answer(data, status=200):
             return route.fulfill(status=status, body=json.dumps(data),

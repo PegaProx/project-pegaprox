@@ -149,7 +149,8 @@ def _bodies(app, call):
             continue
         if m == call[0]:
             out.append(app.server.bodies[p][i])
-        i += 1
+        if m != 'GET':  # the fake server keeps no body for a read
+            i += 1
     return out
 
 

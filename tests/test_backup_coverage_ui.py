@@ -324,7 +324,8 @@ def _sent(app, method, path):
             continue
         if m == method:
             out.append(app.server.bodies[path][i])
-        i += 1
+        if m != 'GET':  # the fake server keeps no body for a read
+            i += 1
     return out
 
 
