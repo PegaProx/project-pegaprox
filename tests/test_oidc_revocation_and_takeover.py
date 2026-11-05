@@ -335,8 +335,8 @@ def test_an_untruncated_groups_claim_still_counts():
     assert m['_authoritative'] is True
 
 
-def test_a_complete_graph_fetch_beats_an_overage_marker():
-    """If Graph answered in full, the token's truncation is irrelevant."""
+def test_a_complete_direct_graph_fetch_does_not_override_overage():
+    """A direct Graph walk cannot recover omitted nested token groups."""
     claims = {'groups': ['g1'], '_claim_names': {'groups': 'src1'}}
     m = O.oidc_map_groups_to_role({}, [], O._VerifiedClaims(claims), groups_complete=True)
-    assert m['_authoritative'] is True
+    assert m['_authoritative'] is False

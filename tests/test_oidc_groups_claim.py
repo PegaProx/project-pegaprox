@@ -104,12 +104,12 @@ def test_complete_graph_groups_are_unchanged():
     assert mapping['groups'] == ['admins']
 
 
-def test_complete_graph_fetch_wins_over_token_overage():
+def test_complete_direct_graph_fetch_does_not_override_token_overage():
     mapping = oidc.oidc_map_groups_to_role(
         _config(provider='entra'), [{'id': 'admins', 'name': 'Administrators'}],
         oidc._VerifiedClaims({'groups_proxmox': [], '_claim_names': {'groups_proxmox': 'src1'}}),
         groups_complete=True)
-    assert mapping['_authoritative'] is True
+    assert mapping['_authoritative'] is False
     assert mapping['role'] == 'admin'
 
 
@@ -309,7 +309,7 @@ def test_unverified_token_relogin_preserves_existing_access(
 
 @pytest.mark.parametrize('claim_name', ['groups', 'groups_proxmox'])
 @pytest.mark.parametrize('complete', [False, True])
-def test_entra_canonical_overage_preserves_access_until_graph_is_complete(
+def test_entra_canonical_overage_preserves_access_with_direct_graph(
         api, db, idp, signer, monkeypatch, claim_name, complete):
     import pegaprox.api.auth as auth
 
@@ -327,8 +327,8 @@ def test_entra_canonical_overage_preserves_access_until_graph_is_complete(
     assert _okta_sign_in(api, monkeypatch, token, **config) == username
     user = db.get_user(username)
     assert user['role'] == 'user'
-    assert user['permissions'] == ([] if complete else ['vm.delete'])
-    assert user['tenant_permissions'] == ({} if complete else held['tenant_permissions'])
+    assert user['permissions'] == ['vm.delete']
+    assert user['tenant_permissions'] == held['tenant_permissions']
     assert db.get_user_directory_groups(username) == ['operators']
 
 
@@ -359,3 +359,42 @@ def test_ignored_claim_diagnostics_identify_reason_without_group_values(caplog, 
     assert 'groups_proxmox' in caplog.text
     assert reason in caplog.text
     assert 'private-group-value' not in caplog.text
+
+
+@pytest.mark.parametrize('claim_name', ['groups', 'groups_proxmox'])
+@pytest.mark.parametrize('claim_present', [False, True])
+def test_entra_overage_keeps_nested_membership_on_relogin(
+        api, db, idp, signer, monkeypatch, claim_name, claim_present):
+    import pegaprox.api.auth as auth
+
+    direct = '11111111-1111-4111-8111-111111111111'
+    nested = '22222222-2222-4222-8222-222222222222'
+    monkeypatch.setattr(auth, 'oidc_get_user_groups_ex', lambda *a: (
+        [{'id': direct, 'name': 'Direct group'}], True))
+    config = {'provider': 'entra', 'groups_claim': claim_name,
+              'admin_group_id': nested, 'user_group_id': direct}
+    username = _okta_sign_in(
+        api, monkeypatch, _id_token(signer, **{claim_name: [nested]}), **config)
+    assert db.get_user(username)['role'] == 'admin'
+    assert db.get_user_directory_groups(username) == [direct, nested]
+
+    claims = {'_claim_names': {'groups': 'src1'}}
+    if claim_present:
+        claims[claim_name] = [direct]
+    assert _okta_sign_in(api, monkeypatch, _id_token(signer, **claims), **config) == username
+    assert db.get_user(username)['role'] == 'admin'
+    assert db.get_user_directory_groups(username) == [direct, nested]
+
+    # A later complete verified token still revokes an actually removed nested group.
+    assert _okta_sign_in(
+        api, monkeypatch, _id_token(signer, **{claim_name: [direct]}), **config) == username
+    assert db.get_user(username)['role'] == 'user'
+    assert db.get_user_directory_groups(username) == [direct]
+
+
+def test_unverified_overage_marker_does_not_override_complete_graph():
+    mapping = oidc.oidc_map_groups_to_role(
+        _config(provider='entra'), [{'id': 'operators', 'name': 'Operators'}],
+        {'_claim_names': {'groups': 'src1'}}, groups_complete=True)
+    assert mapping['_authoritative'] is True
+    assert mapping['role'] == 'user'

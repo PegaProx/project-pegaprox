@@ -36,13 +36,15 @@ verification is disabled or JWKS verification fails, token groups cannot grant
 or revoke access. A non-array claim, or an array containing an object, nested
 array, boolean, null, floating-point value or blank string, is ignored in full;
 valid entries alongside an invalid one are not used. Complete Entra Graph
-results remain authoritative independently of the token.
+results remain authoritative independently of malformed or unverified token claims.
 
 For Entra, an overage marker under the standard `_claim_names.groups` key also
-marks a custom groups claim incomplete. A complete Graph fetch still establishes
-completeness. Graph uses `/me/memberOf`, which lists direct memberships; verified
-token groups can include nested memberships, so the existing mapping combines
-both sources rather than discarding token groups after a complete Graph fetch.
+marks a custom groups claim incomplete. Graph uses `/me/memberOf`, which lists
+direct memberships; token groups can include nested memberships. During verified
+token overage, even a complete direct Graph fetch cannot establish the full group
+set, so login can grant access but preserves existing grants and memberships.
+Without overage, the existing mapping combines both sources rather than
+discarding verified token groups after a complete Graph fetch.
 
 Ignored claims produce a diagnostic with the configured key and the reason
 (missing, not an array, invalid entry, or unverified token), without logging group
