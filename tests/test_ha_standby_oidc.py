@@ -81,7 +81,8 @@ def _idp(monkeypatch, config=None, **people):
                             {'access_token': code, 'id_token': code} if code in people
                             else {'error': 'invalid_grant'}))
     monkeypatch.setattr(auth_api, 'oidc_decode_id_token',
-                        lambda token, expected_nonce=None, config=None: copy.deepcopy(people[token]))
+                        lambda token, expected_nonce=None, config=None:
+                            O._VerifiedClaims(copy.deepcopy(people[token])))
     monkeypatch.setattr(auth_api, 'oidc_get_user_info', lambda cfg, token: {})
     monkeypatch.setattr(auth_api, 'oidc_get_user_groups_ex', lambda cfg, token: ([], False))
 

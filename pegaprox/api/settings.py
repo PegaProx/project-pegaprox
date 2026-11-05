@@ -1541,6 +1541,12 @@ def update_server_settings():
         # check if JSON or form-data
         if request.is_json:
             data = request.get_json() or {}
+            if 'oidc_groups_claim' in data:
+                from pegaprox.utils.oidc import normalize_oidc_groups_claim
+                try:
+                    data['oidc_groups_claim'] = normalize_oidc_groups_claim(data['oidc_groups_claim'])
+                except ValueError as exc:
+                    return jsonify({'error': str(exc)}), 400
             # NS Oct 2026 (#1149) - a username claim outside the list is refused before anything
             # is saved, rather than stored as the old order without a word
             if 'oidc_username_claim' in data:
@@ -1917,9 +1923,11 @@ def update_server_settings():
                 'oidc_audiences': lambda v: str(v or '').strip(),
                 # NS Oct 2026 (#1149) - only a claim from the list, anything else is the old order
                 'oidc_username_claim': lambda v: str(v or '').strip() if str(v or '').strip() in OIDC_USERNAME_CLAIMS else '',
+                'oidc_groups_claim': lambda v: v,  # validated before any settings are changed
             }
             
             _old_claim = settings.get('oidc_username_claim') or ''
+            _old_groups_claim = settings.get('oidc_groups_claim') or 'groups'
             for key, transform in oidc_keys.items():
                 if key in data:
                     settings[key] = transform(data[key])
@@ -1952,7 +1960,8 @@ def update_server_settings():
             if any(k in data for k in oidc_keys):
                 log_audit(request.session.get('user', 'admin'), 'settings.oidc', 
                          f"OIDC settings updated (enabled={settings.get('oidc_enabled', False)}, provider={settings.get('oidc_provider', 'entra')}, "
-                         f"username_claim={_old_claim or 'auto'}->{settings.get('oidc_username_claim') or 'auto'})")
+                         f"username_claim={_old_claim or 'auto'}->{settings.get('oidc_username_claim') or 'auto'}, "
+                         f"groups_claim={_old_groups_claim}->{settings.get('oidc_groups_claim') or 'groups'})")
             
         else:
             # form-data (for file uploads). The lock is checked first: further down this branch

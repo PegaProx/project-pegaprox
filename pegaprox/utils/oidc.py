@@ -90,6 +90,15 @@ OIDC_USERNAME_CLAIMS = ('preferred_username', 'email', 'upn')
 _OIDC_NAME_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789._-@+')
 
 
+def normalize_oidc_groups_claim(value) -> str:
+    """A literal, case-sensitive ID-token key; blank restores the default."""
+    if value is None:
+        return 'groups'
+    if not isinstance(value, str) or len(value) > 256 or any(not c.isprintable() for c in value):
+        raise ValueError('oidc_groups_claim must be a printable string of at most 256 characters')
+    return value.strip() or 'groups'
+
+
 def get_oidc_settings() -> dict:
     """Load OIDC/Entra ID configuration from server settings
 
@@ -98,6 +107,10 @@ def get_oidc_settings() -> dict:
     from pegaprox.api.helpers import load_server_settings
     settings = load_server_settings()  # MK: Must use load_server_settings() NOT get_server_settings() (that's the route handler!)
     provider = settings.get('oidc_provider', 'entra')
+    try:
+        groups_claim = normalize_oidc_groups_claim(settings.get('oidc_groups_claim'))
+    except ValueError:
+        groups_claim = 'groups'
     
     # NS: Entra needs User.Read + GroupMember.Read.All for Graph API
     # Default scopes differ by provider
@@ -124,6 +137,7 @@ def get_oidc_settings() -> dict:
         'auto_create_users': settings.get('oidc_auto_create_users', True),
         # Custom group mappings (same format as LDAP)
         'group_mappings': settings.get('oidc_group_mappings', []),
+        'groups_claim': groups_claim,
         # Display
         'button_text': settings.get('oidc_button_text', 'Sign in with Microsoft'),
         # NS: allow disabling JWT sig verification for broken JWKS environments
@@ -755,9 +769,10 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
     NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
     just to grant. It is true only when we know the full group set: either the Entra
     fetch completed (groups_complete=True), or the validated ID token actually carried a
-    `groups` claim. A provider that sends no groups claim at all is indistinguishable
-    from a user who lost every group, so that case stays non-authoritative and
-    provisioning leaves existing grants alone.
+    configured groups claim as an array of usable IDs/names, with no token overage marker.
+    A direct Graph walk cannot recover nested memberships omitted during overage. A missing
+    or malformed claim alone cannot establish removals either; provisioning preserves
+    existing grants when the mapping stays non-authoritative.
     """
     result = {
         'role': config.get('default_role', ROLE_VIEWER),
@@ -767,26 +782,49 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
         'groups': [],
         '_authoritative': False,
     }
-    if groups_complete:
-        result['_authoritative'] = True
-    elif id_token_claims is not None and 'groups' in id_token_claims:
-        # The ID token is signature-checked before it gets here, so a groups claim in it
-        # is as good a source as the Graph call - including when it is an empty list.
-        #
-        # Except when the provider says it truncated it. Entra stops embedding the full
-        # list once a user is in more groups than fit the token and emits _claim_names /
-        # _claim_sources pointing at Graph instead ("groups overage"). The claim is then
-        # present but partial, and deciding a revocation on a partial list is the thing
-        # this whole mechanism exists to avoid. Grant from it, never revoke.
-        _names = id_token_claims.get('_claim_names')
-        if isinstance(_names, dict) and 'groups' in _names:
-            logging.warning(
-                "[OIDC] the ID token signals a groups overage - the claim is truncated, "
-                "so this login can grant but not revoke. Give the app Graph group-read "
-                "permission if you need memberships to be authoritative.")
+    claim_name = config.get('groups_claim') or 'groups'
+    _claim = []
+    _claim_valid = False
+    if oidc_id_token_verified(id_token_claims):
+        if claim_name not in id_token_claims:
+            logging.info("[OIDC] groups claim %r is missing; token group mapping was not applied",
+                         claim_name)
+        elif not isinstance(id_token_claims[claim_name], list):
+            logging.warning("[OIDC] groups claim %r ignored: not an array; "
+                            "token group mapping was not applied", claim_name)
         else:
-            result['_authoritative'] = True
-    
+            raw_claim = id_token_claims[claim_name]
+            for value in raw_claim:
+                if isinstance(value, str) and value.strip():
+                    _claim.append(value.strip())
+                elif isinstance(value, int) and not isinstance(value, bool):
+                    _claim.append(str(value))
+                else:
+                    # Do not turn an invalid list into an authoritative empty/partial
+                    # one, or let its remaining entries grant access.
+                    _claim = []
+                    logging.warning("[OIDC] groups claim %r ignored: invalid entry; "
+                                    "token group mapping was not applied", claim_name)
+                    break
+            else:
+                _claim_valid = True
+    elif isinstance(id_token_claims, dict) and claim_name in id_token_claims:
+        logging.warning("[OIDC] groups claim %r ignored: ID token signature was not verified; "
+                        "token group roles and memberships were not applied", claim_name)
+    # /me/memberOf is a complete list of direct memberships, not nested ones.
+    # A signed token overage marker therefore also limits a completed Graph walk.
+    _names = id_token_claims.get('_claim_names') if oidc_id_token_verified(id_token_claims) else None
+    _overage = isinstance(_names, dict) and (
+        claim_name in _names or (config.get('provider') == 'entra' and 'groups' in _names))
+    if _overage:
+        logging.warning(
+            "[OIDC] the ID token signals a groups overage; direct Graph memberships "
+            "cannot establish the full group set, so this login can grant but not revoke.")
+    elif groups_complete or _claim_valid:
+        # A complete verified array or Graph fetch can establish removals when the
+        # provider has not signalled that nested token memberships were omitted.
+        result['_authoritative'] = True
+
     # Build list of group identifiers (IDs for Entra, names for generic)
     group_ids = set()
     group_names = set()
@@ -804,21 +842,17 @@ def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = 
             group_ids.add(g.lower())
             group_names.add(g.lower())
     
-    # NS: Also check ID token 'groups' claim (Entra can embed group IDs in token)
-    if id_token_claims:
-        for gid in id_token_claims.get('groups', []):
-            group_ids.add(str(gid).lower())
+    # Reuse the verified, normalized array for both roles and directory memberships.
+    for gid in _claim:
+        group_ids.add(gid.lower())
 
     # MK Oct 2026 (#940) - the groups oidc_build_user_row stores on the user, which is what
     # a pool grant on a group is matched against. Entra groups go in by object id only: the
     # display name is the squattable identifier the name-match warning further down is
     # about, and a pool grant must not be claimable by creating a group of the right name.
     # A generic provider's groups claim is taken as the signed token carries it.
-    _claim = (id_token_claims or {}).get('groups') or []
-    if isinstance(_claim, str):
-        _claim = [_claim]
     _seen = set()
-    for g in list(groups or []) + (list(_claim) if isinstance(_claim, (list, tuple)) else []):
+    for g in list(groups or []) + _claim:
         v = g.get('id') if isinstance(g, dict) else g
         if isinstance(v, int) and not isinstance(v, bool):
             v = str(v)
