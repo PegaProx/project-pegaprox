@@ -5335,7 +5335,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             _log(f"▶ Continued - looking at the quorum again before {node_name} goes on")
 
     def _pending(node_name):
-        """How many updates the node has, None when that could not be read."""
+        """How many updates the node has, None when unreadable or the run stopped."""
         # First refresh apt/yum cache. MK Oct 2026 (#1135) - Proxmox answers with the UPID of its
         # apt update and the list is read once that task is through. A fixed 3s was too short for
         # a slow mirror: the read got the list of the apt update before, and a node with updates
@@ -5347,13 +5347,16 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if isinstance(refreshed, dict) and refreshed.get('success') is False:
                 stale = refreshed.get('error') or 'the refresh failed'
             elif isinstance(refreshed, dict) and refreshed.get('task'):
-                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180):
+                if not mgr._wait_for_task(node_name, refreshed['task'], timeout=180,
+                                          stop=lambda: _status() != 'running'):
                     stale = 'the apt update task failed or took longer than 180s'
-            else:
-                # NS: yum makecache takes way longer than apt update
-                time.sleep(10 if is_xcpng else 3)
+            elif not is_xcpng:
+                # XCP-ng refresh waits for SSH; preserve the PVE no-UPID fallback.
+                time.sleep(3)
         except Exception as e:
             stale = str(e) or type(e).__name__
+        if _status() != 'running':
+            return None
         if stale:
             _log(f"⚠ Package lists of {node_name} not refreshed ({str(stale)[:200]}) - "
                  f"reading the cached list, it may be stale")
@@ -5430,6 +5433,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         if todo('checking') and skip_up_to_date and not force_all:
             _log(f"Checking for available updates on {node_name}...")
             update_count = _pending(node_name)
+            if _status() != 'running':
+                return 'stop'
             if update_count == 0:
                 _set(add={'skipped_nodes': node_name}, node=(node_name, {'phase': 'done', 'result': 'skipped'}),
                      log=f"⏭ {node_name} is already up-to-date - SKIPPING")
@@ -5468,6 +5473,9 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 if lines:
                     _set(log=lines)
                 rolling_node_templates(mgr, vms_here)   # #763
+
+            if _status() != 'running':
+                return 'stop'
 
             # Step 1: Enable maintenance mode (evacuate VMs unless skip_evacuation is set)
             # enter_maintenance_mode() internally calls _set_ceph_maintenance_flags()

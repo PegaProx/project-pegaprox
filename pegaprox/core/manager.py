@@ -4755,7 +4755,7 @@ class PegaProxManager:
                             entry.get('to_node'), why, status,
                             duration=(time.time() - started) if started else 0.0, note=note)
 
-    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600) -> bool:
+    def _wait_for_task(self, node: str, task_id: str, timeout: int = 600, stop=None) -> bool:
         """
         Wait for a Proxmox task to complete.
         
@@ -4765,11 +4765,14 @@ class PegaProxManager:
         Polling interval: 2s normally, 5s after errors (to avoid hammering a failing node)
         Default timeout: 10 minutes (should be enough for most migrations)
         
+        An optional stop callback ends the wait between polls when its caller cancels.
         Returns True only if task completed with exitstatus 'OK'.
         """
         start_time = time.time()
         
         while time.time() - start_time < timeout:
+            if stop is not None and stop():
+                return False
             try:
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/tasks/{task_id}/status"
                 response = self._api_get(url)
