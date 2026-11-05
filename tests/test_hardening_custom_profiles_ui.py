@@ -564,6 +564,8 @@ def test_runtime_save_selection_as_profile(open_app):
     sent = _bodies(app, 'POST', '/api/hardening/profiles')[-1]
     assert sent['controls'] == ['journald', 'pam_faillock', 'backup_dns']
     assert sent['params'] == {'pam_faillock': {'service_user': 'zabbix'}}
+    # the dialog closes before the list is read again
+    _poll(app, lambda: _profile_select(page).locator('option', has_text='Picked by hand').count() == 1)
     assert _profile_select(page).locator('option', has_text='Picked by hand').count() == 1
     _no_errors(app)
 
