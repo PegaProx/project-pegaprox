@@ -53,4 +53,4 @@ def test_runtime_a_snapshot_name_with_a_leading_digit_is_explained(open_app):
     body = page.locator('body').inner_text()
 
     assert 'snapshotNameLetterWarning' not in body, 'the warning showed its key'
-    assert 'Snapshot name must start with a letter.' in body
+    assert 'Snapshot name must start with a letter from A to Z.' in body
