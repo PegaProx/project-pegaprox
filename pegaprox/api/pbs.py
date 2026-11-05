@@ -42,7 +42,7 @@ def pbs_upstream_error(result):
     """
     if not isinstance(result, dict) or 'error' not in result:
         return None
-    upstream = result.get('status_code')
+    upstream = result.get('upstream_status', result.get('status_code'))
     if upstream == 403:
         # PBS guards the node log with Sys.Audit on /system/log. A token minted for
         # backup work alone (Datastore.*) does not carry it, and that is the common case.
@@ -50,8 +50,9 @@ def pbs_upstream_error(result):
     if upstream is None:
         # never got an answer: DNS, refused, timed out, TLS
         return 502, {'error': 'PBS is unreachable', 'code': 'PBS_UNREACHABLE', 'upstream_status': None}
-    return 502, {'error': f'PBS returned HTTP {upstream}', 'code': 'PBS_UPSTREAM',
-                 'upstream_status': upstream}
+    reason = ('PBS returned an invalid response' if 'upstream_status' in result
+              else f'PBS returned HTTP {upstream}')
+    return 502, {'error': reason, 'code': 'PBS_UPSTREAM', 'upstream_status': upstream}
 
 
 def _link_refusal(links, empty_error):
@@ -1182,10 +1183,36 @@ def pbs_delete_snapshot(pbs_id, store):
     return jsonify(result)
 
 
+def _valid_pbs_task_row(row):
+    """Validate task fields consumed by the table without requiring optional values.
+
+    PBS task labels are strings and timestamps are integer seconds. Keep absent
+    and null values unchanged, including worker IDs and unfinished task fields.
+    """
+    if not isinstance(row, dict):
+        return False
+    text_fields = ('upid', 'worker_type', 'worker_id', 'user', 'status')
+    if any(row.get(field) is not None and not isinstance(row[field], str)
+           for field in text_fields):
+        return False
+    return all(row.get(field) is None or type(row[field]) is int
+               for field in ('starttime', 'endtime'))
+
+
+def _valid_pbs_task_detail_fields(row, fields):
+    """Keep existing missing/null text fallbacks but reject malformed displayed values."""
+    return isinstance(row, dict) and all(
+        row.get(field) is None or isinstance(row[field], str) for field in fields)
+
+
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_tasks(pbs_id):
-    """List PBS tasks"""
+    """List PBS tasks, surfacing an upstream failure instead of an empty list.
+
+    A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed
+    response returns HTTP 502. A successful empty task list still returns HTTP 200.
+    """
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1198,11 +1225,18 @@ def get_pbs_tasks(pbs_id):
     running = request.args.get('running', None)
     result = mgr.get_tasks(limit=limit, typefilter=typefilter,
                             running=bool(int(running)) if running is not None else None)
+    failed = pbs_upstream_error(result)
+    if failed:
+        status, payload = failed
+        return jsonify(payload), status
+    if (not isinstance(result, dict) or not isinstance(result.get('data'), list)
+            or any(not _valid_pbs_task_row(row) for row in result['data'])):
+        return jsonify({'error': 'PBS returned an invalid task list', 'code': 'PBS_UPSTREAM'}), 502
     # sec (audit) — the report path scopes these very rows; the raw list didn't, so a scoped
     # caller read every guest's backup history off the same server. Rows with no guest (gc,
     # prune, sync) carry no per-object question, so they go the same way as everywhere else:
     # kept for an unconfined caller, dropped for a confined one.
-    return jsonify(_scope_pbs_rows(mgr, result.get('data', []) or [],
+    return jsonify(_scope_pbs_rows(mgr, result['data'],
                                    key_fn=lambda t: _pbs_task_guest(t.get('worker_id') or t.get('id')),
                                    where_fn=lambda t: (_pbs_task_store(t.get('worker_id') or t.get('id')), '')))
 
@@ -1210,7 +1244,11 @@ def get_pbs_tasks(pbs_id):
 @bp.route('/api/pbs/<pbs_id>/tasks/<path:upid>', methods=['GET'])
 @require_auth(perms=['pbs.tasks.view'])
 def get_pbs_task_detail(pbs_id, upid):
-    """Get task status and log"""
+    """Get task status and log, failing if either PBS read failed.
+
+    A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed
+    response returns HTTP 502. A successful empty log still returns HTTP 200.
+    """
     # NS Jul 2026 (CodeAnt IDOR) — enforce the per-PBS linked-clusters tenant gate
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1226,10 +1264,24 @@ def get_pbs_task_detail(pbs_id, upid):
     if not ok:
         return err
     status = mgr.get_task_status(upid)
+    failed = pbs_upstream_error(status)
+    if failed:
+        code, payload = failed
+        return jsonify(payload), code
+    if (not isinstance(status, dict)
+            or not _valid_pbs_task_detail_fields(status.get('data'), ('status', 'exitstatus'))):
+        return jsonify({'error': 'PBS returned an invalid task status', 'code': 'PBS_UPSTREAM'}), 502
     log = mgr.get_task_log(upid)
+    failed = pbs_upstream_error(log)
+    if failed:
+        code, payload = failed
+        return jsonify(payload), code
+    if (not isinstance(log, dict) or not isinstance(log.get('data'), list)
+            or any(not _valid_pbs_task_detail_fields(row, ('t', 'd')) for row in log['data'])):
+        return jsonify({'error': 'PBS returned an invalid task log', 'code': 'PBS_UPSTREAM'}), 502
     return jsonify({
-        'status': status.get('data', {}),
-        'log': log.get('data', []),
+        'status': status['data'],
+        'log': log['data'],
     })
 
 

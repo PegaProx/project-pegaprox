@@ -167,6 +167,8 @@ def build(app):
                     '400': {'description': 'Bad request'},
                 },
             }
+            if method == 'GET' and rule.endpoint in ('pbs.get_pbs_tasks', 'pbs.get_pbs_task_detail'):
+                op['responses']['502'] = {'description': 'PBS server unreachable or invalid upstream response'}
             if summary:
                 op['summary'] = summary
             if description:

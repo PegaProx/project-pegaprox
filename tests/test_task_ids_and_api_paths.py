@@ -174,6 +174,7 @@ def pbs(api):
 
 
 def test_a_pbs_task_id_that_is_no_task_id_reaches_no_pbs(api, seed, pbs):
+    """Reject climbing IDs before PBS reads, while a valid ID reaches both reads."""
     c = api.as_user(seed.user('root', role='admin'))
     for upid in CLIMBING:
         assert c.get(f'/api/pbs/p1/tasks/{upid}').status_code in (400, 404, 405)
@@ -182,8 +183,12 @@ def test_a_pbs_task_id_that_is_no_task_id_reaches_no_pbs(api, seed, pbs):
     assert not pbs.api_get.called and not pbs.api_delete.called
     # counterproof: a real one goes through
     good = 'UPID:pbs:00001234:0000ABCD:00000001:65000000:garbage_collection:store1:root@pam:'
+    pbs.api_get.side_effect = [
+        {'data': {'status': 'stopped', 'exitstatus': 'OK'}},
+        {'data': []},
+    ]
     assert c.get(f'/api/pbs/p1/tasks/{good}').status_code == 200
-    assert pbs.api_get.called
+    assert pbs.api_get.call_count == 2
 
 
 def test_an_xcpng_task_reference_is_no_upid_and_still_reads(api, seed):

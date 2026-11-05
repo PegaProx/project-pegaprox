@@ -21129,6 +21129,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS server unreachable or invalid upstream response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -21136,7 +21139,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "List PBS tasks",
+        "summary": "List PBS tasks, surfacing an upstream failure instead of an empty list.",
+        "description": "A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed\nresponse returns HTTP 502. A successful empty task list still returns HTTP 200.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21174,6 +21178,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS server unreachable or invalid upstream response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -21181,7 +21188,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Get task status and log",
+        "summary": "Get task status and log, failing if either PBS read failed.",
+        "description": "A refused PBS read returns HTTP 403. An unreachable PBS server or a malformed\nresponse returns HTTP 502. A successful empty log still returns HTTP 200.",
         "parameters": [
           {
             "name": "pbs_id",
