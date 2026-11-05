@@ -2330,7 +2330,8 @@
 
                     {/* LW: Feb 2026 - table view, corporate data-grid */}
                     {viewMode === 'table' && (
-                        <div className={isCorporate ? 'overflow-hidden border border-proxmox-border' : 'overflow-hidden rounded-xl border border-proxmox-border'}>
+                        // JB Nov 2026 (#1225) - scroll, not clip: at common window widths the table is wider than its pane and the actions column was cut off
+                        <div className={isCorporate ? 'overflow-x-auto border border-proxmox-border' : 'overflow-x-auto rounded-xl border border-proxmox-border'}>
                             <table className={`w-full ${isCorporate ? 'corp-datagrid corp-datagrid-striped' : ''}`}>
                                 <thead>
                                     <tr className={isCorporate ? 'text-left' : 'bg-proxmox-dark text-left'} style={isCorporate ? {background: 'var(--corp-header-bg)'} : undefined}>
