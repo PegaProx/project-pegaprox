@@ -49,6 +49,8 @@ from typing import Optional
 
 _LOG = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
+# Tier 4, a name so the tests can point it elsewhere
+SYSTEM_KEY_PATH = Path('/etc/pegaprox/secret.key')
 _CACHED: Optional["MasterKey"] = None
 
 
@@ -105,17 +107,42 @@ def reset_cache() -> None:
         _CACHED = None
 
 
+def peek_master_key() -> Optional[MasterKey]:
+    """The key load_master_key() would use, or None where there is none yet. Never
+    creates one and never caches."""
+    if _CACHED is not None:
+        return _CACHED
+    return _resolve(generate=False)
+
+
 def health_status() -> dict:
-    """Returned by the /api/security/keystore-status endpoint so the
-    admin UI can render the health-indicator pill."""
+    """What `pegaprox_multi_cluster.py --keystore-status` prints.
+
+    MK Nov 2026 - it only reads. It used to resolve like the server and so generate a key
+    when it found none: run as root from another directory it left a fresh key in
+    <cwd>/config, and run before the first start it made the service's own key, owned by
+    root and unreadable for the service. Paths are absolute, so a status taken in the
+    wrong directory shows where it looked."""
+    config_dir = os.path.abspath(os.path.dirname(str(_legacy_key_path())) or '.')
     try:
-        mk = load_master_key()
+        mk = peek_master_key()
     except Exception as e:
-        return {'ok': False, 'source': 'error', 'message': str(e)}
+        return {'ok': False, 'source': 'error', 'message': str(e), 'config_dir': config_dir}
+    if mk is None:
+        return {
+            'ok': False,
+            'source': 'none',
+            'source_path': None,
+            'config_dir': config_dir,
+            'message': (f"No master key found, also not in {config_dir}. PegaProx creates one "
+                        "there on its first start. If it has run before, this looked in the wrong "
+                        "place: run it as the service user from the directory the service runs in."),
+        }
     return {
         'ok': True,
         'source': mk.source,
-        'source_path': mk.source_path,
+        'source_path': os.path.abspath(mk.source_path) if mk.source_path else None,
+        'config_dir': config_dir,
         'is_legacy': mk.is_legacy,
         'tier': _tier_for_source(mk.source),
         'recommendation': _recommendation_for(mk),
@@ -144,7 +171,7 @@ def _safe_is_file(p: Path) -> bool:
         return False
 
 
-def _resolve() -> MasterKey:
+def _resolve(generate: bool = True) -> Optional[MasterKey]:
     # Tier 1: PEGAPROX_DB_KEY env (Docker / k8s / explicit)
     if env_val := os.environ.get('PEGAPROX_DB_KEY'):
         return _from_env_value(env_val, source='env:PEGAPROX_DB_KEY')
@@ -163,8 +190,8 @@ def _resolve() -> MasterKey:
         if _safe_is_file(p):
             return _from_file(p, source='env:PEGAPROX_KEY_FILE')
 
-    # Tier 4: /etc/pegaprox/secret.key (system-service install default)
-    p = Path('/etc/pegaprox/secret.key')
+    # Tier 4: /etc/pegaprox/secret.key (what deploy.sh sets up)
+    p = SYSTEM_KEY_PATH
     if _safe_is_file(p):
         return _from_file(p, source='/etc/pegaprox/secret.key')
 
@@ -179,9 +206,10 @@ def _resolve() -> MasterKey:
         mk = _from_file(legacy, source='legacy:CONFIG_DIR', strict_perms=False)
         return MasterKey(mk.key_b64, mk.key_raw, mk.source, mk.source_path, is_legacy=True)
 
-    # Nothing exists — generate at legacy location for back-compat with
-    # 0.9.9.x installs.  A subsequent operator-initiated `pegaprox secure-key
-    # migrate` moves it to a Tier-4 path.
+    # Nothing exists: generate at the legacy location for back-compat with 0.9.9.x
+    # installs. Moving it to Tier 4 is a manual step, _recommendation_for says how
+    if not generate:
+        return None
     return _generate_at(legacy, source='generated:CONFIG_DIR', is_legacy=True)
 
 
@@ -330,11 +358,13 @@ def _tier_for_source(source: str) -> int:
 
 def _recommendation_for(mk: MasterKey) -> Optional[str]:
     if mk.is_legacy:
+        where = os.path.abspath(mk.source_path) if mk.source_path else 'the config directory'
         return (
-            "Master key in CONFIG_DIR is the legacy default. "
-            "Run `pegaprox secure-key migrate` to move it to "
-            "/etc/pegaprox/secret.key, or set up systemd LoadCredentialEncrypted "
-            "for the strongest at-rest protection."
+            "The master key sits in the config directory, next to the database it protects. "
+            f"To move it out: stop PegaProx, copy {where} to /etc/pegaprox/secret.key "
+            "(mode 0640, owner root, group of the service user), start PegaProx, check that "
+            "this status shows /etc/pegaprox/secret.key, then delete the old file. systemd "
+            "LoadCredentialEncrypted is the strongest option."
         )
     if _tier_for_source(mk.source) >= 4:
         return (

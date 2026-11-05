@@ -6,13 +6,15 @@ Ceph cluster management: status, OSDs, monitors, pools, CephFS, RBD mirroring.
 import re
 import json
 import logging
+import requests
 from flask import Blueprint, jsonify, request
 
 from pegaprox.models.permissions import ROLE_ADMIN
 from pegaprox.utils.auth import require_auth
 from pegaprox.utils.audit import log_audit
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, require_unconfined
-from pegaprox.api.helpers import upstream_failure, upstream_status
+from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable
 from pegaprox.utils.ssh import read_capped as _read_capped
 
 bp = Blueprint('ceph', __name__)
@@ -21,6 +23,42 @@ bp = Blueprint('ceph', __name__)
 def _ceph_url(manager, node, sub=''):
     host, port = manager.host, manager.api_port
     return f"https://{host}:{port}/api2/json/nodes/{node}/ceph{sub}"
+
+
+# MK Nov 2026 - what PVE answers on a node without Ceph (check_ceph_installed and
+# check_ceph_inited in PVE::Ceph::Tools die with a 500). Every 500 used to count as
+# "no Ceph", so a Ceph that timed out looked like one that was never installed, and the
+# lists below answered [] for any failure. Now only this is "no Ceph"; the rest is an error
+_CEPH_ABSENT = ('not installed', 'not initialized', 'not configured',
+                'rados_connect failed - no such file')
+
+
+def _ceph_absent(r):
+    if r.status_code == 501:
+        return True
+    return r.status_code == 500 and any(m in (r.text or '').lower() for m in _CEPH_ABSENT)
+
+
+def _ceph_list(manager, node, sub, what, timeout=10, params=None, shape=None):
+    """GET of a node's Ceph list: the data, [] on a node without Ceph, else the error."""
+    what = f'{what} of node {node}'
+    try:
+        r = manager._create_session().get(_ceph_url(manager, node, sub), params=params, timeout=timeout)
+    except requests.exceptions.RequestException:
+        return pve_unreachable(what)
+    except Exception as e:
+        # MK Nov 2026 - the session itself (login) failed: still JSON, never the HTML error page
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
+    if r.status_code != 200:
+        return jsonify([]) if _ceph_absent(r) else pve_read_failed(r.status_code, r.text, what)
+    try:
+        data = r.json().get('data', [])
+    except (ValueError, AttributeError):
+        return pve_read_failed(0, 'Proxmox VE sent an answer that is not JSON', what)
+    try:
+        return jsonify(shape(data) if shape else data)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
 
 
 # MK: Mar 2026 - PVE returns OSD data as CRUSH tree, not flat list
@@ -225,6 +263,11 @@ def get_ceph_overview(cluster_id):
     """Ceph cluster overview - aggregates status from first available node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - Ceph is the cluster's storage, a pool or a guest grant does not cover it
+    # (as /api/ceph-overview answers 'confined')
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -455,18 +498,29 @@ def get_ceph_rollup():
 def get_node_ceph_status(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the status of the whole Ceph, whichever node it is asked on; so the
+    # reads below, as the log
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
+    what = f'the Ceph status of node {node}'
     try:
         r = manager._create_session().get(_ceph_url(manager, node, '/status'), timeout=10)
-        if r.status_code == 200:
+    except requests.exceptions.RequestException:
+        return pve_unreachable(what)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
+    if r.status_code == 200:
+        try:
             return jsonify(r.json().get('data', {}))
-        if r.status_code in (501, 500):
-            return jsonify({'available': False})
-        return jsonify({}), upstream_status(r.status_code)
-    except:
-        return jsonify({})
+        except (ValueError, AttributeError):
+            return pve_read_failed(0, 'Proxmox VE sent an answer that is not JSON', what)
+    if _ceph_absent(r):
+        return jsonify({'available': False})
+    return pve_read_failed(r.status_code, r.text, what)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/config', methods=['GET'])
@@ -474,6 +528,9 @@ def get_node_ceph_status(cluster_id, node):
 def get_node_ceph_config(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
@@ -498,18 +555,12 @@ def get_node_ceph_log(cluster_id, node):
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        params = {}
-        if request.args.get('limit'):
-            params['limit'] = request.args['limit']
-        if request.args.get('start'):
-            params['start'] = request.args['start']
-        r = manager._create_session().get(_ceph_url(manager, node, '/log'), params=params, timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    params = {}
+    if request.args.get('limit'):
+        params['limit'] = request.args['limit']
+    if request.args.get('start'):
+        params['start'] = request.args['start']
+    return _ceph_list(manager, node, '/log', 'the Ceph log', params=params)
 
 
 # ============================================
@@ -521,16 +572,13 @@ def get_node_ceph_log(cluster_id, node):
 def get_ceph_osds(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/osd'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(_flatten_osd_tree(r.json().get('data', [])))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/osd', 'the Ceph OSDs', shape=_flatten_osd_tree)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd', methods=['POST'])
@@ -646,16 +694,13 @@ def ceph_osd_action(cluster_id, node, osdid, action):
 def get_ceph_mons(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/mon'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/mon', 'the Ceph monitors')
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mon/<monid>', methods=['POST'])
@@ -712,16 +757,13 @@ def destroy_ceph_mon(cluster_id, node, monid):
 def get_ceph_mds(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/mds'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/mds', 'the Ceph metadata servers')
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mds/<name>', methods=['POST'])
@@ -777,16 +819,13 @@ def destroy_ceph_mds(cluster_id, node, name):
 def get_ceph_mgr(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/mgr'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/mgr', 'the Ceph managers')
 
 
 # NS 2026-07-17: Ceph deploy needs at least one MGR (the cluster HEALTH_WARNs
@@ -847,16 +886,13 @@ def destroy_ceph_mgr(cluster_id, node, mgrid):
 def get_ceph_pools(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/pool'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/pool', 'the Ceph pools')
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/pool', methods=['POST'])
@@ -945,16 +981,13 @@ def destroy_ceph_pool(cluster_id, node, name):
 def get_ceph_fs(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/fs'), timeout=10)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/fs', 'the CephFS list')
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/fs', methods=['POST'])
@@ -1035,16 +1068,13 @@ def destroy_ceph_fs(cluster_id, node, name):
 def get_ceph_rules(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error: return error
-    try:
-        r = manager._create_session().get(_ceph_url(manager, node, '/rules'), timeout=5)
-        if r.status_code == 200:
-            return jsonify(r.json().get('data', []))
-        return jsonify([])
-    except:
-        return jsonify([])
+    return _ceph_list(manager, node, '/rules', 'the CRUSH rules', timeout=5)
 
 
 # ============================================

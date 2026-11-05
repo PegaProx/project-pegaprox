@@ -9,6 +9,7 @@ import uuid
 import re
 import shlex
 from datetime import datetime, timedelta
+import requests
 from flask import Blueprint, jsonify, request
 
 from pegaprox.constants import *
@@ -22,7 +23,8 @@ from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
-                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES)
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error)
+from pegaprox.api.helpers import unread_failure
 
 bp = Blueprint('nodes', __name__)
 
@@ -114,7 +116,56 @@ def get_node_network_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
 
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_network_config(node))
+    # MK Nov 2026 - a failed read says so, it is not a node without interfaces
+    got = manager.get_node_network_config(node)
+    return unread_failure(got, f'the network configuration of node {node}') or jsonify(got)
+
+
+# MK Nov 2026 - what waits in interfaces.new until Apply. PVE sends it as the 'changes'
+# attribute next to the list (a unified diff, left out when nothing waits); the list read above
+# hands on only the list. Read only, same access as the list. A read that fails says so with
+# its reason and is never handed on as "nothing waits"
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/changes', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_network_changes_api(cluster_id, node):
+    """The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    bad, status = _reject_bad_node(node)
+    if bad is not None:
+        return bad, status
+
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Pending network changes are a Proxmox VE feature', 'code': 'NOT_SUPPORTED'}), 501
+    if not manager.is_connected and not manager.connect_to_proxmox():
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/network"
+    try:
+        resp = manager._api_get(url)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {_sl(cluster_id)} unreachable for the pending network changes: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the network configuration'),
+                        'upstream_status': resp.status_code}), 502
+    try:
+        body = resp.json()
+    except ValueError:
+        return jsonify({'error': 'Proxmox VE sent an answer that is not JSON', 'upstream_status': 200}), 502
+    # only a left out attribute means nothing waits; any other shape is an answer we cannot read
+    changes = body.get('changes') if isinstance(body, dict) else 0
+    if changes is None:
+        changes = ''
+    if not isinstance(changes, str):
+        return jsonify({'error': 'Proxmox VE sent an unexpected answer for the pending changes', 'upstream_status': 200}), 502
+    return jsonify({'changes': changes})
 
 
 # MK May 2026 — node-name regex (mirrors vms.py:2718 hardening). RFC-1035-ish
@@ -966,7 +1017,8 @@ def get_node_time_api(cluster_id, node):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_node_time(node))
+    got = cluster_managers[cluster_id].get_node_time(node)
+    return unread_failure(got, f'the time settings of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/time', methods=['PUT'])
@@ -1009,7 +1061,8 @@ def get_node_syslog_api(cluster_id, node):
     manager = cluster_managers[cluster_id]
     start = request.args.get('start', 0, type=int)
     limit = bounded_limit(request.args.get('limit'), 500, 5000)
-    return jsonify(manager.get_node_syslog(node, start, limit))
+    got = manager.get_node_syslog(node, start, limit)
+    return unread_failure(got, f'the system log of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates', methods=['GET'])
@@ -1023,7 +1076,8 @@ def get_node_certificates_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_certificates(node))
+    got = manager.get_node_certificates(node)
+    return unread_failure(got, f'the certificates of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/renew', methods=['POST'])
@@ -1133,6 +1187,10 @@ def get_node_tasks_api(cluster_id, node):
     vmid = request.args.get('vmid', None, type=int)
     
     tasks = manager.get_node_tasks(node, start, limit * 3 if vmid else limit, errors)  # Get more if filtering
+    # MK Nov 2026 - before the scoping below, which hands on a plain list
+    failed = unread_failure(tasks, f'the task list of node {node}')
+    if failed:
+        return failed
 
     # sec (private disclosure Sep 2026 — audit): node-level twin of the confined cluster task log —
     # a scoped caller could read every VM's task history here instead. Confine the same way; admins
@@ -1250,7 +1308,8 @@ def get_node_subscription_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
-    return jsonify(manager.get_node_subscription(node))
+    got = manager.get_node_subscription(node)
+    return unread_failure(got, f'the subscription of node {node}') or jsonify(got)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['PUT'])
@@ -2434,6 +2493,11 @@ def starlvm_plugin_status(cluster_id):
     """Per-node install state of the StarWind starlvm plugin (read-only probe)."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - an SSH probe of every node of the cluster: not for a confined caller,
+    # and refused before the first connection
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

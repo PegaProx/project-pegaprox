@@ -2826,6 +2826,7 @@
                                     <VmDetailPanel
                                         vm={selectedDetailVm}
                                         clusterId={clusterId}
+                                        clusterType={((clusters || []).find(c => c.id === clusterId) || sourceCluster || {}).cluster_type || 'proxmox'}
                                         onAction={handleAction}
                                         onOpenConsole={onOpenConsole}
                                         onOpenSpice={onOpenSpice}

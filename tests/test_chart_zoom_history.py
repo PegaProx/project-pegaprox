@@ -10,6 +10,8 @@ tested at runtime in test_chart_zoom_ui.py. The snapshots are stored as PegaProx
 MK Oct 2026
 """
 import math
+import os
+import time
 import types
 from datetime import datetime, timedelta
 
@@ -120,7 +122,27 @@ def test_a_short_range_comes_at_full_resolution_and_oldest_first(history):
     assert [kept['cpu_used'] for _, kept in rows] == [i % 100 for i in range(300, 275, -1)]
 
 
-def test_a_long_range_is_thinned_to_what_a_chart_draws(history):
+@pytest.fixture
+def utc_zone():
+    """The server zone pinned to UTC before `history` writes its rows. That fixture steps
+    back from now in wall-clock time, which is an hour off real time across a change of the
+    clocks in the zone of the machine (25.10. in Europe): nine days back from then, the
+    stride read as 3900 s with one step of 7500 s. UTC has no such change, so the steps
+    below measure the thinning and nothing else."""
+    before = os.environ.get('TZ')
+    os.environ['TZ'] = 'UTC'
+    time.tzset()
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = before
+        time.tzset()
+
+
+def test_a_long_range_is_thinned_to_what_a_chart_draws(utc_zone, history):
     from pegaprox.background.metrics import _RANGE_ROWS
     rows = _rows(history, 9 * 288, 0)    # nine days: 2593 snapshots
     assert _RANGE_ROWS / 2 < len(rows) <= _RANGE_ROWS
