@@ -20562,11 +20562,13 @@
                                 label: p.poolid,
                                 icon: <Icons.Folder className="w-3.5 h-3.5" style={{color: '#E86F2D'}} />,
                                 onClick: async () => {
+                                    // JB Nov 2026 (#1238) - the members routes, not PUT /pools/<id>: that one edits
+                                    // the pool itself and needs admin.users, these ask pool.assign and check the guest
                                     try {
-                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}`, {
-                                            method: 'PUT',
+                                        const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(p.poolid)}/members`, {
+                                            method: 'POST',
                                             headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ add_members: [vm.vmid] })
+                                            body: JSON.stringify({ vmid: vm.vmid, type: vm.type || 'qemu' })
                                         });
                                         if (res && res.ok) {
                                             addToast(`${vm.name || vm.vmid} → ${p.poolid}`, 'success');
@@ -20585,10 +20587,8 @@
                                 const currentPool = poolsForCluster.find(p => (p.members || []).some(m => String(m.vmid || m.id) === String(vm.vmid)));
                                 if (!currentPool) { addToast('VM is not in a pool', 'info'); return; }
                                 try {
-                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}`, {
-                                        method: 'PUT',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ remove_members: [vm.vmid] })
+                                    const res = await authFetch(`${API_URL}/clusters/${cId}/pools/${encodeURIComponent(currentPool.poolid)}/members/${vm.vmid}`, {
+                                        method: 'DELETE'
                                     });
                                     if (res && res.ok) {
                                         addToast(`${vm.name || vm.vmid} removed from ${currentPool.poolid}`, 'success');
