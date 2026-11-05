@@ -633,7 +633,8 @@ def test_runtime_a_check_runs_only_after_its_dialog(open_app):
     page.keyboard.press('Escape')
     assert page.locator('[data-cr-upd-dialog]').count() == 0
     assert _upd(app, 'POST') == []
-    # focus is back on the button
+    # React restores focus in the dialog effect's cleanup after its removal.
+    page.wait_for_function('() => document.activeElement.getAttribute("data-cr-upd-open") === "check"', timeout=3000)
     assert page.evaluate('() => document.activeElement.getAttribute("data-cr-upd-open")') == 'check'
     app.server.hold_check = True
     _open_check(page)
@@ -1125,7 +1126,7 @@ def test_runtime_the_pending_updates_panel_opens_the_updates_tab(open_app):
     assert app.errors == []
 
 
-def test_runtime_classic_corporate_keeps_its_section(open_app):
+def test_runtime_classic_corporate_keeps_its_manager_in_the_updates_tab(open_app):
     app = open_app(layout='corporate', storage={'updateCheck_c1': json.dumps({'time': '2026-10-30T08:00:00.000Z',
                                                                                 'summary': _check_answer()['summary'],
                                                                                 'nodes': _check_answer()['nodes']})})
@@ -1135,8 +1136,11 @@ def test_runtime_classic_corporate_keeps_its_section(open_app):
     page.wait_for_timeout(400)
     assert page.locator('.corp-tab-strip button', has_text=re.compile(r'^\s*Updates\s*$')).count() == 0
     page.locator('button', has_text=re.compile(r'^\s*Settings\s*$')).last.click()
-    _need(page, '[data-update-manager] h3', 'classic Settings has its Update Manager')
+    assert page.locator('[data-update-manager]').count() == 0
     assert page.locator('[data-cr-upd-link]').count() == 0
+    page.get_by_role('button', name='Update Manager', exact=True).click()
+    _need(page, '[data-update-manager] h3', 'classic Updates retains its existing Update Manager')
+    assert page.locator('[data-cr-updates]').count() == 0
     assert app.errors == []
 
 
