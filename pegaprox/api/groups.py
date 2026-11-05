@@ -16,7 +16,8 @@ from pegaprox.utils.audit import log_audit
 # MK 2026-06-04 (CWE-117): group_id from URL path goes into the logger below.
 from pegaprox.utils.sanitization import sanitize_log_message as _sl
 from pegaprox.utils.rbac import DEFAULT_TENANT_ID, UNRESOLVED_TENANT, acting_tenant, get_user_clusters
-from pegaprox.api.helpers import load_server_settings, save_server_settings, check_cluster_access, require_unconfined
+from pegaprox.api.helpers import (load_server_settings, save_server_settings, check_cluster_access, require_unconfined,
+                                  caller_guest_nodes, scope_vm_rows)
 
 bp = Blueprint('groups', __name__)
 
@@ -477,11 +478,21 @@ def get_cluster_group_status(group_id):
                 continue
 
             c_info['connected'] = True
+            # MK Nov 2026 (#1218) - a caller confined to some guests of a member counts the
+            # nodes those run on and their own guests; none of it while those cannot be read
+            try:
+                mine = caller_guest_nodes(cid, user=user)
+            except Exception as e:
+                logging.warning(f"[GROUPS] guests on {cid} unread, not counted for this caller: {e}")
+                cluster_details.append(c_info)
+                continue
 
             # node stats
             try:
                 nodes = mgr.get_node_status()
                 for nname, ndata in nodes.items():
+                    if mine is not None and nname not in mine:
+                        continue
                     if ndata.get('offline') or ndata.get('status') == 'offline':
                         total_nodes_offline += 1
                         c_info['nodes_offline'] += 1
@@ -499,6 +510,8 @@ def get_cluster_group_status(group_id):
             # vm stats
             try:
                 vms = mgr.get_vm_resources()
+                if mine is not None:
+                    vms = scope_vm_rows(cid, vms)
                 for vm in vms:
                     # #749: only count a guest as stopped when it actually is —
                     # paused/suspended/templates would otherwise inflate the stopped

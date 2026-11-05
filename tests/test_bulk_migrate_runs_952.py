@@ -485,6 +485,8 @@ def test_a_vm_acl_user_moves_their_guests_and_sees_only_those(api, seed):
     seed.tenant('acme', clusters=['cluster_1'])
     seed.vm_acl('cluster_1', 100, users=['portal'])
     seed.vm_acl('cluster_1', 101, users=['portal'])
+    # MK Nov 2026 - 300 runs on pve2: a confined caller moves guests onto a node of theirs only
+    seed.vm_acl('cluster_1', 300, users=['portal'])
     pve = _Pve(api)
     portal = api.as_user(seed.user('portal', role='user', tenant_id='acme'))
     # a guest outside the grant gets the answer of one that does not exist
@@ -513,6 +515,7 @@ def test_a_run_asks_again_before_each_guest(api, seed, monkeypatch):
     seed.tenant('acme', clusters=['cluster_1'])
     seed.vm_acl('cluster_1', 100, users=['portal'])
     seed.vm_acl('cluster_1', 101, users=['portal'])
+    seed.vm_acl('cluster_1', 300, users=['portal'])   # theirs on pve2, the target
     monkeypatch.setattr(bulk, 'AUTHZ_SECONDS', 0)
     pve = _Pve(api)
     portal = api.as_user(seed.user('portal', role='user', tenant_id='acme'))

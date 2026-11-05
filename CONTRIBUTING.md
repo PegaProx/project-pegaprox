@@ -26,6 +26,8 @@ Using an AI assistant is completely fine. Submitting its output without reading,
 testing it is not. The tell-tale signs — a verbose auto-generated description, unrelated changes
 bundled together, plausible-but-wrong logic, scale mistakes a person would have felt — get a PR
 closed. If you used AI, **you own every line**: review and test it as if you had written it by hand.
+Name the assistant or model you used on the "AI tool / model used" line of the pull request
+template. We record it for licensing and compliance review.
 
 ## What happens next
 

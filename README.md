@@ -68,6 +68,10 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
   <a href="https://www.occentus.net/">
     <img src="images/sponsors/occentus.png" alt="Occentus Network" width="500"/>
   </a>
+  &nbsp;&nbsp;&nbsp;
+  <a href="https://www.factorfx.com/">
+    <img src="images/sponsors/factorfx.png" alt="FactorFX" width="440"/>
+  </a>
 </p>
 
 ### 🥇 Gold
@@ -159,7 +163,7 @@ The name **PegaProx** is inspired by *Pegasus*, the winged horse of Greek mythol
 - 🛡️ **VM-Level ACLs** - Fine-grained permissions per VM
 - 🏢 **Multi-Tenancy** - Isolate clusters for different customers
 - 🚫 **IP Whitelisting / Blacklisting** - Restrict access by IP or CIDR range
-- 🔒 **Full-DB Encryption** - SQLCipher (AES-256-CBC + HMAC-SHA512, format v4) wraps the entire database at rest on Linux x86_64; sensitive fields stay individually Fernet-encrypted everywhere else. Multi-tier master-key loader resolves from env / systemd LoadCredentialEncrypted / `/etc/pegaprox/secret.key`, so a `config/` backup never carries the key alongside the data. Auto-migrates plain DBs on first boot post-update.
+- 🔒 **Full-DB Encryption** - SQLCipher (AES-256-CBC + HMAC-SHA512, format v4) wraps the entire database at rest wherever the `sqlcipher3` module is installed: pip and `deploy.sh` installs on Linux x86_64 and aarch64, macOS and Windows, and the amd64 and arm64 Docker images. The Debian package, the appliances and 32-bit ARM stay on plain SQLite; sensitive fields are encrypted individually with AES-256-GCM on every install. Multi-tier master-key loader resolves from env / systemd LoadCredentialEncrypted / `/etc/pegaprox/secret.key`; `deploy.sh` puts the key there, Docker and the Debian package keep their keys in the config directory unless you move them. Auto-migrates plain DBs on first boot post-update.
 - 🔍 **CVE Scanner** - Per-node package vulnerability scanning via debsecan
 - 🛡️ **CIS Hardening** - One-click security audit and hardening against CIS benchmarks
 - 🧾 **HMAC-Signed Audit Log** - Tamper-evident integrity verification on every entry
@@ -352,7 +356,7 @@ A fresh install has no default credentials:
 │   ├── index.html              # Compiled frontend
 │   └── src/                    # Frontend source (JSX)
 ├── config/
-│   └── pegaprox.db             # SQLite database - fully encrypted at rest via SQLCipher (Linux x86_64); plain SQLite + Fernet-encrypted fields elsewhere
+│   └── pegaprox.db             # SQLite database - fully encrypted at rest via SQLCipher where sqlcipher3 is installed; plain SQLite + AES-256-GCM fields elsewhere
 ├── static/                     # JS/CSS libraries (offline mode)
 ├── logs/                       # Application logs
 └── update.sh                   # Update script
@@ -360,9 +364,9 @@ A fresh install has no default credentials:
 
 ## 🔒 Security
 
-- **Database at rest** → SQLCipher (AES-256-CBC + HMAC-SHA512, SQLCipher format v4) on Linux x86_64. Plain SQLite + per-field Fernet on other platforms (ARM / macOS / Windows). See [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and recovery story.
+- **Database at rest** → SQLCipher (AES-256-CBC + HMAC-SHA512, SQLCipher format v4) wherever `sqlcipher3` is installed (pip on Linux x86_64 and aarch64, macOS, Windows; the amd64 and arm64 Docker images). Plain SQLite + per-field AES-256-GCM on the Debian package, the appliances and 32-bit ARM. See [`docs/SECURITY.md`](docs/SECURITY.md) for the threat model and recovery story.
 - **Master key custody** → Multi-tier loader: `PEGAPROX_DB_KEY` env / systemd `LoadCredentialEncrypted` (TPM2-bound) / `/etc/pegaprox/secret.key` / `~/.config/pegaprox/secret.key` / legacy `config/`. Default chmod 0600, files with loose permissions are skipped rather than used silently.
-- **Sensitive fields** (Cluster PW, SSH keys, TOTP secrets, OIDC client secrets, LDAP bind) → Fernet (AES-256-GCM equivalent), works even when full-DB encryption isn't available.
+- **Sensitive fields** (Cluster PW, SSH keys, TOTP secrets, OIDC client secrets, LDAP bind) → AES-256-GCM with their own key file, works even when full-DB encryption isn't available.
 - **API Tokens** → SHA-256 hash (constant-time compare).
 - **Passwords** → Argon2id (3 iter, 64 MB memory cost).
 - HTTPS required for production.

@@ -666,9 +666,40 @@ class UnreadList(list):
     It is still an empty list to every caller that only wants one. A caller that acts on
     what is missing asks `unavailable` first: a timeout of that read at 10k guests is not
     a cluster without guests, and drift reported every guest baseline removed. MK Oct 2026
+
+    MK Nov 2026 - it can carry why: `status` the HTTP status PVE sent (0 for none), `text`
+    its body or our own reason, `offline` for a cluster out of reach. The node reads below
+    answer it too, and their routes turn it into an error (api/helpers.unread_failure).
     """
-    __slots__ = ()
+    __slots__ = ('text', 'status', 'offline')
     unavailable = True
+
+    def __init__(self, text='', status=0, offline=False):
+        super().__init__()
+        self.text, self.status, self.offline = text, status, offline
+
+
+class UnreadDict(dict):
+    """The {} of a read whose answer is an object, when it did not answer. Same fields as
+    UnreadList. MK Nov 2026"""
+    __slots__ = ('text', 'status', 'offline')
+    unavailable = True
+
+    def __init__(self, text='', status=0, offline=False):
+        super().__init__()
+        self.text, self.status, self.offline = text, status, offline
+
+
+def unread(kind, response=None, error=None):
+    """kind (UnreadList or UnreadDict) for a PVE read that answered `response` with a status
+    other than 200, or raised `error`; neither means the cluster was not connected."""
+    if response is not None:
+        return kind((getattr(response, 'text', '') or '')[:2000], getattr(response, 'status_code', 0) or 0)
+    if error is None:
+        return kind('the cluster is not connected', offline=True)
+    if isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+        return kind(str(error)[:300], offline=True)
+    return kind(f'the answer could not be read ({type(error).__name__})')
 
 
 def _rrd_value(point, key, scale=1):
@@ -16704,10 +16735,18 @@ echo "AGENT_INSTALLED_OK"
             # comments that picking VirtIO in PegaProx left PVE on LSI; turns
             # out the dropdown was already showing VirtIO without anything to
             # save against, so the user's "no-op" save kept PVE's lsi default.
+            # MK Nov 2026 - an unset cpu is PVE's default type (CPUConfig.pm get_default_cpu_type):
+            # kvm64, qemu64 without KVM, host on aarch64 (max without KVM). 'host' here made the
+            # dropdown claim host and a CPU flag click write cpu=host,flags=..., a silent type change
+            _kvm = str(config.get('kvm', 1)) != '0'
+            if config.get('arch') == 'aarch64':
+                _cpu_default = 'host' if _kvm else 'max'
+            else:
+                _cpu_default = 'kvm64' if _kvm else 'qemu64'
             parsed['hardware'] = {
                 'cores': config.get('cores', 1),
                 'sockets': config.get('sockets', 1),
-                'cpu': config.get('cpu', 'host'),
+                'cpu': config.get('cpu', _cpu_default),
                 'memory': config.get('memory', 512),
                 'balloon': config.get('balloon', 0),
                 'numa': config.get('numa', 0),
@@ -17512,57 +17551,99 @@ echo "AGENT_INSTALLED_OK"
             return storage, None
         return None, f"Storage {storage_name} not found on {node}"
 
-    def get_content_sync_status(self, content_type='iso'):
-        """Build matrix of which ISOs/templates exist on which nodes"""
-        if not self.is_connected:
-            return {'nodes': [], 'files': [], 'matrix': {}}
+    # MK Nov 2026 - the content reads of the sync status: at most this many nodes at a time,
+    # and the whole status within this many seconds (each request 10 s, never past that)
+    SYNC_STATUS_WORKERS = 8
+    SYNC_STATUS_DEADLINE = 25
+
+    def _node_sync_files(self, node, content_type, end=None):
+        """(files, None) of the local active storages of `node` that take content_type, or
+        (None, why) when its storage list or one of their content reads did not answer.
+        `end` (monotonic): no request starts after it and none waits past it."""
+        base = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}"
+        late = (None, 'the read did not finish in time')
+
+        def _left(cap):
+            return cap if end is None else min(cap, end - time.monotonic())
         try:
+            if _left(1) <= 0:
+                return late
+            r = self._api_get(f"{base}/storage", timeout=_left(10))
+            if r.status_code != 200:
+                return None, f'its storage list answered HTTP {r.status_code}'
+            storages = [s for s in (r.json().get('data') or [])
+                        if isinstance(s, dict) and content_type in (s.get('content') or '')
+                        and s.get('active') and not self._storage_is_shared(s)]
+            files = []
+            for stor in storages:
+                if _left(1) <= 0:
+                    return late
+                r = self._create_session().get(f"{base}/storage/{stor['storage']}/content",
+                                               params={'content': content_type}, timeout=_left(10))
+                if r.status_code != 200:
+                    return None, f"the content of {stor['storage']} answered HTTP {r.status_code}"
+                for item in r.json().get('data') or []:
+                    volid = item.get('volid', '')
+                    files.append({'volid': volid, 'name': volid.split('/')[-1] if '/' in volid else volid,
+                                  'size': item.get('size', 0), 'storage': stor['storage']})
+            return files, None
+        except Exception as e:
+            return None, f'it did not answer ({type(e).__name__})'
+
+    def get_content_sync_status(self, content_type='iso'):
+        """Build matrix of which ISOs/templates exist on which nodes
+
+        MK Nov 2026 - the nodes are read in parallel, SYNC_STATUS_WORKERS at a time (one
+        after the other took minutes at 200 nodes). A node whose read failed or did not end
+        within SYNC_STATUS_DEADLINE is left out of nodes and matrix and named in `unread`:
+        with all its files false it read as missing them, and a sync of all copied there.
+        `error` says why there is no status at all (the route answers it as an error)."""
+        if not self.is_connected:
+            return {'nodes': [], 'files': [], 'matrix': {}, 'unread': {},
+                    'error': 'the cluster is not connected', 'offline': True}
+        try:
+            from pegaprox.utils.concurrent import run_per_node, yield_to_hub
             ns = self.get_node_status()
             online_nodes = [n for n, d in ns.items() if d.get('status') == 'online']
-            host = self.host
-            # collect per-node content
-            node_files = {}
+            # one turn of the hub first: its clock stands still while this greenlet runs, and
+            # the deadline below would start that much in the past
+            yield_to_hub()
+            # the deadline holds for the whole read: no node starts after it, no request waits past it
+            end = time.monotonic() + self.SYNC_STATUS_DEADLINE
+            got = run_per_node({n: (lambda node: self._node_sync_files(node, content_type, end)) for n in online_nodes},
+                               max_concurrent=self.SYNC_STATUS_WORKERS, timeout=self.SYNC_STATUS_DEADLINE, whole=True)
+            node_files, unread = {}, {}
             for node in online_nodes:
-                storages = [s for s in self.get_storage_list(node)
-                            if content_type in s.get('content', '')
-                            and s.get('active')
-                            and not self._storage_is_shared(s)]
-                files = []
-                for stor in storages:
-                    url = f"https://{host}:{self.api_port}/api2/json/nodes/{node}/storage/{stor['storage']}/content"
-                    r = self._create_session().get(url, params={'content': content_type}, timeout=10)
-                    if r.status_code == 200:
-                        for item in r.json().get('data', []):
-                            files.append({
-                                'volid': item.get('volid', ''),
-                                'name': item.get('volid', '').split('/')[-1] if '/' in item.get('volid', '') else item.get('volid', ''),
-                                'size': item.get('size', 0),
-                                'storage': stor['storage'],
-                            })
-                node_files[node] = files
+                files, why = got.get(node) or (None, 'the read did not finish in time')
+                if files is None:
+                    unread[node] = why
+                else:
+                    node_files[node] = files
+            read_nodes = [n for n in online_nodes if n in node_files]
 
-            # build deduplicated file list + matrix
-            all_names = {}
-            for node, files in node_files.items():
-                for f in files:
+            # build deduplicated file list + matrix, one set of keys per node
+            all_names, held = {}, {}
+            for node in read_nodes:
+                keys = held[node] = set()
+                for f in node_files[node]:
                     key = f"{f['storage']}:{f['name']}"
+                    keys.add(key)
                     if key not in all_names:
                         all_names[key] = {'name': f['name'], 'storage': f['storage'], 'size': f['size']}
-            matrix = {}
-            for key in all_names:
-                matrix[key] = {}
-                for node in online_nodes:
-                    matrix[key][node] = any(
-                        f"{fi['storage']}:{fi['name']}" == key for fi in node_files.get(node, [])
-                    )
+            matrix = {key: {node: key in held[node] for node in read_nodes} for key in all_names}
+            if unread:
+                self.logger.warning(f"[SYNC] {len(unread)} node(s) not read for the sync status: "
+                                    f"{', '.join(sorted(unread)[:10])}")
             return {
-                'nodes': online_nodes,
+                'nodes': read_nodes,
                 'files': list(all_names.values()),
                 'matrix': matrix,
+                'unread': unread,
             }
         except Exception as e:
             self.logger.error(f"[SYNC] Error building sync status: {e}")
-            return {'nodes': [], 'files': [], 'matrix': {}}
+            return {'nodes': [], 'files': [], 'matrix': {}, 'unread': {},
+                    'error': f'the sync status could not be built ({type(e).__name__})'}
 
     def sync_content_to_nodes(self, source_node, storage, filename, content_type='iso', target_nodes=None):
         """Copy ISO/template from source node to other nodes via SSH
@@ -18299,6 +18380,29 @@ echo "AGENT_INSTALLED_OK"
         except Exception as e:
             return {'success': False, 'error': str(e)}
     
+    # MK Nov 2026 - the parts of a network device the edit dialog owns. Everything else in the
+    # stored string (trunks, an LXC link_down or type, a part a newer PVE adds) is kept: the
+    # rebuild from the dialog fields used to drop it, so editing the rate of a trunk port
+    # turned off its VLAN trunks.
+    _NET_DIALOG_PARTS = {
+        'qemu': {'model', 'macaddr', 'bridge', 'tag', 'firewall', 'rate', 'queues', 'mtu', 'link_down'},
+        'lxc': {'name', 'bridge', 'hwaddr', 'ip', 'gw', 'ip6', 'gw6', 'tag', 'firewall', 'rate', 'mtu'},
+    }
+
+    @classmethod
+    def _net_kept_parts(cls, vm_type: str, stored: str) -> List[str]:
+        """The parts of a stored netN string the dialog does not own, in their order."""
+        owned = cls._NET_DIALOG_PARTS['qemu' if vm_type == 'qemu' else 'lxc']
+        kept = []
+        for i, part in enumerate(p for p in str(stored or '').split(',') if p):
+            key = part.split('=', 1)[0]
+            # QEMU writes the model as "<model>=<mac>" in front
+            if vm_type == 'qemu' and i == 0 and '=' in part and key not in owned:
+                continue
+            if key not in owned:
+                kept.append(part)
+        return kept
+
     def update_network(self, node: str, vmid: int, vm_type: str, net_id: str, net_config: Dict) -> Dict[str, Any]:
         """Update network configuration
         
@@ -18313,6 +18417,12 @@ echo "AGENT_INSTALLED_OK"
                 return {'success': False, 'error': 'Could not connect to Proxmox'}
         
         try:
+            cfg_url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/{'qemu' if vm_type == 'qemu' else 'lxc'}/{vmid}/config"
+            cur = self._api_get(cfg_url)
+            if cur.status_code != 200:
+                return {'success': False, 'error': f'Could not read the current {net_id}, nothing was changed'}
+            kept = self._net_kept_parts(vm_type, ((cur.json() or {}).get('data') or {}).get(net_id, ''))
+
             if vm_type == 'qemu':
                 url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/qemu/{vmid}/config"
                 
@@ -18369,6 +18479,7 @@ echo "AGENT_INSTALLED_OK"
                 
                 net_str = ','.join(parts)
             
+            net_str = ','.join([net_str] + kept) if kept else net_str
             data = {net_id: net_str}
             response = self._api_put(url, data=data)
             
@@ -18474,23 +18585,35 @@ echo "AGENT_INSTALLED_OK"
     # CPU profiles (see manager.cluster.cpu-models in pve-manager 9.2). We try
     # to fetch + append on connect; on older clusters the endpoint 404s and
     # the static list is returned unchanged.
+    # MK Nov 2026 - the fallback is the x86_64 list qemu-server keeps in CPUConfig.pm
+    # (initialize_cpu_models) plus host and the x86-64-v* levels. It lacked 34 newer models
+    # (EPYC-Genoa/-Turin, GraniteRapids, SierraForest, the -vN revisions) and offered n270,
+    # which PVE refuses.
     _STATIC_CPU_TYPES = [
         'host', 'kvm64', 'kvm32', 'qemu64', 'qemu32',
         'max', 'x86-64-v2', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4',
-        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
-        'Cascadelake-Server', 'Cascadelake-Server-noTSX', 'Cascadelake-Server-v2',
-        'Conroe', 'Cooperlake', 'Cooperlake-v2',
-        'EPYC', 'EPYC-IBPB', 'EPYC-Milan', 'EPYC-Rome', 'EPYC-v3',
+        '486', 'pentium', 'pentium2', 'pentium3', 'coreduo', 'core2duo', 'Conroe', 'Penryn',
+        'Nehalem', 'Nehalem-IBRS', 'Westmere', 'Westmere-IBRS',
+        'SandyBridge', 'SandyBridge-IBRS', 'IvyBridge', 'IvyBridge-IBRS',
         'Haswell', 'Haswell-IBRS', 'Haswell-noTSX', 'Haswell-noTSX-IBRS',
+        'Broadwell', 'Broadwell-IBRS', 'Broadwell-noTSX', 'Broadwell-noTSX-IBRS',
+        'Skylake-Client', 'Skylake-Client-IBRS', 'Skylake-Client-noTSX-IBRS', 'Skylake-Client-v4',
+        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS', 'Skylake-Server-v4',
+        'Skylake-Server-v5',
+        'Cascadelake-Server', 'Cascadelake-Server-v2', 'Cascadelake-Server-noTSX',
+        'Cascadelake-Server-v4', 'Cascadelake-Server-v5',
+        'Cooperlake', 'Cooperlake-v2', 'KnightsMill',
         'Icelake-Client', 'Icelake-Client-noTSX', 'Icelake-Server', 'Icelake-Server-noTSX',
-        'IvyBridge', 'IvyBridge-IBRS',
-        'Nehalem', 'Nehalem-IBRS',
-        'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
-        'Penryn', 'SandyBridge', 'SandyBridge-IBRS',
-        'SapphireRapids', 'Skylake-Client', 'Skylake-Client-IBRS',
-        'Skylake-Server', 'Skylake-Server-IBRS', 'Skylake-Server-noTSX-IBRS',
-        'Westmere', 'Westmere-IBRS', 'athlon', 'core2duo', 'coreduo',
-        'n270', 'pentium', 'pentium2', 'pentium3', 'phenom'
+        'Icelake-Server-v3', 'Icelake-Server-v4', 'Icelake-Server-v5', 'Icelake-Server-v6',
+        'Icelake-Server-v7',
+        'SapphireRapids', 'SapphireRapids-v2', 'SapphireRapids-v3', 'SapphireRapids-v4',
+        'GraniteRapids', 'GraniteRapids-v2', 'GraniteRapids-v3',
+        'SierraForest', 'SierraForest-v2', 'SierraForest-v3', 'ClearwaterForest',
+        'athlon', 'phenom', 'Opteron_G1', 'Opteron_G2', 'Opteron_G3', 'Opteron_G4', 'Opteron_G5',
+        'EPYC', 'EPYC-IBPB', 'EPYC-v3', 'EPYC-v4', 'EPYC-v5',
+        'EPYC-Rome', 'EPYC-Rome-v2', 'EPYC-Rome-v3', 'EPYC-Rome-v4', 'EPYC-Rome-v5',
+        'EPYC-Milan', 'EPYC-Milan-v2', 'EPYC-Milan-v3',
+        'EPYC-Genoa', 'EPYC-Genoa-v2', 'EPYC-Turin',
     ]
 
     def get_cpu_types(self) -> List[str]:
@@ -18502,7 +18625,7 @@ echo "AGENT_INSTALLED_OK"
              shows up — e.g. EPYC entries only on AMD nodes). Returns rows
              with {name, vendor, custom} — we keep names verbatim, including
              custom-* models the admin defined.
-          2) Fall back to the static 61-entry list on any error or when no
+          2) Fall back to the static list (qemu-server's own) on any error or when no
              node is reachable. Same shape that PegaProx has been returning
              since forever, so callers don't see breakage.
 
@@ -18869,10 +18992,10 @@ echo "AGENT_INSTALLED_OK"
             return {'error': str(e)}
     
     def get_node_network_config(self, node: str) -> List[Dict]:
-        
+        # MK Nov 2026 - a read that failed is an UnreadList, never a node without interfaces
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/network"
@@ -18880,10 +19003,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting network config: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def update_node_network(self, node: str, iface: str, config: Dict) -> Dict[str, Any]:
         
@@ -19057,7 +19180,7 @@ echo "AGENT_INSTALLED_OK"
         
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return unread(UnreadDict)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/time"
@@ -19065,10 +19188,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', {})
-            return {}
+            return unread(UnreadDict, response)
         except Exception as e:
             self.logger.error(f"Error getting time: {e}")
-            return {}
+            return unread(UnreadDict, error=e)
     
     def update_node_time(self, node: str, timezone: str) -> Dict[str, Any]:
         """Update node timezone"""
@@ -19090,7 +19213,7 @@ echo "AGENT_INSTALLED_OK"
         """Get node system log - returns newest entries first"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/syslog"
@@ -19104,16 +19227,16 @@ echo "AGENT_INSTALLED_OK"
                 # Reverse to get newest first, then return
                 lines = [line.get('t', '') for line in data]
                 return list(reversed(lines))
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting syslog: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_certificates(self, node: str) -> List[Dict]:
         """Get node certificates"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/certificates/info"
@@ -19121,10 +19244,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting certificates: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def renew_node_certificate(self, node: str, force: bool = False) -> Dict[str, Any]:
         """Renew node certificate using ACME"""
@@ -19220,7 +19343,7 @@ echo "AGENT_INSTALLED_OK"
         """Get LVM volume groups"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/lvm"
@@ -19228,10 +19351,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting LVM: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def create_node_lvm(self, node: str, device: str, name: str, add_storage: bool = True) -> Dict[str, Any]:
         """Create LVM volume group"""
@@ -19718,7 +19841,7 @@ echo "AGENT_INSTALLED_OK"
         """Get LVM-Thin pools"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/lvmthin"
@@ -19726,10 +19849,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting LVM-Thin: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def create_node_lvmthin(self, node: str, device: str, name: str, add_storage: bool = True) -> Dict[str, Any]:
         """Create LVM-Thin pool"""
@@ -19756,7 +19879,7 @@ echo "AGENT_INSTALLED_OK"
         """Get ZFS pools"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/disks/zfs"
@@ -19764,10 +19887,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting ZFS: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_zfs_detail(self, node: str, name: str):
         """(status, data) of one ZFS pool: `zpool status` as Proxmox parses it, the vdev
@@ -19915,7 +20038,7 @@ echo "AGENT_INSTALLED_OK"
         """Get task history for node"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return []
+                return unread(UnreadList)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/tasks"
@@ -19926,10 +20049,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', [])
-            return []
+            return unread(UnreadList, response)
         except Exception as e:
             self.logger.error(f"Error getting tasks: {e}")
-            return []
+            return unread(UnreadList, error=e)
     
     def get_node_task_log(self, node: str, upid: str, start: int = 0, limit: int = 500) -> List[str]:
         """Get log for a specific task"""
@@ -19955,7 +20078,7 @@ echo "AGENT_INSTALLED_OK"
         """Get node subscription status"""
         if not self.is_connected:
             if not self.connect_to_proxmox():
-                return {}
+                return unread(UnreadDict)
         
         try:
             url = f"https://{self.host}:{self.api_port}/api2/json/nodes/{node}/subscription"
@@ -19963,10 +20086,10 @@ echo "AGENT_INSTALLED_OK"
             
             if response.status_code == 200:
                 return response.json().get('data', {})
-            return {}
+            return unread(UnreadDict, response)
         except Exception as e:
             self.logger.error(f"Error getting subscription: {e}")
-            return {}
+            return unread(UnreadDict, error=e)
     
     def update_node_subscription(self, node: str, key: str) -> Dict[str, Any]:
         """Update subscription key"""

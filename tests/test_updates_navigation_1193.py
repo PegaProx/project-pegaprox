@@ -1,4 +1,4 @@
-"""The cluster update manager is a first-level tab in both classic layouts (#1193)."""
+"""The cluster update manager is a first-level tab without changing Cloud or Corporate Redesigned navigation (#1193)."""
 import pytest
 
 from test_ha_ui import CLUSTER, SSE_TOKEN, _App, _FakeServer, _wait_for_call, browser  # noqa: F401
@@ -105,4 +105,33 @@ def test_switching_clusters_reads_the_selected_clusters_update_status(ui, layout
     app.page.get_by_role('button', name='Update Manager', exact=True).click()
     assert _wait_for_call(app, ('GET', '/api/clusters/c2/updates/status'))
     assert app.page.locator('[data-update-manager]').count() == 1
+    assert not app.errors, app.errors
+
+
+@pytest.mark.parametrize('layout', ['modern', 'corporate', 'cloud', 'corporate-redesigned'])
+def test_update_navigation_keeps_the_layouts_existing_manager(ui, layout):
+    """Classic gets a dedicated tab; the two existing alternative views stay usable."""
+    app = ui(layout)
+    page = app.page
+    if layout == 'cloud':
+        page.get_by_role('button', name='Update Manager', exact=True).click()
+        page.locator('.cloud-mounted').get_by_text('Update Manager', exact=True).wait_for(timeout=5000)
+        assert _wait_for_call(app, ('GET', '/api/clusters/c1/updates/status'))
+    elif layout == 'corporate-redesigned':
+        page.locator('.corp-tree-item', has_text='Testi').first.click()
+        page.locator('[data-cr-tab="updates"]').click()
+        page.locator('[data-cr-updates]').wait_for(timeout=5000)
+        assert page.locator('[data-update-manager]').count() == 0
+        assert _wait_for_call(app, ('GET', '/api/clusters/c1/updates/status'))
+        assert not _wait_for_call(app, ('POST', '/api/clusters/c1/updates/check'), seconds=1)
+        page.locator('[data-cr-tab="settings"]').click()
+        page.locator('[data-cr-upd-link-open]').click()
+        page.locator('[data-cr-updates]').wait_for(timeout=5000)
+    else:
+        _cluster(app, layout)
+        page.get_by_role('button', name='Update Manager', exact=True).click(timeout=5000)
+        page.locator('[data-update-manager]').wait_for(timeout=5000)
+        assert _wait_for_call(app, ('GET', '/api/clusters/c1/updates/status'))
+        page.get_by_role('button', name='Settings', exact=True).last.click()
+        assert page.locator('[data-update-manager]').count() == 0
     assert not app.errors, app.errors

@@ -1470,6 +1470,19 @@ class VMwareManager:
                         'vmdk_file': backing.get('vmdk_file', ''),
                         'snapshot_delta': backing.get('snapshot_delta'),
                     })
+        # MK Nov 2026 - the network adapters as well, so a migration plan can offer a network
+        # for each. The SOAP answer lists them, the REST one keys them by device id
+        raw_nics = data.get('nics')
+        if isinstance(raw_nics, dict):
+            raw_nics = [v for _k, v in sorted(raw_nics.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0)
+                        if isinstance(v, dict)]
+        nics = []
+        for n in raw_nics if isinstance(raw_nics, list) else []:
+            if isinstance(n, dict):
+                backing = n.get('backing') if isinstance(n.get('backing'), dict) else {}
+                nics.append({'label': n.get('label', '') or '',
+                             'network': n.get('network') or backing.get('network_name') or '',
+                             'mac_address': n.get('mac_address', '') or ''})
         cpu = data.get('cpu', {})
         mem = data.get('memory', {})
         return {'data': {
@@ -1480,6 +1493,7 @@ class VMwareManager:
             'memory_mb': mem.get('size_MiB', 0) if isinstance(mem, dict) else data.get('memory_size_MiB', 0),
             'guest_os': data.get('guest_OS', ''),
             'disks': disks,
+            'nics': nics,
             'total_disk_gb': sum(d.get('capacity_gb', 0) for d in disks),
         }}
     

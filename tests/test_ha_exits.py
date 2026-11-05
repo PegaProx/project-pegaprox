@@ -804,7 +804,8 @@ AUTOMATIONS = {
     ('pegaprox/core/vmware.py', 'load_vmware_servers'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start'): (1, 'confirm'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.start_node_update'): (1, 'job'),
-    ('pegaprox/utils/concurrent.py', 'run_per_node'): (1, 'carry'),
+    # the thread fallback and the greenlets of a fan-out with a whole deadline, both on the carried tasks
+    ('pegaprox/utils/concurrent.py', 'run_per_node'): (2, 'carry'),
     ('pegaprox/utils/concurrent.py', 'gevent_to_thread'): (1, 'console'),
     ('pegaprox/utils/rbac.py', 'get_pool_membership_cache'): (1, 'read'),
     ('pegaprox/utils/realtime.py', 'push_immediate_update'): (1, 'read'),
