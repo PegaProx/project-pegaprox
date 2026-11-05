@@ -631,6 +631,10 @@ def get_pbs_datastores(pbs_id):
             or not isinstance(usage_resp.get('data'), list)
             or any(not isinstance(usage, dict) or not isinstance(usage.get('store'), str)
                    or not usage['store'] or usage.get('error') is not None
+                   # PBS reports optional u64 byte counts; namespace-only rows omit them.
+                   or any(value is not None and (
+                              type(value) is not int or not 0 <= value <= (1 << 64) - 1)
+                          for value in (usage.get('used'), usage.get('total'), usage.get('avail')))
                    for usage in usage_resp['data'])):
         return jsonify({'error': 'PBS returned an invalid datastore usage list', 'code': 'PBS_UPSTREAM'}), 502
     
