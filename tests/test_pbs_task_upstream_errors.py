@@ -195,3 +195,14 @@ def test_valid_optional_task_fields_remain_unchanged(task_client, row):
 
     assert result.status_code == 200
     assert result.get_json() == [row]
+
+
+@pytest.mark.parametrize('needle', ['backup', 'sync-job', '', 'job with spaces', 'a' * 256])
+def test_task_typefilter_preserves_pbs_substring_contract(task_client, needle):
+    """PBS defines a plain substring filter without a restricted name format."""
+    client, manager = task_client
+
+    response = client.get(f'/api/pbs/{PBS_ID}/tasks', query_string={'typefilter': needle})
+
+    assert response.status_code == 200
+    manager.get_tasks.assert_called_once_with(limit=50, typefilter=needle, running=None)
