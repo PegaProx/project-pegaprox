@@ -26,7 +26,7 @@ from pegaprox.utils.audit import log_audit
 from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
-from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import upstream_failure, require_guest_node
 from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_to, ssh_blocked_for, bare_host
 from pegaprox import globals as _g
 from pegaprox.utils.ssh import read_capped as _read_capped
@@ -756,6 +756,10 @@ def get_storage_clusters(cluster_id):
     """Get all storage clusters for a proxmox cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the storage groups of the whole cluster, not for a confined caller
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1896,6 +1900,11 @@ def get_storage_config(cluster_id, storage_id):
     """Get configuration for a specific storage"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - a storage definition is the cluster's (server, export, user), like its
+    # PUT and DELETE below
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2025,6 +2034,10 @@ def get_storage_status(cluster_id, storage_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - asks every node of the cluster: not for a confined caller
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2685,6 +2698,11 @@ def get_node_storage_content(cluster_id, node, storage):
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
+    # MK Nov 2026 - the rows below without a vmid (ISOs, snippets, templates) are not scoped:
+    # a confined caller reads the storage of a node their guests run on, as its storage list
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     try:
         host, port = manager.host, manager.api_port
@@ -2739,6 +2757,10 @@ def get_node_storage_identity(cluster_id, node, storage):
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
+    # MK Nov 2026 - as the node's storage list: the nodes of the caller's own guests
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     try:
         host, port = manager.host, manager.api_port
         url = f"https://{host}:{port}/api2/json/nodes/{node}/storage/{storage}/identity"
@@ -3359,13 +3381,24 @@ def get_backup_job_run_log(cluster_id, job_id):
 def iso_sync_status(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - the ISOs of every node, as the sync it starts (POST) refuses as well
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
     content_type = request.args.get('content', 'iso')
     if content_type not in ('iso', 'vztmpl'):
         return jsonify({'error': 'content must be iso or vztmpl'}), 400
-    return jsonify(mgr.get_content_sync_status(content_type))
+    status = mgr.get_content_sync_status(content_type)
+    # MK Nov 2026 - no status at all is an error, not a cluster without ISOs
+    if status.get('error'):
+        if status.get('offline'):
+            return jsonify({'error': 'Cluster temporarily unreachable: could not read the sync status',
+                            'code': 'PVE_UNREACHABLE', 'offline': True}), 503
+        return jsonify({'error': f"Could not read the sync status: {status['error']}", 'code': 'READ_FAILED'}), 500
+    return jsonify(status)
 
 
 @bp.route('/api/clusters/<cluster_id>/iso-sync', methods=['POST'])
@@ -3464,6 +3497,9 @@ def iso_sync_last_result(cluster_id):
     """Get result of last sync operation for UI feedback"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]

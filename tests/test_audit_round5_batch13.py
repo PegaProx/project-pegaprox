@@ -60,7 +60,10 @@ def _mgr_http(api, payload, cluster_id='cluster_1'):
 
 def test_datastore_content_twin_scoped(api, seed):
     u = _pool_user(seed)
-    api.set_manager('cluster_1', _mgr_http(api, _CONTENT))
+    m = api.set_manager('cluster_1', _mgr_http(api, _CONTENT))
+    # MK Nov 2026 (#1218) - a confined caller lists the storage of a node its guests run on
+    m.get_vm_resources.return_value = [{'vmid': 100, 'node': 'n1', 'type': 'qemu'},
+                                       {'vmid': 200, 'node': 'n1', 'type': 'qemu'}]
     body = api.as_user(u).get('/api/clusters/cluster_1/datastores/local/content?node=n1').get_json()
     volids = sorted(r['volid'] for r in body)
     assert 'local:vm-100-disk-0' in volids

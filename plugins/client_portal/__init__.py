@@ -7,6 +7,7 @@ Uses existing VM ACLs for permission enforcement.
 Hoster configures allowed actions via config.json.
 """
 import os
+import re
 import json
 import logging
 import threading
@@ -73,6 +74,8 @@ def _get_portal_config():
         'show_ip_addresses': cfg.get('show_ip_addresses', True),
         'allow_password_change': cfg.get('allow_password_change', True),
         'allow_snapshots': cfg.get('allow_snapshots', False),
+        # MK Nov 2026 - the page draws the ISO button on it, and it was never sent
+        'allow_iso_mount': bool(cfg.get('allow_iso_mount', False)),
         'custom_logo_url': cfg.get('custom_logo_url', ''),
         'theme_color': cfg.get('theme_color', '#e57000'),
         'reverse_proxy_enabled': rp_enabled,
@@ -549,6 +552,17 @@ def _change_password():
 # LW: Apr 2026 — ISO mount for portal customers
 # hoster defines allowed ISOs in config.json: "allowed_isos": ["local:iso/debian.iso", ...]
 # or "iso_storage": "local" to allow all ISOs from a specific storage
+# MK Nov 2026 - all of it only once the hoster sets allow_iso_mount. The routes did not ask the
+# switch, so a hoster who listed ISOs with the switch off still had them mounted through the API.
+# The drive is a CD-ROM slot: it is written as a key of the guest's config, and any other key
+# (scsi0, net0, args) was taken as given
+_CDROM_DRIVE = re.compile(r'^(ide[0-3]|sata[0-5])$')
+
+
+def _iso_mount_off(cfg):
+    if not cfg.get('allow_iso_mount', False):
+        return {'error': 'ISO mounting is not enabled'}, 403
+    return None
 
 def _list_allowed_isos():
     """List ISOs that portal customers are allowed to mount"""
@@ -556,6 +570,9 @@ def _list_allowed_isos():
     if not username:
         return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
     cfg = _load_config()
+    off = _iso_mount_off(cfg)
+    if off:
+        return off
 
     # hoster can specify individual ISOs or an entire storage
     allowed_list = cfg.get('allowed_isos', [])
@@ -597,6 +614,11 @@ def _mount_iso():
 
     if not all([cluster_id, vmid, iso_volid]):
         return {'error': 'cluster_id, vmid, iso required'}, 400
+    off = _iso_mount_off(_load_config())
+    if off:
+        return off
+    if not isinstance(drive, str) or not _CDROM_DRIVE.match(drive):
+        return {'error': 'drive must be a CD-ROM slot (ide0-ide3, sata0-sata5)'}, 400
 
     # check VM access
     # fix (audit): user_can_access_vm takes the user DICT — passing the username string made
@@ -659,6 +681,11 @@ def _unmount_iso():
 
     if not all([cluster_id, vmid]):
         return {'error': 'cluster_id, vmid required'}, 400
+    off = _iso_mount_off(_load_config())
+    if off:
+        return off
+    if not isinstance(drive, str) or not _CDROM_DRIVE.match(drive):
+        return {'error': 'drive must be a CD-ROM slot (ide0-ide3, sata0-sata5)'}, 400
     # same defect as _mount_iso — a username string where a user dict belongs
     from pegaprox.utils.auth import build_authz_user as _bau
     _iso_user = _bau(username, request.session)

@@ -64,6 +64,31 @@ SRC_FILES=(
     settings_modal.js
     worldmap.js
     cloud.js
+    cr.js
+    cr_views.js
+    cr_topology.js
+    cr_compliance.js
+    cr_tasks.js
+    cr_datastore.js
+    cr_drift.js
+    cr_storage.js
+    cr_recovery.js
+    cr_sla.js
+    cr_isosync.js
+    cr_vm.js
+    cr_reports.js
+    cr_whatif.js
+    cr_harden.js
+    cr_alerts.js
+    cr_datacenter.js
+    cr_updates.js
+    cr_perf.js
+    cr_vmcfg.js
+    cr_node.js
+    cr_nodecfg.js
+    cr_nodestore.js
+    cr_nodemisc.js
+    cr_modules.js
     dashboard.js
 )
 

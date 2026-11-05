@@ -8,17 +8,18 @@ POST /api/clusters/<id>/whatif/ranking   the single points of failure of the clu
 All only read. The POST takes its scenario in the body, so a standby with the live view
 answers it from its own managers like any read (app.py _STANDBY_LOCAL_WRITES) and the
 active tells its members about nothing. A caller confined to some guests of the cluster
-gets the rows of those guests only: the counts stay, the names of the others do not. The
-tenants of a report are the caller's own tenant to anyone but an administrator, and none to
-a confined caller; the ranking is a whole-cluster view and is refused to a confined caller.
+gets the rows of those guests only, and of the nodes they run on: the counts stay, the names
+of the other guests and the load of the other nodes do not. The tenants of a report are the
+caller's own tenant to anyone but an administrator, and none to a confined caller; the
+ranking is a whole-cluster view and is refused to a confined caller.
 """
 
 import logging
 
 from flask import Blueprint, jsonify, request
 
-from pegaprox.api.helpers import (caller_is_scoped, check_cluster_access, require_unconfined, safe_error,
-                                  scope_vm_rows)
+from pegaprox.api.helpers import (caller_guest_nodes, caller_is_scoped, check_cluster_access,
+                                  require_unconfined, safe_error, scope_vm_rows)
 from pegaprox.core import whatif
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import build_authz_user, require_auth
@@ -90,9 +91,12 @@ def thresholds_for(cluster_id, override=None):
     return out
 
 
-def _visible(cluster_id, report):
+def _visible(cluster_id, report, nodes=None):
     """The report as this caller may see it: guest rows and the guests of each limit
-    scoped like the guest list, the counts kept."""
+    scoped like the guest list, the counts kept. nodes: the nodes a confined caller's guests
+    run on (caller_guest_nodes), None for the whole cluster."""
+    if nodes is not None:
+        whatif.for_nodes(report, nodes)
     rows = report.get('guests') or []
     seen = scope_vm_rows(cluster_id, rows)
     ids = {r['vmid'] for r in seen}
@@ -146,6 +150,13 @@ def whatif_run(cluster_id):
     mgr, err = _manager(cluster_id)
     if err:
         return err
+    # MK Nov 2026 - asked before the run: the report carries a row with the load of each node,
+    # which a confined caller gets for the nodes of their own guests only
+    try:
+        nodes = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[WHATIF] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
     body = request.get_json(silent=True)
     try:
         scenario = whatif.parse_scenario(body)
@@ -157,7 +168,7 @@ def whatif_run(cluster_id):
     except Exception as e:
         logging.error(f"[WHATIF] {cluster_id} run failed: {e}")
         return jsonify({'error': safe_error(e, 'The what-if simulation failed')}), 500
-    return jsonify(_visible(cluster_id, report))
+    return jsonify(_visible(cluster_id, report, nodes))
 
 
 @bp.route('/api/clusters/<cluster_id>/whatif/ranking', methods=['POST'])

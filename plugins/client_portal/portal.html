@@ -625,7 +625,8 @@ function renderDash(){
             if(al.includes('vm.console'))acts+=`<button class="btn btn-ghost text-xs" onclick="pConsole('${escCid}',${v.vmid})">&#x1f5a5; Console</button>`;
             if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" onclick="pAction('${escCid}',${v.vmid},'shutdown','${escName}')">&#x23FB; Shutdown</button>`;
             if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" style="opacity:0.7" onclick="pAction('${escCid}',${v.vmid},'stop','${escName}')">&#x26A0; Force Stop</button>`;
-            if(al.includes('vm.start'))acts+=`<button class="btn btn-ghost text-xs" onclick="pAction('${escCid}',${v.vmid},'reboot','${escName}')">&#8635; Reboot</button>`;
+            // MK Nov 2026 (#1239) - reboot is vm.restart on the server, so the button asks the same
+            if(al.includes('vm.restart'))acts+=`<button class="btn btn-ghost text-xs" onclick="pAction('${escCid}',${v.vmid},'reboot','${escName}')">&#8635; Reboot</button>`;
         }else{
             if(al.includes('vm.start'))acts+=`<button class="btn btn-accent text-xs" onclick="pAction('${escCid}',${v.vmid},'start','${escName}')">&#x25B6; Start</button>`;
         }

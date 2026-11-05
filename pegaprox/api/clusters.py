@@ -33,7 +33,9 @@ from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validat
 from pegaprox.utils.sanitization import task_ref_ok
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
-                                  bounded_limit, node_maintenance_for_caller, upstream_failure)
+                                  bounded_limit, node_map_for_caller, upstream_failure)
+from pegaprox.api.helpers import caller_guest_nodes
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable
 
 # MK: this used to be 200 lines down in the monolith, good luck finding anything there
 bp = Blueprint('clusters', __name__)
@@ -525,11 +527,25 @@ def get_cluster_nodes(cluster_id):
     
     manager = cluster_managers[cluster_id]
 
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on, on every
+    # answer below (the cache keeps the whole list)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[NODES] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs',
+                        'nodes': []}), 503
+
+    def _theirs(rows):
+        if mine is None:
+            return rows
+        return [n for n in rows or [] if isinstance(n, dict) and n.get('node') in mine]
+
     # MK: XCP-ng clusters use their own get_nodes()
     if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
         try:
             nodes = manager.get_nodes()
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
         except Exception as e:
             logging.debug(f"XCP-ng get_nodes failed for {cluster_id}: {e}")
             return jsonify({'error': 'Connection temporarily unavailable', 'nodes': [], 'offline': True}), 503
@@ -560,7 +576,7 @@ def get_cluster_nodes(cluster_id):
                     n['mem_percent'] = round((mem / maxmem) * 100, 2)
             # Cache the nodes data
             manager._cached_nodes = nodes
-            return jsonify(nodes)
+            return jsonify(_theirs(nodes))
     except Exception as e:
         logging.debug(f"Failed to get nodes for {cluster_id}: {e}")
 
@@ -571,7 +587,7 @@ def get_cluster_nodes(cluster_id):
         for node in cached:
             if 'connection_status' not in node:
                 node['connection_status'] = 'stale'
-        return jsonify(cached)
+        return jsonify(_theirs(cached))
 
     # If HA is tracking nodes, return those
     if manager.ha_node_status:
@@ -582,7 +598,7 @@ def get_cluster_nodes(cluster_id):
                 'status': data.get('status', 'unknown'),
                 'connection_status': 'from_ha_cache'
             })
-        return jsonify(nodes)
+        return jsonify(_theirs(nodes))
     
     # Last resort - return empty but with error info
     return jsonify({
@@ -1444,14 +1460,15 @@ def get_cluster_metrics(cluster_id):
             if metrics:
                 # Cache the metrics
                 mgr._cached_metrics = metrics
-                # MK Oct 2026 - a node in maintenance names its guests: not to a confined caller
-                return jsonify(node_maintenance_for_caller(cluster_id, metrics))
+                # MK Nov 2026 - a confined caller gets the nodes their guests run on, and a
+                # maintenance there without the guests in it
+                return jsonify(node_map_for_caller(cluster_id, metrics))
         except Exception as e:
             logging.debug(f"Error getting metrics for {cluster_id}: {e}")
     
     # If live data failed, try cached data
     if hasattr(mgr, '_cached_metrics') and mgr._cached_metrics:
-        return jsonify(node_maintenance_for_caller(cluster_id, mgr._cached_metrics))
+        return jsonify(node_map_for_caller(cluster_id, mgr._cached_metrics))
     
     # If HA is tracking nodes, build metrics from HA data
     if mgr.ha_node_status:
@@ -1464,7 +1481,7 @@ def get_cluster_metrics(cluster_id):
                 'disk': {'used': 0, 'total': 0},
                 'from_ha_cache': True
             }
-        return jsonify(ha_metrics)
+        return jsonify(node_map_for_caller(cluster_id, ha_metrics))
     
     # Return error with empty metrics - frontend will keep old data
     return jsonify({'error': 'Connection temporarily unavailable', 'offline': True}), 503
@@ -1662,11 +1679,22 @@ def get_cluster_health(cluster_id):
             'computed_at': None,
         })
 
+    # MK Nov 2026 (#1218) - a caller confined to some guests is told about the nodes those
+    # run on: which are offline, the fullest storage, their replication jobs and backups.
+    # Nothing of it while their guests cannot be read, and no Ceph (below)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.warning(f"[health] guests on {cluster_id} unread, node factors left out for this caller: {e}")
+        mine = set()
+
     # 1) Nodes online
     try:
         ns = mgr.get_node_status() or {}
     except Exception:
         ns = {}
+    if mine is not None:
+        ns = {name: d for name, d in ns.items() if name in mine}
     total_nodes = len(ns)
     online_nodes = sum(1 for n in ns.values() if (n.get('status') in ('online', 'running') or not n.get('offline')))
     if total_nodes:
@@ -1693,7 +1721,7 @@ def get_cluster_health(cluster_id):
             if rows is not None:
                 _health_storage_cache.set(cluster_id, 'storage', rows, ttl_seconds=_HEALTH_STORAGE_TTL)
         for node_name, stor_name, used, total in (rows or []):
-            if total <= 0:
+            if total <= 0 or (mine is not None and node_name not in mine):
                 continue
             pct = (used / total) * 100.0
             if pct > worst_pct:
@@ -1724,6 +1752,9 @@ def get_cluster_health(cluster_id):
         repl = mgr.get_replication_status() or []
     except Exception:
         repl = []
+    if mine is not None:
+        # a job's 'type' is the replication type (local), not the guest's: asked as either
+        repl = scope_vm_rows(cluster_id, repl, vmid_key='guest', type_key='guest_type') if mine else []
     if repl:
         # PVE flags failures via 'fail_count' or non-zero error
         failed = sum(1 for r in repl if (r.get('fail_count') or 0) > 0 or r.get('error'))
@@ -1756,7 +1787,10 @@ def get_cluster_health(cluster_id):
             r = mgr._api_get(url)
             stale = 0
             if r is not None and r.status_code == 200:
-                stale = len(r.json().get('data') or [])
+                _rows = r.json().get('data') or []
+                if mine is not None:
+                    _rows = scope_vm_rows(cluster_id, _rows) if mine else []
+                stale = len(_rows)
             d = -10 if stale else 0
             score += d
             factors.append({
@@ -1774,9 +1808,7 @@ def get_cluster_health(cluster_id):
     # to a pool or to guests: Ceph is the cluster's storage, and the Ceph overview answers
     # 'confined' to them as well
     try:
-        from pegaprox.api.helpers import caller_is_scoped
-        scoped = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
-        ceph, has_ceph = (None, False) if scoped else _health_ceph_status(cluster_id, mgr)
+        ceph, has_ceph = (None, False) if mine is not None else _health_ceph_status(cluster_id, mgr)
         if has_ceph:
             f, issue = _health_ceph_factor(ceph, score)
             score += f['delta']
@@ -2863,66 +2895,51 @@ def get_backup_sla(cluster_id):
         # every guest (vmid, name, node, status, backup age) to any backup.view holder admitted by
         # the pool/ACL fallback — the most complete inventory of the report family, and it flags the
         # unbacked guests. Scope it per-VM like its costs/power/top-vms siblings.
-        vms = scope_vm_rows(cluster_id, mgr.get_vm_resources() or [])
+        raw = mgr.get_vm_resources()
+        # MK Nov 2026 - a guest list that did not answer is no cluster without guests
+        if getattr(raw, 'unavailable', False):
+            return jsonify({'error': 'Could not read the guests of this cluster', 'code': 'PVE_READ_FAILED'}), 502
+        vms = scope_vm_rows(cluster_id, raw or [])
     except Exception as e:
         return jsonify({'error': f'failed to enumerate VMs: {e}'}), 502
 
     # 2) most-recent backup ts per (vmtype, vmid) across local backup storages
     last_backup = {}  # (type, vmid) -> {'ts': int, 'source': 'local|pbs', 'volid': str}
+    base = f"https://{mgr.host}:{mgr.api_port}/api2/json"
     try:
-        host, port = mgr.host, mgr.api_port
-        sess = mgr._create_session()
-        # discover unique nodes
-        nodes_resp = sess.get(f"https://{host}:{port}/api2/json/nodes", timeout=10)
-        nodes = [n['node'] for n in (nodes_resp.json().get('data') or []) if n.get('status') == 'online'] if nodes_resp.status_code == 200 else []
-        seen_storages = set()
-        for node in nodes:
-            try:
-                stor_resp = sess.get(f"https://{host}:{port}/api2/json/nodes/{node}/storage", timeout=10)
-                if stor_resp.status_code != 200:
-                    continue
-                for st in stor_resp.json().get('data') or []:
-                    if 'backup' not in (st.get('content') or ''):
-                        continue
-                    sname = st.get('storage')
-                    if not sname or (node, sname) in seen_storages:
-                        continue
-                    seen_storages.add((node, sname))
-                    try:
-                        c_resp = sess.get(
-                            f"https://{host}:{port}/api2/json/nodes/{node}/storage/{sname}/content",
-                            params={'content': 'backup'}, timeout=(5, 30))
-                    except Exception:
-                        continue
-                    if c_resp.status_code != 200:
-                        continue
-                    for item in c_resp.json().get('data') or []:
-                        ts = int(item.get('ctime') or 0)
-                        if not ts:
-                            continue
-                        vmid = str(item.get('vmid') or '')
-                        if not vmid:
-                            continue
-                        # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
-                        volid = item.get('volid') or ''
-                        if 'qemu' in volid:
-                            vt = 'qemu'
-                        elif 'lxc' in volid or 'openvz' in volid:
-                            vt = 'lxc'
-                        else:
-                            # PBS volids: "<store>:backup/<type>/<id>/<time>"
-                            after = volid.split('backup/', 1)[1] if 'backup/' in volid else ''
-                            vt = 'qemu' if after.startswith('vm/') else 'lxc' if after.startswith('ct/') else ''
-                        if not vt:
-                            continue
-                        key = (vt, vmid)
-                        prev = last_backup.get(key)
-                        if not prev or ts > prev['ts']:
-                            last_backup[key] = {'ts': ts, 'source': 'pbs' if 'pbs' in (st.get('type') or '').lower() else 'local', 'volid': volid}
-            except Exception:
-                continue
+        nodes_resp = mgr._create_session().get(f"{base}/nodes", timeout=10)
     except Exception as e:
-        logging.warning(f"[BACKUP_SLA] storage scan failed for {cluster_id}: {e}")
+        logging.warning(f"[BACKUP_SLA] node list of {cluster_id} not read: {e}")
+        return pve_unreachable('the nodes of this cluster')
+    # MK Nov 2026 - without the node list every guest read as never backed up
+    if nodes_resp.status_code != 200:
+        return pve_read_failed(nodes_resp.status_code, nodes_resp.text, 'the nodes of this cluster')
+    nodes = [n['node'] for n in (nodes_resp.json().get('data') or []) if n.get('status') == 'online']
+    found, unread = _sla_scan(mgr, base, nodes)
+    for st_type, items in found:
+        for item in items:
+            ts = int(item.get('ctime') or 0)
+            if not ts:
+                continue
+            vmid = str(item.get('vmid') or '')
+            if not vmid:
+                continue
+            # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
+            volid = item.get('volid') or ''
+            if 'qemu' in volid:
+                vt = 'qemu'
+            elif 'lxc' in volid or 'openvz' in volid:
+                vt = 'lxc'
+            else:
+                # PBS volids: "<store>:backup/<type>/<id>/<time>"
+                after = volid.split('backup/', 1)[1] if 'backup/' in volid else ''
+                vt = 'qemu' if after.startswith('vm/') else 'lxc' if after.startswith('ct/') else ''
+            if not vt:
+                continue
+            key = (vt, vmid)
+            prev = last_backup.get(key)
+            if not prev or ts > prev['ts']:
+                last_backup[key] = {'ts': ts, 'source': 'pbs' if 'pbs' in (st_type or '').lower() else 'local', 'volid': volid}
 
     # 3) evaluate per VM
     out_vms = []
@@ -2969,6 +2986,13 @@ def get_backup_sla(cluster_id):
     measurable = total - counts.get('disabled', 0)
     pct = round(100 * counts.get('ok', 0) / measurable, 1) if measurable else None
 
+    # MK Nov 2026 - a pool or ACL confined caller learns how many stores were not read, not
+    # their names or the nodes they sit on (it may see neither)
+    if unread:
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+            unread = [{'storage': None, 'node': None, 'error': u.get('error')} for u in unread]
+
     return jsonify({
         'enabled': max_age > 0,
         'max_age_hours': max_age,
@@ -2984,7 +3008,107 @@ def get_backup_sla(cluster_id):
             'compliance_pct': pct,
         },
         'vms': out_vms,
+        # the storages whose backups are not in the ages above: a guest backed up only there
+        # reads as without a backup or older than it is
+        'unread': unread,
     })
+
+
+# MK Nov 2026 - the backup scan of the SLA read every backup storage on every node one after
+# the other: a shared PBS store 200 times at 200 nodes, minutes for one answer. Now the node
+# lists and then the stores are read this many at a time, a shared store once (from the next
+# node that lists it when a read fails), and the whole scan ends within the deadline
+_SLA_WORKERS = 8
+_SLA_LIST_DEADLINE = 15
+_SLA_DEADLINE = 60
+_SLA_SHARED_TRIES = 3
+
+
+def _sla_left(end, cap):
+    """Seconds a request may still wait: at most `cap`, never past the monotonic `end`."""
+    import time
+    return cap if end is None else min(cap, end - time.monotonic())
+
+
+def _sla_storages(mgr, base, node, end=None):
+    """The backup storages `node` lists, or a str with why they could not be read."""
+    if _sla_left(end, 1) <= 0:
+        return 'the storage list did not answer in time'
+    try:
+        r = mgr._create_session().get(f"{base}/nodes/{node}/storage", timeout=_sla_left(end, 10))
+        if r.status_code != 200:
+            return f'the storage list answered HTTP {r.status_code}'
+        return [st for st in (r.json().get('data') or []) if isinstance(st, dict) and st.get('storage')
+                and 'backup' in (st.get('content') or '') and st.get('enabled', 1)]
+    except Exception as e:
+        return f'the storage list did not answer ({type(e).__name__})'
+
+
+def _sla_content(mgr, base, nodes, storage, end=None):
+    """(items, node, None) of the first of `nodes` that lists the backups of `storage`, or
+    (None, last node tried, why)."""
+    why, node = 'not read', None
+    for node in nodes:
+        if _sla_left(end, 1) <= 0:
+            return None, node, 'did not answer in time'
+        try:
+            r = mgr._create_session().get(f"{base}/nodes/{node}/storage/{storage}/content",
+                                          params={'content': 'backup'},
+                                          timeout=(_sla_left(end, 5), _sla_left(end, 30)))
+            if r.status_code == 200:
+                return (r.json().get('data') or []), node, None
+            why = f'HTTP {r.status_code}'
+        except Exception as e:
+            why = f'no answer ({type(e).__name__})'
+    return None, node, why
+
+
+def _sla_scan(mgr, base, nodes):
+    """([(storage type, backup items)], unread) for the online `nodes`. unread: one
+    {storage, node, error} per storage list or store that was not read."""
+    import time
+    from pegaprox.utils.concurrent import run_per_node, yield_to_hub
+    yield_to_hub()   # the hub's clock, which the deadlines go by, is the one of its last turn
+    started = time.monotonic()
+    unread = []
+    # each deadline holds for its whole step: no read starts after it, none waits past it
+    lists_end = started + _SLA_LIST_DEADLINE
+    lists = run_per_node({n: (lambda node: _sla_storages(mgr, base, node, lists_end)) for n in nodes},
+                         max_concurrent=_SLA_WORKERS, timeout=_SLA_LIST_DEADLINE, whole=True)
+    shared, local = {}, {}
+    for node in nodes:
+        got = lists.get(node)
+        if not isinstance(got, list):
+            unread.append({'storage': None, 'node': node, 'error': got or 'the storage list did not answer in time'})
+            continue
+        for st in got:
+            if PegaProxManager._storage_is_shared(st):
+                # the nodes that have it active first
+                entry = shared.setdefault(st['storage'], {'type': st.get('type'), 'on': [], 'off': []})
+                entry['on' if st.get('active', 1) else 'off'].append(node)
+            else:
+                local[(node, st['storage'])] = st.get('type')
+    end = started + _SLA_DEADLINE
+    jobs, types = {}, {}
+    for name, entry in shared.items():
+        tries = (entry['on'] + entry['off'])[:_SLA_SHARED_TRIES]
+        jobs[('shared', name)] = (lambda key, tries=tries: _sla_content(mgr, base, tries, key[1], end))
+        types[('shared', name)] = entry['type']
+    for (node, name), st_type in local.items():
+        jobs[('local', node, name)] = (lambda key: _sla_content(mgr, base, [key[1]], key[2], end))
+        types[('local', node, name)] = st_type
+    left = max(end - time.monotonic(), 0)
+    done = run_per_node(jobs, max_concurrent=_SLA_WORKERS, timeout=left, whole=True) if left > 0 else {}
+    found = []
+    for key in jobs:
+        items, node, why = done.get(key) or (None, key[1] if key[0] == 'local' else None, 'did not answer in time')
+        if items is None:
+            unread.append({'storage': key[-1], 'node': node, 'error': why})
+        else:
+            found.append((types[key], items))
+    if unread:
+        logging.warning(f"[BACKUP_SLA] {len(unread)} backup storage read(s) failed for {getattr(mgr, 'id', '?')}")
+    return found, unread
 
 
 @bp.route('/api/clusters/<cluster_id>/backup-sla/config', methods=['PUT'])

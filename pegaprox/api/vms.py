@@ -54,9 +54,11 @@ from pegaprox.api.helpers import get_connected_manager, check_cluster_access, re
 from pegaprox.api.helpers import node_shell_address
 from pegaprox.api.helpers import xapi_permission_missing, upstream_failure, tenant_quota_gate, guest_size, quota_hold_alive
 from pegaprox.api.helpers import UPSTREAM_AUTH, UPSTREAM_AUTH_STATUSES
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable, _checkbox
 from pegaprox.api.helpers import evacuation_options, evacuation_options_said, guest_storage_totals
 from pegaprox.api.helpers import (sees_whole_maintenance, maintenance_without_guests,
-                                  node_maintenance_for_caller)
+                                  node_map_for_caller, caller_guest_nodes, require_guest_node,
+                                  _request_caller)
 from pegaprox.api.ha import standby_console_refusal, STANDBY_CONSOLE_ERROR
 from pegaprox.core import ha, ha_transport
 from pegaprox.core import transfer_net, preflight
@@ -702,6 +704,11 @@ def set_datacenter_options(cluster_id):
 def get_storage_list(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - every storage of the cluster with its servers, exports and users: not
+    # for a caller confined to their own guests
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -730,7 +737,7 @@ def get_storage_list(cluster_id):
 # so the heavy fan-out fired several times a minute per cluster. Storage totals move
 # on grow/add, not per-15s, so a small snapshot collapses the overlapping pollers
 # (and multiple browser tabs) onto one fan-out per window. Keyed per cluster; the
-# payload is cluster-global + already storage.view-gated by the caller above.
+# payload is cluster-global, so the route refuses a confined caller before it is read.
 _datastores_cache = {}
 _DATASTORES_TTL = 12.0
 
@@ -741,6 +748,11 @@ def get_datastores(cluster_id):
     """Get all datastores with usage info"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # MK Nov 2026 - every storage of every node, shared by all callers through the cache below.
+    # Polled from every open tab: asked of the caller require_auth fetched, no users table
+    _cerr = require_unconfined(cluster_id, user=_request_caller())
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1031,10 +1043,27 @@ def get_datastore_content(cluster_id, storage_name):
     if error:
         return error
     
+    node = request.args.get('node')
+    # MK Nov 2026 - ISOs, snippets and templates have no vmid to scope them by: a confined
+    # caller lists the storage of a node their guests run on, and is given the first of those
+    # when it names none
+    if node:
+        _nerr = require_guest_node(cluster_id, node)
+        if _nerr:
+            return _nerr
+    else:
+        try:
+            _mine = caller_guest_nodes(cluster_id)
+        except Exception as e:
+            logging.error(f"[datastore] cannot read the caller's guests on {cluster_id}: {e}")
+            return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+        if _mine is not None:
+            if not _mine:
+                return jsonify({'error': 'Access denied: none of your guests run on this cluster'}), 403
+            node = sorted(_mine)[0]
     try:
         host, port = manager.host, manager.api_port
-        node = request.args.get('node')
-        
+
         # If no node specified, find first node that has this storage
         if not node:
             nodes_url = f"https://{host}:{port}/api2/json/nodes"
@@ -1043,6 +1072,9 @@ def get_datastore_content(cluster_id, storage_name):
                 for n in nodes_response.json().get('data', []):
                     node = n['node']
                     break
+            else:
+                return pve_read_failed(nodes_response.status_code, nodes_response.text,
+                                       'the nodes of this cluster')
         
         if not node:
             return jsonify({'error': 'No node available'}), 400
@@ -1078,10 +1110,17 @@ def get_datastore_content(cluster_id, storage_name):
             content = [r for r in content if not (isinstance(r, dict) and r.get('vmid') is not None)
                        or r.get('vmid') in _ok_vmids]
             return jsonify(content)
-        return jsonify([])
+        # MK Nov 2026 - a read PVE refused answered 200 [] and the storage showed as empty
+        return pve_read_failed(response.status_code, response.text,
+                               f'the content of storage {storage_name} on node {node}',
+                               node=node, storage=storage_name)
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         logging.warning(f"[API] Cluster {cluster_id} unreachable for storage content: {e}")
-        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+        # MK Nov 2026 - with the code and what was not read, like the refused read above
+        if not node:
+            return pve_unreachable('the nodes of this cluster', storage=storage_name)
+        return pve_unreachable(f'the content of storage {storage_name} on node {node}',
+                               node=node, storage=storage_name)
     except Exception as e:
         logging.error(f"Error getting datastore content: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get datastore content')}), 500
@@ -3354,6 +3393,11 @@ def get_maintenance_status(cluster_id, node_name):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # MK Nov 2026 - the per-node twin of /node-progress keeps to the same nodes, and a node
+    # out of a confined caller's reach costs no refresh from PVE
+    _nerr = require_guest_node(cluster_id, node_name)
+    if _nerr:
+        return _nerr
     mgr = cluster_managers[cluster_id]
     # NS: force-refresh from PVE so we don't return stale data (#141)
     mgr.refresh_maintenance_status()
@@ -4320,30 +4364,42 @@ def start_node_update(cluster_id, node_name):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # MK Nov 2026 - English with a code the UI translates; this route answered in German
     paramiko = get_paramiko()
     if not paramiko:
-        return jsonify({'error': 'SSH nicht verfuegbar. Bitte installiere paramiko'}), 500
+        return jsonify({'error': 'SSH is not available on this server (the paramiko module is missing)',
+                        'code': 'SSH_UNAVAILABLE'}), 500
     
     mgr = cluster_managers[cluster_id]
     data = request.json or {}
-    reboot = data.get('reboot', True)
-    force = data.get('force', False)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Expected a JSON object', 'code': 'INVALID_FIELD'}), 400
+    # a missing reboot stays a reboot, as API clients know it. "false" as a string was a
+    # reboot as well (and "false" for force a forced update), so both are read as booleans
+    reboot = _checkbox(data.get('reboot', True))
+    force = _checkbox(data.get('force', False))
+    for field, value in (('reboot', reboot), ('force', force)):
+        if value is None:
+            return jsonify({'error': f'{field} is true or false', 'code': 'INVALID_FIELD', 'field': field}), 400
     # NS Oct 2026 - rebooting after the update is node.reboot, as on the rolling-update and
     # schedule routes; an update without one stays on node.update (#1072)
     if reboot:
         from pegaprox.utils.rbac import has_permission
         if not has_permission(build_authz_user(request.session.get('user', ''), request.session),
                               'node.reboot'):
-            return jsonify({'error': 'Rebooting the node needs the node.reboot permission'}), 403
+            return jsonify({'error': 'Rebooting the node needs the node.reboot permission',
+                            'code': 'MISSING_PERMISSION', 'required': 'node.reboot'}), 403
 
     # check maintenance mode (unless force)
     if not force:
         if node_name not in mgr.nodes_in_maintenance:
-            return jsonify({'error': f'Node {node_name} ist nicht im Wartungsmodus.'}), 400
+            return jsonify({'error': f'Node {node_name} is not in maintenance mode',
+                            'code': 'NOT_IN_MAINTENANCE', 'node': node_name}), 400
         
         maintenance_task = mgr.nodes_in_maintenance[node_name]
         if maintenance_task.status not in ['completed', 'completed_with_errors']:
-            return jsonify({'error': f'Evacuation in progress.'}), 400
+            return jsonify({'error': f'The evacuation of {node_name} has not finished',
+                            'code': 'EVACUATION_RUNNING', 'node': node_name}), 400
     
     task = mgr.start_node_update(node_name, reboot, force)
     
@@ -4357,7 +4413,8 @@ def start_node_update(cluster_id, node_name):
             'task': task.to_dict()
         })
     else:
-        return jsonify({'error': 'Update konnte nicht gestartet werden'}), 500
+        return jsonify({'error': f'The update of {node_name} could not be started',
+                        'code': 'UPDATE_NOT_STARTED', 'node': node_name}), 500
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node_name>/update', methods=['GET'])
@@ -4369,6 +4426,10 @@ def get_update_status(cluster_id, node_name):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # MK Nov 2026 - the apt output of a node, as /node-progress: the caller's own nodes only
+    _nerr = require_guest_node(cluster_id, node_name)
+    if _nerr:
+        return _nerr
     mgr = cluster_managers[cluster_id]
     status = mgr.get_update_status(node_name)
     
@@ -4402,8 +4463,9 @@ def get_node_progress(cluster_id):
         entry = nodes.setdefault(name, {'maintenance_mode': False, 'maintenance_task': None,
                                         'maintenance_acknowledged': False})
         entry.update(is_updating=True, update_task=task.to_dict())
-    # a confined caller gets the progress, not which guests are in it (helpers)
-    return jsonify({'nodes': node_maintenance_for_caller(cluster_id, nodes)})
+    # a confined caller gets the progress of the nodes their guests run on, not which
+    # guests are in it (helpers)
+    return jsonify({'nodes': node_map_for_caller(cluster_id, nodes)})
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node_name>/update', methods=['DELETE'])
@@ -4625,6 +4687,7 @@ def node_guests_action_api(cluster_id, node_name, action):
             return jsonify({'error': 'vms holds something that is no VMID'}), 400
         wanted = set(wanted)
 
+    user = build_authz_user(request.session.get('user', ''), request.session)
     target, maxworkers, with_local_disks = None, 1, False
     if action == 'migrateall':
         target = data.get('target')
@@ -4632,6 +4695,12 @@ def node_guests_action_api(cluster_id, node_name, action):
             return jsonify({'error': 'Target node is required'}), 400
         if target == node_name:
             return jsonify({'error': 'The target is the node itself'}), 400
+        # MK Nov 2026 - the target rule of the single and the bulk move: a confined caller moves
+        # guests onto a node their guests run on. Asked before the node lookup below, whose
+        # answers would tell such a caller which nodes exist and which are online
+        _nerr = require_guest_node(cluster_id, target, user=user, max_age=0)
+        if _nerr:
+            return _nerr
         maxworkers = data.get('maxworkers', 1)
         if isinstance(maxworkers, bool) or not isinstance(maxworkers, int) or not 1 <= maxworkers <= 16:
             return jsonify({'error': 'maxworkers is a number from 1 to 16'}), 400
@@ -4645,7 +4714,6 @@ def node_guests_action_api(cluster_id, node_name, action):
         if tinfo.get('offline') or tinfo.get('status', 'online') != 'online':
             return jsonify({'error': f'{target} is not online'}), 400
 
-    user = build_authz_user(request.session.get('user', ''), request.session)
     on_node = {}
     for g in (mgr.get_vm_resources(max_age=2) or []):
         if g.get('node') != node_name or g.get('type') not in ('qemu', 'lxc'):
@@ -5731,6 +5799,68 @@ def get_vm_config_api(cluster_id, node, vm_type, vmid):
     return _get_vm_config_response(cluster_id, node, vm_type, vmid)
 
 
+# PVE masks it in its own answer; masked here too, whatever the version sends
+_PENDING_MASKED = ('cipassword',)
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/pending', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_pending_api(cluster_id, node, vmid):
+    """What of a VM's config waits for its next start, as PVE itself reports it. Read only:
+    the keys with a pending value or a pending delete, nothing else."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    denied = _require_vm_access(cluster_id, vmid, 'vm.view', 'qemu')
+    if denied:
+        return denied
+    if not _PVE_NODE_RE.fullmatch(node or ''):
+        return jsonify({'error': 'Invalid node name'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error:
+        return error
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'The pending list is a Proxmox VE setting'}), 400
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/qemu/{vmid}/pending"
+    try:
+        resp = manager._create_session().get(url, timeout=10)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for the pending list: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in (401, 403):
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the pending changes'),
+                        'upstream_status': resp.status_code}), 502
+
+    rows = []
+    for item in resp.json().get('data') or []:
+        if not isinstance(item, dict) or not item.get('key'):
+            continue
+        has_pending = 'pending' in item
+        try:
+            delete = int(item.get('delete') or 0)
+        except (TypeError, ValueError):
+            delete = 0
+        if not has_pending and not delete:
+            continue
+        row = {'key': str(item['key'])}
+        if 'value' in item:
+            row['value'] = item['value']
+        if has_pending:
+            row['pending'] = item['pending']
+        if delete:
+            # 2 is PVE's forced delete
+            row['delete'] = 2 if delete == 2 else 1
+        if row['key'] in _PENDING_MASKED:
+            for k in ('value', 'pending'):
+                if k in row:
+                    row[k] = '**********'
+        rows.append(row)
+    return jsonify({'pending': rows})
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/<vm_type>/<int:vmid>/lock', methods=['GET'])
 @require_auth(perms=['vm.view'])
 def get_vm_lock_status_api(cluster_id, node, vm_type, vmid):
@@ -6244,6 +6374,9 @@ def update_vm_config_api(cluster_id, node, vm_type, vmid):
             root_key = _root_only_config_key(manager, node, vmid, vm_type, config_updates)
             if root_key:
                 return _confined_root_refusal(f'setting {root_key}')
+            pinned = _pin_out_of_reach(manager, cluster_id, node, vmid, vm_type, user, config_updates)
+            if pinned:
+                return pinned
 
     # MK Oct 2026 - more cores, memory or a new volume grow the tenant like a create does
     _grow = (_xcp_config_growth if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng'
@@ -6338,7 +6471,11 @@ def get_node_pci_devices(cluster_id, node):
                 device['display_name'] = f"{device.get('vendor_name', 'Unknown')} {device.get('device_name', device.get('id', 'Unknown'))}"
                 device['passthrough_capable'] = device.get('iommugroup', -1) >= 0
             return jsonify(devices)
-        return jsonify([])
+        # MK Nov 2026 - was 200 [], a node without PCI devices
+        return pve_read_failed(response.status_code, response.text, f'the PCI devices of node {node}')
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {cluster_id} unreachable for the PCI devices: {e}")
+        return pve_unreachable(f'the PCI devices of node {node}')
     except Exception as e:
         logging.error(f"Error getting PCI devices: {e}")
         return jsonify({'error': safe_error(e, 'Failed to get PCI devices')}), 500
@@ -6930,6 +7067,46 @@ def _on_host_path(value, volume_key):
         if key in (volume_key, 'import-from') and val.strip().startswith('/'):
             return True
     return False
+
+
+def _tag_pins(tags):
+    """The node names of the plb_pin_<node> tags in a PVE tag string, lower-cased as the
+    balancer reads them (manager._derive_proxlb_tag_rules)."""
+    pins = set()
+    for t in re.split(r'[;,\s]+', str(tags or '')):
+        t = t.strip().lower()
+        if t.startswith('plb_pin_') and len(t) > len('plb_pin_'):
+            pins.add(t[len('plb_pin_'):])
+    return pins
+
+
+def _pin_out_of_reach(manager, cluster_id, node, vmid, vm_type, user, updates):
+    """The refusal for a confined caller's plb_pin_<node> tag on a node none of their guests
+    run on, else None. With the ProxLB pins set to migrate, the balancer moves the guest onto
+    its pin: the same placement as a move, and kept to the same nodes. A pin the guest has
+    already (set by an administrator) is no new placement and stays. MK Nov 2026"""
+    pins = _tag_pins(updates.get('tags')) if 'tags' in updates else set()
+    if not pins:
+        return None
+    try:
+        mine = caller_guest_nodes(cluster_id, max_age=0, user=user)
+    except Exception as e:
+        logging.error(f"[CONFIG] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    if mine is None:
+        return None
+    new = pins - {n.lower() for n in mine}
+    if new:
+        try:
+            cur = (manager.get_vm_config(node, vmid, vm_type) or {}).get('config') or {}
+            raw = cur.get('raw') if isinstance(cur.get('raw'), dict) else {}
+            new -= _tag_pins(cur.get('tags') or raw.get('tags'))
+        except Exception as e:
+            logging.debug(f"[CONFIG] tags of {vm_type}/{vmid} unread, every pin counts as new: {e}")
+    if not new:
+        return None
+    return jsonify({'error': f"Access denied: a pin onto {', '.join(sorted(new))} - none of your "
+                             f"guests run on that node", 'code': 'PIN_OUT_OF_REACH'}), 403
 
 
 def _root_only_config_key(manager, node, vmid, vm_type, updates):
@@ -7538,6 +7715,11 @@ def get_storage_list_api(cluster_id, node):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # MK Nov 2026 - the disk, clone and restore dialogs read the node of the caller's own
+    # guest; another node's storages are not theirs to list
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     storage = manager.get_storage_list(node)
@@ -10807,10 +10989,29 @@ def get_hardware_options():
     """Get available hardware options (CPU types, SCSI controllers, etc.)
 
     NS: Extended Dec 2025 with machine types
+
+    MK Nov 2026 - ?cluster_id= answers from that cluster: the CPU models (and machine types) are
+    read live from one of its nodes, so they follow its PVE version and its custom models. The
+    first registered cluster used to answer for every dialog, an XCP-ng pool with its two types
+    or an ESXi host with none. Without the parameter: the first Proxmox VE cluster the caller
+    may see.
     """
-    # Use any manager to get options
-    if cluster_managers:
-        manager = list(cluster_managers.values())[0]
+    manager = None
+    cluster_id = request.args.get('cluster_id')
+    if cluster_id:
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
+        manager = cluster_managers.get(cluster_id)
+        if manager is not None and not hasattr(manager, 'get_cpu_types'):
+            manager = None
+    else:
+        for cid, m in list(cluster_managers.items()):
+            if getattr(m, 'cluster_type', 'proxmox') == 'proxmox' and hasattr(m, 'get_cpu_types') \
+                    and check_cluster_access(cid)[0]:
+                manager = m
+                break
+    if manager is not None:
         return jsonify({
             'cpu_types': manager.get_cpu_types(),
             'scsi_controllers': manager.get_scsi_controllers(),
@@ -13448,6 +13649,11 @@ def migrate_vm_api(cluster_id, node, vm_type, vmid):
 
         if not target_node:
             return jsonify({'error': 'Target node is required'}), 400
+        # MK Nov 2026 - a confined caller moves a guest onto a node their guests run on, as
+        # clone and restore place one (#1081); asked fresh, it places a guest
+        _nerr = require_guest_node(cluster_id, target_node, user=user, max_age=0)
+        if _nerr:
+            return _nerr
 
         # NS Mar 2026: xapi.vm.migrate for XCP-ng clusters
         if getattr(manager, 'cluster_type', 'proxmox') == 'xcpng':
@@ -13795,6 +14001,10 @@ def bulk_migrate_api(cluster_id):
         from pegaprox.utils.rbac import has_permission
         if not has_permission(build_authz_user(request.session.get('user', ''), request.session), 'xapi.vm.migrate'):
             return jsonify({'error': 'Permission denied: xapi.vm.migrate'}), 403
+    # MK Nov 2026 - the target of a confined caller, as on the single-guest route, for a run too
+    _nerr = require_guest_node(cluster_id, target_node, max_age=0)
+    if _nerr:
+        return _nerr
 
     # by type: 1 == True passed "true or false" here and `is True` below read it as false,
     # so a dry run asked for as 1 migrated the guests
@@ -14718,12 +14928,20 @@ def get_cluster_nodes_status_api(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[NODES] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
     manager = cluster_managers[cluster_id]
     node_status = manager.get_node_status()
     
     # Return just the node names and basic info
     nodes = []
     for node_name, status in node_status.items():
+        if mine is not None and node_name not in mine:
+            continue
         nodes.append({
             'node': node_name,
             'status': status.get('status', 'unknown'),
