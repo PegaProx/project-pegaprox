@@ -2352,7 +2352,7 @@ def test_runtime_a_refused_snapshot_delete_says_so(open_app, bulk):
     page = app.page
     if bulk:
         page.locator('tbody input[type="checkbox"]').first.check()
-        page.locator('button', has_text='deleteSelected').first.click()   # the key has no text yet (pre-existing)
+        page.locator('button', has_text='Delete selected').first.click()
     else:
         page.locator('button[title="Delete snapshot"]').first.click(force=True)
     page.get_by_text(reason).first.wait_for(timeout=5000)
