@@ -34,8 +34,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # then are in the base). A deliberate change to classic Corporate, Modern or Cloud differs from
 # it on purpose: once PEGAPROX_UI_SHOTS showed that only the intended views moved, set this to
 # the commit of that change (PEGAPROX_GUARD_BASE does it for one run). fe7c2099 put the switch
-# and the frozen notice into every classic Corporate view, d72aceb8 the sixth sponsor into the footer
-BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', 'd72aceb8')
+# and the frozen notice into every classic Corporate view, d72aceb8 the sixth sponsor into the footer,
+# a27042b1 the "Contributing" label of the node hardware health that showed its key name
+BASE_REV = os.environ.get('PEGAPROX_GUARD_BASE', 'a27042b1')
 
 # 2026-10-30 09:00:00 UTC, what Date.now() says in every guarded page
 FIXED = calendar.timegm((2026, 10, 30, 9, 0, 0))
