@@ -11801,6 +11801,9 @@
             const srBusy = (status) => status === 'running' || status === 'cancelling';
             const srActive = (status) => srBusy(status) || status === 'testing';
             const getClusterName = (id) => clusterLabel(clusters.find(cl => cl.id === id)) || id;
+            // LW Nov 2026 - a job can keep the replica under a VMID of its own, which is what an
+            // emergency failover starts; it also tells two jobs of one guest apart
+            const srJobLabel = (j) => `${j.schedule}, ${fillText(t('srOnTargetAs'), { cluster: getClusterName(j.target_cluster), vmid: j.target_vmid || j.vmid })}`;
             const rpoColor = (vm) => {
                 if (!vm.last_replication) return 'text-gray-500';
                 const hrs = (Date.now() - new Date(vm.last_replication).getTime()) / 3600000;
@@ -12179,6 +12182,7 @@
             const handleUpdateVm = async (vmId, field, value) => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms/${vmId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ [field]: value }) });
                 if (r && r.ok) fetchPlanDetail(planDetail.id);
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || t('saveFailed'), 'error'); }
                 setEditingVm(null);
             };
             // save mappings
@@ -12205,6 +12209,13 @@
                 const grouped = {};
                 (pd.vms || []).forEach(vm => { const g = vm.boot_group ?? 0; if (!grouped[g]) grouped[g] = []; grouped[g].push(vm); });
                 const sortedGroups = Object.entries(grouped).sort(([a],[b]) => Number(a) - Number(b));
+                // the jobs a guest row can link: its own between the plan's clusters, one pass
+                const jobsById = {}, jobsOf = {};
+                replJobs.forEach(j => {
+                    jobsById[j.id] = j;
+                    if (j.source_cluster === pd.source_cluster && j.target_cluster === pd.target_cluster) (jobsOf[j.vmid] = jobsOf[j.vmid] || []).push(j);
+                });
+                const drName = getClusterName(pd.target_cluster);
 
                 return (
                     <div className="space-y-4">
@@ -12276,13 +12287,13 @@
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
-                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
+                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('srLinkedJob')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
                                             <tbody>
                                                 {groupVms.map(vm => (
                                                     <tr key={vm.id} className="border-t border-proxmox-border/30 hover:bg-proxmox-hover/30">
                                                         <td className="px-4 py-2 font-mono text-xs">{vm.vmid}</td>
                                                         <td className="py-2">{vm.vm_name || '-'}</td>
-                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} /></td>
+                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} target={drName} /></td>
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_group'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_group} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_group'})}>{vm.boot_group}</span>
@@ -12290,6 +12301,15 @@
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_delay'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_delay} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_delay'})}>{vm.boot_delay}s</span>
+                                                        }</td>
+                                                        <td className="py-2 text-xs" data-sr-guest-job={vm.vmid}>{editingVm?.id === vm.id && editingVm?.field === 'replication_job_id'
+                                                            ? <select className="bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs max-w-48" defaultValue={vm.replication_job_id || ''} autoFocus onChange={e => handleUpdateVm(vm.id, 'replication_job_id', e.target.value)} onBlur={() => setEditingVm(null)}>
+                                                                <option value="">{t('srNoJobLinked')}</option>
+                                                                {(jobsOf[vm.vmid] || []).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
+                                                            </select>
+                                                            : <span className={canManage ? 'cursor-pointer hover:text-proxmox-orange' : ''} onClick={() => canManage && setEditingVm({id: vm.id, field: 'replication_job_id'})}>
+                                                                {!vm.replication_job_id ? <span className="text-gray-500">{t('srNoJobLinked')}</span> : jobsById[vm.replication_job_id] ? srJobLabel(jobsById[vm.replication_job_id]) : <span className="font-mono">{vm.replication_job_id}</span>}
+                                                            </span>
                                                         }</td>
                                                         <td className="py-2">{vm.failed_over
                                                             ? <span className="text-xs text-gray-500">{t('srReplicationHeld')}</span>
@@ -12378,7 +12398,7 @@
                                                         <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
                                                             <tr key={vmid} className="border-t border-proxmox-border/30" data-sr-result={vmid}>
-                                                                <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
+                                                                <td className="py-1"><span className="font-mono">{vmid}</span>{r.dr_vmid != null && String(r.dr_vmid) !== vmid && <span className="text-gray-500" data-sr-result-dr={r.dr_vmid}> {fillText(t('srOnTargetAs'), { cluster: getClusterName(pd.target_cluster), vmid: r.dr_vmid })}</span>}</td><td className="py-1">{r.vm_name || '-'}</td>
                                                                 <td className="py-1">{r.skipped ? <span className="text-gray-400">{t('skipped')}</span> : r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
                                                                 <td className="py-1 text-gray-500">{r.skipped ? (r.reason === 'not failed over' ? t('srSkipNotFailedOver') : t('srSkipFailedOver')) : (r.error || '-')}</td>
                                                             </tr>
@@ -12436,7 +12456,7 @@
                                     </div>
                                     <select value={addVmForm.replication_job_id} onChange={e => setAddVmForm(f => ({...f, replication_job_id: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm">
                                         <option value="">{t('linkReplication') || 'Link Replication Job (optional)'}</option>
-                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{j.schedule} → {getClusterName(j.target_cluster)}</option>)}
+                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
                                     </select>
                                     <div className="flex justify-end gap-2">
                                         <button onClick={() => setShowAddVmModal(false)} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
@@ -12637,13 +12657,19 @@
             );
         }
 
-        function SrGuestPlace({ vm, t }) {
+        // target: the DR cluster's name, for the VMID the guest runs under there when it is
+        // not its own (an emergency failover starts the replica a job keeps elsewhere)
+        function SrGuestPlace({ vm, t, target }) {
             if (!vm.failed_over) return <span className="text-xs text-gray-500">{t('srGuestAtSource')}</span>;
+            const there = target && vm.failed_over_vmid && vm.failed_over_vmid !== vm.vmid ? vm.failed_over_vmid : null;
             return (
-                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
-                    title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
-                    {t('srGuestFailedOver')}
-                </span>
+                <>
+                    <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
+                        title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
+                        {t('srGuestFailedOver')}
+                    </span>
+                    {there && <span className="text-xs text-gray-500" data-sr-guest-dr-vmid={there}> {fillText(t('srOnTargetAs'), { cluster: target, vmid: there })}</span>}
+                </>
             );
         }
 
