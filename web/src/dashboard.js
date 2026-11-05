@@ -33,6 +33,7 @@
                         lastRun: job['last-run-endtime'] ?? null,
                         disabled: Boolean(job.disable),
                         state: job['last-run-state'] ?? '', nextRun: job['next-run'] ?? null,
+                        direction: kind === 'sync' ? (job['sync-direction'] || 'pull') : '',
                     });
                 }
             }
@@ -48,6 +49,29 @@
             const warn = /^(TASK )?WARNINGS/i.test(s);
             return <span data-pbs-run-state={ok ? 'ok' : warn ? 'warning' : 'error'} title={s}
                 className={`${ok ? 'text-green-400' : warn ? 'text-yellow-400' : 'text-red-400'} break-all`}>{s}</span>;
+        }
+
+        // LW Nov 2026 - since PBS 3.3 a sync job pulls into its store or pushes out of it (#801).
+        // store is always the local datastore, remote / remote-store the other end; a job
+        // without a remote syncs from a datastore on the same PBS
+        function pbsSyncEnds(job) {
+            const local = job?.store || '-';
+            const other = job?.remote ? `${job.remote} / ${job['remote-store'] || '-'}` : (job?.['remote-store'] || '-');
+            return job?.['sync-direction'] === 'push' ? { source: local, target: other } : { source: other, target: local };
+        }
+
+        // asType: the whole Type label beside a datastore, so the text names the sync as well
+        function PbsSyncDirection({ direction, asType }) {
+            const { t } = useTranslation();
+            const push = direction === 'push';
+            const Icon = push ? Icons.Upload : Icons.Download;
+            const text = asType
+                ? (push ? (t('pbsSyncPushJob') || 'Push sync') : (t('pbsSyncPullJob') || 'Pull sync'))
+                : (push ? (t('pbsSyncPush') || 'Push') : (t('pbsSyncPull') || 'Pull'));
+            return <span data-pbs-sync-direction={push ? 'push' : 'pull'}
+                className={asType ? 'inline-flex items-center gap-1 whitespace-nowrap' : 'inline-flex items-center gap-1 text-gray-300 font-normal whitespace-nowrap'}>
+                <Icon /> {text}
+            </span>;
         }
 
         function PbsJobReadError({ kind }) {
@@ -102,7 +126,9 @@
                                 {rows.map((row, i) => (
                                     <tr key={`${row.kind}:${row.id}:${i}`} data-pbs-schedule-kind={row.kind}
                                         className="border-b border-proxmox-border/50">
-                                        <td className="p-3 text-white font-medium">{labels[row.kind]}</td>
+                                        <td className="p-3 text-white font-medium">
+                                            {row.direction ? <PbsSyncDirection direction={row.direction} asType /> : labels[row.kind]}
+                                        </td>
                                         <td className="p-3 text-gray-300">{row.id || '-'}</td>
                                         <td className="p-3 text-gray-400">
                                             {row.schedule || (t('manual') || 'Manual')}
@@ -27354,15 +27380,15 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('pbsRemote') || 'Remote'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsSyncDirection') || 'Direction'}</th><th className="text-left p-3">{t('source') || 'Source'} → {t('target') || 'Target'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
-                                                                    {(pbsJobs.sync || []).map((job, i) => (
+                                                                    {(pbsJobs.sync || []).map((job, i) => { const ends = pbsSyncEnds(job); return (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
-                                                                            <td className="p-3 text-gray-300">{job.store}</td>
-                                                                            <td className="p-3 text-gray-400">{job.remote || '-'} / {job['remote-store'] || '-'}</td>
+                                                                            <td className="p-3"><PbsSyncDirection direction={job['sync-direction']} /></td>
+                                                                            <td className="p-3 text-gray-300">{ends.source} <span className="text-gray-500">→</span> {ends.target}</td>
                                                                             <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
                                                                             <td className="p-3 text-gray-500">{job['last-run-endtime'] ? fmtDate(job['last-run-endtime'] * 1000) : '-'}</td>
                                                                             <td className="p-3"><PbsRunState state={job['last-run-state']} /></td>
@@ -27375,7 +27401,7 @@
                                                                                 </td>
                                                                             )}
                                                                         </tr>
-                                                                    ))}
+                                                                    ); })}
                                                                 </tbody>
                                                             </table>
                                                         </div>
