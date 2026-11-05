@@ -20,7 +20,7 @@ import pytest
 from test_ha_ui import BASE, _App, _FakeServer, browser  # noqa: F401 (browser is a fixture)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['searchMatchMac', 'searchMatchIp', 'searchMatchNotes', 'cmdPalSearchingIndex', 'cmdPalIndexHint']
 
 

@@ -17,7 +17,7 @@ from test_ha_ui import CLUSTER, VM, SSE_TOKEN, _App, _FakeServer, _toasts, _wait
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 CATALOG = {'images': [
     {'id': 'nginx', 'name': 'nginx', 'reference': 'docker.io/library/nginx:stable-alpine',

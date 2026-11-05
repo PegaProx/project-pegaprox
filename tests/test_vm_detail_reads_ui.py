@@ -146,7 +146,7 @@ def test_the_unread_list_key_is_in_every_language_once():
     starts = [(m.start(), m.group(1)) for m in re.finditer(r'^            ([a-z]{2}): \{$', src, re.M)]
     ends = [at for at, _ in starts[1:]] + [len(src)]
     blocks = {lang: src[at:end] for (at, lang), end in zip(starts, ends)}
-    assert list(blocks) == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+    assert list(blocks) == ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
     seen = set()
     for lang, block in blocks.items():
         found = re.findall(r"^\s+haResourcesUnread: '((?:[^'\\]|\\.)*)',$", block, re.M)
@@ -157,7 +157,7 @@ def test_the_unread_list_key_is_in_every_language_once():
         at = next(i for i, line in enumerate(lines) if 'haResourcesUnread:' in line)
         assert 'noVmsWithHa:' in lines[at - 1], lang
         seen.add(found[0])
-    assert len(seen) == 9
+    assert len(seen) == 10
 
 
 def test_the_default_label_of_an_unstated_limit_is_in_every_language():

@@ -49,7 +49,7 @@ def _terminal():
 @pytest.mark.parametrize('key', KEYS)
 def test_every_new_string_is_in_every_language_once(key):
     found = len(re.findall(rf'^\s*{key}:', _read('web', 'src', 'translations.js'), re.M))
-    assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+    assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
     assert f"t('{key}')" in _terminal()
 
 

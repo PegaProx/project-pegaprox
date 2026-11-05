@@ -17,7 +17,7 @@ from test_ha_ui import CLUSTER, NODE_METRICS, SSE_TOKEN, VM, _App, _FakeServer, 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 DASHES = (chr(0x2014), chr(0x2013))
 
 
@@ -80,7 +80,7 @@ def test_placeholders_survive_translation():
     tr = _read('web', 'src', 'translations.js')
     for key in _keys():
         values = re.findall(rf'^\s*{key}: "(.*)",$', tr, re.M)
-        assert len(values) == 9, key
+        assert len(values) == 10, key
         wanted = set(re.findall(r'\{(\w+)\}', values[LANGS.index('en')]))
         for v in values:
             assert set(re.findall(r'\{(\w+)\}', v)) == wanted, (key, v)

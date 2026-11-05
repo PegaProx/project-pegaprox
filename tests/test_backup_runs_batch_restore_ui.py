@@ -18,7 +18,7 @@ from test_ha_ui import CLUSTER, VM, SSE_TOKEN, _App, _FakeServer, _classes, brow
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 
 
 def _read(*parts):
@@ -58,7 +58,7 @@ def test_every_new_string_is_in_every_language_once():
     assert len(keys) > 60
     for key in keys:
         found = len(re.findall(rf'^\s*{key}:', tr, re.M))
-        assert found == 9, f'{key} is in {found} of 9 language blocks - the UI would show the key'
+        assert found == 10, f'{key} is in {found} of 10 language blocks - the UI would show the key'
 
 
 def test_no_key_of_the_two_features_is_left_unused():
@@ -81,7 +81,7 @@ def test_placeholders_survive_translation():
     tr = _read('web', 'src', 'translations.js')
     for key in _keys():
         values = re.findall(rf'^\s*{key}: "(.*)",$', tr, re.M)
-        assert len(values) == 9, key
+        assert len(values) == 10, key
         wanted = set(re.findall(r'\{(\w+)\}', values[LANGS.index('en')]))
         for v in values:
             assert set(re.findall(r'\{(\w+)\}', v)) == wanted, (key, v)

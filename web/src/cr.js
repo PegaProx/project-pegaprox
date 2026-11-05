@@ -72,7 +72,7 @@
         // is the one place that turns a UI language into its BCP 47 tag, every toLocale*String and
         // Intl formatter of the cr files is handed it. PegaProxDashboard tells the language it draws
         // in (crUiLocale) before the views below it render, so a helper outside a component has it too
-        const CR_LOCALE_TAGS = { de: 'de', en: 'en', zh: 'zh-CN', pl: 'pl', fr: 'fr', es: 'es', pt: 'pt', ko: 'ko', it: 'it' };
+        const CR_LOCALE_TAGS = { de: 'de', en: 'en', zh: 'zh-CN', pl: 'pl', fr: 'fr', es: 'es', pt: 'pt', ko: 'ko', it: 'it', ru: 'ru' };
         const crUi = { lang: 'en' };
         function crUiLocale(lang) {
             if (CR_LOCALE_TAGS[lang]) crUi.lang = lang;

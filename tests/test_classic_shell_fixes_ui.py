@@ -28,7 +28,7 @@ VM2 = dict(VM, vmid=101, name='db01')
 
 # what t('disabled') showed before the duplicate went: the later definition, in every language
 DISABLED = {'de': 'deaktiviert', 'en': 'disabled', 'zh': '已禁用', 'pl': 'wyłączone', 'fr': 'désactivé',
-            'es': 'desactivado', 'pt': 'desativado', 'ko': '비활성화', 'it': 'Disabilitato'}
+            'es': 'desactivado', 'pt': 'desativado', 'ko': '비활성화', 'it': 'Disabilitato', 'ru': 'выключено'}
 
 
 @pytest.mark.parametrize('lang', LANGS)
