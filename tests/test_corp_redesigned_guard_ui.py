@@ -1682,9 +1682,10 @@ def bundles():
     return {'base': base, 'new': new}
 
 
-@pytest.mark.parametrize('view', VIEWS)
-@pytest.mark.parametrize('run', list(RUNS))
-def test_the_classic_layouts_render_the_same_pixels(browser, bundles, run, view):
+def same_pixels(browser, bundles, run, view):
+    """One view of one layout against the base. One test file per layout: this is about 180 shots of
+    20 seconds and more, and pytest-xdist's loadfile keeps a file on one worker, so as one file
+    it set the length of the whole suite."""
     layout, theme = RUNS[run]
     if (layout, view) in NOT_IN:
         pytest.skip(NOT_IN[(layout, view)])
@@ -1708,6 +1709,11 @@ def test_the_classic_layouts_render_the_same_pixels(browser, bundles, run, view)
         pytest.fail(f'{run}/{view}: the base bundle itself renders differently from one load to the '
                     f'next ({flaky[1]} pixels in {flaky[0]}), so the guard cannot tell. Shots: {where or "-"}')
     pytest.fail(f'{run}/{view}: {found[1]} pixels differ from {BASE_REV} in {found[0]}. Shots: {where or "-"}')
+
+
+@pytest.mark.parametrize('view', VIEWS)
+def test_classic_corporate_dark_renders_the_same_pixels(browser, bundles, view):
+    same_pixels(browser, bundles, 'corporate-dark', view)
 
 
 def test_the_guard_sees_a_change(browser, bundles):
