@@ -1781,7 +1781,7 @@
                                                 {selectedStorage ? (
                                                     <>{t('content') || 'Content'}: {selectedStorage.name}</>
                                                 ) : (
-                                                    t('selectStorage') || 'Select a storage'
+                                                    t('selectStorageToView') || 'Select a storage to view contents'
                                                 )}
                                                 {/* NS Apr 2026 — when a shared storage is reachable from multiple
                                                     nodes (and the row showed "1/2 nodes"), let the user pick which
@@ -2053,7 +2053,7 @@
                             <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                 <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
                                     <h3 className="font-semibold">
-                                        {clusterStatus ? (balancingGroup?.name ?? clusterStatus.name) : (t('selectCluster') || 'Select a storage cluster')}
+                                        {clusterStatus ? (balancingGroup?.name ?? clusterStatus.name) : (t('selectStorageCluster') || 'Select a storage cluster')}
                                     </h3>
                                 </div>
                                 <div className="p-4">

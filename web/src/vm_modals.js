@@ -1101,7 +1101,7 @@
             };
 
             return (
-                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" data-vm-detail-panel={`${clusterId}:${vm.vmid}`}>
                     {/* Header */}
                     <div className="p-6 border-b border-proxmox-border bg-gradient-to-r from-proxmox-dark to-proxmox-card">
                         <div className="flex items-center justify-between">

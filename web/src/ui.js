@@ -4589,7 +4589,8 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
             const [error, setError] = useState('');
             const [kind, setKind] = useState('all');
             const [shown, setShown] = useState(RASR_PAGE);
-            const [tags, setTags] = useState('');
+            // JB Nov 2026 - null shows the server's tags; a typed draft outlives the reloads after each action
+            const [tags, setTags] = useState(null);
             const [dialog, setDialog] = useState(null);
             const [busy, setBusy] = useState('');
             const [verdict, setVerdict] = useState(null);
@@ -4604,25 +4605,30 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                     if (res.ok) {
                         const body = await res.json();
                         setData(body);
-                        setTags((body.critical_tags || []).join(', '));
                         setError('');
                     } else { setData(null); setError(await PegaProxApiErrors.message(res, t('rtestLoadFailed'))); }
                 } catch (e) { if (mine === look.current) setError(t('rtestLoadFailed')); }
             }, [base, days, call]);  // eslint-disable-line react-hooks/exhaustive-deps
             useEffect(() => { load(); }, [load, stamp]);
+            useEffect(() => { setTags(null); }, [clusterId]);  // a draft belongs to its cluster
 
-            const send = async (key, method, url, body, done) => {
+            const send = async (key, method, url, body, done, after) => {
                 setBusy(key);
                 try {
                     const res = await call(url, { method, headers: { 'Content-Type': 'application/json' },
                                                   body: body === undefined ? undefined : JSON.stringify(body) });
-                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); }
+                    if (res.ok) { say(done, 'success'); setDialog(null); await load(); if (after) after(); }
                     else say(await bkpError(res, t, haServing), 'error');
                 } catch (e) { say(t('connectionError'), 'error'); }
                 setBusy('');
             };
-            const saveTags = () => send('tags', 'PUT', `${base}/recovery-settings`,
-                { critical_tags: tags.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'));
+            const shownTags = tags !== null ? tags : ((data && data.critical_tags) || []).join(', ');
+            const saveTags = () => {
+                const sent = shownTags;
+                send('tags', 'PUT', `${base}/recovery-settings`,
+                    { critical_tags: sent.split(',').map(s => s.trim()).filter(Boolean) }, t('rtestSaved'),
+                    () => setTags(cur => (cur === sent ? null : cur)));  // what was typed since stays
+            };
             const saveConfirm = () => {
                 const body = { vmid: Number(dialog.vmid) || dialog.vmid, text: dialog.text.trim() };
                 if (String(dialog.days).trim() !== '') body.expires_days = Number(dialog.days);
@@ -4684,7 +4690,7 @@ pre{white-space:pre-wrap;word-break:break-all;border:1px solid #ccc;padding:12px
                     {canTags && (
                         <div className="flex flex-wrap items-end gap-2">
                             <label className="text-xs text-gray-400 flex-1" style={{ minWidth: '200px' }}>{t('rasrCriticalTags')}
-                                <input value={tags} onChange={e => setTags(e.target.value)} placeholder={t('rasrCriticalTagsHint')} className={`${field} font-mono`} data-rasr-tags />
+                                <input value={shownTags} onChange={e => setTags(e.target.value)} placeholder={t('rasrCriticalTagsHint')} className={`${field} font-mono`} data-rasr-tags />
                             </label>
                             <button onClick={saveTags} disabled={busy === 'tags'} data-rasr-save-tags
                                 className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50">{t('save')}</button>

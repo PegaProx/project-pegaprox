@@ -931,10 +931,11 @@ class VMwareManager:
             import time as _t
             for _ in range(120):
                 _t.sleep(1)
+                # JB Nov 2026 (#1249) - the state is the plain word, the suffix test never matched
                 state = str(t.info.state)
-                if state.endswith('.success'):
+                if state == 'success':
                     return {'data': 'deleted'}
-                if state.endswith('.error'):
+                if state == 'error':
                     return {'error': f'remove failed: {getattr(t.info.error, "msg", t.info.error)}'}
             return {'error': 'remove timed out'}
         except Exception as e:

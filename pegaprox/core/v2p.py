@@ -16,7 +16,7 @@ import shlex
 from datetime import datetime
 
 from pegaprox.globals import cluster_managers, vmware_managers, _v2p_migrations
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, forget_key_refusal
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
 
@@ -214,6 +214,7 @@ class V2PMigrationTask:
         self.install_virtio_drivers = bool(self.config.get('install_virtio_drivers', False))
         self.virtio_iso_path = self.config.get('virtio_iso_path', '') or ''
         self._disk_vols = {}       # disk index -> volume id it was copied to
+        self.warnings = []         # what went wrong without failing the run (_result_warning)
 
     def record_disk_volume(self, i, vol_id):
         if vol_id:
@@ -331,7 +332,8 @@ class V2PMigrationTask:
             broadcast_sse('vmware_migration', {
                 'id': self.id, 'phase': self.phase, 'status': self.status,
                 'progress': self.progress, 'vm_name': self.vm_name,
-                'error': self.error, 'disk_progress': self.disk_progress
+                'error': self.error, 'disk_progress': self.disk_progress,
+                'warnings': list(getattr(self, 'warnings', None) or []),
             })
         except: pass
     
@@ -436,6 +438,7 @@ class V2PMigrationTask:
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'disk_progress': self.disk_progress, 'phase_times': self.phase_times,
             'total_downtime_seconds': self.total_downtime_seconds,
+            'warnings': list(getattr(self, 'warnings', None) or []),
             'log': self.log_lines[-20:],  # Last 20 log lines
             'config': {
                 'network_bridge': self.network_bridge,
@@ -455,6 +458,69 @@ def _node_hkc():
     the way it seeds ours."""
     from pegaprox.utils.ssh_security import strict_host_keys_enabled
     return 'yes' if strict_host_keys_enabled() else 'accept-new'
+
+
+# what the tool probe of the planning step prints for a tool the node does not have
+_TOOL_MISSING = 'V2P_TOOL_MISSING'
+
+
+def _first_lines(text, limit=300):
+    """The text of a node's answer on one line, for a log line."""
+    return ' '.join(str(text or '').split())[:limit]
+
+
+def _node_cannot_reach(pve_mgr, node, host, port, wait=5):
+    """Why `node` cannot open a TCP connection to host:port, '' when it can, None when
+    the probe gave no answer (it did not run, or a node exec without output).
+
+    bash's /dev/tcp under coreutils' timeout, both on every PVE node. A filtered port
+    waits for the timeout (124), a refused or unknown one fails at once with bash's
+    reason. Host and port are arguments of the inner bash, never part of its script:
+    that one parses its string again (an IPv6 zone id may hold any character)."""
+    from pegaprox.utils.ssh import bare_host
+    from pegaprox.utils.sanitization import validate_host_address
+    addr = bare_host(host)
+    if not validate_host_address(addr):
+        return None
+    rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"timeout {int(wait)} bash -c '</dev/tcp/\"$1\"/\"$2\"' _ {shlex.quote(addr)} {int(port)} 2>&1; "
+        f"echo V2P_TCP_RC=$?", timeout=int(wait) + 10)
+    lines = str(out or '').strip().splitlines()
+    m = re.fullmatch(r'V2P_TCP_RC=(\d+)', lines[-1].strip()) if lines else None
+    if not m:
+        return None
+    code = int(m.group(1))
+    if code == 0:
+        return ''
+    if code == 124:
+        return f'no answer within {int(wait)}s'
+    return _first_lines(' '.join(lines[:-1])) or f'exit code {code}'
+
+
+def _sshfs_mount_cmd(mnt_path, safe_pass, opts, source):
+    """The node's command for one SSHFS mount attempt (#1224).
+
+    sshfs 3 sends the stderr of the ssh it starts to /dev/null and says no more than
+    'read: Connection reset by peer'. ssh -E puts ssh's own messages in a file, printed
+    to stderr when the mount fails and removed either way. Not sshfs_debug: that hands
+    ssh the command's stderr, and an ssh that stays for the mount keeps the call open."""
+    return (
+        f"mkdir -p {mnt_path} && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && {{ "
+        f"printf '%s' {safe_pass} | sshfs -o password_stdin,{opts} "
+        f"-o \"ssh_command=ssh -E $_log\" {source} {mnt_path}; "
+        f"_rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }}"
+    )
+
+
+# what sshfs and ssh print around a failed mount that never names its cause
+_SSHFS_NOISE = ('read: Connection reset by peer', 'Warning: Permanently added')
+
+
+def _mount_said(err, out):
+    """What a failed mount attempt said, on one line, without the _SSHFS_NOISE lines
+    (unless that is all it said)."""
+    lines = [ln.strip() for ln in str(err or out or '').splitlines() if ln.strip()]
+    return _first_lines(' '.join([ln for ln in lines if not ln.startswith(_SSHFS_NOISE)] or lines))
 
 
 # what mktemp in _write_node_script prints, and nothing else
@@ -520,6 +586,7 @@ def _run_v2p_migration(task):
             task.set_phase('failed', 'Proxmox cluster not found'); return
         
         esxi_host = task.esxi_host or vmware_mgr.host
+        esxi_addr = esxi_host   # unquoted, for the node's own probe of it
         esxi_user = task.esxi_user or 'root'
         esxi_pass = task.esxi_password
         # NS Feb 2026 - quote user/host for shell injection prevention
@@ -573,19 +640,31 @@ def _run_v2p_migration(task):
         # standard binary dirs. Either path success counts.
         _preflight = {}
         _probe_dirs = '/usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin'
+        # MK Nov 2026 (#1224) - a run started by hand offers the stored key again even where
+        # a console tile saw it refused a minute ago: the operator may just have fixed that
+        forget_key_refusal(pve_mgr, task.target_node)
         for _tool in ['qemu-img', 'qemu-nbd', 'sshfs', 'sshpass']:
             # Belt-and-suspenders probe: `command -v` (POSIX builtin, honours
             # PATH) wins fast, else walk the canonical bin/sbin dirs and
             # check for executable absolute paths. The `&& exit 0` pattern
             # avoids the bash-precedence trap where `A || B; exit 1` runs
             # `exit 1` unconditionally because `;` isn't a `||`-continuation.
+            # MK Nov 2026 (#1224) - a missing tool says so on stdout; a non-zero
+            # answer without that line never ran on the node (SSH, login).
             probe = (
                 f"command -v {_tool} >/dev/null 2>&1 && exit 0; "
                 f"for d in {_probe_dirs}; do "
                 f"  [ -x \"$d/{_tool}\" ] && exit 0; "
-                f"done; exit 1"
+                f"done; echo {_TOOL_MISSING}; exit 1"
             )
-            rc_pf, out_pf, _ = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            rc_pf, out_pf, err_pf = _pve_node_exec(pve_mgr, task.target_node, probe, timeout=5)
+            if rc_pf != 0 and _TOOL_MISSING not in str(out_pf or ''):
+                _exec_err = _first_lines(err_pf or out_pf).rstrip('.') or f'exit code {rc_pf}'
+                task.set_phase('failed',
+                    f'Cannot run commands on target node {task.target_node} over SSH, so the '
+                    f'tool check could not run: {_exec_err}. Check the SSH key or password '
+                    f'stored for the cluster and that the node accepts it.')
+                return
             _preflight[_tool] = rc_pf == 0
         avail = [t for t, ok in _preflight.items() if ok]
         missing = [t for t, ok in _preflight.items() if not ok]
@@ -607,6 +686,18 @@ def _run_v2p_migration(task):
                 'that package conflicts with pve-qemu-kvm and can break '
                 'Proxmox.')
             return
+
+        # MK Nov 2026 (#1224) - the SSHFS mount and the copies run on the node, so it is
+        # the node's way to the ESXi host that has to work. The test above only proved ours.
+        _reach_err = _node_cannot_reach(pve_mgr, task.target_node, esxi_addr, 22)
+        if _reach_err:
+            task.set_phase('failed',
+                f'Target node {task.target_node} cannot reach {esxi_host} on port 22 '
+                f'({_reach_err}). The SSHFS mount and the disk copies run on the node: allow '
+                f'it in the ESXi firewall and on the network in between.')
+            return
+        if _reach_err is not None:
+            task.log(f"Port 22 of {esxi_host} reachable from {task.target_node}")
 
         # Find VM directory on ESXi datastore
         datastore = task.esxi_datastore
@@ -1013,8 +1104,11 @@ def _run_v2p_migration(task):
         #   negative_timeout=3600: cache "file not found" for 1h
         #   no_check_root: skip root dir check (faster mount)
         _hk = _node_hkc()
+        # MK Nov 2026 (#1224) - ConnectTimeout: ssh gives up inside the 30s an attempt gets,
+        # where a filtered port outlasted the call. Its reason comes back through the -E
+        # log of _sshfs_mount_cmd.
         sshfs_ssh_opts = (
-            f"StrictHostKeyChecking={_hk},"
+            f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
             "reconnect,ServerAliveInterval=15,ServerAliveCountMax=3,"
             "cache=yes,kernel_cache,"
             "max_read=1048576,max_write=1048576,big_writes,large_read,"
@@ -1031,37 +1125,38 @@ def _run_v2p_migration(task):
             "-o IPQoS=throughput"
         )
         
-        mount_cmd = (
-            f"mkdir -p {mnt_path} && "
-            f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-            f"{sshfs_ssh_opts},{sshfs_algo_opts} "
-            f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}"
-        )
+        _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
+        mount_cmd = _sshfs_mount_cmd(mnt_path, safe_pass, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
         rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30)
+        # what the node's sshfs/ssh said goes into the log for each attempt, the last
+        # thing it said into the failure
+        _mount_err = ''
         if rc != 0:
+            _mount_err = _mount_said(err, out)
+            task.log(f"SSHFS mount attempt 1/3 failed, trying fewer options: "
+                     f"{_mount_err or f'exit code {rc}, no output'}")
             # Fallback 1: perf options but simpler SSH (no algo workaround)
-            mount_cmd2 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd2 = _sshfs_mount_cmd(mnt_path, safe_pass,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
-                f"entry_timeout=3600,attr_timeout=3600 "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
+                f"entry_timeout=3600,attr_timeout=3600", _src)
             rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30)
         if rc != 0:
+            _said = _mount_said(err, out)
+            _mount_err = _said or _mount_err
+            task.log(f"SSHFS mount attempt 2/3 failed, trying fewer options: "
+                     f"{_said or f'exit code {rc}, no output'}")
             # Fallback 2: minimal options (maximum compatibility)
-            mount_cmd3 = (
-                f"mkdir -p {mnt_path} && "
-                f"printf '%s' {safe_pass} | sshfs -o password_stdin,"
-                f"StrictHostKeyChecking={_hk},"
+            mount_cmd3 = _sshfs_mount_cmd(mnt_path, safe_pass,
+                f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
-                f"cache=yes "
-                f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)} {mnt_path}")
+                f"cache=yes", _src)
             rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30)
             if rc != 0:
-                task.set_phase('failed', f'SSHFS mount failed: {err}'); return
+                _mount_err = _mount_said(err, out) or _mount_err or f'exit code {rc}, no output'
+                task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
         task.log(f"SSHFS mounted: {mnt_path}")
         
         # Verify files visible
@@ -1210,7 +1305,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -1601,12 +1696,12 @@ def _run_v2p_migration(task):
                     _err = str(_res.get('error') or '') if isinstance(_res, dict) else ''
                     if _err:
                         task.log(f"  Snapshot removal reported: {_err}")
-                    if not _err or 'timed out' in _err.lower():
+                    if not _err or _remove_still_running(_err):
                         break
                     if _try == 0:
                         time.sleep(10)
                 # a timed-out remove keeps consolidating on ESXi, any other error gets a short look
-                _limit = 120 if _err and 'timed out' not in _err.lower() else fold_limit
+                _limit = 120 if _err and not _remove_still_running(_err) else fold_limit
                 if not _wait_clone_snap_consolidated(vmware_mgr, task.vm_id, backing_before, _limit):
                     raise _VmkSwitchoverFailed(
                         f'The clone snapshot was not consolidated within {_limit}s (still listed, or a '
@@ -1656,7 +1751,7 @@ def _run_v2p_migration(task):
                 _register_uefi_fallback_loader(pve_mgr, task)
                 # must run while the VM is STILL stopped (live-NTFS guard inside)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
                 try: _maybe_convert_disks_to_qcow2(pve_mgr, task)
                 except Exception as _qe: task.log(f"  qcow2 convert skipped: {_qe}")
 
@@ -1826,7 +1921,7 @@ def _run_v2p_migration(task):
             # NS Apr 2026 — UEFI fallback loader so OVMF auto-boots Windows post-V2P
             _register_uefi_fallback_loader(pve_mgr, task)
             try: _inject_virtio_drivers(pve_mgr, task)
-            except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+            except Exception as _ve: _virtio_not_injected(task, _ve)
 
             _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
 
@@ -2019,7 +2114,7 @@ def _run_v2p_migration(task):
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
                 _register_uefi_fallback_loader(pve_mgr, task)
                 try: _inject_virtio_drivers(pve_mgr, task)
-                except Exception as _ve: task.log(f"  VirtIO injection skipped: {_ve}")
+                except Exception as _ve: _virtio_not_injected(task, _ve)
 
                 # Start Proxmox VM
                 if task.start_after:
@@ -2176,7 +2271,7 @@ def _run_v2p_migration(task):
             # always try; helper bails harmlessly if disk has no Microsoft loader
             _register_uefi_fallback_loader(pve_mgr, task)
         try: _inject_virtio_drivers(pve_mgr, task)
-        except Exception as _ve: task.log(f"VirtIO injection skipped: {_ve}")
+        except Exception as _ve: _virtio_not_injected(task, _ve)
 
         if task.start_after:
             task.log("Starting VM on Proxmox...")
@@ -2439,11 +2534,43 @@ def _detect_windows_driver_subdir(version_str, build_str):
     return 'w11/amd64'
 
 
+def _result_warning(task, msg):
+    """Log msg and keep it on the task, whose result in the UI lists it next to the
+    outcome. For a problem the migration finishes despite."""
+    msg = getattr(task, '_redact', str)(msg)
+    task.log(f"WARNING: {msg}")
+    warnings = getattr(task, 'warnings', None)
+    if not isinstance(warnings, list):
+        warnings = task.warnings = []
+    if msg not in warnings:
+        warnings.append(msg)
+
+
+def _virtio_not_injected(task, why):
+    """MK Nov 2026 (#1245) - the drivers were asked for and the guest boots without them.
+    That used to be one log line under a COMPLETED. Returns False for the caller."""
+    why = str(why).strip()[:300].rstrip('. ') or 'an unexpected error'
+    _result_warning(task, f"VirtIO drivers were not injected: {why}. "
+                          "The guest boots without them, install them from the virtio-win "
+                          "ISO after the first boot.")
+    return False
+
+
+# what the node script prints right before it gives up (first one in the output wins)
+_VIRTIO_SCRIPT_FAILURES = (
+    'ISO_MOUNT_FAILED', 'NOT_A_BLOCK_DEVICE', 'RBD_PARSE_FAILED', 'RBD_MAP_FAILED',
+    'NOT_A_FILE', 'qemu-nbd missing', 'NBD_CONNECT_FAILED', 'UNSUPPORTED_STORAGE_TYPE',
+    'LOSETUP_FAILED', 'NO_NTFS_FOUND', 'NTFS_MOUNT_FAILED', 'NTFS_NOT_RW', 'NO_WINDOWS_DIR',
+    'NO_DRIVERS_COPIED', 'HIVEX_MERGE_FAILED',
+)
+
+
 def _inject_virtio_drivers(pve_mgr, task):
     """Offline-inject VirtIO drivers into the boot disk's Windows install.
 
     Touches only the first attached disk (assumed boot). Returns True on success.
-    On any error we log + return False — never aborts the migration."""
+    On any error we log, put a warning into the result and return False. It never
+    aborts the migration."""
     if not getattr(task, 'install_virtio_drivers', False):
         return False
 
@@ -2458,7 +2585,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             task.log("[VirtIO] Skipped — VM is already running (sshfs_boot live-pivot path). "
                      "Use transfer_mode=offline/auto/snapshot_zero for offline pre-staging, "
                      "or install drivers post-boot via the virtio-win.iso CD-ROM.")
-            return False
+            return _virtio_not_injected(task, "the target VM was already running")
     except Exception:
         pass  # if the status probe fails, fall through and try injection anyway
 
@@ -2498,7 +2625,7 @@ def _inject_virtio_drivers(pve_mgr, task):
             # lines of hook output and the operator got "✗ apt install failed:" with
             # nothing after the colon.
             task.log(f"[VirtIO] ✗ apt install failed: {str(out_apt or '').strip()[-600:]}")
-            return False
+            return _virtio_not_injected(task, "python3-hivex / ntfs-3g could not be installed on the node")
 
     # hivexsh is checked separately and is NOT fatal. It only feeds the version probe,
     # and the script falls back to a driver variant without it — which for a Windows 11
@@ -2523,7 +2650,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         from pegaprox.utils.sanitization import validate_node_iso_path
         if not validate_node_iso_path(task.virtio_iso_path):
             task.log("[VirtIO] ✗ virtio_iso_path must be an absolute path to an .iso file - skipping")
-            return False
+            return _virtio_not_injected(task, "the virtio-win ISO path is not an absolute path to an .iso file")
         iso_candidates.append(task.virtio_iso_path)
     iso_candidates += [
         "/var/lib/vz/template/iso/virtio-win.iso",
@@ -2539,7 +2666,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     if not iso_path:
         task.log("[VirtIO] ⚠ virtio-win.iso not found — skipping. Searched: " + ", ".join(iso_candidates))
         task.log("[VirtIO]   Hint: drop virtio-win.iso into /var/lib/vz/template/iso/ or set virtio_iso_path")
-        return False
+        return _virtio_not_injected(task, "virtio-win.iso was not found on the node")
     task.log(f"[VirtIO] ISO: {iso_path}")
 
     # 3) Build a single shell script — easier to follow + we get one rc back.
@@ -2549,16 +2676,21 @@ def _inject_virtio_drivers(pve_mgr, task):
     vol_id = task.boot_volume()
     if not vol_id:
         task.log("[VirtIO] no volume of the boot disk is known, skipping")
-        return False
+        return _virtio_not_injected(task, "no volume of the boot disk is known")
     rc, vol_path, _ = _pve_node_exec(pve_mgr, node,
         f"pvesm path {shlex.quote(vol_id)} 2>/dev/null", timeout=10)
     vol_path = str(vol_path or '').strip()
     if not vol_path:
         task.log("[VirtIO] ✗ Could not resolve boot disk path")
-        return False
+        return _virtio_not_injected(task, "the path of the boot disk could not be resolved")
     # Detect storage type so the script knows which exposure path to take
     storage_type = _pve_storage_type(pve_mgr, node, task.target_storage)
     task.log(f"[VirtIO] Target storage type: {storage_type or 'unknown'} ({vol_path})")
+    rbd_map = ''
+    if storage_type == 'rbd':
+        krbd_opts = {} if vol_path.startswith('rbd:') else \
+            _ceph_storage_opts(pve_mgr, node, task.target_storage)
+        rbd_map = ' '.join(shlex.quote(a) for a in _rbd_map_args(vol_path, krbd_opts))
 
     drivers_arg = ' '.join(_VIRTIO_DRIVERS)
     script = (
@@ -2567,6 +2699,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         f"VOL={shlex.quote(vol_path)}\n"
         f"VOL_ID={shlex.quote(vol_id)}\n"
         f"STYPE={shlex.quote(storage_type)}\n"
+        f"RBD_MAP=({rbd_map})\n"
         f"ISO={shlex.quote(iso_path)}\n"
         f"DRIVERS=\"{drivers_arg}\"\n"
         "TMP=$(mktemp -d /tmp/v2p-virtio-XXXXXX)\n"
@@ -2597,16 +2730,22 @@ def _inject_virtio_drivers(pve_mgr, task):
         "    BLK=\"$VOL\"\n"
         "    ;;\n"
         # Ceph RBD — rbd map produces /dev/rbdN
+        # MK Nov 2026 (#1245) - pool, namespace, image and the storage's conf, monitors and
+        # keyring come from the pvesm path, for krbd from the storage config (RBD_MAP, see
+        # _rbd_map_args). The volume id is <storage>:<image> and has no pool in it. A krbd
+        # image PVE has mapped is used as it is, and that map stays; only a map made here
+        # is undone by cleanup.
         "  rbd)\n"
         "    command -v rbd >/dev/null || { echo 'rbd cli missing — apt install ceph-common'; "
         "      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ceph-common >/dev/null 2>&1; }\n"
-        "    POOLIMG=$(echo \"$VOL_ID\" | sed 's|^[^:]*:||')\n"
-        "    POOL=$(echo \"$POOLIMG\" | cut -d/ -f1)\n"
-        "    IMG=$(echo \"$POOLIMG\" | cut -d/ -f2)\n"
-        "    [ -z \"$POOL\" ] || [ -z \"$IMG\" ] && { echo 'RBD_PARSE_FAILED'; exit 2; }\n"
-        "    BLK=$(rbd map -p \"$POOL\" \"$IMG\" 2>&1 | tail -1)\n"
-        "    [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $BLK\"; exit 2; }\n"
-        "    RBD=\"$BLK\"\n"
+        "    if [ -b \"$VOL\" ]; then\n"
+        "      BLK=\"$VOL\"\n"
+        "    else\n"
+        "      [ ${#RBD_MAP[@]} -gt 0 ] || { echo \"RBD_PARSE_FAILED: $VOL\"; exit 2; }\n"
+        "      BLK=$(rbd \"${RBD_MAP[@]}\" 2>\"$TMP/rbd.err\" | tail -1)\n"
+        "      [ -b \"$BLK\" ] || { echo \"RBD_MAP_FAILED: $(tr '\\n' ' ' <\"$TMP/rbd.err\" | tail -c 300)$BLK\"; exit 2; }\n"
+        "      RBD=\"$BLK\"\n"
+        "    fi\n"
         "    ;;\n"
         # File-based (qcow2 / raw on dir/NFS/CIFS/cephfs/glusterfs/btrfs) — qemu-nbd
         "  dir|nfs|cifs|cephfs|glusterfs|btrfs)\n"
@@ -2933,7 +3072,7 @@ def _inject_virtio_drivers(pve_mgr, task):
     sf = _write_node_script(pve_mgr, node, script, f"virtio-inject-{task.proxmox_vmid}")
     if not sf:
         task.log("[VirtIO] ✗ the injection script could not be written on the node")
-        return False
+        return _virtio_not_injected(task, "the injection script could not be written on the node")
 
     # Detect version first via a separate quick run (so we can pass VIRTIO_SUBDIR cleanly)
     # Simpler path: do a probe-only run then a real run. But to keep cost down we just
@@ -3003,7 +3142,9 @@ def _inject_virtio_drivers(pve_mgr, task):
         return True
     task.log(f"[VirtIO] ✗ Injection failed (rc={rc}). Last 400 chars of output:")
     task.log(out_str[-400:])
-    return False
+    why = next((ln.strip() for ln in out_str.splitlines()
+                if ln.strip().startswith(_VIRTIO_SCRIPT_FAILURES)), '')
+    return _virtio_not_injected(task, why or f"the node script ended with exit code {rc}")
 
 
 # NS Apr 2026 — Snapshot-iterative ZERO-DOWNTIME V2P (transfer_mode='snapshot_zero').
@@ -3152,6 +3293,13 @@ def _clone_snap_consolidated(vmware_mgr, vm_id, backing_before):
     except Exception:
         return False
     return bool(backing_before) and all(files.get(k) == f for k, f in backing_before.items())
+
+
+def _remove_still_running(err):
+    # JB Nov 2026 (#1249) - ESXi's own words can say "timed out" too, and a task that ended in
+    # failure is not running on: the long wait for it would be downtime with the source off
+    err = str(err or '').lower()
+    return 'timed out' in err and not err.startswith('remove failed')
 
 
 def _consolidation_timeout(merge_bytes):
@@ -3979,9 +4127,13 @@ def _parse_rbd_uri(rbd_uri):
     `pvesm path` (conf / id / keyring / mon_host are the ones PVE emits). Returns
     (pool, image, {k: v}) or (None, None, {}) when there's no parseable
     pool/image. Kept separate from the mapping so it's unit-testable without a node.
+
+    MK Nov 2026 (#1245) - PVE writes the colons inside mon_host (host:port, IPv6) as
+    '\\:', so only a bare ':' ends a field. A namespace stays in front of the image
+    (<ns>/<image>), _rbd_map_args takes it apart.
     """
     body = rbd_uri[4:] if str(rbd_uri or '').startswith('rbd:') else str(rbd_uri or '')
-    parts = body.split(':')
+    parts = [p.replace('\\:', ':') for p in re.split(r'(?<!\\):', body)]
     pool_image = parts[0].strip()
     if '/' not in pool_image:
         return None, None, {}
@@ -4012,6 +4164,83 @@ def _rbd_map_command(pool, image, opts):
     if opts.get('mon_host'):
         flags += f" -m {shlex.quote(opts['mon_host'])}"
     return f"rbd map{flags} -p {shlex.quote(pool)} {shlex.quote(image)}"
+
+
+def _rbd_map_args(vol_path, storage_opts=None):
+    """The `rbd` arguments that kernel-map the image behind a `pvesm path` answer, in the
+    order PVE's own map_volume passes them: -p, --namespace, -c, -m,
+    --auth_client_required, --id, --keyring, then `map <image>`. [] when the path names
+    no pool and image.
+
+    librbd paths are rbd:<pool>[/<ns>]/<image>[:k=v...] and carry the storage's conf,
+    monitors and keyring. krbd ones are /dev/rbd-pve/<fsid>/<pool>[/<ns>]/<image> and carry
+    none of it, so for those the settings come from storage_opts (_ceph_storage_opts)."""
+    path = str(vol_path or '').strip()
+    if path.startswith('rbd:'):
+        pool, image, opts = _parse_rbd_uri(path)
+        # PVE before Ceph 19.2.6 wrote auth_supported, which that Ceph no longer reads
+        if opts.get('auth_supported') and not opts.get('auth_client_required'):
+            opts['auth_client_required'] = opts['auth_supported']
+    else:
+        m = re.match(r'/dev/rbd(?:-pve/[^/]+)?/([^/]+)/(.+)$', path)
+        pool, image = (m.group(1), m.group(2)) if m else (None, None)
+        opts = dict(storage_opts or {})
+    ns, _, image = str(image or '').rpartition('/')
+    if not (pool and image):
+        return []
+    args = ['-p', pool] + (['--namespace', ns] if ns else [])
+    for flag, key in (('-c', 'conf'), ('-m', 'mon_host'),
+                      ('--auth_client_required', 'auth_client_required'),
+                      ('--id', 'id'), ('--keyring', 'keyring')):
+        val = opts.get(key)
+        if val:
+            # the path lists monitors with ';', PVE hands them to the CLI with ','
+            args += [flag, val.replace(';', ',') if key == 'mon_host' else val]
+    return args + ['map', image]
+
+
+# where PVE keeps a Ceph storage's own keyring and, for an external cluster, its conf
+_CEPH_PRIV_DIR = '/etc/pve/priv/ceph'
+
+
+def _ceph_mon(host):
+    # PVE's hostlist puts a bare IPv6 monitor in brackets, a port stays behind it
+    return f"[{host}]" if host.count(':') > 1 and not host.startswith('[') else host
+
+
+def _ceph_storage_opts(pve_mgr, node, storage):
+    """conf, monitors, client and keyring of an RBD storage, picked as PVE's
+    ceph_connect_option picks them. Only a krbd map needs this, its /dev path has none of
+    them. {} when the storage config cannot be read; the map then relies on the node's
+    own ceph.conf."""
+    sid = str(storage or '')
+    keyring = f"{_CEPH_PRIV_DIR}/{sid}.keyring"
+    conf = f"{_CEPH_PRIV_DIR}/{sid}.conf"
+    _rc, out, _ = _pve_node_exec(pve_mgr, node,
+        f"pvesh get /storage/{shlex.quote(sid)} --output-format json 2>/dev/null; echo; "
+        f"for f in {shlex.quote(keyring)} {shlex.quote(conf)}; do "
+        f"[ -e \"$f\" ] && echo \"HAVE $f\"; done", timeout=20)
+    lines = [ln.strip() for ln in str(out or '').splitlines()]
+    try:
+        scfg = json.loads(next(ln for ln in lines if ln.startswith('{')))
+    except (StopIteration, ValueError):
+        return {}
+    if not isinstance(scfg, dict):
+        return {}
+    have = {ln[5:] for ln in lines if ln.startswith('HAVE ')}
+    monhost = str(scfg.get('monhost') or '').strip()
+    opts = {'id': str(scfg.get('username') or 'admin')}
+    if keyring in have:
+        opts['keyring'] = keyring
+    if not monhost:
+        # pveceph-managed: the cluster's own conf, which also sets its auth
+        opts['conf'] = '/etc/pve/ceph.conf'
+        return opts
+    if conf in have:
+        opts['conf'] = conf
+    opts['mon_host'] = ','.join(_ceph_mon(h) for h in re.split(r'[\s,;]+', monhost) if h)
+    opts['auth_client_required'] = 'cephx' if 'keyring' in opts else 'none'
+    return opts
 
 
 def _map_rbd_uri_to_device(pve_mgr, node, vol_id, rbd_uri):
@@ -5050,6 +5279,11 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     VMware VM must already be stopped before calling this.
     """
     import time
+
+    # this path never stages drivers, and auto mode lands here too, where the form showed
+    # no notice about it
+    if getattr(task, 'install_virtio_drivers', False):
+        _virtio_not_injected(task, "the live mirror boots the VM before the drivers can be staged")
 
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the

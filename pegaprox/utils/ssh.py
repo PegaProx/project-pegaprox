@@ -11,6 +11,7 @@ import threading
 import socket
 import ipaddress
 import re
+import hashlib
 
 from pegaprox.constants import SSH_MAX_CONCURRENT
 from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
@@ -499,6 +500,151 @@ def ssh_blocked_for(mgr, host=None):
 
 _node_ip_cache = {}  # (cluster_id, node) -> (ip, timestamp)
 
+# MK Nov 2026 (#1224) - nodes whose sshd refused the stored key. The console tiles run
+# node commands on every poll, and a key offered each time to a node that never takes
+# it is a failed login per tile (OpenSSH's PerSourcePenalties then shuts PegaProx out).
+# Only the server's own no counts. Offered again once this runs out, at once for another
+# key or login name, after a login with the key went through there, and when an ESXi
+# import starts.
+_KEY_REFUSED_TTL = 300
+_node_key_refused = {}  # (cluster_id, node) -> (monotonic, digest of login + key, why, host)
+
+
+def _key_digest(login, key):
+    return hashlib.sha256(f'{login}\0{key}'.encode('utf-8', 'replace')).hexdigest()
+
+
+def key_accepted(cluster_id, host, login, key):
+    """A login with `key` as `login` went through at `host` (the connection check, say):
+    a refusal of it remembered for that address is out of date."""
+    if not key or not _node_key_refused:
+        return
+    digest, addr = _key_digest(login, key), bare_host(host)
+    for slot, seen in list(_node_key_refused.items()):
+        if slot[0] == cluster_id and seen[1] == digest and seen[3] == addr:
+            _node_key_refused.pop(slot, None)
+
+
+def forget_key_refusal(pve_mgr, node):
+    """The next command on `node` offers the stored key again: for a run an operator just
+    started, after fixing what refused it perhaps."""
+    _node_key_refused.pop((getattr(pve_mgr, 'id', None), node), None)
+
+
+def _is_cluster_member(pve_mgr, node):
+    """Whether `node` is in the manager's own node list. An empty or unreadable list is no."""
+    if not isinstance(node, str) or not node:
+        return False
+    try:
+        return node in (pve_mgr.nodes or {})
+    except Exception:
+        return False
+
+
+def _run_on_client(client, cmd, timeout):
+    """(rc, out, err) of one command on a connected paramiko client, which is closed after.
+
+    One deadline of `timeout` for the call: stdout is read to EOF or until `timeout` passes
+    without a byte, stderr and the exit status get what is left. recv_exit_status alone
+    waits for ever; past the deadline the call answers 124 (what coreutils' timeout says)
+    while the command may still be running."""
+    deadline = time.monotonic() + max(1, timeout)
+    try:
+        _in, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        ch = stdout.channel
+        out = read_capped(stdout)
+        try:
+            ch.settimeout(max(0.0, deadline - time.monotonic()))
+        except Exception:
+            pass
+        err = read_capped(stderr)
+        # counted, so a clock that stands still cannot keep it going
+        for _ in range(int(max(0.0, deadline - time.monotonic()) / 0.2) + 1):
+            if ch.exit_status_ready():
+                break
+            time.sleep(0.2)
+        if ch.exit_status_ready():
+            return ch.recv_exit_status(), out, err
+        note = f"no exit status from the node within {timeout}s"
+        return 124, out, f"{err.rstrip()}\n{note}" if err.strip() else note
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback):
+    """The stored key's go at a node command, before any password (#1224).
+
+    Through pve_mgr._ssh_connect: it asks ssh_blocked_reason, checks the host key the
+    TOFU way and waits for the connection semaphore (no longer than the call's own
+    timeout here). Returns (result, note): result is (rc, out, err) when this settles the
+    call, None when the password step goes next; note says what became of the key.
+    `fallback`: a password step follows. Without one a failed key login is the last one
+    of this call and counts against the node; nothing counts that never reached it.
+    `host` comes resolved: _pve_node_exec has it from _get_node_ip for a member only."""
+    key = getattr(pve_mgr.config, 'ssh_key', '') or ''
+    if not key or not hasattr(pve_mgr, '_ssh_connect'):
+        return None, ''
+    slot = (getattr(pve_mgr, 'id', None), node)
+    digest = _key_digest(user, key)
+    seen = _node_key_refused.get(slot)
+    if seen and seen[1] == digest:
+        left = int(_KEY_REFUSED_TTL - (time.monotonic() - seen[0]))
+        if left > 0:
+            return None, (f"the stored SSH key was refused for '{user}' ({seen[2]}), "
+                          f"it is offered again in {left}s")
+    _node_key_refused.pop(slot, None)
+
+    # asked before anything connects, as _ssh_exec does (#625); the client's own ask at
+    # the exec is then this same call once more
+    from pegaprox.core import ha_transport
+    ha_transport.guard_ssh(host, cmd)
+
+    failure = {}
+    try:
+        client = pve_mgr._ssh_connect(host, retries=1, connect_timeout=8, failure=failure,
+                                      login=user, quiet=True, guard_asked=True,
+                                      queue_wait=min(120, max(10, int(timeout))))
+    except Exception as e:
+        client, failure = None, {'kind': 'error', 'detail': str(e)}
+    if client is not None:
+        result = _run_on_client(client, cmd, timeout)
+        # logged in: whatever the command said, the node answers
+        try:
+            pve_mgr._reset_node_failures(node)
+        except Exception:
+            pass
+        return result, ''
+
+    kind = failure.get('kind') or 'local'
+    detail = ' '.join(str(failure.get('detail') or 'no connection was opened').split())[:300]
+    if kind == 'auth' and failure.get('refused') is False:
+        # the connection ended or stalled during the login: no answer about the key
+        kind = 'error'
+    if kind == 'blocked':
+        return (1, '', f"cannot run node commands on '{node}': {detail}"), ''
+    if kind in ('busy', 'local'):
+        # nothing went to the node: no count against it, nothing to remember
+        return None, f"the stored SSH key was not tried ({detail})"
+    if kind in ('unreachable', 'host_key') or (kind in ('auth', 'error') and not fallback):
+        try:
+            pve_mgr._register_node_failure(node)
+        except Exception:
+            pass
+    if kind in ('unreachable', 'host_key'):
+        # nothing a password could change: the node is not there, or not the one pinned
+        what = 'host key check failed' if kind == 'host_key' else 'connection failed'
+        return (1, '', f"SSH to node '{node}' at {host}: {what}: {detail}"), ''
+    if kind in ('auth', 'key'):
+        _node_key_refused[slot] = (time.monotonic(), digest, detail, bare_host(host))
+        if kind == 'key':
+            return None, f"the stored SSH key could not be loaded ({detail})"
+        return None, f"the stored SSH key was refused for '{user}' ({detail})"
+    return None, f"SSH with the stored key failed ({detail})"
+
+
 def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
                    ignore_node_backoff=False):
     """Execute a command on a Proxmox node via the Proxmox API.
@@ -513,7 +659,16 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
 
     MK May 2026 (dead-node UI hang) — short-circuit if the per-node circuit
     breaker says this node is unreachable; register failure on SSH errors so
-    repeated calls don't burn a full timeout every time."""
+    repeated calls don't burn a full timeout every time.
+
+    MK Nov 2026 (#1224) - SSH offers the stored key first (_stored_key_exec), the
+    password after it. use_controlmaster only concerns the password leg's ssh. Only a
+    node of the manager's own node list gets a command at all."""
+    # MK Nov 2026 (#1224) - routes hand node names on from the URL, and _get_node_ip's DNS
+    # step resolves any name: the stored key, or the password, went to whatever address
+    # that gave. A name the cluster does not list gets nothing, an unknown list neither.
+    if not _is_cluster_member(pve_mgr, node):
+        return 1, '', f"cannot run node commands on '{str(node)[:64]}': not a node of this cluster"
     # MK — fail-fast if the breaker is open, unless the caller is already in a
     # controlled workflow that needs to probe the node to recover from a stale
     # breaker. V2P migration uses this for short local checks on the target node:
@@ -609,14 +764,11 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', _diag[1]
 
         _ssh_user = getattr(pve_mgr.config, 'ssh_user', '') or 'root'
-        # The diagnosis above still lets the worst case through: it only says "no
-        # credentials" when there is NEITHER a key NOR a usable password, so a cluster
-        # with an SSH key stored that authenticates with an API token comes back clean.
-        # _ssh_exec is password-only (M3 passes look_for_keys=False, the sshpass leg asks
-        # for keyboard-interactive,password), so the key is never reached and config.pass_
-        # goes to sshd in its place — on a token cluster that is the token secret, and
-        # every method in _ssh_exec tries it in turn. Key + API token is the setup we
-        # recommend, so that is the config generating the most failed root logins.
+        # The diagnosis above lets a cluster with a key through, token or not. _ssh_exec
+        # is password-only (M3 passes look_for_keys=False, the sshpass leg asks for
+        # keyboard-interactive,password), so the key goes first, on its own client: key +
+        # API token is the setup we recommend, and on key-only nodes it was the setup
+        # that could not run a single node command (#1224).
         # Same question as ssh_diagnose asks, and for the same reason: pass_ is the token
         # secret only when the operator typed a token id as the username. A cluster whose
         # token WE minted (#110) keeps its password, and blanking it here took node
@@ -624,6 +776,10 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         _token_auth = '!' in (getattr(pve_mgr.config, 'user', '') or '')
         # the node's own password where it has one (#1136)
         _ssh_pass = ssh_password_to(pve_mgr, node_host)
+        settled, _key_note = _stored_key_exec(pve_mgr, node, node_host, _ssh_user, cmd,
+                                              timeout, fallback=bool(_ssh_pass))
+        if settled is not None:
+            return settled
         if not _ssh_pass:
             # Say which of the three it actually is. The first version of this asserted a
             # stored key in every case, but the branch is also reached on a cluster with no
@@ -633,9 +789,12 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
                     "that token, not an SSH password, and this node has no password of its "
                     "own") if _token_auth else \
                    "no SSH password is stored for this cluster"
-            if getattr(pve_mgr.config, 'ssh_key', ''):
-                _why += (" — the stored SSH key cannot help here, this path authenticates "
-                         "by password only")
+            if _key_note:
+                _why = f"{_key_note}, and {_why}"
+            elif getattr(pve_mgr.config, 'ssh_key', ''):
+                # a manager without _ssh_connect has no way to the key
+                _why += (" - the stored SSH key cannot be used with this manager, and this "
+                         "path then authenticates by password only")
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster)
@@ -664,8 +823,14 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
                 pve_mgr._reset_node_failures(node)
         except Exception:
             pass
+        if looks_like_node_down and _key_note:
+            err = f"{err} (before that, {_key_note})"
         return rc, out, err
     except Exception as e:
+        from pegaprox.core.ha import GuardRefused
+        if isinstance(e, GuardRefused):
+            # this instance may not send it (#625): that says nothing about the node
+            return 1, '', str(e)
         try:
             pve_mgr._register_node_failure(node)
         except Exception:

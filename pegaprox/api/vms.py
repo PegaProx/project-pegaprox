@@ -5418,6 +5418,14 @@ def get_vm_screenshot(cluster_id, node, vm_type, vmid):
         return jsonify({'error': 'screenshot only available on proxmox'}), 400
     if not user_can_access_vm(user, cluster_id, vmid, 'vm.console', vm_type):
         return jsonify({'error': 'Permission denied: vm.console'}), 403
+    # MK Nov 2026 (#1224) - the screendump runs on <node> over SSH with the cluster's key
+    # or password: a node of this cluster, never an address from the URL
+    try:
+        _member = node in (mgr.nodes or {})
+    except Exception:
+        _member = False
+    if not _member:
+        return jsonify({'error': 'Node not found in this cluster'}), 404
 
     cache_key = f"{cluster_id}:{vmid}"
     now = time.monotonic()

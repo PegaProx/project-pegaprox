@@ -44,7 +44,8 @@ def test_status_bearing_admin_endpoint_is_used_for_each_job_kind(kind):
     manager = PBSManager.__new__(PBSManager)
     paths = []
     expected = {'data': JOB_LISTS[kind]}
-    manager.api_get = lambda path: paths.append(path) or expected
+    # the sync list also asks for both directions (#801)
+    manager.api_get = lambda path, params=None, **kw: paths.append(path) or expected
 
     result = getattr(manager, f'get_{kind}_jobs')()
 

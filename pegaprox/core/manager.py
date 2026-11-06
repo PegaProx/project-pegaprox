@@ -13419,7 +13419,9 @@ echo "AGENT_INSTALLED_OK"
         return bool(password) and password == stored and not ssh_password_for(self.config)
 
     def _ssh_connect(self, host: str, retries: int = 3, retry_delay: float = 2.0,
-                     connect_timeout: int = 30, failure: dict = None, pinned_as: str = None):
+                     connect_timeout: int = 30, failure: dict = None, pinned_as: str = None,
+                     login: str = None, quiet: bool = False, queue_wait: float = 120,
+                     guard_asked: bool = False):
         """SSH connect with retry logic and connection rate limiting
 
         NS: Jan 2026 - Limits concurrent CONNECTION ATTEMPTS (not active sessions).
@@ -13430,12 +13432,20 @@ echo "AGENT_INSTALLED_OK"
         HA operations use separate methods without any rate limiting.
 
         MK Oct 2026 - `failure`, when given, gets {'kind', 'detail'} on a None return
-        (auth, host_key, unreachable, key, blocked, error); the connection check names
-        the reason per node instead of a bare "SSH failed".
+        (auth, host_key, unreachable, key, blocked, error, and busy or local when nothing
+        left this host); the connection check names the reason per node instead of a
+        bare "SSH failed". An auth failure also says `refused`: False when the connection
+        ended or stalled during the login, rather than the server saying no.
 
         `pinned_as`: another address of the same node (its management address). `host`
         is then accepted only with the host key pinned for that one, nothing is learned
         or saved, and without such a pin there is no connection (transfer network).
+
+        MK Nov 2026 (#1224) - for _pve_node_exec's key leg: `login` the user to log in as
+        (its rule: ssh_user, else root; default here ssh_user, else the API user's name),
+        `quiet` its connect lines at debug (a polled path), `queue_wait` how long it waits
+        for a connection slot, `guard_asked` it asked guard_ssh for its one command before
+        connecting.
         """
         # #941 — decide before we open a socket. Every SSH path to a PVE node comes
         # through here, so refusing here is what stops the traffic AND stops the token
@@ -13462,21 +13472,27 @@ echo "AGENT_INSTALLED_OK"
         paramiko = get_paramiko()
         if not paramiko:
             self.logger.error("paramiko not installed, cannot use SSH features")
+            if failure is not None:
+                failure.update(kind='local', detail='paramiko is not installed on this PegaProx')
             return None
         
         # Get connection parameters
-        username = self.config.ssh_user if self.config.ssh_user else self.config.user.split('@')[0]
+        username = login or (self.config.ssh_user if self.config.ssh_user else self.config.user.split('@')[0])
         ssh_port = getattr(self.config, 'ssh_port', 22) or 22
         ssh_key = getattr(self.config, 'ssh_key', '')
+        _said = self.logger.debug if quiet else self.logger.info
         
         for attempt in range(1, retries + 1):
             # Rate limit connection ATTEMPTS (not active connections)
             stats = get_ssh_connection_stats()
             self.logger.debug(f"SSH queue: {stats['active_normal']} connecting, {stats['active_ha']} HA active")
             
-            acquired = _g._ssh_semaphore.acquire(timeout=120)
+            acquired = _g._ssh_semaphore.acquire(timeout=queue_wait)
             if not acquired:
-                self.logger.error(f"SSH to {host} queued too long (120s) - increase PEGAPROX_SSH_MAX_CONCURRENT")
+                self.logger.error(f"SSH to {host} queued too long ({int(queue_wait)}s) - increase PEGAPROX_SSH_MAX_CONCURRENT")
+                if failure is not None:
+                    failure.update(kind='busy', detail=f'every SSH connection slot of this PegaProx '
+                                                       f'was taken for {int(queue_wait)}s')
                 return None
             
             _ssh_track_connection('normal', +1)
@@ -13485,7 +13501,7 @@ echo "AGENT_INSTALLED_OK"
                 if attempt > 1:
                     self.logger.info(f"SSH retry {attempt}/{retries} to {host}...")
                 else:
-                    self.logger.info(f"Connecting to {host}:{ssh_port} as {username}...")
+                    _said(f"Connecting to {host}:{ssh_port} as {username}...")
                 
                 from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, pin_as
                 ssh = paramiko.SSHClient()
@@ -13539,16 +13555,22 @@ echo "AGENT_INSTALLED_OK"
                 ssh.connect(**connect_kwargs)
                 if not pinned_as:
                     persist_host_keys(ssh)
-                self.logger.info(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
+                _said(f"SSH connected to {host}" + (f" (attempt {attempt})" if attempt > 1 else ""))
+                if ssh_key:
+                    # MK Nov 2026 (#1224) - node commands stop skipping the key there
+                    from pegaprox.utils.ssh import key_accepted
+                    key_accepted(getattr(self, 'id', None), host, username, ssh_key)
 
                 # SUCCESS - release semaphore immediately, connection is established
                 # This allows new connections while this session runs
-                return ha_transport.guard_client(ssh, host)
+                return ha_transport.guard_client(ssh, host, again=guard_asked)
                 
             except paramiko.ssh_exception.AuthenticationException as e:
                 self.logger.error(f"SSH auth failed for {username}@{host}: {e}")
                 if failure is not None:
-                    failure.update(kind='auth', detail=str(e)[:300])
+                    # paramiko's words for a connection that ended or stalled in the login
+                    _gone = 'saw EOF' in str(e) or str(e).startswith('Authentication timeout')
+                    failure.update(kind='auth', detail=str(e)[:300], refused=not _gone)
                 return None
                 
             except (paramiko.ssh_exception.NoValidConnectionsError, socket.timeout, TimeoutError) as e:

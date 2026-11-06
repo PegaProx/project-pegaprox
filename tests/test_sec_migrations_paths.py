@@ -435,7 +435,8 @@ def v2p_route(api, seed, monkeypatch):
     m.get_vm.return_value = {'data': {'name': 'guest', 'nics': []}}
     ppglobals.vmware_managers['vmw1'] = m
     seed.tenant('acme', clusters=[TGT])
-    api.set_manager(TGT, api.make_fake_manager(TGT))
+    # with the node list a real manager has: the start asks target_node against it (#1224)
+    api.set_manager(TGT, api.make_fake_manager(TGT)).nodes = {'pve1': {'node': 'pve1'}}
     monkeypatch.setattr(vmware_api, '_vmware_migrations', {})
     return started
 

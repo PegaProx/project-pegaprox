@@ -33,6 +33,7 @@
                         lastRun: job['last-run-endtime'] ?? null,
                         disabled: Boolean(job.disable),
                         state: job['last-run-state'] ?? '', nextRun: job['next-run'] ?? null,
+                        direction: kind === 'sync' ? (job['sync-direction'] || 'pull') : '',
                     });
                 }
             }
@@ -48,6 +49,29 @@
             const warn = /^(TASK )?WARNINGS/i.test(s);
             return <span data-pbs-run-state={ok ? 'ok' : warn ? 'warning' : 'error'} title={s}
                 className={`${ok ? 'text-green-400' : warn ? 'text-yellow-400' : 'text-red-400'} break-all`}>{s}</span>;
+        }
+
+        // LW Nov 2026 - since PBS 3.3 a sync job pulls into its store or pushes out of it (#801).
+        // store is always the local datastore, remote / remote-store the other end; a job
+        // without a remote syncs from a datastore on the same PBS
+        function pbsSyncEnds(job) {
+            const local = job?.store || '-';
+            const other = job?.remote ? `${job.remote} / ${job['remote-store'] || '-'}` : (job?.['remote-store'] || '-');
+            return job?.['sync-direction'] === 'push' ? { source: local, target: other } : { source: other, target: local };
+        }
+
+        // asType: the whole Type label beside a datastore, so the text names the sync as well
+        function PbsSyncDirection({ direction, asType }) {
+            const { t } = useTranslation();
+            const push = direction === 'push';
+            const Icon = push ? Icons.Upload : Icons.Download;
+            const text = asType
+                ? (push ? (t('pbsSyncPushJob') || 'Push sync') : (t('pbsSyncPullJob') || 'Pull sync'))
+                : (push ? (t('pbsSyncPush') || 'Push') : (t('pbsSyncPull') || 'Pull'));
+            return <span data-pbs-sync-direction={push ? 'push' : 'pull'}
+                className={asType ? 'inline-flex items-center gap-1 whitespace-nowrap' : 'inline-flex items-center gap-1 text-gray-300 font-normal whitespace-nowrap'}>
+                <Icon /> {text}
+            </span>;
         }
 
         function PbsJobReadError({ kind }) {
@@ -102,7 +126,9 @@
                                 {rows.map((row, i) => (
                                     <tr key={`${row.kind}:${row.id}:${i}`} data-pbs-schedule-kind={row.kind}
                                         className="border-b border-proxmox-border/50">
-                                        <td className="p-3 text-white font-medium">{labels[row.kind]}</td>
+                                        <td className="p-3 text-white font-medium">
+                                            {row.direction ? <PbsSyncDirection direction={row.direction} asType /> : labels[row.kind]}
+                                        </td>
                                         <td className="p-3 text-gray-300">{row.id || '-'}</td>
                                         <td className="p-3 text-gray-400">
                                             {row.schedule || (t('manual') || 'Manual')}
@@ -11801,6 +11827,9 @@
             const srBusy = (status) => status === 'running' || status === 'cancelling';
             const srActive = (status) => srBusy(status) || status === 'testing';
             const getClusterName = (id) => clusterLabel(clusters.find(cl => cl.id === id)) || id;
+            // LW Nov 2026 - a job can keep the replica under a VMID of its own, which is what an
+            // emergency failover starts; it also tells two jobs of one guest apart
+            const srJobLabel = (j) => `${j.schedule}, ${fillText(t('srOnTargetAs'), { cluster: getClusterName(j.target_cluster), vmid: j.target_vmid || j.vmid })}`;
             const rpoColor = (vm) => {
                 if (!vm.last_replication) return 'text-gray-500';
                 const hrs = (Date.now() - new Date(vm.last_replication).getTime()) / 3600000;
@@ -12179,6 +12208,7 @@
             const handleUpdateVm = async (vmId, field, value) => {
                 const r = await authFetch(`${API_URL}/site-recovery/plans/${planDetail.id}/vms/${vmId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ [field]: value }) });
                 if (r && r.ok) fetchPlanDetail(planDetail.id);
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || t('saveFailed'), 'error'); }
                 setEditingVm(null);
             };
             // save mappings
@@ -12205,6 +12235,13 @@
                 const grouped = {};
                 (pd.vms || []).forEach(vm => { const g = vm.boot_group ?? 0; if (!grouped[g]) grouped[g] = []; grouped[g].push(vm); });
                 const sortedGroups = Object.entries(grouped).sort(([a],[b]) => Number(a) - Number(b));
+                // the jobs a guest row can link: its own between the plan's clusters, one pass
+                const jobsById = {}, jobsOf = {};
+                replJobs.forEach(j => {
+                    jobsById[j.id] = j;
+                    if (j.source_cluster === pd.source_cluster && j.target_cluster === pd.target_cluster) (jobsOf[j.vmid] = jobsOf[j.vmid] || []).push(j);
+                });
+                const drName = getClusterName(pd.target_cluster);
 
                 return (
                     <div className="space-y-4">
@@ -12276,13 +12313,13 @@
                                             {gIdx > 0 && <span className="text-xs text-gray-500 flex items-center gap-1"><Icons.Clock className="w-3 h-3" />{t('bootDelay')}: {groupVms[0]?.boot_delay || 30}s</span>}
                                         </div>
                                         <table className="w-full text-sm">
-                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
+                                            <thead><tr className="text-left text-gray-500 text-xs"><th className="px-4 py-2">VMID</th><th className="py-2">{t('name')||'Name'}</th><th className="py-2">{t('srGuestLocation')}</th><th className="py-2">{t('bootGroup')}</th><th className="py-2">{t('bootDelay')}</th><th className="py-2">{t('srLinkedJob')}</th><th className="py-2">{t('rpo')}</th><th className="py-2 w-10"></th></tr></thead>
                                             <tbody>
                                                 {groupVms.map(vm => (
                                                     <tr key={vm.id} className="border-t border-proxmox-border/30 hover:bg-proxmox-hover/30">
                                                         <td className="px-4 py-2 font-mono text-xs">{vm.vmid}</td>
                                                         <td className="py-2">{vm.vm_name || '-'}</td>
-                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} /></td>
+                                                        <td className="py-2" data-sr-guest-location={vm.vmid}><SrGuestPlace vm={vm} t={t} target={drName} /></td>
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_group'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_group} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_group', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_group'})}>{vm.boot_group}</span>
@@ -12290,6 +12327,15 @@
                                                         <td className="py-2">{editingVm?.id === vm.id && editingVm?.field === 'boot_delay'
                                                             ? <input type="number" className="w-16 bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs" defaultValue={vm.boot_delay} autoFocus onBlur={e => handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} onKeyDown={e => e.key === 'Enter' && handleUpdateVm(vm.id, 'boot_delay', parseInt(e.target.value))} />
                                                             : <span className="cursor-pointer hover:text-proxmox-orange" onClick={() => canManage && setEditingVm({id: vm.id, field: 'boot_delay'})}>{vm.boot_delay}s</span>
+                                                        }</td>
+                                                        <td className="py-2 text-xs" data-sr-guest-job={vm.vmid}>{editingVm?.id === vm.id && editingVm?.field === 'replication_job_id'
+                                                            ? <select className="bg-proxmox-dark border border-proxmox-border rounded px-1 py-0.5 text-xs max-w-48" defaultValue={vm.replication_job_id || ''} autoFocus onChange={e => handleUpdateVm(vm.id, 'replication_job_id', e.target.value)} onBlur={() => setEditingVm(null)}>
+                                                                <option value="">{t('srNoJobLinked')}</option>
+                                                                {(jobsOf[vm.vmid] || []).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
+                                                            </select>
+                                                            : <span className={canManage ? 'cursor-pointer hover:text-proxmox-orange' : ''} onClick={() => canManage && setEditingVm({id: vm.id, field: 'replication_job_id'})}>
+                                                                {!vm.replication_job_id ? <span className="text-gray-500">{t('srNoJobLinked')}</span> : jobsById[vm.replication_job_id] ? srJobLabel(jobsById[vm.replication_job_id]) : <span className="font-mono">{vm.replication_job_id}</span>}
+                                                            </span>
                                                         }</td>
                                                         <td className="py-2">{vm.failed_over
                                                             ? <span className="text-xs text-gray-500">{t('srReplicationHeld')}</span>
@@ -12378,7 +12424,7 @@
                                                         <thead><tr className="text-gray-500"><th className="text-left pb-1">VMID</th><th className="text-left pb-1">{t('name')||'Name'}</th><th className="text-left pb-1">Status</th><th className="text-left pb-1">Error</th></tr></thead>
                                                         <tbody>{Object.entries(results).map(([vmid, r]) => (
                                                             <tr key={vmid} className="border-t border-proxmox-border/30" data-sr-result={vmid}>
-                                                                <td className="py-1 font-mono">{vmid}</td><td className="py-1">{r.vm_name || '-'}</td>
+                                                                <td className="py-1"><span className="font-mono">{vmid}</span>{r.dr_vmid != null && String(r.dr_vmid) !== vmid && <span className="text-gray-500" data-sr-result-dr={r.dr_vmid}> {fillText(t('srOnTargetAs'), { cluster: getClusterName(pd.target_cluster), vmid: r.dr_vmid })}</span>}</td><td className="py-1">{r.vm_name || '-'}</td>
                                                                 <td className="py-1">{r.skipped ? <span className="text-gray-400">{t('skipped')}</span> : r.success ? <span className="text-green-400">OK</span> : <span className="text-red-400">Failed</span>}</td>
                                                                 <td className="py-1 text-gray-500">{r.skipped ? (r.reason === 'not failed over' ? t('srSkipNotFailedOver') : t('srSkipFailedOver')) : (r.error || '-')}</td>
                                                             </tr>
@@ -12436,7 +12482,7 @@
                                     </div>
                                     <select value={addVmForm.replication_job_id} onChange={e => setAddVmForm(f => ({...f, replication_job_id: e.target.value}))} className="w-full bg-proxmox-card border border-proxmox-border rounded-lg p-2 text-sm">
                                         <option value="">{t('linkReplication') || 'Link Replication Job (optional)'}</option>
-                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{j.schedule} → {getClusterName(j.target_cluster)}</option>)}
+                                        {replJobs.filter(j => j.vmid == addVmForm.vmid && j.source_cluster === planDetail.source_cluster && j.target_cluster === planDetail.target_cluster).map(j => <option key={j.id} value={j.id}>{srJobLabel(j)}</option>)}
                                     </select>
                                     <div className="flex justify-end gap-2">
                                         <button onClick={() => setShowAddVmModal(false)} className="px-3 py-1.5 text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
@@ -12637,13 +12683,19 @@
             );
         }
 
-        function SrGuestPlace({ vm, t }) {
+        // target: the DR cluster's name, for the VMID the guest runs under there when it is
+        // not its own (an emergency failover starts the replica a job keeps elsewhere)
+        function SrGuestPlace({ vm, t, target }) {
             if (!vm.failed_over) return <span className="text-xs text-gray-500">{t('srGuestAtSource')}</span>;
+            const there = target && vm.failed_over_vmid && vm.failed_over_vmid !== vm.vmid ? vm.failed_over_vmid : null;
             return (
-                <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
-                    title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
-                    {t('srGuestFailedOver')}
-                </span>
+                <>
+                    <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400"
+                        title={`${vm.failed_over}${vm.failed_over_at ? ', ' + fmtDate(vm.failed_over_at) : ''}`}>
+                        {t('srGuestFailedOver')}
+                    </span>
+                    {there && <span className="text-xs text-gray-500" data-sr-guest-dr-vmid={there}> {fillText(t('srOnTargetAs'), { cluster: target, vmid: there })}</span>}
+                </>
             );
         }
 
@@ -14408,6 +14460,22 @@
             const globalSearchRef = React.useRef(null);
             const globalSearchTimerRef = React.useRef(null);
             const [highlightedVm, setHighlightedVm] = useState(null);  // {vmid, node} - for scrolling to VM in table
+            // LW Nov 2026 - a guest Modern opens in the detail view of its cluster's guest list ({clusterId, vmid, type}, #1229).
+            // It waits there for the list of that cluster and is dropped once the user moves on
+            const [openGuestDetail, setOpenGuestDetail] = useState(null);
+            useEffect(() => {
+                if (openGuestDetail && (openGuestDetail.clusterId !== selectedCluster?.id || activeTab !== 'resources' || resourcesSubTab !== 'management')) setOpenGuestDetail(null);
+            }, [selectedCluster?.id, activeTab, resourcesSubTab]);
+            // Modern has no guest view of its own: a guest picked in All Guests or an overview opens
+            // there, from the top of the page. The list of the cluster shown before is emptied first,
+            // so a guest with the same ID there is never the one picked. Without a type the ID alone
+            // finds it, it is unique in a cluster
+            const askGuestDetail = (cluster, guest) => {
+                if (isCorporate) return;
+                if (selectedCluster?.id !== cluster.id) setClusterResources([]);
+                setOpenGuestDetail({ clusterId: cluster.id, vmid: guest.vmid, type: guest.type || null });
+                window.scrollTo(0, 0);
+            };
             
             // NS: User Favorites state
             const [favorites, setFavorites] = useState({ vms: [], nodes: [], clusters: [] });
@@ -23112,6 +23180,8 @@
                                                             onBulkDone={() => { const cid = selectedCluster.id; setTimeout(() => fetchClusterResources(cid), 1500); }}
                                                             favorites={favorites}
                                                             onToggleFavorite={toggleGuestFavorite}
+                                                            openGuest={openGuestDetail}
+                                                            onOpenGuestDone={() => setOpenGuestDetail(null)}
                                                             onVmNavigate={isCorporate ? (vm) => {
                                                                 setSelectedSidebarVm({...vm, _clusterId: selectedCluster.id});
                                                                 setSelectedSidebarNode(null);
@@ -27310,15 +27380,15 @@
                                                         <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
                                                             <table className="w-full text-sm">
                                                                 <thead><tr className="border-b border-proxmox-border text-gray-500 text-xs">
-                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsStore') || 'Store'}</th><th className="text-left p-3">{t('pbsRemote') || 'Remote'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
+                                                                    <th className="text-left p-3">{t('id') || 'ID'}</th><th className="text-left p-3">{t('pbsSyncDirection') || 'Direction'}</th><th className="text-left p-3">{t('source') || 'Source'} → {t('target') || 'Target'}</th><th className="text-left p-3">{t('schedule') || 'Schedule'}</th><th className="text-left p-3">{t('lastRun') || 'Last Run'}</th><th className="text-left p-3">{t('status') || 'Status'}</th><th className="text-left p-3">{t('pbsNextRun') || 'Next Run'}</th>
                                                                     {isAdmin && <th className="text-right p-3">{t('actions') || 'Actions'}</th>}
                                                                 </tr></thead>
                                                                 <tbody>
-                                                                    {(pbsJobs.sync || []).map((job, i) => (
+                                                                    {(pbsJobs.sync || []).map((job, i) => { const ends = pbsSyncEnds(job); return (
                                                                         <tr key={i} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover/30">
                                                                             <td className="p-3 text-white font-medium">{job.id}</td>
-                                                                            <td className="p-3 text-gray-300">{job.store}</td>
-                                                                            <td className="p-3 text-gray-400">{job.remote || '-'} / {job['remote-store'] || '-'}</td>
+                                                                            <td className="p-3"><PbsSyncDirection direction={job['sync-direction']} /></td>
+                                                                            <td className="p-3 text-gray-300">{ends.source} <span className="text-gray-500">→</span> {ends.target}</td>
                                                                             <td className="p-3 text-gray-400">{job.schedule || (t('manual') || 'manual')}</td>
                                                                             <td className="p-3 text-gray-500">{job['last-run-endtime'] ? fmtDate(job['last-run-endtime'] * 1000) : '-'}</td>
                                                                             <td className="p-3"><PbsRunState state={job['last-run-state']} /></td>
@@ -27331,7 +27401,7 @@
                                                                                 </td>
                                                                             )}
                                                                         </tr>
-                                                                    ))}
+                                                                    ); })}
                                                                 </tbody>
                                                             </table>
                                                         </div>
@@ -28813,6 +28883,9 @@
                                                                                             </div>
                                                                                         )}
                                                                                         {m.current_step && <div className="text-xs text-gray-500 mt-1">{m.current_step}</div>}
+                                                                                        {(m.warnings || []).map((w, i) => (
+                                                                                            <div key={i} data-v2p-warnings className="text-xs text-yellow-300 mt-1 flex items-start gap-1"><Icons.AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" /><span>{w}</span></div>
+                                                                                        ))}
                                                                                         {m.phase === 'awaiting_confirmation' && !haReadOnly && (
                                                                                             <div className="mt-2 flex items-center gap-2">
                                                                                                 <span className="text-xs text-amber-300 flex-1">{t('awaitingCutoverShort') || 'Ready to switch over — source still running.'}</span>
@@ -29754,6 +29827,7 @@
                                                                             </div>
                                                                             <div className="flex items-center gap-3">
                                                                                 {m.total_downtime_seconds != null && <span className="text-xs text-gray-500">{t('downtime')}: {m.total_downtime_seconds}s</span>}
+                                                                                {(m.warnings || []).length > 0 && <span data-v2p-warnings title={m.warnings.join('\n')} className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-500/20 text-yellow-300 flex items-center gap-1"><Icons.AlertTriangle className="w-3 h-3" />{t('migrationWarnings')}: {m.warnings.length}</span>}
                                                                                 <span className={`px-2 py-0.5 rounded text-xs font-semibold ${m.status === 'completed' ? 'bg-green-500/20 text-green-400' : m.status === 'failed' ? 'bg-red-500/20 text-red-400' : m.status === 'cancelled' ? 'bg-gray-500/20 text-gray-400' : 'bg-blue-500/20 text-blue-400'}`}>{m.status}</span>
                                                                             </div>
                                                                         </div>
@@ -29833,6 +29907,13 @@
                                                         </div>
                                                         {vmwareMigrationDetail.error && <div className="p-3 bg-red-500/10 border-t border-red-500/20 text-red-400 text-xs">{t('error')}: {vmwareMigrationDetail.error}</div>}
                                                         {vmwareMigrationDetail.status === 'completed' && <div className="p-3 bg-green-500/10 border-t border-green-500/20 text-green-400 text-xs">✓ {t('migrationCompleted')} VMID: {vmwareMigrationDetail.proxmox_vmid}{vmwareMigrationDetail.total_downtime_seconds ? ` - ${t('downtime')}: ${vmwareMigrationDetail.total_downtime_seconds}s` : ''}</div>}
+                                                        {/* LW Nov 2026 - what the run left undone, e.g. VirtIO drivers not injected (#1245) */}
+                                                        {(vmwareMigrationDetail.warnings || []).length > 0 && (
+                                                            <div data-v2p-warnings className="p-3 bg-yellow-500/10 border-t border-yellow-500/20 text-yellow-300 text-xs space-y-1">
+                                                                <div className="flex items-center gap-1.5 font-semibold"><Icons.AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />{t('migrationWarnings')}</div>
+                                                                {vmwareMigrationDetail.warnings.map((w, i) => <div key={i}>{w}</div>)}
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 )}
                                                 
@@ -29885,7 +29966,7 @@
                                         clusterGroups={clusterGroups}
                                         topGuests={topGuests}
                                         onSelectCluster={(cluster) => { setSelectedGroup(null); setSelectedCluster(cluster); }}
-                                        onSelectVm={(cluster, vmid, node, guest) => { setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
+                                        onSelectVm={(cluster, vmid, node, guest) => { askGuestDetail(cluster, guest || { vmid }); setSelectedGroup(null); setSelectedCluster(cluster); setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id}); setSelectedSidebarNode(null); setActiveTab('resources'); setResourcesSubTab('management'); }}
                                         onOpenSettings={() => setShowGroupSettings(selectedGroup)}
                                         authFetch={authFetch}
                                         API_URL={API_URL}
@@ -30385,6 +30466,7 @@
                                         addToast={addToast}
                                         onBulkMigrate={handleBulkMigrate}
                                         onOpenGuest={(cluster, guest) => {
+                                            askGuestDetail(cluster, guest);
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...guest, _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);
@@ -30403,6 +30485,7 @@
                                         addToast={addToast}
                                         onSelectCluster={setSelectedCluster}
                                         onSelectVm={(cluster, vmid, node, guest) => {
+                                            askGuestDetail(cluster, guest || { vmid });
                                             setSelectedCluster(cluster);
                                             setSelectedSidebarVm({...(guest || { vmid, node, type: 'qemu' }), _clusterId: cluster.id});
                                             setSelectedSidebarNode(null);

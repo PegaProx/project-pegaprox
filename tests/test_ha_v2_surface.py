@@ -73,6 +73,8 @@ def _fake_manager(api):
     m.config.name = CID
     m.host, m.api_port = '192.0.2.10', 8006
     m.is_connected = True
+    # the screenshot asks its node against the node list a real manager has (#1224)
+    m.nodes = {'n1': {'node': 'n1', 'status': 'online'}}
     return m
 
 

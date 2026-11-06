@@ -100,8 +100,10 @@ its own at the first login and keeps the password for what a token cannot do.
   node scripts, hardening and CVE checks, the self-fence agents of the 2-node HA, the
   transfer network check, file restore into containers and ESXi migration. Store an SSH
   key in the cluster settings (for root, or a user with `sudo`), or give single nodes a
-  root password of their own under *Node credentials*. ESXi migration signs in by
-  password only. A cluster can switch SSH off entirely.
+  root password of their own under *Node credentials*. ESXi migration offers the key
+  first and a password after it, as the SSH user of the cluster or else root, and the
+  target node itself needs port 22 of the ESXi host: the SSHFS mount runs there. A
+  cluster can switch SSH off entirely.
 - **root@pam**: raw PCI and USB devices on a VM, most LXC feature flags and creating or
   removing Ceph OSDs. Proxmox keeps these to `root@pam` and refuses them to every API
   token, `root@pam`'s own included; PegaProx needs the `root@pam` password for them.

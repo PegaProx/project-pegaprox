@@ -1,5 +1,5 @@
 Source: pegaprox
-Maintainer: Florian Paul Azim Hoberg <gyptazy@gyptazy.com>
+Maintainer: Florian Paul Azim Hoberg <gyptazy@pegaprox.com>
 Homepage: https://pegaprox.com
 Section: web
 Priority: optional
@@ -40,7 +40,9 @@ Depends: ${misc:Depends},
          python3-ldap3,
          python3-pyvmomi,
          python3-xenapi,
-         python3-defusedxml
+         python3-defusedxml,
+         python3-sqlcipher3,
+         sqlcipher
 Description: Multi-Cluster Manager for Proxmox VE
  PegaProx is a modern multi-cluster management platform for Proxmox VE.
  It provides centralized cluster management, automation,

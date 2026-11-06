@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from test_ha_ui import (BASE, LANGS, _App, _FakeServer, _blocks, _classes, _toasts,  # noqa: F401 (browser is a fixture)
+from test_ha_ui import (BASE, LANGS, NODE_METRICS, _App, _FakeServer, _blocks, _classes, _toasts,  # noqa: F401 (browser is a fixture)
                         browser)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -238,10 +238,10 @@ class _Clusters:
 def real_app(browser, api, seed):  # noqa: F811
     apps = []
 
-    def _open(user=None, c1=GUESTS_C1, c2=GUESTS_C2, **kw):
+    def _open(user=None, c1=GUESTS_C1, c2=GUESTS_C2, clock=False, **kw):
         who = user or seed.user('admin', role='admin')
         managers = _Clusters(api, c1, c2)
-        app = _App(browser, _Server(api.as_user(who), **kw))
+        app = _App(browser, _Server(api.as_user(who), **kw), clock=clock)
         app.pve = managers
         apps.append(app)
         return app
@@ -569,10 +569,268 @@ def test_runtime_the_overview_links_to_it_and_a_name_opens_the_guest(real_app, l
     page.wait_for_function('() => !document.querySelector("[data-all-guests]")', timeout=5000)
     page.get_by_text('web01').first.wait_for(timeout=5000)
     assert ('GET', '/api/clusters/c1/resources') in app.server.calls
+    if layout == 'modern':
+        # the guest itself, in the detail view of its cluster's list (#1229)
+        _panel(app, 'c1:100')
     # and back through the sidebar
     _open_table(app, layout)
     page.locator('.pp-sidebar button', has_text='All Clusters').first.click()
     page.wait_for_function('() => !document.querySelector("[data-all-guests]")', timeout=5000)
+    assert not app.errors, app.errors
+
+
+# Branch has a guest with the ID of web01 on Testi, on a node of its own, and enough guests
+# for a second page of the cluster's guest list (50 a page)
+TWIN = dict(_LOAD, vmid=100, name='erp-twin', type='qemu', status='running', node='b1', cpu=0.3)
+BRANCH = [TWIN] + GUESTS_C2 + [dict(_LOAD, vmid=1000 + i, name=f'branch-{i:02d}', type='qemu', status='stopped',
+                                    node='b2', cpu=0, mem=0, uptime=0) for i in range(60)]
+
+
+def _panel(app, key):
+    """The detail panel of the guest list once it shows the guest key (cluster:vmid), its name
+    on the screen and not below a page scrolled down to the row that was clicked."""
+    app.page.locator(f'[data-vm-detail-panel="{key}"]').wait_for(timeout=10000)
+    panel = app.page.locator('[data-vm-detail-panel]')
+    assert panel.count() == 1
+    box = panel.locator('h2').bounding_box()
+    assert box and 100 < box['y'] and box['y'] + box['height'] < 1000, box
+    return panel
+
+
+def _in_sight(row, name):
+    """Whether the row is inside the scroll box of its list and on the screen, below the header
+    and above the task bar (the bottom 40 px), and the name too."""
+    r, box, n = row.bounding_box(), row.locator('xpath=..').bounding_box(), name.bounding_box()
+    return (box['y'] - 1 <= r['y'] and r['y'] + r['height'] <= box['y'] + box['height'] + 1
+            and 100 < r['y'] and r['y'] + r['height'] <= 960 and 100 < n['y']), (r, box, n)
+
+
+def _guest_reads(app, mark, cid, node, kind, vmid):
+    """The guest reads since mark: all of cluster cid, the opened guest's on its own node."""
+    reads = [c[1] for c in app.server.calls[mark:] if re.match(r'^/api/clusters/[^/]+/vms/', c[1])]
+    assert all(r.startswith(f'/api/clusters/{cid}/') for r in reads), reads
+    mine = [r for r in reads if re.match(rf'^/api/clusters/[^/]+/vms/[^/]+/[a-z]+/{vmid}/', r)]
+    assert f'/api/clusters/{cid}/vms/{node}/{kind}/{vmid}/lock' in mine, reads
+    assert all(r.startswith(f'/api/clusters/{cid}/vms/{node}/{kind}/{vmid}/') for r in mine), mine
+
+
+def test_runtime_modern_opens_the_guest_itself_in_the_cluster_it_belongs_to(real_app):
+    """Modern has no guest view of its own: a name in All Guests opens the detail view of the
+    guest list of its cluster with that guest picked (#1229), not the cluster's card grid. With
+    the same ID on two clusters each opens its own guest."""
+    lists = {('GET', '/api/clusters/c1/resources'): (200, [dict(g) for g in GUESTS_C1]),
+             ('GET', '/api/clusters/c2/resources'): (200, [dict(g) for g in BRANCH])}
+    # the node cards of a cluster's overview take the full node figures
+    nodes = {n: dict(NODE_METRICS['pve1']) for n in ('pve1', 'pve2')}
+    app = real_app(layout='modern', c2=BRANCH, extra=lists, metrics=nodes)
+    page = app.page
+    # Testi was open before, so its guests are what the page has read last
+    page.get_by_text('Testi (Vienna)').first.click()
+    for _ in range(100):
+        if ('GET', '/api/clusters/c1/resources') in app.server.calls:
+            break
+        page.wait_for_timeout(100)
+    assert ('GET', '/api/clusters/c1/resources') in app.server.calls
+    page.wait_for_timeout(500)
+
+    _open_table(app, 'modern')
+    mark = len(app.server.calls)
+    page.locator('[data-all-guests-open="c2:100"]').click()
+    panel = _panel(app, 'c2:100')
+    assert panel.locator('h2').inner_text() == 'erp-twin'
+    head = re.sub(r'\s+', ' ', panel.locator('h2 + div').inner_text())
+    assert head == 'ID: 100 \u2022 QEMU VM \u2022 b1', head
+    # what the panel reads is the guest of Branch on its node, nothing of web01 on Testi
+    _guest_reads(app, mark, 'c2', 'b1', 'qemu', 100)
+    assert page.locator('[data-all-guests]').count() == 0
+    _shot(app, 'all-guests-modern-opens-guest')
+
+    # a guest past the first page of its list: that page, with the guest picked in it
+    _open_table(app, 'modern')
+    page.locator('[data-all-guests-search]').fill('branch-59')
+    _wait_rows(app, ['c2:1059'])
+    page.locator('[data-all-guests-open="c2:1059"]').click()
+    panel = _panel(app, 'c2:1059')
+    assert panel.locator('h2').inner_text() == 'branch-59'
+    picked = page.locator('div.cursor-pointer.border-l-proxmox-orange')
+    assert picked.count() == 1 and 'branch-59' in picked.inner_text() and picked.is_visible()
+    # in sight: in the list's own scroll box and on the screen, next to the guest's name
+    for _ in range(30):
+        if _in_sight(picked, panel.locator('h2'))[0]:
+            break
+        page.wait_for_timeout(100)
+    seen, boxes = _in_sight(picked, panel.locator('h2'))
+    assert seen, boxes
+    _shot(app, 'all-guests-modern-second-page')
+
+    # and the guest with the same ID on Testi, and a container there
+    for vmid, name, kind, node in ((100, 'web01', 'qemu', 'pve1'), (200, 'ct01', 'lxc', 'pve2')):
+        _open_table(app, 'modern')
+        mark = len(app.server.calls)
+        page.locator(f'[data-all-guests-open="c1:{vmid}"]').click()
+        panel = _panel(app, f'c1:{vmid}')
+        assert panel.locator('h2').inner_text() == name
+        head = re.sub(r'\s+', ' ', panel.locator('h2 + div').inner_text())
+        assert head == f'ID: {vmid} \u2022 {"QEMU VM" if kind == "qemu" else "LXC Container"} \u2022 {node}', head
+        _guest_reads(app, mark, 'c1', node, kind, vmid)
+    assert not app.errors, app.errors
+
+
+def _lists(c1, c2):
+    return {('GET', '/api/clusters/c1/resources'): (200, [dict(g) for g in c1]),
+            ('GET', '/api/clusters/c2/resources'): (200, [dict(g) for g in c2])}
+
+
+def _lit(page):
+    """The view the guest list of the cluster shows, by its lit button."""
+    return page.locator('button[title="Grid View"], button[title="List View"], button[title="Compact View"]') \
+        .evaluate_all('bs => bs.filter(b => b.className.includes("bg-proxmox-orange")).map(b => b.title)')
+
+
+def _wait(app, check, seconds=6):
+    for _ in range(int(seconds * 10)):
+        if check():
+            return True
+        app.page.wait_for_timeout(100)
+    return check()
+
+
+def test_runtime_modern_a_guest_its_cluster_no_longer_lists_leaves_the_view_to_the_user(real_app):
+    """All Guests listed the guest, the list of its cluster has it no more (moved or deleted in
+    between): the first read of that list ends the wait and says so. A view the user picks then
+    stays through the next change of the list, also when the guest is back in it (#1229)."""
+    nodes = {n: dict(NODE_METRICS['pve1']) for n in ('pve1', 'pve2')}
+    app = real_app(layout='modern', c2=[TWIN] + GUESTS_C2, extra=_lists(GUESTS_C1, GUESTS_C2), metrics=nodes,
+                   clock=True)
+    page = app.page
+    read = ('GET', '/api/clusters/c2/resources')
+    _open_table(app, 'modern')
+    page.locator('[data-all-guests-open="c2:100"]').click()
+    assert _wait(app, lambda: _lit(page) == ['Compact View'])
+    assert _wait(app, lambda: read in app.server.calls)
+    said = []
+    _wait(app, lambda: said.extend(_toasts(page)) or any('Guest 100' in s for s in said), seconds=3)
+    assert page.locator('[data-vm-detail-panel]').count() == 0
+
+    page.locator('button[title="Grid View"]').click()
+    assert _lit(page) == ['Grid View']
+    # the next poll: one guest changed and the guest that was asked for is back
+    reads = app.server.calls.count(read)
+    app.server.extra.update(_lists(GUESTS_C1, [TWIN, dict(GUESTS_C2[0], status='stopped', name='erp-old'),
+                                               GUESTS_C2[1]]))
+    page.clock.run_for(16000)
+    assert _wait(app, lambda: app.server.calls.count(read) > reads)
+    page.get_by_text('erp-old').first.wait_for(timeout=5000)
+    page.wait_for_timeout(300)
+    assert _lit(page) == ['Grid View']
+    _shot(app, 'all-guests-modern-guest-not-listed')
+    # the request ended with that first read, the guest back in the list is not picked behind the user
+    page.locator('button[title="Compact View"]').click()
+    page.get_by_text('Select a VM from the list').first.wait_for(timeout=5000)
+    assert page.locator('[data-vm-detail-panel]').count() == 0
+    assert [s for s in said if 'Guest 100' in s][:1] == [
+        'Guest 100 is not in the list of this cluster, it may have been moved or deleted'], said
+    assert not app.errors, app.errors
+
+
+def _overview(real_app, layout):
+    """The overview with ct01 on Testi and the guest with the ID of web01 on Branch among the top
+    guests and the guests without a backup job, both clusters in the group East."""
+    extra = _lists(GUESTS_C1, [TWIN] + GUESTS_C2)
+    extra[('GET', '/api/backup-coverage')] = (200, {'guests': [
+        {'cluster_id': cid, 'cluster_name': cname, 'vmid': g['vmid'], 'name': g['name'], 'type': g['type'],
+         'node': g['node'], 'status': g['status'], 'template': False, 'tags': []}
+        for cid, cname, g in (('c1', 'Testi', GUESTS_C1[3]), ('c2', 'Branch', TWIN))],
+        'clusters': [{'cluster_id': c, 'cluster_name': n, 'state': 'ok', 'count': 1, 'checked_at': 1791000000}
+                     for c, n in (('c1', 'Testi'), ('c2', 'Branch'))]})
+    extra[('GET', '/api/cluster-groups')] = (200, [{'id': 'g1', 'name': 'East', 'color': '#E86F2D'}])
+    return real_app(layout=layout, c2=[TWIN] + GUESTS_C2, extra=extra, clusters=[dict(C1, group_id='g1'),
+                    dict(C2, group_id='g1'), C3], metrics={n: dict(NODE_METRICS['pve1']) for n in ('pve1', 'pve2')})
+
+
+@pytest.mark.parametrize('where', ['top', 'backup', 'group'])
+def test_runtime_modern_a_guest_in_an_overview_opens_the_guest_itself(real_app, where):
+    """The top guests and the guests without a backup job of the overview, and the top guests of
+    a group, open the guest the way All Guests does in Modern (#1229): a container as a container,
+    and the guest with the ID of web01 on Branch as the one of Branch."""
+    app = _overview(real_app, 'modern')
+    page = app.page
+
+    def overview():
+        if where == 'group':
+            page.locator('.pp-sidebar button', has_text='East').first.click()
+        else:
+            page.locator('.pp-sidebar button', has_text='All Clusters').first.click()
+        if where == 'backup':
+            rows = page.locator('[data-backup-coverage-row]')
+            rows.first.wait_for(timeout=10000)
+            return lambda key, name: page.locator(f'[data-backup-coverage-row="{key}"]')
+        page.locator('tr[title="Click to open VM"]').first.wait_for(timeout=15000)
+        return lambda key, name: page.locator('tr[title="Click to open VM"]', has_text=name).first
+
+    for key, name, head, kind, node in (('c1:200', 'ct01', 'ID: 200 • LXC Container • pve2', 'lxc', 'pve2'),
+                                        ('c2:100', 'erp-twin', 'ID: 100 • QEMU VM • b1', 'qemu', 'b1')):
+        row = overview()(key, name)
+        row.scroll_into_view_if_needed()
+        mark = len(app.server.calls)
+        row.click()
+        panel = _panel(app, key)
+        assert panel.locator('h2').inner_text() == name
+        assert re.sub(r'\s+', ' ', panel.locator('h2 + div').inner_text()) == head
+        _guest_reads(app, mark, key.split(':')[0], node, kind, int(key.split(':')[1]))
+    _shot(app, f'overview-{where}-modern-opens-guest')
+    assert not app.errors, app.errors
+
+
+@pytest.mark.parametrize('layout', ['corporate', 'corporate-redesigned'])
+def test_runtime_the_corporate_layouts_open_an_overview_guest_in_their_own_view(real_app, layout):
+    """Corporate and Corporate Redesigned draw a guest view of their own: a guest without a backup
+    job opens there as before, and the list of its cluster it goes back to keeps its own view."""
+    app = _overview(real_app, layout)
+    page = app.page
+    row = page.locator('[data-backup-coverage-row="c1:200"]')
+    row.wait_for(timeout=10000)
+    row.scroll_into_view_if_needed()
+    mark = len(app.server.calls)
+    row.click()
+    page.locator('button[title="Back to List"]').first.wait_for(timeout=10000)
+    page.get_by_text('ct01').first.wait_for(timeout=5000)
+    _guest_reads(app, mark, 'c1', 'pve2', 'lxc', 200)
+    assert page.locator('[data-vm-detail-panel]').count() == 0
+    _shot(app, f'overview-backup-{layout}-opens-guest')
+    page.locator('button[title="Back to List"]').first.click()
+    assert _wait(app, lambda: page.get_by_text('Showing 1-4 of 4 Resources').count() > 0), \
+        'the guest list of the cluster did not come back'
+    page.wait_for_timeout(500)
+    # its table, not the split view the Modern request would have switched it to
+    assert page.get_by_text('VMs & Container (').count() == 0
+    assert page.locator('[data-vm-detail-panel]').count() == 0
+    _shot(app, f'overview-backup-{layout}-back-to-list')
+    assert not app.errors, app.errors
+
+
+def test_runtime_modern_in_a_narrow_window_the_panel_of_the_guest_comes_up(real_app):
+    """Below 1024 px the list sits above the panel: after the click the panel of the guest comes
+    up below the header, its name on the screen above the task bar (#1229)."""
+    nodes = {n: dict(NODE_METRICS['pve1']) for n in ('pve1', 'pve2')}
+    app = real_app(layout='modern', c2=BRANCH, extra=_lists(GUESTS_C1, BRANCH), metrics=nodes)
+    page = app.page
+    page.set_viewport_size({'width': 900, 'height': 1000})
+    _open_table(app, 'modern')
+    page.locator('[data-all-guests-search]').fill('branch-59')
+    _wait_rows(app, ['c2:1059'])
+    page.locator('[data-all-guests-open="c2:1059"]').click()
+    page.locator('[data-vm-detail-panel="c2:1059"]').wait_for(timeout=10000)
+    head = page.locator('[data-vm-detail-panel] h2')
+    top = page.evaluate('() => document.querySelector("header").getBoundingClientRect().bottom')
+
+    def seen():
+        box = head.bounding_box()
+        return box and top <= box['y'] and box['y'] + box['height'] <= 960
+
+    assert _wait(app, seen, seconds=3), (head.bounding_box(), top)
+    assert head.inner_text() == 'branch-59'
+    _shot(app, 'all-guests-modern-narrow')
     assert not app.errors, app.errors
 
 

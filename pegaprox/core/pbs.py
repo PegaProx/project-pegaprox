@@ -266,8 +266,11 @@ class PBSManager:
             if time.time() - self._ticket_time > 5400:  # 90 min
                 self.connect()
     
-    def api_get(self, path: str, params: dict = None, timeout: int = 30) -> dict:
-        """GET request to PBS API"""
+    def api_get(self, path: str, params: dict = None, timeout: int = 30, expected=()) -> dict:
+        """GET request to PBS API
+
+        `expected` are error statuses the caller handles itself, logged at debug only.
+        """
         self._ensure_ticket()
         try:
             url = f"{self.base_url}/{path.lstrip('/')}"
@@ -280,7 +283,8 @@ class PBSManager:
                     resp = self._session.get(url, params=params, timeout=timeout)
                     if resp.status_code == 200:
                         return resp.json()
-            logging.warning(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
+            log = logging.debug if resp.status_code in expected else logging.warning
+            log(f"[PBS:{self.name}] GET {path} → {resp.status_code}")
             return {'error': f"HTTP {resp.status_code}", 'status_code': resp.status_code}
         except Exception as e:
             logging.error(f"[PBS:{self.name}] GET {path} failed: {e}")
@@ -723,10 +727,34 @@ class PBSManager:
         return self.api_get(f'/nodes/localhost/tasks/{upid}/log')
     
     # ── Jobs ──
-    
+
+    # MK Nov 2026 (#801) - when a PBS before 3.3 last refused sync-direction (monotonic)
+    _sync_direction_refused = None
+
     def get_sync_jobs(self) -> dict:
-        """List sync jobs with their schedules and last-run status."""
-        return self.api_get('/admin/sync')
+        """List sync jobs of both directions with their schedules and last-run status.
+
+        PBS 3.3 added jobs that push, and /admin/sync lists only the pulling ones unless
+        sync-direction=all asks for every job. An older PBS has no such parameter (all its
+        jobs pull) and answers it with a 400, so the plain list is read instead. That
+        answer is kept for an hour, the jobs are polled every 30 s. The 400 is expected
+        there and no warning.
+        """
+        refused = self._sync_direction_refused
+        if refused is None or time.monotonic() - refused > 3600:
+            result = self.api_get('/admin/sync', params={'sync-direction': 'all'}, expected=(400,))
+            if isinstance(result, dict) and result.get('status_code') == 400:
+                result = self.api_get('/admin/sync')
+                if isinstance(result, dict) and isinstance(result.get('data'), list):
+                    self._sync_direction_refused = time.monotonic()
+        else:
+            result = self.api_get('/admin/sync')
+        rows = result.get('data') if isinstance(result, dict) else None
+        if isinstance(rows, list):
+            # PBS leaves the field out for its default, pull
+            result['data'] = [{**job, 'sync-direction': job.get('sync-direction') or 'pull'}
+                              if isinstance(job, dict) else job for job in rows]
+        return result
     
     def get_verify_jobs(self) -> dict:
         """List verify jobs with their schedules and last-run status."""
@@ -737,7 +765,7 @@ class PBSManager:
         return self.api_get('/admin/prune')
     
     def run_sync_job(self, job_id: str) -> dict:
-        """Manually trigger a sync job"""
+        """Manually trigger a sync job, pull or push (PBS looks the direction up by id)"""
         return self.api_post(f'/admin/sync/{job_id}/run')
     
     def run_verify_job(self, job_id: str) -> dict:
