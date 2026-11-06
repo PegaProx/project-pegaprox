@@ -7675,6 +7675,19 @@
         // Topbar bell button: shows unread count + popover (enable/disable, test,
         // recent inbox). Subscribes via SW + VAPID, persists subscription on the
         // server. Wake-up pushes hit the SW, which fetches /api/push/inbox.
+        // JB Nov 2026 - the blur of the Modern header makes the header what fixed means, so a catcher inside it ends at its
+        // lower edge. One stays for the header, one on the body takes the page: 49 is under the header, over the page.
+        // Corporate has no blur, its catcher covers the window already.
+        function HeaderDropdownCatcher({ onClose }) {
+            const blurred = document.body.getAttribute('data-layout') !== 'corporate';
+            return (
+                <>
+                    <div className="fixed inset-0 z-40" onClick={onClose} />
+                    {blurred && ReactDOM.createPortal(<div className="fixed inset-0" style={{ zIndex: 49 }} onClick={onClose} />, document.body)}
+                </>
+            );
+        }
+
         function PushBellButton({ authFetch, addToast, t }) {
             // clearing the inbox goes through the active like any change (#625)
             const { haReadOnly } = useAuth();
@@ -7827,7 +7840,7 @@
 
                     {open && (
                         <>
-                            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+                            <HeaderDropdownCatcher onClose={() => setOpen(false)} />
                             <div className="absolute right-0 top-full mt-2 w-80 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
                                 <div className="px-3 py-2 border-b border-proxmox-border flex items-center justify-between">
                                     <div className="text-sm font-semibold text-white">{t('notifications') || 'Notifications'}</div>
@@ -20985,7 +20998,7 @@
                     {/* Search Results Dropdown */}
                     {showGlobalSearch && globalSearchResults && (
                         <>
-                            <div className="fixed inset-0 z-40" onClick={() => setShowGlobalSearch(false)} />
+                            <HeaderDropdownCatcher onClose={() => setShowGlobalSearch(false)} />
                             <div className={`pp-search-results absolute top-full right-0 md:left-0 mt-2 w-[28rem] max-h-[32rem] overflow-y-auto z-50 ${isCorporate ? 'rounded-md border-2' : 'bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl'}`} style={isCorporate ? {background: '#243542', borderColor: '#49afd9', boxShadow: '0 8px 32px rgba(0,0,0,0.5)'} : {}}>
                                 {/* Header with count and prefix hints */}
                                 <div className="p-3 border-b border-proxmox-border">
@@ -21238,7 +21251,7 @@
                     
                     {showUserMenu && (
                         <>
-                            <div className="fixed inset-0 z-40" onClick={() => setShowUserMenu(false)} />
+                            <HeaderDropdownCatcher onClose={() => setShowUserMenu(false)} />
                             <div className="absolute right-0 top-full mt-2 w-56 bg-proxmox-card border border-proxmox-border rounded-xl shadow-xl z-50 overflow-hidden">
                                 <div className="p-3 border-b border-proxmox-border">
                                     <p className="font-medium text-white">{user?.display_name || user?.username}</p>
@@ -21574,7 +21587,7 @@
                                             </button>
                                             {showAddDropdown && (
                                                 <>
-                                                    <div className="fixed inset-0 z-40" onClick={() => setShowAddDropdown(false)} />
+                                                    <HeaderDropdownCatcher onClose={() => setShowAddDropdown(false)} />
                                                     <div className="absolute right-0 top-full mt-2 w-64 bg-proxmox-card border border-proxmox-border rounded-xl shadow-2xl z-50 overflow-hidden animate-scale-in">
                                                         {[
                                                             { id: 'proxmox', label: 'Proxmox VE', desc: t('pveClusterDesc') || 'Virtual machines & containers', icon: Icons.Server, color: 'text-orange-400', bg: 'bg-orange-500/10' },
