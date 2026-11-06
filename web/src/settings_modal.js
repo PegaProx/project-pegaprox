@@ -2708,6 +2708,8 @@
             const [showAddUser, setShowAddUser] = useState(false);
             const [editingUser, setEditingUser] = useState(null);
             const [userFilter, setUserFilter] = useState('');
+            // JB Nov 2026 - the Users folder filter and this one shared a state, each emptied the other's list
+            const [auditUserFilter, setAuditUserFilter] = useState('');
             const [userFolders, setUserFolders] = useState([]);
             const [showAddFolder, setShowAddFolder] = useState(false);
             const [newFolderName, setNewFolderName] = useState('');
@@ -4552,7 +4554,7 @@
             const uniqueActions = [...new Set(auditLogs.map(log => log.action))];
             
             const filteredLogs = auditLogs.filter(log => {
-                if (userFilter && log.user !== userFilter) return false;
+                if (auditUserFilter && log.user !== auditUserFilter) return false;
                 if (actionFilter && log.action !== actionFilter) return false;
                 return true;
             });
@@ -9243,8 +9245,8 @@
                                     <div className="flex items-center justify-between gap-4">
                                         <div className="flex items-center gap-3">
                                             <select
-                                                value={userFilter}
-                                                onChange={e => setUserFilter(e.target.value)}
+                                                value={auditUserFilter}
+                                                onChange={e => setAuditUserFilter(e.target.value)}
                                                 className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-white focus:outline-none focus:border-proxmox-orange"
                                             >
                                                 <option value="">{t('allUsers')}</option>
@@ -9265,7 +9267,7 @@
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <button
-                                                onClick={fetchAuditLogs}
+                                                onClick={() => fetchAuditLogs()}
                                                 className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
                                             >
                                                 <Icons.RefreshCw />
