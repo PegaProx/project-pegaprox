@@ -68,7 +68,8 @@ def test_runtime_a_click_inside_the_menu_does_not_open_the_row(open_app):
     app, page = _list(open_app)
     _open_menu(page, 'web00')
     box = page.locator('.cloud-menu').bounding_box()
-    page.mouse.click(box['x'] + 2, box['y'] + 2)
+    # the padding at the side: the very corner is outside the round border, and Firefox goes by that
+    page.mouse.click(box['x'] + 3, box['y'] + box['height'] / 2)
     page.wait_for_timeout(300)
     assert page.locator('.cloud-table-row', has_text='web00').count() == 1, 'the guest opened'
     assert not app.errors, app.errors
