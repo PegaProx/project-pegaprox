@@ -161,10 +161,10 @@ def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
         err = _read_capped(stderr).strip()
 
         # NS: exit code 22 = EINVAL, usually means mirroring not enabled on pool
-        if exit_code == 22:
-            if expect_json:
-                return {}, None
-            return '', None
+        # JB Nov 2026 - that reads as nothing to show, but an action it refused has not happened: a promote
+        # came back as a success and wrote its audit line, so a failover looked done
+        if exit_code == 22 and expect_json:
+            return {}, None
 
         if exit_code != 0:
             # rbd not installed
