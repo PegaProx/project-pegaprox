@@ -4784,6 +4784,13 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     return key_path
 
 
+def _qemu_open_reason(output):
+    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off
+    _, sep, reason = output.rpartition("}': ")
+    reason = reason.strip()
+    return reason[:300] if sep and reason else output[-300:]
+
+
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     """Remove temporary SSH key from Proxmox and ESXi."""
     if not key_path:
@@ -5461,7 +5468,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         qemu_ssh_works = True
         task.log("QEMU SSH driver: connection OK")
     else:
-        task.log(f"QEMU SSH driver test failed: {qtest_out[:200]}")
+        task.log(f"QEMU SSH driver test failed: {_qemu_open_reason(qtest_out)}")
         # Try alternative: qemu-img with simpler SSH URL syntax
         rc_qt2, out_qt2, err_qt2 = _pve_node_exec(pve_mgr, task.target_node,
             f"timeout 10 qemu-img info "
@@ -5566,7 +5573,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             task.log("HTTPS boot config written")
         else:
-            task.log(f"QEMU HTTPS test failed: {ht_out[:200]}")
+            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(ht_out)}")
     
     # ----------------------------------------------------------------
     # Method 3: SSHFS-backed boot (OpenSSH handles ESXi algorithms)
