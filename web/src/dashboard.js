@@ -23152,7 +23152,7 @@
                                                     />
                                                 ) : (<>
                                                 {/* Sub-Tab Navigation */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex items-center gap-1 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'}>
                                                     <button
                                                         onClick={() => setResourcesSubTab('management')}
                                                         className={isCorporate
@@ -23826,7 +23826,7 @@
                                                 {/* LW: Feb 2026 - sub-tab nav, corporate underline style */}
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {[
                                                         { id: 'schedules', label: t('scheduledActions') || 'Schedules', icon: Icons.Clock },
@@ -24766,7 +24766,7 @@
                                                             return (
                                                             <>
                                                                 {/* summary bar */}
-                                                                <div className="flex items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                                                                <div className="flex pp-wrap-narrow items-center gap-4 bg-proxmox-card border border-proxmox-border rounded-xl p-4">
                                                                     <div className="flex-1">
                                                                         <div className="flex items-center gap-2 mb-2">
                                                                             <span className="text-sm font-medium">{hardenNode}</span>
@@ -24978,7 +24978,7 @@
                                         {activeTab === 'reports' && (
                                             <div className="space-y-6">
                                                 {/* LW: use the same corp tab-strip as Automation/the other sections (was a one-off blue underline) */}
-                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex gap-2 border-b border-proxmox-border pb-2'}>
+                                                <div className={isCorporate ? 'corp-tab-strip' : 'flex pp-wrap-narrow gap-2 border-b border-proxmox-border pb-2'}>
                                                     {[
                                                         { id: 'summary', label: t('summary') || 'Summary', icon: Icons.BarChart },
                                                         { id: 'cve', label: t('cveScanner') || 'CVE Scanner', icon: Icons.Shield },
@@ -25844,7 +25844,7 @@
                                             <div className="space-y-4">
                                                 <div className={isCorporate
                                                     ? 'corp-tab-strip'
-                                                    : 'flex items-center gap-1 border-b border-proxmox-border pb-2'
+                                                    : 'flex pp-wrap-narrow items-center gap-1 border-b border-proxmox-border pb-2'
                                                 }>
                                                     {complianceSubs.map(sub => (
                                                         <button

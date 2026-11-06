@@ -1921,6 +1921,9 @@
            NS 2026-05-10: tighter padding (8/14), focus-visible ring, light-mode
            hover that doesn't tint the bg cyan. */
         .corp-tab-strip { border-bottom: 1px solid var(--corp-border-medium, #344955); display: flex; gap: 0; padding: 0 8px; background: transparent; }
+        /* JB Nov 2026 - the shell clips sideways (#727), so a tab or a button that does not fit is gone. From 1600 on these
+           stay on one line as they were. */
+        @media (max-width: 1599px) { .corp-tab-strip, .pp-wrap-narrow { flex-wrap: wrap; min-width: 0; } }
         .corp-tab-strip button { padding: 8px 14px; font-size: 12.5px; color: var(--corp-text-secondary, #adbbc4); border: none; background: none;
             cursor: pointer; margin-bottom: -1px; border-bottom: 2px solid transparent; white-space: nowrap; display: flex; align-items: center; gap: 6px;
             font-family: inherit; transition: color .12s, border-color .12s, background .12s; }
@@ -2616,6 +2619,11 @@
 
         /* LW: Feb 2026 - Corporate data-grid (dense table) */
         body[data-layout="corporate"] .corp-datagrid { border-collapse: collapse; width: 100%; }
+        /* JB Nov 2026 - the shell clips sideways (#727), so a data grid wider than its pane needs a scrollbar of its own.
+           Only where it can happen: above this the node tabs have the room, and a block table no longer fills its pane. */
+        @media (max-width: 1200px) {
+            body[data-layout="corporate"] .corp-datagrid { display: block; max-width: 100%; overflow-x: auto; }
+        }
         body[data-layout="corporate"] .corp-datagrid th { background: var(--corp-surface-0, #0e161b); color: #adbbc4; font-size: 11px; text-transform: uppercase;
             letter-spacing: 0.05em; font-weight: 600; padding: 6px 12px; border-bottom: 2px solid var(--corp-border-medium, #344955); position: sticky; top: 0; z-index: 2; }
         body[data-layout="corporate"] .corp-datagrid th:hover { color: #c8d8e4; cursor: pointer; }
@@ -6157,6 +6165,11 @@
         @media (max-width: 820px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-nic { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-nic-id { grid-column: 1 / -1; } }
         @media (max-width: 820px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-top, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-hw, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-ci { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
         @media (max-width: 520px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-top, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-hw, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-ci { grid-template-columns: minmax(0, 1fr); } }
+
+        /* the node tabs here lay their columns out for the width: they keep their table, and a phone keeps its scrolling one */
+        @media (min-width: 821px) and (max-width: 1200px) {
+            body[data-layout="corporate"][data-corp-variant="redesigned"] .corp-datagrid { display: table; max-width: none; overflow-x: visible; }
+        }
 
         /* -- 14. phones: the drawer and the wrapped header of #189 stay as they are -- */
         @media (max-width: 820px) {
