@@ -4784,6 +4784,12 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
     return key_path
 
 
+def _qemu_open_reason(output):
+    # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off
+    head, sep, reason = output.rpartition("}': ")
+    return reason.strip()[:300] if sep else output[-300:]
+
+
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
     """Remove temporary SSH key from Proxmox and ESXi."""
     if not key_path:
@@ -5566,7 +5572,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             task.log("HTTPS boot config written")
         else:
-            task.log(f"QEMU HTTPS test failed: {ht_out[:200]}")
+            task.log(f"QEMU HTTPS test failed: {_qemu_open_reason(ht_out)}")
     
     # ----------------------------------------------------------------
     # Method 3: SSHFS-backed boot (OpenSSH handles ESXi algorithms)
