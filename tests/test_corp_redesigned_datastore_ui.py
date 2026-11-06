@@ -102,7 +102,7 @@ class _DsServer(_GuardServer):
                  ('GET', '/api/clusters/c1/esxi-hosts'): (200, list(ESXI if esxi is None else esxi)),
                  ('GET', '/api/clusters/c1/esxi-hosts/e1/vms'): (200, ESXI_VMS),
                  ('GET', '/api/clusters/c1/templates/available'): (200, []),
-                 ('GET', '/api/clusters/c1/next-vmid'): (200, {'vmid': 900}),
+                 ('GET', '/api/clusters/c1/nextid'): (200, {'vmid': 900}),
                  ('GET', '/api/batch-restores'): (200, {'runs': []})}
         reads.update(extra or {})
         super().__init__(bundle=BUNDLE if bundle is None else bundle, extra=reads, **kw)

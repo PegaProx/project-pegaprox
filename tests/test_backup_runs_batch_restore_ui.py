@@ -394,7 +394,7 @@ def _restore_reads(post=None):
         ('GET', '/api/clusters/c1/datastores'): (200, DATASTORES),
         ('GET', '/api/clusters/c1/datastores/backupsrv/content'): (200, CONTENT),
         ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
-        ('GET', '/api/clusters/c1/next-vmid'): (200, {'vmid': 900}),
+        ('GET', '/api/clusters/c1/nextid'): (200, {'vmid': 900}),
         ('POST', '/api/clusters/c1/backup-restore/batch'): post or (202, {'run': _batch()}),
         ('GET', f'/api/batch-restores/{RUN_ID}'): (200, {'run': _batch()}),
         ('POST', f'/api/batch-restores/{RUN_ID}/cancel'): (200, {'run': dict(_batch(), cancelled_by='admin', may_cancel=False)}),
