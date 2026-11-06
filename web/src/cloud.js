@@ -2281,6 +2281,11 @@
                 if (!String(form.vmid).trim() || !form.time) return;
                 const body = { cluster_id: clusterId, vmid: Number(form.vmid), vm_type: form.vm_type, action: form.action, schedule_type: form.schedule_type, time: form.time };
                 if (form.schedule_type === 'once' && form.date) body.date = form.date;
+                // JB Nov 2026 - weekly was on offer with nothing to pick the days with, and the route wants them
+                if (form.schedule_type === 'weekly') {
+                    if (!(form.days || []).length) return;
+                    body.days = form.days;
+                }
                 mut.run('newsched', 'POST', '/api/schedules', body);
                 setShowNew(false); setForm({ vmid: '', vm_type: 'qemu', action: 'start', schedule_type: 'daily', time: '03:00', date: '' });
             };
@@ -2304,7 +2309,6 @@
                                         <td><CloudConnChip connected={isOn(s)} t={t} /></td>
                                         <CloudRowActions>
                                             {mut.acts && (<>
-                                            <CloudIconBtn icon="Play" title={t('cloud.runNow') || 'Run now'} onClick={() => mut.run('r' + s.id, 'POST', `/api/schedules/${s.id}/run`)} />
                                             <CloudIconBtn icon="Power" title={isOn(s) ? (t('disable') || 'Disable') : (t('enable') || 'Enable')} onClick={() => mut.run('t' + s.id, 'PUT', `/api/schedules/${s.id}`, { enabled: isOn(s) ? 0 : 1 })} />
                                             <CloudIconBtn icon="Trash2" danger title={t('delete') || 'Delete'} onClick={() => mut.run('d' + s.id, 'DELETE', `/api/schedules/${s.id}`, undefined, (t('cloud.confirmDelSchedule') || 'Delete this schedule?'))} />
                                             </>)}
@@ -2325,6 +2329,17 @@
                                 <CloudField label={t('cloud.colWhen') || 'Schedule'}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
                                 <CloudField label={t('cloud.colTime') || 'Time'}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
                             </div>
+                            {form.schedule_type === 'weekly' && <CloudField label={t('days') || 'Days'}>
+                                <div data-cloud-sched-days="" style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                                    {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
+                                        <label key={d} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                            <input type="checkbox" data-cloud-sched-day={d} checked={(form.days || []).includes(d)}
+                                                onChange={e => setForm({ ...form, days: e.target.checked ? [...(form.days || []), d] : (form.days || []).filter(x => x !== d) })} />
+                                            {t(d)}
+                                        </label>
+                                    ))}
+                                </div>
+                            </CloudField>}
                             {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate') || 'Date'}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
                         </CloudModal>
                     )}
