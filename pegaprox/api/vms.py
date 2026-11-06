@@ -5042,6 +5042,7 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
     
     if result['success']:
         # #194: apply Cloud-Init config to cloned QEMU VM (before first boot)
+        _ci_warn = ''
         if vm_type == 'qemu':
             ci_params = {}
             for ci_key in ('ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'ipconfig1', 'nameserver', 'searchdomain'):
@@ -5050,14 +5051,19 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
             if ci_params:
                 try:
                     upid = result.get('data')
-                    if upid:
-                        manager._wait_for_task(node, upid, timeout=600)
+                    if upid and not manager._wait_for_task(node, upid, timeout=600):
+                        raise RuntimeError('the clone task did not finish')
                     clone_node = data.get('target_node') or node
                     ci_url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{clone_node}/qemu/{newid}/config"
-                    manager._api_post(ci_url, data=ci_params)
+                    # JB Nov 2026 - all of it goes in this one request, so a refusal loses user, password, keys and
+                    # address together, and the guest comes up without them while the clone reads as a success
+                    ci_resp = manager._api_post(ci_url, data=ci_params)
+                    if ci_resp.status_code != 200:
+                        raise RuntimeError(f"HTTP {ci_resp.status_code} {str(getattr(ci_resp, 'text', '') or '')[:200]}")
                     logging.info(f"[CLONE] Applied Cloud-Init config to VM {newid}: {list(ci_params.keys())}")
                 except Exception as e:
                     logging.warning(f"[CLONE] Cloud-Init config failed for {newid}: {e}")
+                    _ci_warn = f"The clone was started, but its Cloud-Init settings were not applied: {e}"
 
         # Audit log
         user = getattr(request, 'session', {}).get('user', 'system')
@@ -5076,6 +5082,7 @@ def clone_vm_api(cluster_id, node, vm_type, vmid):
             'newid': newid,
             'data': result.get('data'),
             **({'quota_warning': _qwarn} if _qwarn else {}),
+            **({'cloudinit_warning': _ci_warn} if _ci_warn else {}),
         })
     else:
         return jsonify({'error': result['error']}), 500
