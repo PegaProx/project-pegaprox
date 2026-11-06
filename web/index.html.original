@@ -3702,9 +3702,11 @@
 
             /* JB Nov 2026 - the shell clips sideways (#727), so the buttons at the end of a row of a page are gone on a
                phone. There are hundreds of these rows, so this goes by their shape. */
-            .pp-main-row .flex-1 { min-width: 0; }
+            .pp-main-row .flex-1, .cloud-content .flex-1 { min-width: 0; }
             .pp-main-row .flex.items-center.justify-between, .pp-main-row .flex.items-center.gap-1, .pp-main-row .flex.items-center.gap-2,
-            .pp-main-row .flex.items-center.gap-3, .pp-main-row .flex.gap-1, .pp-main-row .flex.gap-2, .pp-main-row .corp-toolbar {
+            .pp-main-row .flex.items-center.gap-3, .pp-main-row .flex.gap-1, .pp-main-row .flex.gap-2, .pp-main-row .corp-toolbar,
+            .cloud-content .flex.items-center.justify-between, .cloud-content .flex.items-center.gap-1, .cloud-content .flex.items-center.gap-2,
+            .cloud-content .flex.items-center.gap-3, .cloud-content .flex.gap-1, .cloud-content .flex.gap-2, .pp-main-row .cr-seg {
                 flex-wrap: wrap; row-gap: 6px; min-width: 0;
             }
 

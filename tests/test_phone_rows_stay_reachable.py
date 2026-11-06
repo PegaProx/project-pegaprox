@@ -17,13 +17,14 @@ from test_ha_ui import browser  # noqa: F401
 BUNDLE = pathlib.Path(__file__).resolve().parent.parent / 'web' / 'index.html'
 WIDTHS = [600, 412]
 CASES = [('corporate', v) for v in ('config', 'drift', 'perf', 'node_network', 'rep_costs', 'rep_power', 'topology', 'tasks', 'alerts')] + \
-        [('modern', v) for v in ('drift', 'rep_costs', 'rep_power', 'topology')]
+        [('modern', v) for v in ('drift', 'rep_costs', 'rep_power', 'topology')] + \
+        [('corporate-redesigned', v) for v in ('compliance', 'perf')] + [('cloud', v) for v in ('updates', 'tasks')]
 
 # a control is lost when its middle is out of the window and no box around it, itself inside the window, scrolls sideways
 LOST = '''() => {
   const out = [];
-  for (const n of document.querySelectorAll('.pp-main-row button, .pp-main-row a[href], .pp-main-row input, .pp-main-row select')) {
-    if (n.closest('.pp-sidebar')) continue;
+  for (const n of document.querySelectorAll('.pp-main-row button, .pp-main-row a[href], .pp-main-row input, .pp-main-row select, .cloud-content button, .cloud-content input')) {
+    if (n.closest('.pp-sidebar, .cloud-topbar')) continue;
     const r = n.getBoundingClientRect();
     if (r.width < 4 || r.height < 4 || getComputedStyle(n).visibility === 'hidden') continue;
     const x = (r.left + r.right) / 2;
