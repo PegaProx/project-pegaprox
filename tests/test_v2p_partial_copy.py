@@ -85,6 +85,12 @@ def test_the_next_method_may_still_finish_it(monkeypatch):
     assert not world.freed
 
 
+def test_the_last_method_reads_its_exit_status_too(monkeypatch):
+    world = _World(monkeypatch, f'PIPE=255/0\n{_dd(int(SIZE * 0.95))}', sshfs=f'RC=1/0\n{_dd(SIZE)}')
+    assert world.copy() == (None, None)
+    assert any('echo RC=$?/0' in cmd for cmd in world.sent), 'the command prints no status'
+
+
 def test_a_descriptor_is_not_copied_as_the_disk(monkeypatch):
     world = _World(monkeypatch, f'PIPE=0/0\n{_dd(512)}', stat={'desc': 512})
     assert world.copy() == (None, None)

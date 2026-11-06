@@ -7521,7 +7521,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; "
+                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
