@@ -3757,6 +3757,7 @@ class XcpngManager:
         time.sleep(20)  # give it time to shut down
 
         deadline = time.time() + timeout
+        host_ref = None
         while time.time() < deadline:
             try:
                 sock = socket.create_connection((host_ip, 443), timeout=5)
@@ -3764,7 +3765,11 @@ class XcpngManager:
                 # brief pause then verify XAPI responds
                 time.sleep(5)
                 api = self._api()
-                if api:
+                if api and host_ref is None:
+                    api, host_ref = self._resolve_host_ref(node_name)
+                if api and host_ref:
+                    # This RPC is forwarded to the named host, unlike cached pool state.
+                    api.host.get_servertime(host_ref)
                     self._cached_nodes = None
                     return True
             except Exception:
