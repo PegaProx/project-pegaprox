@@ -770,7 +770,7 @@ def test_unrecognized_disk_options_do_not_enter_node_commands(discard, ssd):
     expected = ',discard=ignore' if discard == 'ignore' else ''
     if ssd is True:
         expected += ',ssd=1'
-    assert task._disk_attach_opts('scsi') == expected
+    assert task._disk_attach_opts('scsi') == expected + ',cache=none'
 
 
 @pytest.mark.parametrize('bus', ['scsi', 'sata', 'ide', 'virtio'])
@@ -791,6 +791,7 @@ def test_imported_disk_attachment_keeps_options_and_failure_diagnostics(monkeypa
     v2p._attach_imported_disk(None, task, 1, bus,
                              "Successfully imported disk as 'unused0:local:120/vm-120-disk-1.raw'")
     suffix = ',discard=on' + (',ssd=1' if bus != 'virtio' else '')
+    suffix += ',cache=none' + (',iothread=1' if bus == 'virtio' else '')
     assert commands == [f'qm set {VMID} --{bus}1 local:120/vm-120-disk-1.raw{suffix} 2>&1']
     assert any('cannot attach node error' in line for line in task.log_lines)
 

@@ -232,7 +232,13 @@ class V2PMigrationTask:
 
     def _disk_attach_opts(self, disk_bus):
         """Options for final target disks, using the resolved bus (including Auto)."""
-        opts = f',aio={self.aio_mode}' if getattr(self, 'aio_mode', '') else ''
+        cache = self.disk_cache if self.disk_cache in (
+            'none', 'directsync', 'writethrough', 'writeback', 'unsafe') else ''
+        aio = getattr(self, 'aio_mode', '')
+        # Native AIO requires O_DIRECT, which buffered cache modes disable.
+        if aio == 'native' and cache in ('writethrough', 'writeback', 'unsafe'):
+            aio = 'threads'
+        opts = f',aio={aio}' if aio else ''
         # Emit only literal supported values: this suffix enters root shell commands
         # and qm.conf, and API callers need not have used the migration dialog.
         if self.disk_discard in ('on', 'ignore'):
@@ -240,6 +246,12 @@ class V2PMigrationTask:
         # Proxmox supports SSD emulation on IDE/SATA/SCSI, not VirtIO Block.
         if self.disk_ssd is True and disk_bus in ('ide', 'sata', 'scsi'):
             opts += ',ssd=1'
+        if cache:
+            opts += f',cache={cache}'
+        scsihw = getattr(self, '_detected_scsihw', self.scsihw_override)
+        if self.disk_iothread is True and (disk_bus == 'virtio' or (
+                disk_bus == 'scsi' and scsihw == 'virtio-scsi-single')):
+            opts += ',iothread=1'
         return opts
 
     def _redact(self, text):
@@ -875,6 +887,7 @@ def _run_v2p_migration(task):
             scsihw = hw.get('scsi_controller_pve', 'virtio-scsi-single')
         if task.disk_bus == 'scsi' and scsihw not in ('pvscsi', 'lsi', 'lsi53c810', 'megasas', 'virtio-scsi-pci', 'virtio-scsi-single'):
             scsihw = 'virtio-scsi-single'
+        task._detected_scsihw = scsihw
         
         # Disk bus: honor the user's wizard pick, else match VMware.
         # MK #597 — 'virtio' was missing from this allowlist, so an explicit virtio
@@ -923,7 +936,6 @@ def _run_v2p_migration(task):
             'vga': vga_type,
         }
         # optional fields — only set if user configured them
-        disk_cache = getattr(task, 'disk_cache', '') or ''
         if getattr(task, 'numa', False):
             pve_config['numa'] = 1
         if getattr(task, 'agent', True):
