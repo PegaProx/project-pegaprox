@@ -3561,6 +3561,8 @@
         .cloud-user-name { font-size:0.84rem; font-weight:500; max-width:140px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .cloud-user-btn svg { width:14px; height:14px; }
         .cloud-lang { display:inline-flex; align-items:center; font-size:0.8rem; }
+        /* with nine flags this bar alone is wider than a phone */
+        @media (max-width: 820px) { .cloud-topbar-actions, .cloud-lang, .cloud-lang > div { min-width:0; max-width:100%; } .cloud-lang > div { flex-wrap:wrap; } }
         .cloud-lang select { background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:5px 6px; font-size:0.8rem; }
         .cloud-lang button { color:var(--cloud-text-muted); }
 

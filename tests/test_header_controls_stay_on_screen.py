@@ -124,3 +124,14 @@ def test_runtime_the_page_starts_below_a_header_of_two_lines(open_at, engine, la
     assert found['main'] >= found['header'] - 1, found
     # one line is 109 in Modern and 71 in Cloud, so this is the second line
     assert found['header'] > {'modern': 120, 'cloud': 100}[layout], found
+
+
+@pytest.mark.parametrize('engine', ENGINES)
+@pytest.mark.parametrize('width', [820, 600, 412])
+def test_runtime_the_cloud_top_bar_stays_in_the_window_of_a_phone(open_at, engine, width):
+    """Cloud has no phone layout of its own, and its side navigation stays open as the user left it."""
+    app = open_at(engine, 'cloud', width=width)
+    page = app.page
+    page.wait_for_timeout(500)
+    seen = page.evaluate(OUT)
+    assert seen['roots'] == 1 and seen['out'] == [], seen
