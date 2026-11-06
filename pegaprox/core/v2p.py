@@ -4786,8 +4786,9 @@ def _setup_temp_ssh_key(pve_mgr, node, esxi_host, esxi_user, esxi_pass):
 
 def _qemu_open_reason(output):
     # JB Nov 2026 (#1269) - qemu-img repeats the whole json spec before it says why, which used up any cut-off
-    reason = output.rpartition("}': ")[2].strip()
-    return reason[:300] if reason else output[-300:]
+    _, sep, reason = output.rpartition("}': ")
+    reason = reason.strip()
+    return reason[:300] if sep and reason else output[-300:]
 
 
 def _cleanup_temp_ssh_key(pve_mgr, node, key_path, esxi_host, esxi_user):
