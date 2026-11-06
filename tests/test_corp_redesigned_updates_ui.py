@@ -1174,7 +1174,8 @@ def test_runtime_the_dialogs_hold_the_tab_key(open_app):
         assert inside
     page.keyboard.press('Escape')
     assert page.locator('[data-cr-upd-dialog]').count() == 0
-    assert page.evaluate('() => document.activeElement.getAttribute("data-cr-upd-open")') == 'start'
+    # the focus goes back in an effect, a moment after the dialog left the page
+    page.wait_for_function('() => document.activeElement.getAttribute("data-cr-upd-open") === "start"', timeout=3000)
     # the inner tabs go with the arrow keys
     page.locator('[data-cr-tab="upd-nodes"]').focus()
     page.keyboard.press('ArrowRight')

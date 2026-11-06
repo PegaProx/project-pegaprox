@@ -43,6 +43,11 @@ def _add_cluster(app, layout):
     return form
 
 
+# Beside the dialog, and below the top of the page: the connection banner takes that over the
+# backdrop a few seconds after the load, and a click there no longer reaches the backdrop
+BACKDROP = (4, 500)
+
+
 def _drag(page, start, end):
     page.mouse.move(*start)
     page.mouse.down()
@@ -60,11 +65,11 @@ def test_runtime_selecting_text_out_onto_the_backdrop_keeps_add_cluster_open(ope
     field.fill('lab-cluster-with-a-long-name')
     box = field.bounding_box()
     # press in the field, select towards its start and leave the dialog over the backdrop
-    _drag(page, (box['x'] + box['width'] - 8, box['y'] + box['height'] / 2), (4, 4))
+    _drag(page, (box['x'] + box['width'] - 8, box['y'] + box['height'] / 2), BACKDROP)
     assert form.is_visible(), 'the drag closed the dialog'
     assert field.input_value() == 'lab-cluster-with-a-long-name'
     # a click that starts and ends on the backdrop still closes it
-    page.mouse.click(4, 4)
+    page.mouse.click(*BACKDROP)
     form.wait_for(state='detached', timeout=5000)
     assert not app.errors, app.errors
 
