@@ -122,3 +122,5 @@ def test_runtime_the_page_starts_below_a_header_of_two_lines(open_at, engine, la
       return {header: h.bottom, main: main.getBoundingClientRect().top};
     }''')
     assert found['main'] >= found['header'] - 1, found
+    # one line is 109 in Modern and 71 in Cloud, so this is the second line
+    assert found['header'] > {'modern': 120, 'cloud': 100}[layout], found
