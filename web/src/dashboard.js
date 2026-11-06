@@ -14712,7 +14712,11 @@
             useEffect(() => { vmwareSelectedVmRef.current = vmwareSelectedVm; }, [vmwareSelectedVm]);
             useEffect(() => { vmwareSelectedMigrationRef.current = vmwareSelectedMigration; }, [vmwareSelectedMigration]);
 
-            const addToast = (message, type = 'success') => {
+            // JB Nov 2026 - the EVPN and ESXi views call this with (title, detail, type): the detail ended up as
+            // the type, so the reason a server gave was never shown and every toast came out in the info colour
+            const addToast = (message, typeOrDetail = 'success', typeAfterDetail) => {
+                const type = typeAfterDetail || typeOrDetail;
+                if (typeAfterDetail && typeOrDetail) message = `${message}: ${typeOrDetail}`;
                 const id = Date.now() + Math.random();
                 // the same message twice at once says nothing new (authFetch and its caller
                 // both report a standby refusal, #625). The newer one replaces the older and
