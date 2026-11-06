@@ -14376,6 +14376,19 @@
                 // the global views set no selection, so they never closed the drawer
                 sidebarTopology, sidebarWorldmap, sidebarXHM, sidebarMultiSdn, sidebarAutoInstall, sidebarGuests,
             ]);
+            // JB Nov 2026 - a dialog opened from the drawer opens under it, z-index 50 against 1200, so nothing in it
+            // can be reached. Same reasoning as above: watch for the dialog, not the dozens of buttons that open one.
+            useEffect(() => {
+                if (!mobileSidebarOpen) return;
+                const dialog = '.fixed.inset-0:not(.pointer-events-none):not(.z-40), .modal-backdrop, .corp-vm-modal-overlay';
+                const watch = new MutationObserver((changes) => {
+                    for (const c of changes) for (const n of c.addedNodes) {
+                        if (n.nodeType === 1 && (n.matches(dialog) || n.querySelector(dialog))) { setMobileSidebarOpen(false); return; }
+                    }
+                });
+                watch.observe(document.body, { childList: true, subtree: true });
+                return () => watch.disconnect();
+            }, [mobileSidebarOpen]);
             const sidebarResizing = useRef(false);
             const wsRef = useRef(null);
             const retryCount = useRef(0);  // unused but might need later
