@@ -3203,13 +3203,13 @@
         .cloud-nav-item-icon { display:inline-flex; }
         .cloud-nav-item-icon svg { width:18px; height:18px; }
         .cloud-nav-item-active { background:var(--cloud-surface-2); color:var(--cloud-accent); border-left-color:var(--cloud-accent); font-weight:600; }
-        .cloud-topbar { display:flex; align-items:center; justify-content:space-between; padding:var(--space-md) var(--space-lg); border-bottom:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-1); flex:0 0 auto; }
+        .cloud-topbar { display:flex; align-items:center; justify-content:space-between; padding:var(--space-md) var(--space-lg); border-bottom:1px solid var(--cloud-border-subtle); background:var(--cloud-surface-1); flex:0 0 auto; flex-wrap:wrap; row-gap:var(--space-sm); }
         .cloud-breadcrumb { display:flex; align-items:center; gap:var(--space-xs); font-size:0.85rem; color:var(--cloud-text-secondary); }
         .cloud-breadcrumb svg { width:16px; height:16px; }
         .cloud-breadcrumb-root { color:var(--cloud-text-muted); }
         .cloud-breadcrumb-sep { display:inline-flex; color:var(--cloud-text-muted); }
         .cloud-breadcrumb-leaf { color:var(--color-text); font-weight:600; }
-        .cloud-topbar-actions { display:flex; align-items:center; gap:var(--space-sm); }
+        .cloud-topbar-actions { display:flex; align-items:center; gap:var(--space-sm); flex-wrap:wrap; justify-content:flex-end; }
         .cloud-cluster-select { background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:var(--space-xs) var(--space-sm); font-size:0.85rem; }
         .cloud-btn { display:inline-flex; align-items:center; justify-content:center; gap:var(--space-xs); background:var(--cloud-surface-2); color:var(--color-text); border:1px solid var(--cloud-border-medium); border-radius:var(--radius-md); padding:var(--space-xs) var(--space-sm); font-size:0.85rem; cursor:pointer; }
         .cloud-btn:hover { background:var(--cloud-surface-3); }
@@ -3579,6 +3579,12 @@
            hidden until the viewport drops to phone size.
            ============================================================ */
         .pp-drawer-toggle, .pp-drawer-backdrop, .pp-drawer-close { display: none; }
+
+        /* JB Nov 2026 - the shell clips sideways (#727), so what does not fit into the header is gone and not a
+           scroll away, the user menu with its logout first. From 1600 on it stays on one line as it was. */
+        @media (max-width: 1599px) {
+            .pp-header-actions { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+        }
 
         @media (max-width: 820px) {
             /* The sidebar took 288px of a 412px screen. Make it slide over instead. */
