@@ -13823,6 +13823,15 @@ echo "AGENT_INSTALLED_OK"
                 
                 # Reconnect for reboot command
                 ssh = self._ssh_connect(node_ip)
+                # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
+                # a kernel update ended as success without its reboot
+                if not ssh:
+                    task.add_output(f"[ERROR] Could not connect to send the reboot / Keine Verbindung fuer den Neustart: {node_name}")
+                    task.error = "The reboot could not be sent: no SSH connection to the node"
+                    task.status = 'failed'
+                    task.phase = 'reboot_failed'
+                    task.completed_at = datetime.now()
+                    return
                 if ssh:
                     try:
                         # Check if root
