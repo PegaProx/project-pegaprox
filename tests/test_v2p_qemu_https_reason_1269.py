@@ -19,9 +19,13 @@ def test_the_reason_comes_without_the_spec_in_front():
 
 def test_output_of_another_shape_is_kept_from_its_end():
     other = 'x' * 500 + ' timed out'
-    assert v2p._qemu_open_reason(other).endswith(' timed out')
-    assert len(v2p._qemu_open_reason(other)) == 300
+    assert v2p._qemu_open_reason(other) == other[-300:]
     assert v2p._qemu_open_reason('') == ''
+
+
+def test_output_that_stops_after_the_spec_does_not_log_nothing():
+    cut = f"qemu-img: Could not open '{SPEC}': "
+    assert v2p._qemu_open_reason(cut) == cut[-300:]
 
 
 def test_a_very_long_reason_stays_a_log_line():
