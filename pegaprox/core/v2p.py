@@ -5251,6 +5251,14 @@ fi
     return True
 
 
+def _resolved_bios(task):
+    # JB Nov 2026 (#1268) - 'auto' is a value of its own here: it means take what was detected
+    override = getattr(task, 'bios_override', None)
+    if override and override != 'auto':
+        return override
+    return getattr(task, '_detected_bios', 'seabios')
+
+
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
                               datastore, vm_dir, descriptor_files, disk_bus, mnt_path,
                               v2p_tmpdir='/var/tmp'):
@@ -5283,7 +5291,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     # NS Apr 2026 — resolve bios at function entry. The live-pivot post-mirror block
     # references `bios` (line ~4055) which previously was only defined later in the
     # post-stop-and-restart fallback path. Live pivot returns before that.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
 
     # #562 — sshfs-boot requires the source already stopped (see docstring), so a
     # confirmation hold here would only add downtime: log-and-commit, never block.
@@ -7062,7 +7070,7 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     # NS Apr 2026: OVMF/EFI post-copy fix — same logic as NZD path.
     # Previously the offline copy path never reset bios/machine/efidisk after disk import,
     # so the corrupted initial efidisk0 from qm create stayed and the VM couldn't boot.
-    bios = getattr(task, 'bios_override', None) or getattr(task, '_detected_bios', 'seabios')
+    bios = _resolved_bios(task)
     if bios == 'ovmf':
         _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --bios ovmf --machine q35 2>&1", timeout=10)
