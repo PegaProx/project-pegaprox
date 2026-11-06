@@ -2397,7 +2397,9 @@ def _run_v2p_migration(task):
 # \EFI\Microsoft\Boot\bootmgfw.efi. Result: PXE/HTTP-boot loop and no usable disk
 # entry in the Boot Manager. Workaround: copy bootmgfw.efi to the removable-media
 # default path so OVMF auto-discovers it.
-def _register_uefi_fallback_loader(pve_mgr, task):
+def _register_uefi_fallback_loader(pve_mgr, task, guest_running=False):
+    # JB Nov 2026 (#1268) - guest_running: the guest has this disk open, so only look. A vfat mounted on both
+    # sides ends up damaged, for the same reason the live pivot leaves the VirtIO injection out
     try:
         vol_id = task.boot_volume()
         if not vol_id:
@@ -2412,6 +2414,10 @@ def _register_uefi_fallback_loader(pve_mgr, task):
         # #722 follow-up — a non-krbd RBD storage resolves to a librbd URI, not a block device, so the
         # loopback below would bail with 'volume not a block device'. Map it to /dev/rbdN (tracked so
         # the migration teardown unmaps it) and use that.
+        if vol_path.startswith('rbd:') and guest_running:
+            task.log("EFI fallback: not checked while the VM runs on this RBD volume. "
+                     "A Windows guest without EFI/BOOT/BOOTX64.EFI may need a boot entry after a restart")
+            return
         if vol_path.startswith('rbd:'):
             _mapped_efi = _map_rbd_uri_to_device(pve_mgr, task.target_node, vol_id, vol_path)
             if not _mapped_efi:
@@ -2419,7 +2425,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
                 return
             _rbd_map_sink(task).append(_mapped_efi)
             vol_path = _mapped_efi
-        task.log(f"EFI fallback: registering BOOTX64.EFI on {vol_path}")
+        task.log(f"EFI fallback: {'checking' if guest_running else 'registering'} BOOTX64.EFI on {vol_path}")
         # Combined script — losetup with 512b sector override, partprobe, identify ESP,
         # mount RW, copy loader, cleanup. Idempotent: if BOOTX64.EFI already exists with
         # same content, no-op. Read-only check first; write only if needed.
@@ -2438,7 +2444,7 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "[ -n \"$LOOP\" ] && losetup -d \"$LOOP\" 2>/dev/null||true; "
             "rm -rf \"$TMPDIR\"; }\n"
             "trap cleanup EXIT\n"
-            "LOOP=$(losetup -b 512 -fP --show \"$VOL\" 2>&1)\n"
+            f"LOOP=$(losetup {'-r ' if guest_running else ''}-b 512 -fP --show \"$VOL\" 2>&1)\n"
             "[ -b \"$LOOP\" ] || { echo \"losetup failed: $LOOP\"; exit 1; }\n"
             "# Wait briefly for partition nodes to materialize\n"
             "for i in 1 2 3 4 5; do ls -1 ${LOOP}p* 2>/dev/null | head -1 >/dev/null && break; sleep 1; done\n"
@@ -2450,15 +2456,19 @@ def _register_uefi_fallback_loader(pve_mgr, task):
             "if [ \"$PT\" = c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then ESP=$p; break; fi; "
             "[ -z \"$ESP\" ] && ESP=$p; done\n"
             "[ -n \"$ESP\" ] || { echo 'no ESP partition found'; exit 1; }\n"
-            "mount -t vfat -o rw \"$ESP\" \"$MNT\" || { echo 'mount failed'; exit 1; }\n"
+            f"mount -t vfat -o {'ro' if guest_running else 'rw'} \"$ESP\" \"$MNT\" || {{ echo 'mount failed'; exit 1; }}\n"
             "MGR=\"$MNT/EFI/Microsoft/Boot/bootmgfw.efi\"\n"
             "[ -f \"$MGR\" ] || { echo 'bootmgfw.efi not present (not a Windows ESP?)'; exit 0; }\n"
             "DST=\"$MNT/EFI/BOOT/BOOTX64.EFI\"\n"
             "if [ -f \"$DST\" ] && cmp -s \"$MGR\" \"$DST\"; then "
             "echo 'fallback loader already in place'; exit 0; fi\n"
-            "mkdir -p \"$MNT/EFI/BOOT\"\n"
-            "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n"
         )
+        if guest_running:
+            script += ("echo 'the VM is running, so nothing was written: without EFI/BOOT/BOOTX64.EFI "
+                       "this Windows guest may need a boot entry after a restart'\n")
+        else:
+            script += ("mkdir -p \"$MNT/EFI/BOOT\"\n"
+                       "cp -f \"$MGR\" \"$DST\" && sync && echo 'fallback loader installed'\n")
         sf = _write_node_script(pve_mgr, task.target_node, script,
                                 f"efi-fallback-{task.proxmox_vmid}")
         if not sf:
@@ -5259,6 +5269,13 @@ def _resolved_bios(task):
     return getattr(task, '_detected_bios', 'seabios')
 
 
+def _log_efidisk_result(task, rc, out, pre_keys):
+    if rc == 0:
+        task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+    else:
+        task.log(f"  ⚠ EFI disk could not be allocated, boot entries will not persist: {str(out or '').strip()[-200:]}")
+
+
 def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, esxi_pass,
                               datastore, vm_dir, descriptor_files, disk_bus, mnt_path,
                               v2p_tmpdir='/var/tmp'):
@@ -6696,16 +6713,16 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 _is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
                           or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
                 pre_keys = '1' if _is_win else '0'
-                _pve_node_exec(pve_mgr, task.target_node,
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             try:
                 _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, len(descriptor_files))
             except Exception as _se:
                 task.log(f"  sector-size emulation skipped: {_se}")
             try:
-                _register_uefi_fallback_loader(pve_mgr, task)
+                _register_uefi_fallback_loader(pve_mgr, task, guest_running=True)
             except Exception as _fe:
                 task.log(f"  EFI fallback loader skipped: {_fe}")
             # VirtIO injection intentionally NOT called here — VM is live (sshfs_boot
@@ -6906,10 +6923,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 efi_line = ''
 
             if not efi_line:
-                _pve_node_exec(pve_mgr, task.target_node,
+                rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
-                task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+                _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
             task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
         # NS Apr 2026 — apply 4K-LUN sector emulation + UEFI fallback loader on the
@@ -7101,10 +7118,10 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
             efi_line = ''
 
         if not efi_line:
-            _pve_node_exec(pve_mgr, task.target_node,
+            rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                 timeout=15)
-            task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
+            _log_efidisk_result(task, rc_alloc, out_alloc, pre_keys)
         task.log(f"  BIOS: ovmf, Machine: q35 ✓")
 
     # honour qcow2 selection while the VM is still stopped (disks at rest)
