@@ -3042,6 +3042,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'Kein Zugriff auf Ceph',
                 cephNoAccessDesc: 'Ihr Konto sieht nur einen Teil dieses Clusters. Ceph dient dem ganzen Cluster und wird nur Konten gezeigt, die ihn ganz sehen.',
+                cephReadFailed: "Ceph-Status nicht lesbar",
+                cephReadFailedDesc: "Keiner der erreichbaren Nodes hat auf die Ceph-Abfrage geantwortet. Das sagt nichts darüber, ob Ceph installiert ist. Bitte später erneut versuchen.",
                 cephInit: 'Ceph initialisieren',
 
                 // LW: RBD Mirroring - Mar 2026
@@ -14321,6 +14323,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'No access to Ceph',
                 cephNoAccessDesc: 'Your account sees part of this cluster. Ceph serves the whole cluster and is shown only to accounts that see all of it.',
+                cephReadFailed: "Could not read Ceph",
+                cephReadFailedDesc: "None of the reachable nodes answered the Ceph query. That says nothing about whether Ceph is installed. Please try again later.",
                 cephInit: 'Initialize Ceph',
 
                 // RBD Mirroring
@@ -25086,6 +25090,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: '无权访问 Ceph',
                 cephNoAccessDesc: '您的账户只能看到此集群的一部分。Ceph 服务于整个集群，仅向可查看整个集群的账户显示。',
+                cephReadFailed: "无法读取 Ceph",
+                cephReadFailedDesc: "可访问的节点都未响应 Ceph 查询。这并不能说明 Ceph 是否已安装。请稍后重试。",
                 cephInit: '初始化Ceph',
                 cephMirroring: '镜像',
                 cephMirrorMode: '镜像模式',
@@ -35589,6 +35595,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'Brak dostępu do Ceph',
                 cephNoAccessDesc: 'Twoje konto widzi tylko część tego klastra. Ceph obsługuje cały klaster i jest pokazywany tylko kontom, które widzą go w całości.',
+                cephReadFailed: "Nie można odczytać Ceph",
+                cephReadFailedDesc: "Żaden z osiągalnych węzłów nie odpowiedział na zapytanie o Ceph. Nie oznacza to, czy Ceph jest zainstalowany. Spróbuj ponownie później.",
                 cephInit: 'Zainicjuj Ceph',
                 cephMirroring: 'Mirroring',
                 cephMirrorMode: 'Tryb mirroringu',
@@ -45429,6 +45437,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: "Pas d'accès à Ceph",
                 cephNoAccessDesc: "Votre compte ne voit qu'une partie de ce cluster. Ceph sert tout le cluster et n'est affiché qu'aux comptes qui le voient en entier.",
+                cephReadFailed: "Impossible de lire Ceph",
+                cephReadFailedDesc: "Aucun des nœuds joignables n'a répondu à la requête Ceph. Cela ne dit rien sur l'installation de Ceph. Veuillez réessayer plus tard.",
                 cephInit: 'Initialiser Ceph',
 
                 // RBD Mirroring
@@ -56219,6 +56229,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'Sin acceso a Ceph',
                 cephNoAccessDesc: 'Su cuenta ve solo una parte de este clúster. Ceph sirve a todo el clúster y solo se muestra a las cuentas que lo ven completo.',
+                cephReadFailed: "No se pudo leer Ceph",
+                cephReadFailedDesc: "Ninguno de los nodos accesibles respondió a la consulta de Ceph. Esto no indica si Ceph está instalado. Inténtelo de nuevo más tarde.",
                 cephInit: "Inicializar Ceph",
                 cephMirrorAddPeer: "Agregar Peer",
                 cephMirrorAddSchedule: "Agregar programación",
@@ -66947,6 +66959,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'Sem acesso ao Ceph',
                 cephNoAccessDesc: 'Sua conta vê apenas uma parte deste cluster. O Ceph atende o cluster inteiro e só é mostrado a contas que o veem por completo.',
+                cephReadFailed: "Não foi possível ler o Ceph",
+                cephReadFailedDesc: "Nenhum dos nós acessíveis respondeu à consulta do Ceph. Isso não indica se o Ceph está instalado. Tente novamente mais tarde.",
                 cephInit: 'Inicializar Ceph',
 
                 // RBD Mirroring
@@ -77490,6 +77504,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: 'Ceph에 대한 접근 권한 없음',
                 cephNoAccessDesc: '이 계정은 이 클러스터의 일부만 볼 수 있습니다. Ceph는 클러스터 전체에 사용되므로 클러스터 전체를 볼 수 있는 계정에만 표시됩니다.',
+                cephReadFailed: "Ceph를 읽을 수 없음",
+                cephReadFailedDesc: "연결 가능한 노드 중 Ceph 쿼리에 응답한 노드가 없습니다. Ceph 설치 여부와는 무관합니다. 나중에 다시 시도하세요.",
                 cephInit: 'Ceph 초기화',
 
                 // RBD Mirroring
@@ -88254,6 +88270,8 @@
                 // LW Nov 2026 (#1218) - the Ceph views of an account confined to some guests
                 cephNoAccess: "Nessun accesso a Ceph",
                 cephNoAccessDesc: "Il tuo account vede solo una parte di questo cluster. Ceph serve l'intero cluster ed è mostrato solo agli account che lo vedono per intero.",
+                cephReadFailed: "Impossibile leggere Ceph",
+                cephReadFailedDesc: "Nessuno dei nodi raggiungibili ha risposto alla richiesta Ceph. Questo non indica se Ceph è installato. Riprova più tardi.",
                 cephInit: 'Inizializza Ceph',
 
                 // RBD Mirroring

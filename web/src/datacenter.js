@@ -1205,9 +1205,12 @@
                     } else if (res?.status === 403) {
                         // LW Nov 2026 (#1218) - refused to an account confined to some guests: said as such
                         setCephData({ available: false, denied: true });
+                    } else {
+                        setCephData({ available: false, read_failed: true });
                     }
                 } catch (e) {
                     console.error('Failed to load Ceph data:', e);
+                    setCephData({ available: false, read_failed: true });
                 }
                 setCephLoading(false);
             };
@@ -7183,6 +7186,12 @@
                                         <Icons.Lock className="w-12 h-12 mx-auto text-gray-600 mb-4" />
                                         <h3 className="text-lg font-semibold mb-2">{t('cephNoAccess')}</h3>
                                         <p className="text-gray-400">{t('cephNoAccessDesc')}</p>
+                                    </div>
+                                ) : cephData?.read_failed ? (
+                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
+                                        <Icons.Database className="w-12 h-12 mx-auto text-yellow-500 mb-4" />
+                                        <h3 className="text-lg font-semibold mb-2">{t('cephReadFailed')}</h3>
+                                        <p className="text-gray-400">{t('cephReadFailedDesc')}</p>
                                     </div>
                                 ) : !cephData || !cephData.available ? (
                                     <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
