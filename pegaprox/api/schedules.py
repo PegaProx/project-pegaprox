@@ -577,6 +577,7 @@ def execute_scheduled_action(action):
             url = f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot"
             response = mgr._create_session().post(url, data={'snapname': snap_name})
             logging.info(f"[SCHEDULER] Snapshot result: {response.status_code}")
+            _audit_scheduled(action_type, vmid, cluster_id, response)
             return
         else:
             logging.error(f"[SCHEDULER] Unknown action: {action_type}")
@@ -585,12 +586,22 @@ def execute_scheduled_action(action):
         response = mgr._create_session().post(url)
         logging.info(f"[SCHEDULER] {action_type} result: {response.status_code}")
         
-        # Log the action
-        log_audit('scheduler', f'scheduled.{action_type}', 
-                 f"Scheduled {action_type} executed on VM {vmid} in {cluster_id}")
+        _audit_scheduled(action_type, vmid, cluster_id, response)
         
     except Exception as e:
         logging.error(f"[SCHEDULER] Failed to execute {action_type}: {e}")
+        log_audit('scheduler', f'scheduled.{action_type}.failed',
+                  f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: {e}")
+
+
+def _audit_scheduled(action_type, vmid, cluster_id, response):
+    # JB Nov 2026 - it said executed whatever Proxmox answered, and a snapshot said nothing at all
+    if response.status_code == 200:
+        log_audit('scheduler', f'scheduled.{action_type}', f"Scheduled {action_type} executed on VM {vmid} in {cluster_id}")
+        return
+    logging.error(f"[SCHEDULER] {action_type} of {vmid} refused: HTTP {response.status_code}")
+    log_audit('scheduler', f'scheduled.{action_type}.failed',
+              f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: HTTP {response.status_code}")
 
 
 def _channel_ids(value):
