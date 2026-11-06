@@ -13641,9 +13641,9 @@ echo "AGENT_INSTALLED_OK"
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
         start_time = time.time()
         
-        # First wait a bit for the node to actually go down
-        # 30s seems to work, less and you get false positives
-        time.sleep(30)
+        # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
+        # next node. Online only counts once this one was seen down or has booted since the wait began
+        seen_down = False
         
         while time.time() - start_time < timeout:
             try:
@@ -13651,18 +13651,19 @@ echo "AGENT_INSTALLED_OK"
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    node_status = self.get_node_status()
-                    if node_name in node_status:
-                        if node_status[node_name]['status'] == 'online':
-                            self.logger.info(f"[OK] {node_name} is back online!")
-                            return True
+                    node = self.get_node_status().get(node_name)
+                    if not node or node.get('status') != 'online':
+                        seen_down = True
+                    elif seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time:
+                        self.logger.info(f"[OK] {node_name} is back online!")
+                        return True
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for {node_name}: {e}")
             
             time.sleep(10)
         
-        self.logger.error(f"Timeout waiting for {node_name} to come online")
+        self.logger.error(f"Timeout waiting for {node_name}: it did not restart and come back online")
         return False
     
     def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
