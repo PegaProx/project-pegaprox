@@ -641,7 +641,8 @@ def test_runtime_the_preview_is_a_calculation_and_cancel_sends_nothing(open_app)
         assert page.evaluate('() => !!document.activeElement.closest("[data-cr-sb-dialog]")')
     page.keyboard.press('Escape')
     assert page.locator('[data-cr-sb-dialog]').count() == 0
-    assert page.evaluate('() => document.activeElement && document.activeElement.dataset.crSbPreview') == '100|scsi0|ceph-b'
+    # the focus goes back in an effect, a moment after the dialog left
+    page.wait_for_function('() => document.activeElement && document.activeElement.dataset.crSbPreview === "100|scsi0|ceph-b"', timeout=3000)
     # Cancel too; nothing was sent either way
     btn.click()
     dlg.wait_for(timeout=4000)
