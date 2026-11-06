@@ -2925,7 +2925,8 @@ def get_backup_sla(cluster_id):
             if not vmid:
                 continue
             # vmtype from volid prefix: "vzdump-qemu-100..." or "vzdump-lxc-..."
-            volid = item.get('volid') or ''
+            # JB Nov 2026 - after the colon: a storage named lxc-backups made every VM on it a container
+            volid = (item.get('volid') or '').split(':', 1)[-1]
             if 'qemu' in volid:
                 vt = 'qemu'
             elif 'lxc' in volid or 'openvz' in volid:

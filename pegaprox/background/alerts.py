@@ -367,7 +367,7 @@ def check_and_send_alerts():
                                                         ts = int(it.get('ctime') or 0)
                                                         vmid = str(it.get('vmid') or '')
                                                         if not ts or not vmid: continue
-                                                        volid = it.get('volid') or ''
+                                                        volid = (it.get('volid') or '').split(':', 1)[-1]
                                                         vt = 'qemu' if 'qemu' in volid or '/vm/' in volid else \
                                                              'lxc' if 'lxc' in volid or '/ct/' in volid else ''
                                                         if not vt: continue
