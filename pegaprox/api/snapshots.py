@@ -118,10 +118,14 @@ def _resolve_targets(mgr, policy):
     """
     targets = []
     try:
-        resources = mgr.get_vm_resources() or []
+        resources = mgr.get_vm_resources()
     except Exception as e:
         logging.warning(f"[snap-sched] get_vm_resources failed: {e}")
         raise TargetResolutionFailed(str(e)) from e
+    # JB Nov 2026 - a read that timed out comes back as an empty list that says so, and `or []` threw that away
+    if getattr(resources, 'unavailable', False):
+        raise TargetResolutionFailed(getattr(resources, 'text', '') or 'the guest list could not be read')
+    resources = resources or []
 
     if policy['target_type'] == 'vm':
         wanted = {x.strip() for x in (policy['target_value'] or '').split(',') if x.strip()}
@@ -416,6 +420,7 @@ def _execute_policy(policy_id, force=False):
                      WHERE id=?''',
                   (datetime.now().isoformat(), '\n'.join(log_lines),
                    'target resolution failed', run_id))
+        c.execute("UPDATE snapshot_policies SET last_run_status='failed' WHERE id=?", (policy_id,))
         db.conn.commit()
         return
     log_lines.append(f"resolved {len(targets)} target VMs")
