@@ -1330,9 +1330,7 @@ def _run_v2p_migration(task):
                 try: vmware_mgr.delete_migration_snapshot(task.vm_id)
                 except: pass
                 if task.remove_source:
-                    task.log("Deleting source VM on ESXi (remove_source=true)")
-                    try: vmware_mgr.delete_vm(task.vm_id)
-                    except Exception as _e: task.log(f"  delete_vm failed: {_e}")
+                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
 
                 task.set_phase('verify')
                 time.sleep(5)
@@ -2133,13 +2131,7 @@ def _run_v2p_migration(task):
                         task.log(f"  Snapshot cleanup of '{sn}' failed: {_ce}")
 
                 if task.remove_source:
-                    task.log("Powering off + deleting source VM on ESXi...")
-                    try:
-                        vmware_mgr.vm_power_action(task.vm_id, 'stop')
-                        time.sleep(3)
-                        vmware_mgr.delete_vm(task.vm_id)
-                    except Exception as _e:
-                        task.log(f"  Source-VM cleanup failed: {_e}")
+                    _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=True)
 
                 task.set_phase('verify')
                 time.sleep(5)
@@ -2295,8 +2287,7 @@ def _run_v2p_migration(task):
         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
         task.log("SSHFS unmounted")
         if task.remove_source:
-            task.log("Removing source VM from VMware...")
-            vmware_mgr.delete_vm(task.vm_id)
+            _remove_source_once_target_runs(pve_mgr, vmware_mgr, task)
         
         task.set_phase('completed')
         dt_msg = f" (downtime: {task.total_downtime_seconds:.1f}s)" if task.total_downtime_seconds else ""
@@ -3390,6 +3381,28 @@ def _pve_vm_status(pve_mgr, node, vmid):
     except Exception:
         pass
     return ''
+
+
+def _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=False, wait=60, poll=2):
+    # JB Nov 2026 - these paths started the target without reading the answer, and then deleted the source
+    # either way. Only a target that runs is a reason to let go of the copy that is known to work
+    deadline = time.monotonic() + wait
+    while _pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) != 'running':
+        if time.monotonic() >= deadline:
+            task.log("remove_source is set, but the target VM does not run - the source VM stays on ESXi, "
+                     "delete it there once the target runs")
+            return False
+        time.sleep(poll)
+    task.log("Deleting source VM on ESXi (remove_source=true)")
+    try:
+        if power_off:
+            vmware_mgr.vm_power_action(task.vm_id, 'stop')
+            time.sleep(3)
+        vmware_mgr.delete_vm(task.vm_id)
+    except Exception as e:
+        task.log(f"  Source-VM cleanup failed: {e}")
+        return False
+    return True
 
 
 def _start_target_vm(pve_mgr, task, task_wait=300, run_wait=30, poll=2):
