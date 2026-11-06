@@ -298,9 +298,10 @@ def test_runtime_the_report_the_schedule_and_a_guest(open_app, layout):
     page.locator('[data-rtest-days]').select_option('60')
     # the open guest reads its own report with the new period too, so wait for the one this is about
     deadline = time.time() + 20
-    while time.time() < deadline and not any('recovery-report?days=60' in u for u in app.server.urls):
+    asked = lambda: any(re.search(r'recovery-report\?days=60(&|$)', u) for u in app.server.urls)
+    while time.time() < deadline and not asked():
         page.wait_for_timeout(100)
-    assert any('recovery-report?days=60' in u for u in app.server.urls)
+    assert asked()
     _shot(page, f'rtest_{layout}.png')
     assert not app.errors, app.errors
 

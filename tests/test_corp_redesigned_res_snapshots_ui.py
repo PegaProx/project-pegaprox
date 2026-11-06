@@ -234,13 +234,13 @@ def test_runtime_the_variant_sends_what_classic_sends(open_app):
     page.get_by_text('before_php84').first.wait_for(timeout=8000)
     page.once('dialog', lambda d: d.accept())
     page.locator('tr', has_text='pre-upgrade').locator('button').last.click()
-    _poll(lambda: _read_again(classic.server.reqs), page)
+    assert _poll(lambda: _read_again(classic.server.reqs), page), classic.server.reqs
     want = [r for r in classic.server.reqs]
     app = open_app()
     page = _open_tab(app)
     page.once('dialog', lambda d: d.accept())
     page.locator('[data-cr-snap-del]').first.click()
-    _poll(lambda: _read_again(app.server.reqs), page)
+    assert _poll(lambda: _read_again(app.server.reqs), page), app.server.reqs
     assert app.server.reqs == want, (app.server.reqs, want)
     assert app.errors == [] and classic.errors == []
 
