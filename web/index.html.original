@@ -6049,8 +6049,8 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-iso-err { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--cr-error); }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-iso-results { grid-template-columns: minmax(0, 1fr); margin-top: 6px; }
 
-        /* the node tabs here lay their columns out for the width: they keep their table */
-        @media (max-width: 1200px) {
+        /* the node tabs here lay their columns out for the width: they keep their table, and a phone keeps its scrolling one */
+        @media (min-width: 821px) and (max-width: 1200px) {
             body[data-layout="corporate"][data-corp-variant="redesigned"] .corp-datagrid { display: table; max-width: none; overflow-x: visible; }
         }
 

@@ -87,3 +87,21 @@ def test_runtime_more_actions_of_a_resource_card_opens_with_the_mouse(browser, w
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
+
+
+@pytest.mark.parametrize('layout,width,display', [('corporate-redesigned', 1024, 'table'), ('corporate-redesigned', 600, 'block'),
+                                                  ('corporate', 1024, 'block'), ('corporate', 1600, 'table')])
+def test_runtime_what_a_data_grid_is_at_each_width(browser, layout, width, display):  # noqa: F811
+    server = _GuardServer(bundle=BUNDLE.read_bytes(), layout=layout)
+    app = _GuardApp(browser, server, viewport=(width, 800))
+    try:
+        app.page.wait_for_timeout(300)
+        got = app.page.evaluate('''() => {
+          const t = document.createElement('table');
+          t.className = 'corp-datagrid';
+          document.body.appendChild(t);
+          return getComputedStyle(t).display;
+        }''')
+        assert got == display
+    finally:
+        app.close()
