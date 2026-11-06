@@ -16,7 +16,7 @@ import pytest
 from test_ha_ui import CLUSTER, VM, SSE_TOKEN, NODE_METRICS, _App, _FakeServer, _classes, browser  # noqa: F401
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['auditChainTitle', 'auditChainIntact', 'auditChainEdited', 'auditChainMissing', 'auditChainBroken',
         'auditChainTruncated', 'auditChainBadCheckpoints', 'auditChainPruned', 'auditChainAfterCheckpoint',
         'auditLegacyRows', 'auditLegacyChanged', 'auditLegacyUnchanged', 'complianceCheckedOf',

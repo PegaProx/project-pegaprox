@@ -33,7 +33,7 @@ from test_ha_ui import CLUSTER, NODE_METRICS, SSE_TOKEN, VM, _App, _FakeServer, 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHOTS = os.environ.get('PEGAPROX_SHOTS', '')
-LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it']
+LANGS = ['de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru']
 KEYS = ['sbStatusUnreadable', 'sbCannotJudge', 'sbCannotJudgeHint', 'sbMemberUnreadable', 'sbMemberMissing',
         'sbMemberDisabled', 'sbMemberInactive', 'sbMemberUnavailable', 'sbMemberNoSize', 'sbMemberLocal',
         'sbCtRunning', 'storageToleranceDesc']

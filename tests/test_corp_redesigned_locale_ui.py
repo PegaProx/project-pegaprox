@@ -29,7 +29,7 @@ LAYOUT = 'corporate-redesigned'
 ROOT = os.path.join(os.path.dirname(__file__), '..')
 SRC = os.environ.get('PEGAPROX_CR_SRC') or os.path.join(ROOT, 'web', 'src')
 # the brief's table: UI language -> BCP 47 tag
-TAGS = {'de': 'de', 'en': 'en', 'zh': 'zh-CN', 'pl': 'pl', 'fr': 'fr', 'es': 'es', 'pt': 'pt', 'ko': 'ko', 'it': 'it'}
+TAGS = {'de': 'de', 'en': 'en', 'zh': 'zh-CN', 'pl': 'pl', 'fr': 'fr', 'es': 'es', 'pt': 'pt', 'ko': 'ko', 'it': 'it', 'ru': 'ru'}
 NO_SIDEWAYS = '() => document.scrollingElement.scrollWidth <= window.innerWidth'
 COMPACT = "{ notation: 'compact', maximumFractionDigits: 1 }"
 # fmtDate's parts (constants.js), 24 h as the default time format

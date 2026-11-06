@@ -146,7 +146,7 @@ BAD = [
     ('ui_layout_lock', 5), ('ui_layout_lock', None), ('ui_layout_lock', ['modern']),
     ('ui_layout_lock', {'v': 'modern'}), ('ui_layout_lock', True),
     ('ui_language_lock', 'nl'), ('ui_language_lock', 'EN'), ('ui_language_lock', 'en-US'),
-    ('ui_language_lock', 'ru'), ('ui_language_lock', 7), ('ui_language_lock', None),
+    ('ui_language_lock', 'ja'), ('ui_language_lock', 7), ('ui_language_lock', None),
     ('ui_language_lock', ['en']),
     ('ui_lock_admins', 'maybe'), ('ui_lock_admins', 'truthy'), ('ui_lock_admins', 2),
     ('ui_lock_admins', -1), ('ui_lock_admins', 1.0), ('ui_lock_admins', None),

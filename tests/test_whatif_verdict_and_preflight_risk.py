@@ -370,9 +370,9 @@ def test_the_codes_have_translations_in_every_language():
     # a code the UI would have no wording for falls back to the English text, which is fine for
     # the few scoped variants; everything else has its key in all nine blocks
     for key in sorted(keys - {'pf_' + c for c in FREE_TEXT}):
-        assert len(re.findall(rf"\b{key}:", text)) == 9, key
+        assert len(re.findall(rf"\b{key}:", text)) == 10, key
     for code in whatif.VERDICT_TEXT:
-        assert len(re.findall(rf"\bwiv_{code}:", text)) == 9, code
+        assert len(re.findall(rf"\bwiv_{code}:", text)) == 10, code
 
 
 def test_a_count_of_one_reads_as_one():
@@ -385,6 +385,6 @@ def test_a_count_of_one_reads_as_one():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             'web', 'src', 'translations.js'), encoding='utf-8').read()
     for key in ("wiv_" + c for c in whatif.VERDICT_TEXT_ONE):
-        assert len(re.findall(r"^ +%s_one: '" % key, src, re.M)) == 9, key
+        assert len(re.findall(r"^ +%s_one: '" % key, src, re.M)) == 10, key
     for key in ('maintDlgMoves', 'maintDlgStay', 'maintDlgUnproven'):
-        assert len(re.findall(r"^ +%s_one: '" % key, src, re.M)) == 9, key
+        assert len(re.findall(r"^ +%s_one: '" % key, src, re.M)) == 10, key

@@ -157,7 +157,7 @@ def test_the_new_key_is_in_every_language_once_and_in_front_of_the_pinned_chain(
     starts = [(m.start(), m.group(1)) for m in re.finditer(r'^            ([a-z]{2}): \{$', src, re.M)]
     ends = [s for s, _ in starts[1:]] + [len(src)]
     blocks = {lang: src[s:e] for (s, lang), e in zip(starts, ends)}
-    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'}
+    assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it', 'ru'}
     texts = set()
     for lang, block in blocks.items():
         found = re.findall(r"^ {16}hardenNoopCount: '([^'\n]*)',$", block, re.M)
@@ -170,7 +170,7 @@ def test_the_new_key_is_in_every_language_once_and_in_front_of_the_pinned_chain(
         banner = block.find('the banners of a group that fails over automatically')
         if banner >= 0:
             assert block.index('hardenNoopCount:') < banner, lang
-    assert len(texts) == 9      # translated, not English copied into the other blocks
+    assert len(texts) == 10      # translated, not English copied into the other blocks
     assert 'hardenNoopCount' in _read('web', 'index.html')
 
 
@@ -191,7 +191,7 @@ def test_the_partial_rollback_key_is_in_every_language_next_to_its_neighbour():
         banner = block.find('the banners of a group that fails over automatically')
         if banner >= 0:
             assert block.index('hardenRollbackPartialCount:') < banner, lang
-    assert len(starts) == 9 and len(texts) == 9
+    assert len(starts) == 10 and len(texts) == 10
     assert 'hardenRollbackPartialCount' in _read('web', 'index.html')
 
 

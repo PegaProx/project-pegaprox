@@ -485,7 +485,7 @@ def test_runtime_the_card_shows_the_lock_and_saves_it(open_page):
     assert page.locator('#ui-language-lock').input_value() == 'en'
     assert not card.locator('input[type=checkbox]').is_checked()
     languages = page.locator('#ui-language-lock option').evaluate_all('os => os.map(o => o.value)')
-    assert languages == ['', 'de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl']
+    assert languages == ['', 'de', 'en', 'it', 'fr', 'es', 'pt', 'ko', 'zh', 'pl', 'ru']
 
     # Cloud for the admins too is a lock like any other
     page.locator('#ui-layout-lock').select_option('cloud')

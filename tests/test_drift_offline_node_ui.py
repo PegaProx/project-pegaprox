@@ -30,7 +30,7 @@ def _drift_tab_src():
 def test_the_label_reuses_a_key_every_language_has_once():
     assert "'unknown': t('nodeOffline')" in _drift_tab_src()
     found = len(re.findall(r'^\s*nodeOffline:', _read('web', 'src', 'translations.js'), re.M))
-    assert found == 9
+    assert found == 10
 
 
 def test_no_em_dash_in_what_this_change_added():

@@ -24,7 +24,7 @@ def _read(*parts):
         return fh.read()
 
 
-def test_every_new_key_is_in_all_nine_languages():
+def test_every_new_key_is_in_all_ten_languages():
     src = _read('web', 'src', 'translations.js')
     used = set(re.findall(r"t\('(drift[A-Za-z_]+)'\)", _read('web', 'src', 'dashboard.js')))
     used |= {f'driftCheck_{c}' for c in ('access_admin_role', 'access_token_expiry',
@@ -32,7 +32,7 @@ def test_every_new_key_is_in_all_nine_languages():
     new = {k for k in used if k.startswith(KEY_PREFIXES)}
     assert len(new) >= 30
     for key in sorted(new):
-        assert len(re.findall(rf'^\s*{key}:', src, re.M)) == 9, key
+        assert len(re.findall(rf'^\s*{key}:', src, re.M)) == 10, key
 
 
 def test_no_dash_in_what_this_change_added():
