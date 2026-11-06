@@ -13928,22 +13928,26 @@ echo "AGENT_INSTALLED_OK"
                         ssh = None
 
                 
-                task.add_output("Waiting for node to reboot / Warte auf Neustart...")
-                
-                # Wait for node to come back online
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                
-                if self._wait_for_node_online(node_name):
-                    task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
-                    task.back_online = True
+                # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
+                if not task.reboot_issued:
+                    task.add_output(f"No reboot sent to {node_name}, nothing to wait for / Kein Neustart, kein Warten")
                 else:
-                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
-                    task.error = "Node did not come back online in time"
-                    task.status = 'failed'
-                    task.phase = 'wait_timeout'
-                    task.completed_at = datetime.now()
-                    return
+                    task.add_output("Waiting for node to reboot / Warte auf Neustart...")
+                    
+                    # Wait for node to come back online
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    
+                    if self._wait_for_node_online(node_name):
+                        task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
+                        task.back_online = True
+                    else:
+                        task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
+                        task.error = "Node did not come back online in time"
+                        task.status = 'failed'
+                        task.phase = 'wait_timeout'
+                        task.completed_at = datetime.now()
+                        return
 
             # Done!
             task.status = 'completed'

@@ -7,7 +7,7 @@ pulled the next node while this one went down.
 from unittest.mock import MagicMock
 
 import pegaprox.core.manager as mgrmod
-from pegaprox.core.manager import PegaProxManager
+from pegaprox.core.manager import PegaProxManager, UpdateTask
 
 OLD_UPTIME = 3_000_000
 
@@ -88,3 +88,54 @@ def test_the_api_itself_going_away_and_coming_back(monkeypatch):
 def test_an_online_answer_without_an_uptime_proves_nothing(monkeypatch):
     m = _manager(monkeypatch, lambda t: _online(0))
     assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=60) is False
+
+
+# -- the update task only waits for a reboot it sent ------------------------------------------------
+
+def _task_manager(monkeypatch, ssh_execute, ssh=True):
+    monkeypatch.setattr(mgrmod, 'time', _Clock())
+    monkeypatch.setattr(mgrmod, '_read_capped', lambda s, *a, **k: '0')
+    client = MagicMock()
+    client.exec_command.return_value = (MagicMock(), MagicMock(), MagicMock())
+    m = PegaProxManager.__new__(PegaProxManager)
+    m.logger = MagicMock()
+    m.nodes_in_maintenance = {}
+    m._get_node_ip = lambda node: '10.0.0.5'
+    # the first connect is the update, the second one the reboot
+    conns = iter([client, client if ssh else None])
+    m._ssh_connect = lambda ip, **kw: next(conns)
+    m._ssh_execute = ssh_execute
+    m._schedule_update_clear = lambda node, task: None
+    m.connect_to_proxmox = lambda: True
+    # up the whole time with its old uptime, as a node that was not rebooted is
+    m.get_node_status = lambda: {'n1': _online(OLD_UPTIME)}
+    return m
+
+
+def _run_task(m):
+    task = UpdateTask('n1', reboot=True)
+    PegaProxManager._perform_node_update(m, 'n1', task)
+    return task
+
+
+def test_a_node_that_needs_no_reboot_does_not_fail_the_update(monkeypatch):
+    # needrestart is installed and says no restart: exit 0 on every command
+    m = _task_manager(monkeypatch, lambda ssh, cmd, task=None: (0, '', ''))
+    task = _run_task(m)
+    assert task.status == 'completed', task.error
+    assert task.reboot_issued is False and task.back_online is False
+
+
+def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
+    m = _task_manager(monkeypatch, lambda ssh, cmd, task=None: (0, '', ''), ssh=False)
+    task = _run_task(m)
+    assert task.status == 'completed', task.error
+    assert task.reboot_issued is False
+
+
+def test_a_sent_reboot_is_still_waited_for(monkeypatch):
+    # needrestart is not installed (exit 1): the reboot goes out, and this node never restarts
+    m = _task_manager(monkeypatch, lambda ssh, cmd, task=None: (1 if 'dpkg -s needrestart' in cmd else 0, '', ''))
+    task = _run_task(m)
+    assert task.reboot_issued is True
+    assert task.status == 'failed' and task.back_online is False
