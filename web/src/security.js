@@ -134,6 +134,11 @@
                     if(res.ok) {
                         setSettings(newSettings);
                         addToast(t('settingsSaved'), 'success');
+                    } else {
+                        // JB Nov 2026 - a refusal said nothing and the form kept showing the refused value
+                        const err = await res.json().catch(() => ({}));
+                        addToast(err.error || t('failedToSaveSettings'), 'error');
+                        fetchSettings();
                     }
                 } catch(e) {
                     addToast(t('failedToSaveSettings'), 'error');
