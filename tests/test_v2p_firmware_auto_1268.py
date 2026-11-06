@@ -144,3 +144,15 @@ def test_an_efidisk_that_failed_is_not_reported_as_allocated(monkeypatch):
 
 def test_an_efidisk_that_worked_says_so(monkeypatch):
     assert any('EFI disk allocated' in line for line in _offline_logs(monkeypatch, 0))
+
+
+@pytest.mark.parametrize('pending,ostype,want', [({'pre_enrolled_keys': '1'}, 'l26', '1'), ({'pre_enrolled_keys': '0'}, 'l26', '0'),
+                                                 (None, 'win11', '1'), (None, 'l26', '0'), ({}, 'l26', '0')])
+def test_the_efi_keys_follow_what_was_decided_for_this_guest(pending, ostype, want):
+    assert v2p._efidisk_pre_keys(SimpleNamespace(_pending_efidisk=pending, ostype=ostype)) == want
+
+
+def test_the_live_pivot_asks_for_them():
+    """The reporter's Secure Boot guest came up with pre-enrolled-keys=0 on this path."""
+    tree = ast.parse(inspect.getsource(v2p._do_sshfs_boot_migration))
+    assert [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, 'id', '') == '_efidisk_pre_keys']

@@ -5269,6 +5269,17 @@ def _resolved_bios(task):
     return getattr(task, '_detected_bios', 'seabios')
 
 
+def _efidisk_pre_keys(task):
+    # JB Nov 2026 - what the config step worked out from Secure Boot and the guest counts here too: the live
+    # pivot only looked at Windows, so Secure Boot ticked on a Linux guest came up without the keys
+    decided = (getattr(task, '_pending_efidisk', None) or {}).get('pre_enrolled_keys')
+    if decided:
+        return decided
+    is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
+        or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
+    return '1' if is_win else '0'
+
+
 def _log_efidisk_result(task, rc, out, pre_keys):
     if rc == 0:
         task.log(f"  EFI disk allocated (OVMF, pre-enrolled-keys={pre_keys})")
@@ -6710,9 +6721,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             rc_ef, _, _ = _pve_node_exec(pve_mgr, task.target_node,
                 f"grep -q '^efidisk0:' {conf_path}", timeout=5)
             if rc_ef != 0:
-                _is_win = str(getattr(task, 'ostype_resolved', '') or '').lower().startswith('win') \
-                          or str(getattr(task, 'ostype', '') or '').lower().startswith('win')
-                pre_keys = '1' if _is_win else '0'
+                pre_keys = _efidisk_pre_keys(task)
                 rc_alloc, out_alloc, _ = _pve_node_exec(pve_mgr, task.target_node,
                     f"qm set {task.proxmox_vmid} --efidisk0 {shlex.quote(task.target_storage)}:1,efitype=4m,pre-enrolled-keys={pre_keys} 2>&1",
                     timeout=15)
