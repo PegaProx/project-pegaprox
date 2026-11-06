@@ -3385,7 +3385,12 @@ def _pve_vm_status(pve_mgr, node, vmid):
 
 def _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=False, wait=60, poll=2):
     # JB Nov 2026 - these paths started the target without reading the answer, and then deleted the source
-    # either way. Only a target that runs is a reason to let go of the copy that is known to work
+    # either way. Only a target that runs is a reason to let go of the copy that is known to work. Without start
+    # after nothing here started it, and one somebody starts by hand in the meantime is no go-ahead either
+    if not getattr(task, 'start_after', True):
+        task.log("remove_source is set, but the target VM was not started here - the source VM stays on ESXi, "
+                 "delete it there once the target runs")
+        return False
     deadline = time.monotonic() + wait
     while _pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) != 'running':
         if time.monotonic() >= deadline:

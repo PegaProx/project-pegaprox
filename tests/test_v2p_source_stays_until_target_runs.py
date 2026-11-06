@@ -43,6 +43,18 @@ def test_it_powers_off_first_only_where_that_path_did(monkeypatch):
     assert _go(monkeypatch, ['stopped'], power_off=True, wait=0)[1] == []
 
 
+def test_without_start_after_it_neither_waits_nor_deletes(monkeypatch):
+    """A target somebody starts by hand during the wait is no go-ahead, and the migration should not sit there."""
+    def no_look(*a):
+        raise AssertionError('asked for the target status')
+    monkeypatch.setattr(v2p, '_pve_vm_status', no_look)
+    calls, logs = [], []
+    esxi = SimpleNamespace(delete_vm=lambda vm: calls.append('delete'))
+    task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, vm_id='vm-1', log=logs.append, start_after=False)
+    assert v2p._remove_source_once_target_runs(SimpleNamespace(), esxi, task) is False
+    assert calls == [] and any('stays on ESXi' in line for line in logs)
+
+
 def test_a_failed_delete_is_said_and_not_raised(monkeypatch):
     monkeypatch.setattr(v2p, '_pve_vm_status', lambda *a: 'running')
 
