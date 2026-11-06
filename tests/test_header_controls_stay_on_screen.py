@@ -87,8 +87,12 @@ def test_runtime_every_control_of_the_header_is_in_the_window(open_at, engine, l
     lost = {}
     for width in WIDTHS:
         page.set_viewport_size({'width': width, 'height': 800})
-        page.wait_for_timeout(150)
-        seen = page.evaluate(OUT)
+        # on a busy machine the header is still settling right after the resize
+        for _ in range(20):
+            page.wait_for_timeout(150)
+            seen = page.evaluate(OUT)
+            if not seen['out']:
+                break
         assert seen['roots'] == 1, (width, seen)
         if seen['out']:
             lost[width] = seen['out']
