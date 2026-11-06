@@ -986,19 +986,8 @@ def _run_xcpng_to_pve(task):
         # === ATTACHING ===
         task.set_phase('attaching')
 
-        for vol_info in imported_volumes:
-            try:
-                attach_data = {f'scsi{vol_info["index"]}': vol_info['vol_id']}
-                resp = tgt_mgr._api_post(
-                    f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
-                    data=attach_data
-                )
-                if resp.status_code == 200:
-                    task.log(f"Attached {vol_info['vol_id']} as scsi{vol_info['index']}")
-                else:
-                    task.log(f"Warning: attach scsi{vol_info['index']} returned {resp.status_code}")
-            except Exception as e:
-                task.log(f"Warning: couldn't attach disk: {e}")
+        if not _attach_pve_volumes(tgt_mgr, task, new_vmid, imported_volumes):
+            return
 
         # EFI disk for UEFI
         if bios == 'ovmf':
@@ -1431,12 +1420,16 @@ def _run_pve_to_xcpng(task):
         task.set_phase('attaching')
 
         # attach VDIs
+        attach_failed = []
         for vdi_info in created_vdis:
             try:
                 xapi.VBD.create(_xcp_disk_vbd(new_vm_ref, vdi_info))
                 task.log(f"Attached VDI {vdi_info['uuid']} as device {vdi_info['index']}")
             except Exception as e:
-                task.log(f"Warning: VBD attach failed for device {vdi_info['index']}: {e}")
+                attach_failed.append(f"device {vdi_info['index']}: {e}")
+        if attach_failed:
+            task.set_phase('failed', f"Disks could not be attached, the source VM stays: {'; '.join(attach_failed)}")
+            return
 
         # attach networks
         net_map = task.network_map or {}
@@ -1512,6 +1505,27 @@ def _run_pve_to_xcpng(task):
 # ============================================================
 # helpers
 # ============================================================
+
+def _attach_pve_volumes(tgt_mgr, task, new_vmid, volumes):
+    # JB Nov 2026 - these were warnings, and the run went on to destroy the source and say completed with a
+    # target that had no disk. A copy that is not attached is no copy yet
+    failed = []
+    for vol in volumes:
+        try:
+            resp = tgt_mgr._api_post(
+                f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
+                data={f'scsi{vol["index"]}': vol['vol_id']})
+            if resp.status_code == 200:
+                task.log(f"Attached {vol['vol_id']} as scsi{vol['index']}")
+            else:
+                failed.append(f"scsi{vol['index']}: HTTP {resp.status_code}")
+        except Exception as e:
+            failed.append(f"scsi{vol['index']}: {e}")
+    if failed:
+        task.set_phase('failed', f"Disks could not be attached to VM {new_vmid}, the source VM stays: {'; '.join(failed)}")
+        return False
+    return True
+
 
 def _pve_guest_identity(raw):
     """The config keys that tell a guest apart from a later one under the same VMID.
@@ -2225,19 +2239,8 @@ def _run_esxi_to_pve(task):
 
         # === ATTACHING ===
         task.set_phase('attaching')
-        for vol in imported_volumes:
-            try:
-                attach_data = {f'scsi{vol["index"]}': vol['vol_id']}
-                resp = tgt_mgr._api_post(
-                    f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
-                    data=attach_data
-                )
-                if resp.status_code == 200:
-                    task.log(f"Attached {vol['vol_id']} as scsi{vol['index']}")
-                else:
-                    task.log(f"Warning: attach scsi{vol['index']} returned {resp.status_code}")
-            except Exception as e:
-                task.log(f"Warning: attach failed: {e}")
+        if not _attach_pve_volumes(tgt_mgr, task, new_vmid, imported_volumes):
+            return
 
         task.progress = 95
         task.set_phase('completed')
