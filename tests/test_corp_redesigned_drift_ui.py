@@ -673,14 +673,15 @@ def test_runtime_the_panel_takes_the_keyboard_and_gives_it_back(open_app):
     assert panel.get_attribute('aria-modal') == 'false'
     page.keyboard.press('Escape')
     page.wait_for_function('() => !document.querySelector("[data-cr-sidepanel]")', timeout=3000)
-    assert page.evaluate('() => !!(document.activeElement.closest("tr") && document.activeElement.querySelector("[data-cr-drift-row=\\"40\\"]"))')
+    # the focus goes back in an effect, a moment after the panel left the page
+    page.wait_for_function('() => !!(document.activeElement.closest("tr") && document.activeElement.querySelector("[data-cr-drift-row=\\"40\\"]"))', timeout=3000)
     # the close button does the same; another row opens in the same panel
     _open_row(page, 41)
     _open_row(page, 37)
     assert page.locator('[data-cr-sidepanel]').count() == 1
     page.locator('[data-cr-sp-close]').click()
     page.wait_for_function('() => !document.querySelector("[data-cr-sidepanel]")', timeout=3000)
-    assert page.evaluate('() => !!(document.activeElement.closest("tr") && document.activeElement.querySelector("[data-cr-drift-row=\\"37\\"]"))')
+    page.wait_for_function('() => !!(document.activeElement.closest("tr") && document.activeElement.querySelector("[data-cr-drift-row=\\"37\\"]"))', timeout=3000)
     assert app.errors == []
 
 
