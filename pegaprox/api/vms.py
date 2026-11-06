@@ -15024,6 +15024,17 @@ def get_xcp_os_types(cluster_id):
     return jsonify(mgr.get_os_types())
 
 
+def _start_after_create_refused(config):
+    """403 when the new guest is to be started by someone who may create but not start."""
+    if not config.get('start'):
+        return None
+    from pegaprox.utils.rbac import has_permission
+    if has_permission(build_authz_user(request.session.get('user', ''), request.session), 'vm.start'):
+        return None
+    return jsonify({'error': 'Starting the guest after creation needs the vm.start permission',
+                    'code': 'MISSING_PERMISSION', 'required': 'vm.start'}), 403
+
+
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/qemu', methods=['POST'])
 @require_auth(perms=["vm.create"])
 def create_vm_api(cluster_id, node):
@@ -15049,6 +15060,9 @@ def create_vm_api(cluster_id, node):
             return jsonify({'error': 'Permission denied: xapi.vm.create'}), 403
 
     vm_config = request.json or {}
+    _serr = _start_after_create_refused(vm_config)
+    if _serr:
+        return _serr
 
     # NS #502 — tenant quota pre-flight (fail-open: a quota bug must never block a create)
     # MK Oct 2026 - under the tenant's lock, with a hold on the new guest until it shows, so
@@ -15131,6 +15145,9 @@ def create_container_api(cluster_id, node):
     
     manager = cluster_managers[cluster_id]
     ct_config = request.json or {}
+    _serr = _start_after_create_refused(ct_config)
+    if _serr:
+        return _serr
 
     # NS #502 — tenant quota pre-flight (fail-open)
     # MK Oct 2026 - under the tenant's lock with a hold, as the VM twin above

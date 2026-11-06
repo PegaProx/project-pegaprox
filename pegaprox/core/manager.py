@@ -14871,8 +14871,9 @@ echo "AGENT_INSTALLED_OK"
             if vm_config.get('onboot'):
                 data['onboot'] = '1'
             
-            # Start after creation
-            start_after = vm_config.get('start', False)
+            # JB Nov 2026 - the checkbox was read and then dropped; PVE starts it at the end of the create task
+            if vm_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after VM creation)
             ha_enabled = vm_config.get('ha_enabled', False)
@@ -15062,6 +15063,9 @@ echo "AGENT_INSTALLED_OK"
                 features.append(f"mount={mount}")
             if features:
                 data['features'] = ','.join(features)
+            
+            if ct_config.get('start'):
+                data['start'] = '1'
             
             # MK: HA config (will be applied after CT creation)
             ha_enabled = ct_config.get('ha_enabled', False)
