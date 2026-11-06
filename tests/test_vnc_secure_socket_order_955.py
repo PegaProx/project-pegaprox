@@ -110,7 +110,7 @@ def run(tmp_path_factory):
     harness.write_text(HARNESS, encoding='utf-8')
     # the WebCrypto globals came with Node 20, Node 18 keeps them behind a flag
     major = int(subprocess.run(['node', '-p', 'process.versions.node.split(".")[0]'], capture_output=True,
-                               text=True, timeout=60).stdout)
+                               text=True, timeout=60, check=True).stdout)
     flags = ['--experimental-global-webcrypto'] if major < 20 else []
     p = subprocess.run(['node', *flags, str(harness), SRC], capture_output=True, text=True, timeout=60)
     assert p.returncode == 0, p.stderr
