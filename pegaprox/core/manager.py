@@ -13933,7 +13933,10 @@ echo "AGENT_INSTALLED_OK"
                 task.phase = 'wait_online'
                 task.status = 'waiting_online'
                 
-                if self._wait_for_node_online(node_name):
+                # JB Nov 2026 - a running rolling update's reboot timeout counts here, this was always 600 s
+                rolling = getattr(self, '_rolling_update', None) or {}
+                reboot_timeout = rolling.get('reboot_timeout') if rolling.get('status') == 'running' else None
+                if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600)):
                     task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
                     task.back_online = True
                 else:
