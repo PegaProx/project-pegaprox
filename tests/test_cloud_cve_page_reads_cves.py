@@ -30,8 +30,10 @@ def _page(browser, node):  # noqa: F811
     ({'packages': [PLAIN], 'cves': [CVE]}, ['CVE-2026-1001'], ['curl'], False),
     ({'packages': [PLAIN], 'cves': []}, [], ['curl'], True),
     ({'packages': [SECURITY, PLAIN], 'cves': []}, ['libxml2', 'critical', '2.9'], ['curl'], False),
+    ({'packages': [SECURITY], 'cves': [], 'debsecan_available': True}, [], ['libxml2'], True),
     ({'packages': [], 'cves': []}, [], [], True),
-], ids=['cves-and-nothing-pending', 'cves-and-updates', 'only-plain-updates', 'no-debsecan-security-update', 'clean'])
+], ids=['cves-and-nothing-pending', 'cves-and-updates', 'only-plain-updates', 'no-debsecan-security-update',
+        'debsecan-found-none', 'clean'])
 def test_runtime_what_a_node_reports(browser, node, shown, hidden, clean):  # noqa: F811
     app, page = _page(browser, node)
     try:

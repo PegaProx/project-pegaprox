@@ -2354,7 +2354,8 @@
             // JB Nov 2026 - packages is always there and holds pending updates, so an empty one hid the CVEs behind it and a
             // node with CVEs read as clean. Without debsecan the security updates are the closest there is
             const nodeVulns = (n) => (n.cves && n.cves.length ? n.cves
-                : (n.vulnerabilities && n.vulnerabilities.length ? n.vulnerabilities : (n.packages || []).filter(p => p.security)));
+                : (n.vulnerabilities && n.vulnerabilities.length ? n.vulnerabilities
+                : (n.debsecan_available ? [] : (n.packages || []).filter(p => p.security))));
             const totalVulns = nodes.reduce((a, n) => a + (nodeVulns(n).length || Number(n.count) || 0), 0);
             return (
                 <div className="cloud-body">
