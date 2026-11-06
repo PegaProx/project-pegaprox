@@ -220,6 +220,12 @@
                     window.removeEventListener('resize', onScroll);
                 };
             }, [open]);
+            // the items are as tall as half a screen: the lower rows of a list open it upwards as far as needed
+            React.useLayoutEffect(() => {
+                if (!open || !menuRef.current) return;
+                const room = window.innerHeight - menuRef.current.offsetHeight - 8;
+                setPos(p => (p.top > room ? { ...p, top: Math.max(8, room) } : p));
+            }, [open]);
             const toggle = (e) => {
                 e.stopPropagation();
                 if (!open && btnRef.current) {
@@ -228,24 +234,40 @@
                 }
                 setOpen(o => !o);
             };
+            // the menu is the last thing on the page now, Tab would jump past it from the button
+            const onTriggerKey = (e) => {
+                if (!open || e.key !== 'Tab' || e.shiftKey || !menuRef.current) return;
+                const first = menuRef.current.querySelector('button:not(:disabled)');
+                if (first) { e.preventDefault(); first.focus(); }
+            };
+            const onMenuKey = (e) => {
+                if (e.key !== 'Tab') return;
+                const btns = menuRef.current.querySelectorAll('button:not(:disabled)');
+                if (e.target !== (e.shiftKey ? btns[0] : btns[btns.length - 1])) return;
+                e.preventDefault();
+                if (btnRef.current) btnRef.current.focus();
+                if (!e.shiftKey) setOpen(false);
+            };
             const visible = (items || []).filter(Boolean);
             return (
                 <>
                     {triggerNode ? (
-                        <button type="button" ref={btnRef} className="cloud-menu-trigger-plain" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-menu-trigger-plain" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             {triggerNode}
                         </button>
                     ) : triggerLabel ? (
-                        <button type="button" ref={btnRef} className="cloud-btn" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-btn" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             {triggerLabel} <Icons.ChevronDown />
                         </button>
                     ) : (
-                        <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} title={label || 'Actions'}>
+                        <button type="button" ref={btnRef} className="cloud-icon-btn" onClick={toggle} onKeyDown={onTriggerKey} title={label || 'Actions'}>
                             <Icons.MoreVertical />
                         </button>
                     )}
-                    {open && (
-                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left }} onClick={(e) => e.stopPropagation()}>
+                    {/* JB Nov 2026 - on the body: a hovered .cloud-card has a transform, which turns the card into
+                        what fixed means, and the overflow of the table card then cut this menu off */}
+                    {open && ReactDOM.createPortal(
+                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left }} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKey}>
                             {visible.map((it, i) => it.divider ? <div className="cloud-menu-sep" key={'s' + i} /> : (
                                 <button
                                     type="button"
@@ -258,7 +280,8 @@
                                     <span>{it.label}</span>
                                 </button>
                             ))}
-                        </div>
+                        </div>,
+                        document.body
                     )}
                 </>
             );

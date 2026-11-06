@@ -1200,6 +1200,12 @@ def _cloud_nav(page, label):
     page.locator('.cloud-nav-item', has_text=_exact(label)).first.click()
 
 
+def _cloud_menu_item(page, label):
+    # not a mouse click: a base bundle from before the menu moved to the body cuts it off inside the
+    # card, and Playwright scrolls the card to reach it, whose scroll event then closes the menu
+    page.locator('.cloud-menu-item', has_text=_exact(label)).first.dispatch_event('click')
+
+
 def _drift_drawn(page):
     # every read answered: the kind tiles, the policy checks and the list
     page.locator('[data-drift-kind="vm_config"]').first.wait_for(timeout=8000)
@@ -1390,7 +1396,7 @@ def go(app, layout, view):
         elif view in CFG_TABS:
             _cloud_nav(page, 'Virtual Machines')
             page.locator('.cloud-table-row', has_text='web01').first.locator('button').last.click()
-            page.locator('.cloud-menu-item', has_text=_exact('Edit')).first.click()
+            _cloud_menu_item(page, 'Edit')
             _config_drawn(page, view)
         elif view == 'topology':
             _cloud_nav(page, 'Topology')
@@ -1408,7 +1414,7 @@ def go(app, layout, view):
         elif view == 'vmperf':
             _cloud_nav(page, 'Virtual Machines')
             page.locator('.cloud-table-row', has_text='web01').first.locator('button').last.click()
-            page.locator('.cloud-menu-item', has_text=_exact('Metrics')).first.click()
+            _cloud_menu_item(page, 'Metrics')
             _charts_drawn(page, 9)
         return
     corp = layout.startswith('corporate')
