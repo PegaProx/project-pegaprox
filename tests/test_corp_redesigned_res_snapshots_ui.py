@@ -107,6 +107,11 @@ def _poll(cond, page, seconds=6):
     return cond()
 
 
+def _read_again(reqs):
+    # the list is read again after a delete: until then a copy of what was sent is one short
+    return len(reqs) >= 2 and reqs[-2][0].endswith('/delete') and reqs[-1][0].endswith('/overview')
+
+
 def _open_tab(app, wait='ok'):
     page = app.page
     _corp_cluster(page)
@@ -229,14 +234,13 @@ def test_runtime_the_variant_sends_what_classic_sends(open_app):
     page.get_by_text('before_php84').first.wait_for(timeout=8000)
     page.once('dialog', lambda d: d.accept())
     page.locator('tr', has_text='pre-upgrade').locator('button').last.click()
-    _poll(lambda: any(r[0].endswith('/delete') for r in classic.server.reqs), page)
+    _poll(lambda: _read_again(classic.server.reqs), page)
     want = [r for r in classic.server.reqs]
     app = open_app()
     page = _open_tab(app)
     page.once('dialog', lambda d: d.accept())
     page.locator('[data-cr-snap-del]').first.click()
-    _poll(lambda: any(r[0].endswith('/delete') for r in app.server.reqs), page)
-    _poll(lambda: len(app.server.reqs) == len(want), page)
+    _poll(lambda: _read_again(app.server.reqs), page)
     assert app.server.reqs == want, (app.server.reqs, want)
     assert app.errors == [] and classic.errors == []
 

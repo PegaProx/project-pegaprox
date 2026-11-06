@@ -27,6 +27,7 @@ import pytest
 from pegaprox import witness as wm
 from pegaprox.core import ha_vote as hv
 from pegaprox.core import ha_wire
+from test_ha_witness_install import _free_port
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 A, B, W = 'a' * 32, 'b' * 32, 'f' * 32
@@ -44,15 +45,6 @@ def _genesis():
     body = {'mode': hv.MODE_AUTO, 'lease_s': 20, 'voters': voters,
             'witness': {'id': W, 'public_key': _pub(W), 'site': 'dc3'}, 'quarantined': []}
     return hv.make_cfg(None, 1, A, body, lambda m: base64.b64encode(key.sign(m)).decode())
-
-
-def _free_port():
-    s = socket.socket()
-    s.bind(('127.0.0.1', 0))
-    port = s.getsockname()[1]
-    s.close()
-    assert not 5000 <= port <= 5300
-    return port
 
 
 class _Running:

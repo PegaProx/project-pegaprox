@@ -885,6 +885,8 @@ def test_runtime_enter_right_after_arrow_down_opens_the_row_below(open_app):
         panel.wait_for(timeout=4000)
         got = panel.locator('.cr-sp-title').inner_text()
         assert got == want, (i, got, want)
+        # the panel listens for Escape from the effect that also takes the focus
+        page.wait_for_function('() => !!document.activeElement?.closest("[data-cr-sidepanel]")', timeout=4000)
         page.keyboard.press('Escape')
         panel.wait_for(state='detached', timeout=4000)
         page.wait_for_function(f'() => document.activeElement?.dataset?.rowIndex === "{i}"', timeout=4000)
