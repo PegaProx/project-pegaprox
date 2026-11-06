@@ -73,6 +73,7 @@
     "pegaprox/api/clusters.py",
     "pegaprox/api/costs.py",
     "pegaprox/api/datacenter.py",
+    "pegaprox/api/pve_access.py",
     "pegaprox/api/dr_drill.py",
     "pegaprox/api/drift.py",
     "pegaprox/api/groups.py",
