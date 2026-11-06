@@ -2985,7 +2985,7 @@ def _inject_virtio_drivers(pve_mgr, task):
         # NS May 2026 — Bulk install via virtio-win-gt-x64.msi.
         # Cleanest approach: stage the official 4.4 MB MSI, register a
         # one-shot SYSTEM service that runs msiexec /quiet at first boot.
-        # The MSI itself handles cert import, ALL driver installs, qemu-ga,
+        # The MSI itself handles cert import, ALL driver installs and the
         # balloon service. Earlier we tried offline pnputil + RunOnce — that
         # ran into "registry corrupt" because RunOnce executes with the
         # logged-in user's standard token (no elevation), even for admins.
@@ -3003,6 +3003,11 @@ def _inject_virtio_drivers(pve_mgr, task):
         "  fi; "
         "done\n"
         "[ \"$MSI_OK\" -eq 1 ] || echo 'MSI_MISSING (skipping bulk install)'\n"
+        # JB Nov 2026 (#1247) - the driver MSI does not bring the guest agent, it is a package of its own on the ISO
+        "if [ -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" ]; then "
+        "  cp -f \"$ISO_MNT/guest-agent/qemu-ga-x86_64.msi\" \"$PEGADIR/qemu-ga-x86_64.msi\"; "
+        "  echo 'MSI_STAGED qemu-ga-x86_64.msi'; "
+        "else echo 'GUEST_AGENT_MSI_MISSING (skipping the guest agent)'; fi\n"
         # Register the one-shot service in the SYSTEM hive.
         # ImagePath runs as LocalSystem at next boot; cmd /c chains:
         #   msiexec /quiet → sc delete self → del MSI
@@ -3039,12 +3044,14 @@ def _inject_virtio_drivers(pve_mgr, task):
         # any manual `sc config` step on the customer side.
         "cmdline = (\n"
         "    'cmd.exe /c '\n"
-        "    '(msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
+        "    '(start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" '\n"
         "    'ADDLOCAL=ALL /quiet /norestart /l*v \"C:\\\\PegaProx\\\\msi.log\") & '\n"
+        "    '(if exist \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" start \"\" /wait msiexec /i \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" '\n"
+        "    '/quiet /norestart /l*v \"C:\\\\PegaProx\\\\qemu-ga.log\") & '\n"
         "    '(sc config vioscsi start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
         "    '(sc config viostor start= boot >> \"C:\\\\PegaProx\\\\bootarm.log\" 2>&1) & '\n"
         "    '(sc delete PegaProxFirstBoot >> \"C:\\\\PegaProx\\\\service.log\" 2>&1) & '\n"
-        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" 2>nul)'\n"
+        "    '(del \"C:\\\\PegaProx\\\\virtio-win-gt-x64.msi\" \"C:\\\\PegaProx\\\\qemu-ga-x86_64.msi\" 2>nul)'\n"
         ")\n"
         "for cs_name in ['ControlSet001','ControlSet002']:\n"
         "    cs = fc(h.root(), cs_name)\n"
