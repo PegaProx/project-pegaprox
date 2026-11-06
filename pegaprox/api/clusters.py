@@ -198,7 +198,7 @@ def add_cluster():
     _uerr = _ssh_user_error(data)
     if _uerr:
         return _uerr
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     _xn_err = _transfer_network_error(data)
@@ -434,7 +434,7 @@ def reconfigure_cluster(cluster_id):
         kept = getattr(old_mgr.config, 'ha_settings', None)
         data['ha_settings'] = dict(kept) if isinstance(kept, dict) else {}
     # the balancer cooldown is no connection setting either: one the dialog leaves out stays
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     data.setdefault('migration_cooldown', balancer_cooldown(getattr(old_mgr.config, 'migration_cooldown', None)))
@@ -2047,6 +2047,17 @@ ALLOWED_CONFIG_FIELDS = {
 BOOLEAN_CONFIG_FIELDS = {'proxlb_pins_auto_migrate', 'proxlb_pins_strict'}
 
 
+def _check_interval_error(data):
+    # JB Nov 2026 - it goes straight into the wait of the cluster's daemon loop: a string ended the loop for good,
+    # and 0 made it spin
+    if 'check_interval' not in data:
+        return None
+    value = data['check_interval']
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 1 <= value <= 86400:
+        return jsonify({'error': "'check_interval' must be seconds from 1 to 86400"}), 400
+    return None
+
+
 def _cooldown_error(data):
     """A 400 when the body sets migration_cooldown to anything but whole seconds in
     range. Checked before any field is applied, like the booleans above."""
@@ -2239,7 +2250,7 @@ def update_cluster_config(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     _xn_err = _transfer_network_error(data, mgr)
@@ -2294,7 +2305,7 @@ def update_cluster_config_live(cluster_id):
     for _bk in BOOLEAN_CONFIG_FIELDS:
         if _bk in data and type(data[_bk]) is not bool:
             return jsonify({'error': f"'{_bk}' must be a boolean"}), 400
-    _cd_err = _cooldown_error(data)
+    _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
     _xn_err = _transfer_network_error(data, mgr)

@@ -263,6 +263,16 @@ MAX_STEP_CHANNELS = 20
 MAX_AFTER_MINUTES = 10080  # cap a step delay at one week
 
 
+def _threshold_error(data):
+    """A 400 when the body sets a threshold that is no number: the alert loop compares it with each metric."""
+    if 'threshold' not in data:
+        return None
+    value = data['threshold']
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return jsonify({'error': "'threshold' must be a number"}), 400
+    return None
+
+
 def _sanitize_channels(raw):
     if not isinstance(raw, list):
         return []
@@ -315,6 +325,9 @@ def create_cluster_alert(cluster_id):
     # background loop never knew where to dispatch and which cluster the alert
     # belonged to. Persist both in the JSON config.
     channels = _sanitize_channels(data.get('channels'))
+    _te = _threshold_error(data)
+    if _te:
+        return _te
     metric = data.get('metric', 'cpu')
     is_rolling_update = metric == 'rolling_update'
     alert = {
@@ -361,6 +374,9 @@ def update_cluster_alert(cluster_id, alert_id):
     if not isinstance(data, dict):
         return jsonify({'error': 'The request body must be a JSON object'}), 400
     alerts = load_cluster_alerts()
+    _te = _threshold_error(data)
+    if _te:
+        return _te
     cluster_alerts = alerts.get(cluster_id, [])
 
     for alert in cluster_alerts:
@@ -889,6 +905,9 @@ def create_alert():
         return err
     config = load_alerts_config()
 
+    _te = _threshold_error(data)
+    if _te:
+        return _te
     import uuid
     new_alert = {
         'id': str(uuid.uuid4())[:8],
@@ -916,6 +935,9 @@ def create_alert():
 def update_alert(alert_id):
     """Update an alert"""
     data = request.json or {}
+    _te = _threshold_error(data)
+    if _te:
+        return _te
     config = load_alerts_config()
     
     for alert in config['alerts']:

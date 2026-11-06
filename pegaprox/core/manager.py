@@ -20473,7 +20473,9 @@ echo "AGENT_INSTALLED_OK"
                     self.logger.error(f"[MAINT] switching negative affinity rules back on failed: {e}")
 
             # Wait for next interval or stop signal
-            self.stop_event.wait(self.config.check_interval)
+            # one stored before the route checked it must not end this loop
+            _wait = self.config.check_interval
+            self.stop_event.wait(_wait if isinstance(_wait, (int, float)) and not isinstance(_wait, bool) and _wait > 0 else 300)
         
         self.logger.info(f"PegaProx daemon stopped for cluster: {self.config.name}")
     
