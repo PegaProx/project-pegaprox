@@ -5356,7 +5356,17 @@ class PegaProxManager:
             node_vms.sort(key=lambda x: x.get('mem', 0))
             placement = self._evacuation_placement()
 
+            # JB Nov 2026 - a cancel or an exit of maintenance takes the task off the node. This thread went on moving every
+            # guest off a node that was no longer in maintenance
+            in_maintenance = getattr(self, 'nodes_in_maintenance', None) or {}
+            started_here = in_maintenance.get(node_name) is task
             for vm in node_vms:
+                if started_here and in_maintenance.get(node_name) is not task:
+                    self.logger.info(f"[MAINT] {node_name} left maintenance, stopping its evacuation")
+                    task.pending_vms = []
+                    task.status = 'cancelled'
+                    task.current_vm = None
+                    return
                 vm_name = vm.get('name', 'unnamed')
                 vmid = vm.get('vmid')
 
