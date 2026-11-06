@@ -3965,7 +3965,7 @@
             useEffect(() => {
                 if (phase !== 'options' || firstVmid) return;
                 call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/nextid`)
-                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid) setFirstVmid(String(j.vmid)); })
+                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid && !j.range_exhausted) setFirstVmid(String(j.vmid)); })
                     .catch(() => {});
             }, [phase]);  // eslint-disable-line react-hooks/exhaustive-deps
 
