@@ -3792,8 +3792,10 @@ class XcpngManager:
         Returns same field names as Proxmox APT so the frontend renders correctly."""
         rc, out, _ = self._ssh_exec(node, "yum check-update 2>/dev/null", timeout=120)
         # yum check-update returns 100 if updates available, 0 if none
+        # JB Nov 2026 - anything else is no answer. An empty list read as up to date and a rolling update skipped the node,
+        # as the manager of Proxmox raises here
         if rc not in (0, 100):
-            return []
+            raise Exception(f"yum check-update on {node} failed (rc={rc})")
         pending = []
         past_header = False
         for line in out.splitlines():
