@@ -360,7 +360,7 @@ class XcpngManager:
                     interval_cfg = getattr(self.config, 'check_interval', 300)
                     auto_migrate = getattr(self.config, 'auto_migrate', False)
                     # a PegaProx standby does not balance (#625)
-                    if auto_migrate and ha.is_active() and now_t - self._last_balance_check >= interval_cfg:
+                    if getattr(self.config, 'enabled', True) and auto_migrate and ha.is_active() and now_t - self._last_balance_check >= interval_cfg:
                         try:
                             self.run_balance_check()
                         except Exception as be:
@@ -4973,9 +4973,10 @@ echo DONE""",
         threshold = getattr(self.config, 'migration_threshold', 30)
 
         # filter: online, not in maintenance, not excluded
+        excluded = getattr(self.config, 'excluded_nodes', None) or []
         active = {}
         for name, info in node_status.items():
-            if info.get('offline') or info.get('maintenance_mode'):
+            if info.get('offline') or info.get('maintenance_mode') or name in excluded:
                 continue
             active[name] = info
 
@@ -5086,6 +5087,13 @@ echo DONE""",
         vmid = vm_info['vmid']
         source = vm_info['node']
         started = time.time()
+        # JB Nov 2026 - the same dry run the cluster balancer has, a pool moved its guests anyway
+        if getattr(self.config, 'dry_run', False):
+            self.logger.info(f"[BALANCE] [DRY RUN] would migrate VM {vmid} ({vm_info.get('name','')}) "
+                             f"{source} -> {target_node}")
+            if why:
+                record_balance_move(self.id, vm_info, target_node, why, 'dry_run')
+            return True
         try:
             self.logger.info(f"[BALANCE] migrating VM {vmid} ({vm_info.get('name','')}) "
                              f"{source} -> {target_node}")
@@ -5123,8 +5131,8 @@ echo DONE""",
                                     'failed', duration=time.time() - started, note=f"failed: {error}")
         return False
 
-    def run_balance_check(self):
-        """Main balancing cycle - called from _run_loop."""
+    def run_balance_check(self, force=False):
+        """Main balancing cycle - called from _run_loop, force=True is Balance Now."""
         # a PegaProx standby migrates nothing, whoever calls this (#625)
         if not ha.is_active():
             return
@@ -5139,7 +5147,8 @@ echo DONE""",
         self.logger.info(f"[BALANCE] imbalance detected: {max_node} (overloaded) vs {min_node}")
 
         # max migrations per cycle depends on cluster size
-        num_nodes = len([n for n in node_status.values() if not n.get('offline')])
+        excluded = getattr(self.config, 'excluded_nodes', None) or []
+        num_nodes = len([n for name, n in node_status.items() if not n.get('offline') and name not in excluded])
         max_migrations = min(3, max(1, num_nodes // 2))
         migrated = 0
         already_tried = set()
@@ -5166,8 +5175,11 @@ echo DONE""",
             from pegaprox.core.manager import BALANCE_WHY, balance_reason
             candidate[BALANCE_WHY] = balance_reason(
                 'balance', max_node, target, node_status,
-                threshold=getattr(self.config, 'migration_threshold', 30))
+                threshold=getattr(self.config, 'migration_threshold', 30), manual=force)
             ok = self._do_balance_migrate(candidate, target)
+            if ok and getattr(self.config, 'dry_run', False):
+                # nothing moved, so the loads below would not change either
+                continue
             if ok:
                 migrated += 1
                 time.sleep(5)  # brief pause between migrations
