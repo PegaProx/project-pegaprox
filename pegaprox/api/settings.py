@@ -4972,11 +4972,12 @@ def _ceph_gate_unsafe(summary, gate):
     hit = [tok for tok in risky if tok in pgs]
     if hit:
         return 'PGs ' + '+'.join(hit)
-    warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).lower()
-    for w in ('degraded data redundancy', 'reduced data availability', 'pgs inactive',
-              'osds down', 'osd down', 'are down', 'insufficient standby', 'insufficient'):
-        if w in warns:
-            return 'warning: ' + w
+    # JB Nov 2026 - `warnings` holds Ceph's check codes, the sentences below never matched one of them
+    warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).upper()
+    for code in ('PG_DEGRADED', 'PG_AVAILABILITY', 'PG_DAMAGED', 'OSD_DOWN', 'OSD_HOST_DOWN', 'OSD_ROOT_DOWN',
+                 'OSD_FULL', 'OBJECT_UNFOUND', 'MON_DOWN', 'FS_DEGRADED', 'MDS_INSUFFICIENT_STANDBY'):
+        if code in warns:
+            return 'warning: ' + code
     return None
 
 
