@@ -329,6 +329,11 @@ def _prune(mgr, node, vmid, vm_type, policy):
         owned.append((snap_t, name))
     owned.sort(reverse=True)  # newest first
 
+    # JB Nov 2026 - both off is no rule at all, not a rule that nothing stays: the edit form can save it, and
+    # the next run then took every snapshot of this policy, the one it had just made too
+    if policy['retention_count'] <= 0 and policy['retention_days'] <= 0:
+        return pruned
+
     keep_set = set()
     if policy['retention_count'] > 0:
         for _, name in owned[:policy['retention_count']]:
