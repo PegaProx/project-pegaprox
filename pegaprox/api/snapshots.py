@@ -306,6 +306,10 @@ def _prune(mgr, node, vmid, vm_type, policy):
     """Delete snapshots owned by this policy beyond retention. Owned =
     name starts with `pegaprox-<policy_id_prefix>-`."""
     pruned = 0
+    # JB Nov 2026 - both off is no rule at all, not a rule that nothing stays: the edit form can save it, and
+    # the next run then took every snapshot of this policy, the one it had just made too
+    if policy['retention_count'] <= 0 and policy['retention_days'] <= 0:
+        return pruned
     prefix = f"pegaprox-{policy['id'][:12]}-"
     try:
         snaps = mgr.list_snapshots(node, vmid, vm_type) if hasattr(mgr, 'list_snapshots') else []
@@ -328,11 +332,6 @@ def _prune(mgr, node, vmid, vm_type, policy):
         snap_t = s.get('snaptime', 0)
         owned.append((snap_t, name))
     owned.sort(reverse=True)  # newest first
-
-    # JB Nov 2026 - both off is no rule at all, not a rule that nothing stays: the edit form can save it, and
-    # the next run then took every snapshot of this policy, the one it had just made too
-    if policy['retention_count'] <= 0 and policy['retention_days'] <= 0:
-        return pruned
 
     keep_set = set()
     if policy['retention_count'] > 0:
