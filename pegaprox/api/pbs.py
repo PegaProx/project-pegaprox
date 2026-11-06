@@ -741,6 +741,11 @@ def get_pbs_groups(pbs_id, store):
     return jsonify(_scope_pbs_rows(mgr, groups, store=store, ns=ns, owners=owners))
 
 
+def _pbs_answer(result):
+    # JB Nov 2026 - the manager hands PBS's refusal back as a dict. Under a 200 the UI read it as started
+    return jsonify(result), (502 if isinstance(result, dict) and 'error' in result else 200)
+
+
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/gc', methods=['POST'])
 @require_auth(perms=['pbs.datastore.gc'])
 def pbs_start_gc(pbs_id, store):
@@ -759,7 +764,7 @@ def pbs_start_gc(pbs_id, store):
     result = mgr.start_gc(store)
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.gc', f"Started GC on {mgr.name}/{store}")
-    return jsonify(result)
+    return _pbs_answer(result)
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/verify', methods=['POST'])
@@ -781,7 +786,7 @@ def pbs_start_verify(pbs_id, store):
     result = mgr.start_verify(store, ignore_verified=data.get('ignore_verified', True))
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.verify', f"Started verify on {mgr.name}/{store}")
-    return jsonify(result)
+    return _pbs_answer(result)
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/prune', methods=['POST'])
@@ -819,7 +824,7 @@ def pbs_prune(pbs_id, store):
     action = "dry-run prune" if data.get('dry_run', True) else "PRUNE"
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.prune', f"{action} on {mgr.name}/{store}")
-    return jsonify(result)
+    return _pbs_answer(result)
 
 
 def _scope_pbs_rows(mgr, rows, type_key='backup-type', id_key='backup-id',
@@ -1179,7 +1184,7 @@ def pbs_delete_snapshot(pbs_id, store):
     if 'error' not in result:
         log_audit(request.session.get('user', 'admin'), 'pbs.snapshot.delete',
                   f"Deleted {data['backup_type']}/{data['backup_id']} @ {data['backup_time']} from {mgr.name}/{store}")
-    return jsonify(result)
+    return _pbs_answer(result)
 
 
 @bp.route('/api/pbs/<pbs_id>/tasks', methods=['GET'])
