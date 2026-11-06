@@ -210,7 +210,11 @@
                     if (menuRef.current && !menuRef.current.contains(e.target) &&
                         btnRef.current && !btnRef.current.contains(e.target)) setOpen(false);
                 };
-                const onScroll = () => setOpen(false);
+                // a short window scrolls the menu itself, which must not close it
+                const onScroll = (e) => {
+                    if (menuRef.current && e.target instanceof Node && menuRef.current.contains(e.target)) return;
+                    setOpen(false);
+                };
                 document.addEventListener('mousedown', onDoc);
                 window.addEventListener('scroll', onScroll, true);
                 window.addEventListener('resize', onScroll);
@@ -267,7 +271,7 @@
                     {/* JB Nov 2026 - on the body: a hovered .cloud-card has a transform, which turns the card into
                         what fixed means, and the overflow of the table card then cut this menu off */}
                     {open && ReactDOM.createPortal(
-                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left }} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKey}>
+                        <div ref={menuRef} className="cloud-menu cloud-menu-fixed" style={{ top: pos.top, left: pos.left, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()} onKeyDown={onMenuKey}>
                             {visible.map((it, i) => it.divider ? <div className="cloud-menu-sep" key={'s' + i} /> : (
                                 <button
                                     type="button"

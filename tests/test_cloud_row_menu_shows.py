@@ -164,3 +164,30 @@ def test_runtime_tab_past_the_last_item_closes_the_menu_on_the_three_dots(open_a
     page.locator('.cloud-menu').wait_for(state='detached', timeout=5000)
     assert page.evaluate(FOCUS)['dots'], page.evaluate(FOCUS)
     assert not app.errors, app.errors
+
+
+def test_runtime_a_short_window_scrolls_the_menu_to_its_last_item(open_app):
+    app, page = _list(open_app, height=400)
+    _open_menu(page, 'web00')
+    menu = page.locator('.cloud-menu').bounding_box()
+    assert menu['y'] >= 0 and menu['y'] + menu['height'] <= 400, menu
+    page.mouse.move(menu['x'] + menu['width'] / 2, menu['y'] + menu['height'] / 2)
+    page.mouse.wheel(0, 2000)
+    page.wait_for_timeout(300)
+    assert page.locator('.cloud-menu').count() == 1, 'scrolling the menu closed it'
+    last = page.evaluate('''() => {
+      const items = document.querySelectorAll('.cloud-menu-item');
+      const r = items[items.length - 1].getBoundingClientRect();
+      const top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return items[items.length - 1].contains(top);
+    }''')
+    assert last, 'the last item cannot be reached'
+    assert not app.errors, app.errors
+
+
+def test_runtime_a_resize_still_closes_the_menu(open_app):
+    app, page = _list(open_app)
+    _open_menu(page, 'web00')
+    page.set_viewport_size({'width': 1500, 'height': 900})
+    page.locator('.cloud-menu').wait_for(state='detached', timeout=5000)
+    assert not app.errors, app.errors
