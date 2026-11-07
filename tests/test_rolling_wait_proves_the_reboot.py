@@ -206,11 +206,15 @@ def test_a_host_that_returns_in_what_is_left_goes_on(api, seed, monkeypatch):
 class _XcpClock:
     def __init__(self):
         self.now = 1000.0
+        self.step = 0   # what the wall clock was moved by
 
     def __getattr__(self, name):
         return getattr(time, name)
 
     def time(self):
+        return self.now + self.step
+
+    def monotonic(self):
         return self.now
 
     def sleep(self, seconds):
@@ -286,6 +290,15 @@ def test_the_task_notes_nothing_for_a_host_that_came_back(monkeypatch):
     m.nodes_updating = {'h1': task}
     assert XcpngManager._wait_for_host_online(m, 'h1', timeout=120) is True
     assert task.reboot_waited == 0
+
+
+def test_a_step_of_the_wall_clock_is_not_a_restart(monkeypatch):
+    def answers(t):
+        m.clock.step = 2 * OLD_UPTIME
+        return _up(OLD_UPTIME + t)
+    m = _waiting(monkeypatch, answers)
+    assert XcpngManager._wait_for_host_online(m, 'h1', timeout=60) is False
+    assert m.clock.now - m.start >= 60
 
 
 def test_a_failing_read_proves_nothing(monkeypatch):

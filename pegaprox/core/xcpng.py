@@ -3773,14 +3773,15 @@ class XcpngManager:
 
     def _wait_for_host_online(self, node_name, timeout=300):
         """Wait for XCP-ng host to come back after reboot: seen down, or booted since the wait began."""
-        start = time.time()
+        # monotonic: the uptime is a duration, and the wall clock can step while we wait
+        start = time.monotonic()
         seen_down = False
-        while time.time() - start < timeout:
+        while time.monotonic() - start < timeout:
             try:
                 row = self.node_reboot_look(node_name)
                 if row and row.get('status') != 'online':
                     seen_down = True
-                elif row and (seen_down or 0 < (row.get('uptime') or 0) < time.time() - start):
+                elif row and (seen_down or 0 < (row.get('uptime') or 0) < time.monotonic() - start):
                     self._cached_nodes = None
                     return True
             except Exception as e:
