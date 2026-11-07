@@ -5037,7 +5037,9 @@ class PegaProxManager:
             health = data.get('health', {}) or {}
             status = health.get('status') or 'unknown'
             checks = health.get('checks', {}) or {}
-            warnings = [k for k in checks.keys()][:5]
+            # JB Nov 2026 - the rolling update gates read all of it: PG_DEGRADED as the sixth check, or
+            # degraded as the fourth PG state, was not seen
+            warnings = list(checks.keys())
             osdmap = data.get('osdmap', {}) or {}
             osd_up = osdmap.get('num_up_osds', osdmap.get('osdmap', {}).get('num_up_osds', 0))
             osd_in = osdmap.get('num_in_osds', osdmap.get('osdmap', {}).get('num_in_osds', 0))
@@ -5045,7 +5047,7 @@ class PegaProxManager:
             pg_summary = ''
             states = pgmap.get('pgs_by_state') or []
             if states:
-                pg_summary = ', '.join(f"{s.get('count', 0)} {s.get('state_name', '')}" for s in states[:3])
+                pg_summary = ', '.join(f"{s.get('count', 0)} {s.get('state_name', '')}" for s in states)
             return {'status': status, 'osd_up': osd_up, 'osd_in': osd_in, 'pgs': pg_summary, 'warnings': warnings}
         except Exception as e:
             self.logger.debug(f"[CEPH] health summary failed: {e}")
