@@ -3475,6 +3475,8 @@
             const [mode, setMode] = React.useState('new');
             const [targetNode, setTargetNode] = React.useState(nodes?.[0] || '');
             const [targetVmid, setTargetVmid] = React.useState(snapshot?.vmid ? snapshot.vmid + 1000 : 999);
+            // once the user typed an id, a suggestion (late, or after a mode switch) must not replace it
+            const vmidTyped = React.useRef(false);
             const [targetStorage, setTargetStorage] = React.useState('');
             const [running, setRunning] = React.useState(false);
             const [error, setError] = React.useState(null);
@@ -3487,7 +3489,8 @@
                         const r = await authFetch(`${apiUrl}/clusters/${clusterId}/nextid`);
                         if (r && r.ok) {
                             const j = await r.json();
-                            if (j.vmid) setTargetVmid(j.vmid);
+                            // a full tenant range answers with PVE's next id, which the restore refuses
+                            if (j.vmid && !j.range_exhausted && !vmidTyped.current) setTargetVmid(j.vmid);
                         }
                     } catch (_) {}
                 })();
@@ -3569,7 +3572,7 @@
 
                             <div>
                                 <div className="text-xs uppercase tracking-wide opacity-60 mb-1">{t('pbsTargetVmid') || 'Target VMID'}</div>
-                                <input type="number" value={targetVmid} onChange={e => setTargetVmid(e.target.value)}
+                                <input type="number" value={targetVmid} onChange={e => { vmidTyped.current = true; setTargetVmid(e.target.value); }}
                                     className="w-full px-2 py-1.5 text-sm"
                                     style={{ background: 'var(--corp-surface-2, #29414e)', color: 'var(--corp-text)', border: '1px solid var(--corp-border, #485764)' }} />
                             </div>
