@@ -193,6 +193,7 @@ class XcpngManager:
         self._cached_node_dict = {}
         self.last_migration_log = []
         self._vm_migration_cooldown = {}  # {vmid: when the balancer moved it}
+        self._reboot_addrs = {}  # {host: the address node_reboot_look last had from XAPI}
 
         # task tracking - xapi opaque refs -> our task dicts
         self._active_tasks = {}
@@ -3769,10 +3770,24 @@ class XcpngManager:
         that is down still looked up. Its own port says that, and the cached rows hold an old uptime.
         """
         import socket
-        try:
-            socket.create_connection((self._get_host_ip(node_name), 443), timeout=5).close()
-        except OSError:
-            return {'status': 'offline', 'uptime': 0}
+        # not _get_host_ip: it answers config.host when XAPI does not, and a shut port there says
+        # nothing about a member. The address XAPI gave last is still this host's when the pool
+        # master is down, in its own reboot too
+        if not isinstance(getattr(self, '_reboot_addrs', None), dict):
+            self._reboot_addrs = {}
+        addr = self.member_node_ip(node_name) or self._reboot_addrs.get(node_name)
+        if not addr:
+            return None
+        self._reboot_addrs[node_name] = addr
+        # one connect that fails can be a lost packet: down only when the next one fails too
+        for attempt in range(2):
+            try:
+                socket.create_connection((addr, 443), timeout=5).close()
+                break
+            except OSError:
+                if attempt:
+                    return {'status': 'offline', 'uptime': 0}
+                time.sleep(2)
         try:
             api = self._api()
             rows = self._fetch_nodes(api) if api else []

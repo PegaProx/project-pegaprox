@@ -233,7 +233,7 @@ def _waiting(monkeypatch, answers):
     m = XcpngManager.__new__(XcpngManager)
     m.logger = MagicMock()
     m.is_connected = True
-    m._get_host_ip = lambda node: '10.0.0.9'
+    m.member_node_ip = lambda node: '10.0.0.9'
     m._api = lambda: object()
     start = clock.now
 
@@ -313,10 +313,11 @@ def test_the_task_takes_a_host_that_went_down_and_came_back(monkeypatch):
 
 
 def _looking(monkeypatch, connect, rows):
+    monkeypatch.setattr(xcpngmod, 'time', _XcpClock())
     m = XcpngManager.__new__(XcpngManager)
     m.logger = MagicMock()
     m.is_connected = True
-    m._get_host_ip = lambda node: '10.0.0.9'
+    m.member_node_ip = lambda node: '10.0.0.9'
     m._api = lambda: object()
     m._fetch_nodes = rows
     import socket
