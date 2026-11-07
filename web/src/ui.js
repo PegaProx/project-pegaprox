@@ -3484,7 +3484,7 @@
                 if (mode !== 'new' || !clusterId) return;
                 (async () => {
                     try {
-                        const r = await authFetch(`${apiUrl}/clusters/${clusterId}/next-vmid`);
+                        const r = await authFetch(`${apiUrl}/clusters/${clusterId}/nextid`);
                         if (r && r.ok) {
                             const j = await r.json();
                             if (j.vmid) setTargetVmid(j.vmid);
@@ -3964,8 +3964,8 @@
 
             useEffect(() => {
                 if (phase !== 'options' || firstVmid) return;
-                call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/next-vmid`)
-                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid) setFirstVmid(String(j.vmid)); })
+                call(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/nextid`)
+                    .then(r => (r.ok ? r.json() : null)).then(j => { if (j && j.vmid && !j.range_exhausted) setFirstVmid(String(j.vmid)); })
                     .catch(() => {});
             }, [phase]);  // eslint-disable-line react-hooks/exhaustive-deps
 

@@ -394,7 +394,7 @@ def _restore_reads(post=None):
         ('GET', '/api/clusters/c1/datastores'): (200, DATASTORES),
         ('GET', '/api/clusters/c1/datastores/backupsrv/content'): (200, CONTENT),
         ('GET', '/api/clusters/c1/storage-clusters'): (200, []),
-        ('GET', '/api/clusters/c1/next-vmid'): (200, {'vmid': 900}),
+        ('GET', '/api/clusters/c1/nextid'): (200, {'vmid': 900}),
         ('POST', '/api/clusters/c1/backup-restore/batch'): post or (202, {'run': _batch()}),
         ('GET', f'/api/batch-restores/{RUN_ID}'): (200, {'run': _batch()}),
         ('POST', f'/api/batch-restores/{RUN_ID}/cancel'): (200, {'run': dict(_batch(), cancelled_by='admin', may_cancel=False)}),
@@ -419,6 +419,23 @@ def _open_storage(app, layout):
 
 def _body(app):
     return app.server.bodies.get('/api/clusters/c1/backup-restore/batch', [])
+
+
+def test_runtime_a_full_tenant_range_suggests_no_id(open_app):
+    """The route then answers with an id outside the range, which the restore would refuse."""
+    reads = _restore_reads()
+    reads[('GET', '/api/clusters/c1/nextid')] = (200, {'vmid': 900, 'range': [100, 110], 'range_exhausted': True})
+    app = open_app(reads, layout='modern')
+    page = _open_storage(app, 'modern')
+    page.locator('[data-br-open]').click()
+    page.locator('[data-br-pick]').wait_for(timeout=5000)
+    page.locator('[data-br-check="100"]').check()
+    page.locator('[data-br-next]').click()
+    page.locator('[data-br-options]').wait_for(timeout=5000)
+    page.wait_for_timeout(500)
+    assert page.locator('[data-br-first]').input_value() == ''
+    assert ('GET', '/api/clusters/c1/nextid') in app.server.calls
+    assert not app.errors, app.errors
 
 
 @pytest.mark.parametrize('layout', ['modern', 'corporate'])
