@@ -93,6 +93,7 @@ class UpdateTask:
         self.completed_at = None
         self.reboot_issued = False
         self.back_online = False
+        self.reboot_waited = 0
 
     def add_output(self, line: str):
         self.output_lines.append({

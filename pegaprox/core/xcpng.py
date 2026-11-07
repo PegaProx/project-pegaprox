@@ -3786,6 +3786,10 @@ class XcpngManager:
             except Exception as e:
                 self.logger.debug(f"Waiting for {node_name}: {e}")
             time.sleep(10)
+        # a rolling update waits what is left of its timeout, not a whole second one
+        task = self.nodes_updating.get(node_name)
+        if task:
+            task.reboot_waited = timeout
         return False
 
     def get_update_status(self, node_name):

@@ -5446,6 +5446,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
 
         node_rebooted = from_phase == 'rebooting' or bool(info.get('rebooted'))
         back_online = False
+        reboot_waited = 0
 
         # MK: Step 0 - Check if node has updates available (GitHub Issue fix)
         if todo('checking') and skip_up_to_date and not force_all:
@@ -5638,6 +5639,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             # then "back online (0s)".
             node_rebooted = include_reboot and getattr(update_task, 'reboot_issued', False)
             back_online = bool(getattr(update_task, 'back_online', False))
+            reboot_waited = getattr(update_task, 'reboot_waited', 0)
             _set(node=(node_name, {'updated': True, 'rebooted': bool(node_rebooted)}), log="✓ Updates installed")
             if include_reboot and not node_rebooted:
                 _log(f"Node {node_name} did not require a reboot - skipping reboot wait")
@@ -5655,8 +5657,9 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 _phase(node_name, 'rebooting', f"Node {node_name} requires a reboot - rebooting (timeout: {reboot_timeout}s)...")
             _set(add={'rebooting_nodes': node_name})
 
-            # Phase 1: Wait for offline - not for one that went down while nobody watched
-            node_went_offline = from_phase == 'rebooting' and recheck
+            # Phase 1: Wait for offline - not for one that went down while nobody watched, or that
+            # the update task already waited for
+            node_went_offline = (from_phase == 'rebooting' and recheck) or reboot_waited > 0
             seen_down = False
             offline_waited = 0
             while not node_went_offline and offline_waited < 120 and _status() != 'cancelled':
@@ -5675,7 +5678,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if wait_for_reboot:
                 # Phase 2: Wait for online
                 _log(f"Waiting for {node_name} to come back online...")
-                waited = 0
+                waited = reboot_waited
                 node_back_online = False
                 while waited < reboot_timeout:
                     if _status() == 'cancelled':
