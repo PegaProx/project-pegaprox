@@ -139,6 +139,7 @@ def _interrupted_text(rec):
 
 
 def run_concurrent(tasks: list, timeout: float = 30.0, pool=None) -> list:
+    """Bound shared-pool reads by one deadline; explicit pools keep their full sweep."""
     # MK 2026-05-31 — paired bugfix with utils/concurrent.py: gevent.pool.Pool's
     # __bool__ is len(), so `if GEVENT_POOL and ...` was always-False on entry.
     # `is not None` is the right gate.
@@ -156,9 +157,18 @@ def run_concurrent(tasks: list, timeout: float = 30.0, pool=None) -> list:
     _pool = pool if pool is not None else GEVENT_POOL
     if _pool is not None and GEVENT_AVAILABLE:
         try:
-            greenlets = [_pool.spawn(task) for task in tasks]
-            from gevent import joinall
-            joinall(greenlets, timeout=timeout)
+            from gevent import Timeout, joinall
+            greenlets = []
+            if pool is None:
+                with Timeout(timeout, False):
+                    for task in tasks:
+                        greenlets.append(_pool.spawn(task))
+                    joinall(greenlets)
+            else:
+                # The dedicated IP sweep pool walks the whole estate. Keep its queue
+                # intact so a slow batch cannot leave the same tail guests unread forever.
+                greenlets = [_pool.spawn(task) for task in tasks]
+                joinall(greenlets, timeout=timeout)
             results = []
             for g in greenlets:
                 try:
@@ -166,6 +176,11 @@ def run_concurrent(tasks: list, timeout: float = 30.0, pool=None) -> list:
                 except Exception as e:
                     logging.error(f"Concurrent task failed: {e}")
                     results.append(None)
+            if pool is None:
+                results.extend([None] * (len(tasks) - len(greenlets)))
+                for g in greenlets:
+                    if not g.ready():
+                        g.kill(block=False)
             return results
         except Exception as e:
             logging.error(f"Concurrent execution failed: {e}")
