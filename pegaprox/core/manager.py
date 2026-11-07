@@ -13681,33 +13681,38 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"SSH execute error: {e}")
             return -1, '', str(e)
     
-    def _wait_for_node_online(self, node_name: str, timeout: int = 600) -> bool:
+    def _wait_for_node_online(self, node_name: str, timeout: int = 600, since: float = None) -> bool:
         
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
-        start_time = time.time()
+        # monotonic: the uptime is a duration, and the wall clock can step while we wait
+        start_time = time.monotonic()
         
-        # First wait a bit for the node to actually go down
-        # 30s seems to work, less and you get false positives
-        time.sleep(30)
+        # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
+        # next node. Online only counts once this one was seen down or has booted since the reboot was sent
+        seen_down = False
+        booted_after = since or start_time
         
-        while time.time() - start_time < timeout:
+        while time.monotonic() - start_time < timeout:
             try:
                 # Try to get node status from Proxmox API
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    node_status = self.get_node_status()
-                    if node_name in node_status:
-                        if node_status[node_name]['status'] == 'online':
-                            self.logger.info(f"[OK] {node_name} is back online!")
-                            return True
+                    # no row says nothing: a failed read, or its details ran out of time. Only
+                    # offline counts as down, and the uptime shows a node that left the list
+                    node = self.get_node_status().get(node_name) or {}
+                    if node.get('status') == 'offline':
+                        seen_down = True
+                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.monotonic() - booted_after):
+                        self.logger.info(f"[OK] {node_name} is back online!")
+                        return True
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for {node_name}: {e}")
             
             time.sleep(10)
         
-        self.logger.error(f"Timeout waiting for {node_name} to come online")
+        self.logger.error(f"Timeout waiting for {node_name}: it did not restart and come back online")
         return False
     
     def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
@@ -13867,6 +13872,7 @@ echo "AGENT_INSTALLED_OK"
                 task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
                 
                 # Reconnect for reboot command
+                reboot_asked_at = time.monotonic()
                 ssh = self._ssh_connect(node_ip)
                 # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
                 # a kernel update ended as success without its reboot
@@ -13979,24 +13985,30 @@ echo "AGENT_INSTALLED_OK"
                         except:
                             pass
                         ssh = None
+                else:
+                    task.add_output(f"[ERROR] No connection to {node_name} for the reboot, it was not rebooted / Keine Verbindung, kein Neustart")
 
                 
-                task.add_output("Waiting for node to reboot / Warte auf Neustart...")
-                
-                # Wait for node to come back online
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                
-                if self._wait_for_node_online(node_name):
-                    task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
-                    task.back_online = True
+                # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
+                if not task.reboot_issued:
+                    task.add_output(f"No reboot sent to {node_name}, nothing to wait for / Kein Neustart, kein Warten")
                 else:
-                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
-                    task.error = "Node did not come back online in time"
-                    task.status = 'failed'
-                    task.phase = 'wait_timeout'
-                    task.completed_at = datetime.now()
-                    return
+                    task.add_output("Waiting for node to reboot / Warte auf Neustart...")
+                    
+                    # Wait for node to come back online
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    
+                    if self._wait_for_node_online(node_name, since=reboot_asked_at):
+                        task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
+                        task.back_online = True
+                    else:
+                        task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
+                        task.error = "Node did not come back online in time"
+                        task.status = 'failed'
+                        task.phase = 'wait_timeout'
+                        task.completed_at = datetime.now()
+                        return
 
             # Done!
             task.status = 'completed'
