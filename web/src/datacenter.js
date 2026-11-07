@@ -1883,7 +1883,15 @@
                         credentials: 'include',
                         headers: authHeaders
                     });
-                    if (res.ok) setFirewallRules(firewallRules.filter(r => r.pos !== pos));
+                    // JB Nov 2026 - Proxmox renumbers what follows, so the rows kept here would point at the wrong rule from now on
+                    if (res.ok) {
+                        const rulesRes = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/firewall/rules`);
+                        if (rulesRes.ok) setFirewallRules(await rulesRes.json());
+                        else setFirewallRules(firewallRules.filter(r => r.pos !== pos));
+                    } else {
+                        const err = await res.json().catch(() => ({}));
+                        addToast(err.error || t('error') || 'Error', 'error');
+                    }
                 } catch(e) { console.error(e); }
             };
 
