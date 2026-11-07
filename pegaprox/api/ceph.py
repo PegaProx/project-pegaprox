@@ -282,6 +282,8 @@ def get_ceph_overview(cluster_id):
         'pools': [],
         'fs': [],
         'rules': [],
+        # JB Nov 2026 - no answer is not "no Ceph": the page told people to install it
+        'read_failed': False,
     }
 
     try:
@@ -296,6 +298,7 @@ def get_ceph_overview(cluster_id):
             online_nodes = [n['node'] for n in nr.json().get('data', []) if n.get('status') == 'online']
 
         if not online_nodes:
+            result['read_failed'] = True
             return jsonify(result)
 
         # #191: try each online node until one has Ceph (not all nodes run Ceph daemons)
@@ -308,11 +311,16 @@ def get_ceph_overview(cluster_id):
                     result['available'] = True
                     result['status'] = sr.json().get('data', {})
                     break
+                if not _ceph_absent(sr):
+                    result['read_failed'] = True
             except:
+                result['read_failed'] = True
                 continue
 
         if not ceph_node:
             return jsonify(result)
+
+        result['read_failed'] = False
 
         result['node'] = ceph_node
 
@@ -379,6 +387,8 @@ def get_ceph_overview(cluster_id):
 
     except Exception as e:
         logging.error(f"Error getting Ceph overview: {e}")
+        if not result['available']:
+            result['read_failed'] = True
         return jsonify(result)
 
 
