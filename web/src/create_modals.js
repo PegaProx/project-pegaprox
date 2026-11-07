@@ -1973,7 +1973,7 @@
             name: '', host: '', api_port: 8006, node_ui_suffix: '', user: 'root@pam', pass: '',
             ssl_verification: false, migration_threshold: 20, migration_tolerance: 10, check_interval: 300,
             auto_migrate: false, balance_containers: false, balance_local_disks: false,
-            dry_run: false, ssh_key: '', ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
+            dry_run: false, ssh_user: '', ssh_key: '', ssh_key_remove: false, ssh_disabled: false, ha_enabled: false, proxlb_tags_enabled: false,
             proxlb_pins_auto_migrate: false, proxlb_pins_strict: false,
             predictive_balancing: false, predictive_threshold: 75,
             balance_cpu_weight: 1.0, balance_mem_weight: 1.0, balance_io_weight: 0.0,
@@ -2463,7 +2463,7 @@
                         // just this subset. The omitted toggles (HA, ProxLB tags, predictive balancing +
                         // its weights/baseline) started at their defaults, so hitting Re-configure quietly
                         // switched them back off. The list GET already returns all of these.
-                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_key: '', ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
+                        setConfig(prev => ({ ...prev, name: rc.name || '', host: rc.host || '', api_port: rc.api_port || 8006, node_ui_suffix: rc.node_ui_suffix || '', user: rc.user || '', pass: '', ssl_verification: rc.ssl_verification || false, migration_threshold: rc.migration_threshold || 20, migration_tolerance: rc.migration_tolerance || 10, check_interval: rc.check_interval || 300, auto_migrate: rc.auto_migrate || false, balance_containers: rc.balance_containers || false, balance_local_disks: rc.balance_local_disks || false, dry_run: rc.dry_run || false, ssh_user: rc.ssh_user || '', ssh_key: '', ssh_key_remove: false, ssh_disabled: rc.ssh_disabled || false, ha_enabled: rc.ha_enabled || false, proxlb_tags_enabled: rc.proxlb_tags_enabled || false, proxlb_pins_auto_migrate: rc.proxlb_pins_auto_migrate === true, proxlb_pins_strict: rc.proxlb_pins_strict === true, predictive_balancing: rc.predictive_balancing || false, predictive_threshold: rc.predictive_threshold || 75, balance_cpu_weight: rc.balance_cpu_weight || 1.0, balance_mem_weight: rc.balance_mem_weight || 1.0, balance_io_weight: rc.balance_io_weight || 0.0, cpu_baseline: rc.cpu_baseline || null }));
                     }
                 }
             }, [isOpen, initialType, reconfigureConfig]);
@@ -2630,6 +2630,22 @@
                                 {showSshSettings && (
                                     <div className="mt-4 space-y-4 p-4 bg-proxmox-dark/50 rounded-lg">
                                         <p className="text-xs text-gray-400">{t('sshKeyExplanation')}</p>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('sshUser')}</label>
+                                            <input type="text" value={config.ssh_user} onChange={e => setConfig({...config, ssh_user: e.target.value})} data-cluster-ssh-user
+                                                placeholder={(config.user || 'root@pam').split('@')[0]}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                        {reconfigureConfig && reconfigureConfig.has_ssh_key && (
+                                            <div className="space-y-2" data-cluster-ssh-key-stored>
+                                                <p className="text-xs text-gray-400">{t('sshKeyStoredKeep')}</p>
+                                                <label className="flex items-center gap-2 text-xs text-gray-400">
+                                                    <input type="checkbox" checked={!!config.ssh_key_remove} disabled={!!config.ssh_key} data-cluster-ssh-key-remove
+                                                        onChange={e => setConfig({...config, ssh_key_remove: e.target.checked})} />
+                                                    {t('sshKeyRemove')}
+                                                </label>
+                                            </div>
+                                        )}
                                         <textarea value={config.ssh_key} onChange={e => setConfig({...config, ssh_key: e.target.value})}
                                             className="w-full px-4 py-2.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-proxmox-orange transition-colors font-mono text-xs"
                                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" rows={4} />
