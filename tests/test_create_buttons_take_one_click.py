@@ -44,3 +44,13 @@ def test_the_replication_dialog_has_the_same_guard():
     body = src[src.index('const handleCreateXRepl = async'):src.index('const handleDeleteXRepl = async')]
     assert re.search(r'if \(creatingXRepl\.current\) return;\s+creatingXRepl\.current = true;', body)
     assert re.search(r'finally \{\s+creatingXRepl\.current = false;', body)
+
+
+def test_the_group_settings_replication_dialog_has_the_same_guard():
+    """The group settings modal posts to the same route from its own handler."""
+    src = (ROOT / 'web' / 'src' / 'vm_modals.js').read_text(encoding='utf-8')
+    start = src.index('function GroupSettingsModal(')
+    body = src[src.index('const handleCreateXRepl = async', start):src.index('const handleDeleteXRepl = async', start)]
+    assert re.search(r'if \(creatingXRepl\.current\) return;\s+creatingXRepl\.current = true;', body)
+    assert re.search(r'finally \{\s+creatingXRepl\.current = false;', body)
+    assert 'const creatingXRepl = useRef(false);' in src[start:src.index('const handleCreateXRepl = async', start)]

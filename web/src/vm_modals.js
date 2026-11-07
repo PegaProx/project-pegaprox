@@ -9093,7 +9093,11 @@
             }, [xReplForm.target_cluster]);
 
             // NS: Cross-cluster replication handlers
+            // a double click must not make two jobs for one guest
+            const creatingXRepl = useRef(false);
             const handleCreateXRepl = async () => {
+                if (creatingXRepl.current) return;
+                creatingXRepl.current = true;
                 try {
                     const res = await authFetch(`${API_URL}/cross-cluster-replications`, {
                         method: 'POST',
@@ -9122,6 +9126,8 @@
                     }
                 } catch (e) {
                     if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                } finally {
+                    creatingXRepl.current = false;
                 }
             };
 
