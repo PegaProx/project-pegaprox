@@ -191,6 +191,22 @@ def validate_host_address(value) -> bool:
         return False
 
 
+# one DNS label: letters, digits and inner hyphens, at most 63 characters
+_DNS_LABEL_RE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z')
+
+
+def dns_suffix(value):
+    """`value` as a DNS suffix, without surrounding space and dots ('' when empty), or
+    None when it is no string or anything but labels of letters, digits and hyphens
+    separated by dots. The node UI suffix of a cluster is one."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip().strip('.')
+    if value and (len(value) > 253 or not all(_DNS_LABEL_RE.match(label) for label in value.split('.'))):
+        return None
+    return value
+
+
 def validate_storage_name(storage) -> bool:
     """Validate Proxmox / XCP-ng storage identifier.
 

@@ -29,7 +29,7 @@ from pegaprox.utils.realtime import broadcast_sse, broadcast_update, push_immedi
 from pegaprox.core.config import load_config, save_config
 from pegaprox.core.manager import PegaProxManager
 from pegaprox.core.xcpng import XcpngManager, XENAPI_AVAILABLE
-from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address
+from pegaprox.utils.sanitization import bounded_list, validate_ssh_user, validate_host_address, dns_suffix
 from pegaprox.utils.sanitization import task_ref_ok
 from pegaprox.api.helpers import (load_server_settings, get_connected_manager, check_cluster_access,
                                   safe_error, scope_vm_rows, require_unconfined, parse_pve_error,
@@ -204,6 +204,9 @@ def add_cluster():
     _xn_err = _transfer_network_error(data)
     if _xn_err:
         return _xn_err
+    _sfx_err = _node_ui_suffix_error(data)
+    if _sfx_err:
+        return _sfx_err
 
     # Generate unique ID
     cluster_id = str(uuid.uuid4())[:8]
@@ -447,6 +450,9 @@ def reconfigure_cluster(cluster_id):
     if _xn_err:
         return _xn_err
     data.setdefault('transfer_network', getattr(old_mgr.config, 'transfer_network', '') or '')
+    _sfx_err = _node_ui_suffix_error(data)
+    if _sfx_err:
+        return _sfx_err
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -2092,6 +2098,22 @@ def _transfer_network_error(data, mgr=None):
     return None
 
 
+def _node_ui_suffix_error(data):
+    """A 400 when the body sets node_ui_suffix to anything but a DNS suffix or empty.
+    The UI puts it behind the node name in the "Open in Proxmox" link, so a '/', '@' or
+    ':' there would move the link to another host, and a number or an object broke the
+    link builder and the save of the cluster row. Normalises it in place (no leading or
+    trailing dot, no surrounding space). A config restore checks it the same way."""
+    if 'node_ui_suffix' not in data:
+        return None
+    value = dns_suffix(data['node_ui_suffix'])
+    if value is None:
+        return jsonify({'error': "'node_ui_suffix' must be a domain name such as example.local: "
+                                 "letters, digits and hyphens, separated by dots"}), 400
+    data['node_ui_suffix'] = value
+    return None
+
+
 def _ssh_user_error(data):
     """A 400 when the body names an ssh_user that is no login name. Normalises it in
     place; empty means the default user."""
@@ -2257,7 +2279,7 @@ def update_cluster_config(cluster_id):
     _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
-    _xn_err = _transfer_network_error(data, mgr)
+    _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)
@@ -2312,7 +2334,7 @@ def update_cluster_config_live(cluster_id):
     _cd_err = _cooldown_error(data) or _check_interval_error(data)
     if _cd_err:
         return _cd_err
-    _xn_err = _transfer_network_error(data, mgr)
+    _xn_err = _transfer_network_error(data, mgr) or _node_ui_suffix_error(data)
     if _xn_err:
         return _xn_err
     _err, rebind = _config_edit_checks(mgr, data)

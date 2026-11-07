@@ -2974,6 +2974,15 @@ def restore_config():
                         cluster['ssh_user'] = ''
                         results['errors'].append(f"Cluster {cluster_id}: ssh_user is not a valid "
                                                  f"user name, the default user is used")
+                    # it goes behind the node names of the UI links, as on the cluster routes
+                    from pegaprox.utils.sanitization import dns_suffix
+                    if 'node_ui_suffix' in cluster:
+                        _sfx = dns_suffix(cluster['node_ui_suffix'] or '')
+                        if _sfx is None:
+                            _sfx = ''
+                            results['errors'].append(f"Cluster {cluster_id}: node_ui_suffix is not a "
+                                                     f"domain name, the node links go without one")
+                        cluster['node_ui_suffix'] = _sfx
 
                     if not dry_run:
                         database.save_cluster(cluster_id, cluster)
