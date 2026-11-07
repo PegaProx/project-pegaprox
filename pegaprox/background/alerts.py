@@ -228,6 +228,14 @@ def check_and_send_alerts():
         cluster_id = alert.get('cluster_id', '')
         metric = alert.get('metric', '')  # cpu, memory, disk
         threshold = alert.get('threshold', 80)
+        # JB Nov 2026 - a rule stored with text here raised at the comparison below and took every later rule of
+        # every cluster with it, each round
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+            try:
+                threshold = float(threshold)
+            except (TypeError, ValueError):
+                _record_eval(alert_id, reason=f'threshold is not a number: {threshold!r}')
+                continue
         operator = alert.get('operator', '>')  # >, <, =
         target_type = alert.get('target_type', 'cluster')  # cluster, node, vm
         target_id = alert.get('target_id', '')  # node name or vmid
