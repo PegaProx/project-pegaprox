@@ -162,6 +162,9 @@ class _Cluster:
             t.reboot_issued = True
             if self.die_at == ('rebooting', node):
                 self.die_at, self.armed = None, 'status'
+            else:
+                # as the real task: it saw the node back, unless the run asked it not to wait
+                t.back_online = (self._rolling_update or {}).get('wait_for_reboot') is not False
         return t
 
     def suspend_negative_ha_rules(self, who='system'):

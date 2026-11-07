@@ -75,7 +75,7 @@ def test_a_fresh_task_claims_no_reboot():
 
 # -- the rolling-update loop ---------------------------------------------------
 
-def _run(api, seed, monkeypatch, task):
+def _run(api, seed, monkeypatch, task, reboots=False):
     import pegaprox.api.settings as settings_mod
     monkeypatch.setattr(settings_mod, 'time', _FastTime())
     root = seed.user('root', role='admin')
@@ -84,6 +84,11 @@ def _run(api, seed, monkeypatch, task):
     # the quorum gate before the node goes down reads /cluster/status: three votes, one may go
     fake._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}] + [
         {'type': 'node', 'name': n, 'online': 1} for n in ('blade1', 'blade2', 'blade3')]
+    if reboots:
+        # the run's own wait asks to see it down first
+        looks = iter([{'blade1': {'status': 'offline'}}])
+        fake.get_node_status.side_effect = lambda: (next(looks, {'blade1': {'status': 'online'}})
+                                                    if fake.start_node_update.called else {'blade1': {'status': 'online'}})
     fake.get_ceph_health_summary.return_value = None
     fake.start_node_update.return_value = task
     fake.exit_maintenance_mode.return_value = False   # what the real one says for an untracked node
@@ -128,5 +133,5 @@ def test_no_failed_exit_for_a_node_the_task_took_out_of_maintenance(api, seed, m
 
 def test_a_reboot_the_task_did_not_see_through_is_still_waited_for(api, seed, monkeypatch):
     """Counter-check: the skip needs the task's own confirmation, not just the reboot."""
-    logs, _ = _run(api, seed, monkeypatch, _finished_task(False))
+    logs, _ = _run(api, seed, monkeypatch, _finished_task(False), reboots=True)
     assert 'requires a reboot' in logs, logs
