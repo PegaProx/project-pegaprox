@@ -17,8 +17,12 @@ OLD_UPTIME = 3_000_000
 class _Clock:
     def __init__(self):
         self.now = 1000.0
+        self.step = 0   # what the wall clock was moved by, as NTP or a resumed VM do
 
     def time(self):
+        return self.now + self.step
+
+    def monotonic(self):
         return self.now
 
     def sleep(self, seconds):
@@ -117,6 +121,15 @@ def test_the_api_itself_going_away_and_coming_back(monkeypatch):
     m = _manager(monkeypatch, lambda t: ConnectionError('gone') if t < 150 else _online(t - 140))
     assert PegaProxManager._wait_for_node_online(m, 'n1') is True
     assert m.clock.now - m.start >= 150
+
+
+def test_a_step_of_the_wall_clock_is_not_a_restart(monkeypatch):
+    def answers(t):
+        m.clock.step = 2 * OLD_UPTIME
+        return _online(OLD_UPTIME + t)
+    m = _manager(monkeypatch, answers)
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=60) is False
+    assert m.clock.now - m.start >= 60
 
 
 def test_an_online_answer_without_an_uptime_proves_nothing(monkeypatch):
