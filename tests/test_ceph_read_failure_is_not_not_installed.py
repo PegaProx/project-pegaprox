@@ -44,6 +44,12 @@ def _raise(_node):
     raise TimeoutError('no answer')
 
 
+def _no_json():
+    def broken():
+        raise ValueError('Expecting value: line 1 column 1 (char 0)')
+    return MagicMock(status_code=200, text='<html>proxy error</html>', json=broken)
+
+
 @pytest.mark.parametrize('name, nodes, status, available, failed', [
     ('every node says no ceph', _answer(data=NODES), lambda n: NOT_INSTALLED, False, False),
     ('every node times out', _answer(data=NODES), _raise, False, True),
@@ -55,6 +61,8 @@ def _raise(_node):
      lambda n: _raise(n) if n == 'n1' else _answer(data={'data': {'health': {'status': 'HEALTH_OK'}}}), True, False),
     ('one has no ceph, the next times out', _answer(data=NODES),
      lambda n: NOT_INSTALLED if n == 'n1' else _raise(n), False, True),
+    ('one answers 200 with no JSON, the next has no ceph', _answer(data=NODES),
+     lambda n: _no_json() if n == 'n1' else NOT_INSTALLED, False, True),
 ])
 def test_the_answer_tells_the_two_apart(api, seed, name, nodes, status, available, failed):
     _manager(api, nodes, status)

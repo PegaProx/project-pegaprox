@@ -307,9 +307,11 @@ def get_ceph_overview(cluster_id):
             try:
                 sr = session.get(_ceph_url(manager, candidate, '/status'), timeout=10)
                 if sr.status_code == 200:
+                    # parsed first: a 200 without a readable body is a failed read, not this node
+                    status = sr.json().get('data', {})
                     ceph_node = candidate
                     result['available'] = True
-                    result['status'] = sr.json().get('data', {})
+                    result['status'] = status
                     break
                 if not _ceph_absent(sr):
                     result['read_failed'] = True
