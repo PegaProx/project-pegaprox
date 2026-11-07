@@ -20551,9 +20551,11 @@ echo "AGENT_INSTALLED_OK"
                     self.logger.error(f"[MAINT] switching negative affinity rules back on failed: {e}")
 
             # Wait for next interval or stop signal
-            # one stored before the route checked it must not end this loop
+            # one stored before the route checked it must not end this loop. Only the route's range:
+            # inf or a value past threading.TIMEOUT_MAX raised in the wait, under gevent it never returned
             _wait = self.config.check_interval
-            self.stop_event.wait(_wait if isinstance(_wait, (int, float)) and not isinstance(_wait, bool) and _wait > 0 else 300)
+            _ok = isinstance(_wait, (int, float)) and not isinstance(_wait, bool) and 1 <= _wait <= 86400
+            self.stop_event.wait(_wait if _ok else 300)
         
         self.logger.info(f"PegaProx daemon stopped for cluster: {self.config.name}")
     

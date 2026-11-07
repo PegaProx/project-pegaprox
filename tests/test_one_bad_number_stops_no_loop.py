@@ -74,7 +74,8 @@ def test_a_good_check_interval_is_taken(admin):
     assert mgr.config.check_interval == 60
 
 
-@pytest.mark.parametrize('stored', ['300', None, 0])
+# inf and a value past threading.TIMEOUT_MAX raise in the wait (or hang under gevent), 0.001 spins
+@pytest.mark.parametrize('stored', ['300', None, 0, float('inf'), 1e10, 0.001])
 def test_one_stored_before_this_does_not_end_the_daemon_loop(stored):
     waits = []
     loop = MagicMock()

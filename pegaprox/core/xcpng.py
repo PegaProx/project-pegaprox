@@ -111,6 +111,13 @@ def xapi_memory_bytes(value):
     return None if mem is None else max(mem, 128 * 1024 * 1024)
 
 
+def _check_interval(config):
+    """Seconds between balance checks. One stored before the routes checked it (text, None, 0)
+    reads as 300, as in the Proxmox daemon loop: text ended this loop, 0 made it spin."""
+    value = getattr(config, 'check_interval', 300)
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 300
+
+
 class XcpngManager:
     """
     XCP-ng pool manager - duck-typed to match PegaProxManager's public interface.
@@ -357,7 +364,7 @@ class XcpngManager:
                     self.last_run = datetime.now()
                     # MK: balance check on separate timer
                     now_t = time.time()
-                    interval_cfg = getattr(self.config, 'check_interval', 300)
+                    interval_cfg = _check_interval(self.config)
                     auto_migrate = getattr(self.config, 'auto_migrate', False)
                     # a PegaProx standby does not balance (#625)
                     if getattr(self.config, 'enabled', True) and auto_migrate and ha.is_active() and now_t - self._last_balance_check >= interval_cfg:
@@ -375,9 +382,8 @@ class XcpngManager:
             except Exception as e:
                 self.logger.error(f"Loop error: {e}")
 
-            interval = getattr(self.config, 'check_interval', 300)
             # NS: poll more often so tasks show up quickly
-            self.stop_event.wait(min(interval, 15))
+            self.stop_event.wait(min(_check_interval(self.config), 15))
 
     # ──────────────────────────────────────────
     # Cache refresh
