@@ -3689,10 +3689,11 @@ def _rebuild_sector_args(pve_mgr, node, vmid):
         new_args = ' '.join(parts)
         if new_args == cur_args:
             return False, cur_args, None
-        rc_s, out_s, _ = _pve_node_exec(pve_mgr, node,
+        rc_s, out_s, err_s = _pve_node_exec(pve_mgr, node,
             f"qm set {int(vmid)} --args {shlex.quote(new_args)} 2>&1", timeout=15)
         if rc_s != 0:
-            return False, new_args, f'qm set failed: {str(out_s or "")[:200]}'
+            why = str(out_s or '').strip() or str(err_s or '').strip()
+            return False, new_args, f'qm set failed: {why[:200]}'
         return True, new_args, None
     except Exception as e:
         return False, '', f'{type(e).__name__}: {e}'
@@ -3725,11 +3726,13 @@ def _ensure_guest_sector_size_512(pve_mgr, task, disk_bus, disk_count):
             parts.append(f"-set device.{disk_bus}{i}.logical_block_size=512")
             parts.append(f"-set device.{disk_bus}{i}.physical_block_size=512")
         args_str = ' '.join(parts)
-        rc_args, out_args, _ = _pve_node_exec(pve_mgr, task.target_node,
+        rc_args, out_args, err_args = _pve_node_exec(pve_mgr, task.target_node,
             f"qm set {task.proxmox_vmid} --args {shlex.quote(args_str)} 2>&1", timeout=10)
         # JB Nov 2026 - without it a guest with a 512 byte GPT does not boot from this LUN, so the log has to be true
         if rc_args != 0:
-            task.log(f"⚠ 512b sector emulation could not be set, the guest may not boot from this LUN: {str(out_args or '').strip()[-200:]}")
+            # a call refused before qm ran (no SSH, backoff) has its reason in the error slot
+            why = str(out_args or '').strip() or str(err_args or '').strip()
+            task.log(f"⚠ 512b sector emulation could not be set, the guest may not boot from this LUN: {why[-200:]}")
             return
         task.log(f"Applied 512b sector emulation ({disk_count} disk(s)): {args_str}")
         # If the customer later swaps scsi0 → sata0 via the Proxmox UI, these
