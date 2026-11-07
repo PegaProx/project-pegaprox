@@ -7238,6 +7238,20 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
         stop_evt.wait(5)
 
 
+def _copy_complete(task, how, output, copied, size):
+    # JB Nov 2026 - 90% used to count as done, and a disk with its last tenth missing went on to completed
+    status = re.search(r'(?:PIPE|RC)=(\d+)/(\d+)', output)
+    failed = status and status.groups() != ('0', '0')
+    if copied >= size and not failed:
+        return True
+    task.log(f"  {how} incomplete: {copied} of {size} bytes" + (f", {status.group(0)}" if failed else ""))
+    return False
+
+
+# a descriptor is a few hundred bytes of text, a disk with its data in that file is not
+_DESCRIPTOR_ONLY_BELOW = 1024 * 1024
+
+
 def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore, vm_dir, desc_file, disk_index):
     """Transfer a flat VMDK from ESXi to Proxmox storage.
 
@@ -7266,6 +7280,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
         return None, None
     
     flat_size = int(out.strip())
+    if flat_file == desc_file and flat_size < _DESCRIPTOR_ONLY_BELOW:
+        task.log(f"  {desc_file} is only a descriptor ({flat_size} bytes) and its data file was not found")
+        return None, None
     flat_size_gb = flat_size / (1024**3)
     size_kb = (flat_size + 1023) // 1024
     task.log(f"  Source: {flat_file} ({flat_size_gb:.1f} GB)")
@@ -7442,11 +7459,10 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             _bytes_all = re.findall(r'(\d+) bytes', dl_out)
             if _bytes_all:
                 downloaded = int(_bytes_all[-1])
-            if downloaded >= flat_size * 0.9:
+            if _copy_complete(task, 'HTTPS', dl_out, downloaded, flat_size):
                 dl_success = True
                 task.log(f"  HTTPS OK: {downloaded/(1024**3):.2f} GB")
             else:
-                task.log(f"  HTTPS incomplete: {downloaded/(1024**3):.2f} GB")
                 # Surface stderr tail when the dl is short — saves a re-bundle round
                 err_tail = (err_dl or '').strip()
                 if err_tail:
@@ -7489,7 +7505,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             _bytes_all2 = re.findall(r'(\d+) bytes', ssh_out)  # #538: last line, not first
             if _bytes_all2:
                 downloaded = int(_bytes_all2[-1])
-            if downloaded >= flat_size * 0.9:
+            if _copy_complete(task, 'SSH', ssh_out, downloaded, flat_size):
                 dl_success = True
                 task.log(f"  SSH OK: {downloaded/(1024**3):.2f} GB")
             else:
@@ -7512,13 +7528,13 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; "
+                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
                 _bytes_all3 = re.findall(r'(\d+) bytes', dd_out)  # #538: last, not first
                 downloaded = int(_bytes_all3[-1]) if _bytes_all3 else 0
-                if downloaded >= flat_size * 0.9:
+                if _copy_complete(task, 'SSHFS', dd_out, downloaded, flat_size):
                     dl_success = True
                 else:
                     err_tail = (err_dd or '').strip()
