@@ -3034,8 +3034,14 @@ def update_backup_job(cluster_id, job_id):
             data.pop(k, None)
         # Drop empty / null values — PVE 8+ rejects "" for some optional fields
         # (e.g. it complains about `mailto: ""` on jobs that never had it set).
-        for k in [k for k, v in list(data.items()) if v in (None, '')]:
+        # JB Nov 2026 - an emptied optional field is a delete for PVE, leaving it out kept the old
+        # value (All Nodes stayed on the node). Only these: an empty storage or guest list means nothing
+        emptied = [k for k, v in list(data.items()) if v in (None, '')]
+        for k in emptied:
             data.pop(k, None)
+        emptied = [k for k in emptied if k in ('node', 'mailto', 'comment', 'notes-template')]
+        if emptied:
+            data['delete'] = ','.join(filter(None, [str(data.get('delete') or '')] + emptied))
 
         # `prune-backups` and `fleecing` come back from GET as either a dict
         # or a string. PVE's PUT only accepts the property-string form

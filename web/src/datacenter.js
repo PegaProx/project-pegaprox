@@ -1707,9 +1707,6 @@
                         jobData.all = 1;
                         delete jobData.vmid;
                     }
-                    Object.keys(jobData).forEach(key => {
-                        if (key !== 'all' && (jobData[key] === '' || jobData[key] === null || jobData[key] === undefined)) delete jobData[key];
-                    });
                     const res = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/backup/${jobId}`, {
                         method: 'PUT', credentials: 'include',
                         headers: { ...authHeaders, 'Content-Type': 'application/json' },
