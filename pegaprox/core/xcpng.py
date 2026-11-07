@@ -3838,12 +3838,14 @@ class XcpngManager:
     def get_node_apt_updates(self, node):
         """List pending updates - yum equivalent of apt updates.
         Returns same field names as Proxmox APT so the frontend renders correctly."""
-        rc, out, _ = self._ssh_exec(node, "yum check-update 2>/dev/null", timeout=120)
+        rc, out, err = self._ssh_exec(node, "yum check-update 2>/dev/null", timeout=120)
         # yum check-update returns 100 if updates available, 0 if none
         # JB Nov 2026 - anything else is no answer. An empty list read as up to date and a rolling update skipped the node,
         # as the manager of Proxmox raises here
         if rc not in (0, 100):
-            raise Exception(f"yum check-update on {node} failed (rc={rc})")
+            # -1 is _ssh_exec's own: no SSH connection, or the command broke off, and err says which
+            why = f'rc={rc}' if rc != -1 else ((err or '').strip().splitlines() or ['no SSH answer'])[0][:200]
+            raise Exception(f"yum check-update on {node} failed ({why})")
         pending = []
         past_header = False
         for line in out.splitlines():

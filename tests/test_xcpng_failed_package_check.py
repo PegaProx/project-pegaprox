@@ -29,3 +29,13 @@ def test_nothing_pending_is_still_an_empty_list():
 def test_pending_updates_are_still_listed():
     got = _xcp(100, 'Loaded plugins\n\nkernel.x86_64  4.19  updates\n').get_node_apt_updates('n1')
     assert any('kernel' in str(p) for p in got), got
+
+
+@pytest.mark.parametrize('err,says', [('SSH connection failed', 'SSH connection failed'), ('', 'no SSH answer'),
+                                      ('Timeout opening channel.\n', 'Timeout opening channel.')])
+def test_a_check_that_got_no_answer_says_why(err, says):
+    x = XcpngManager.__new__(XcpngManager)
+    x._ssh_exec = lambda node, cmd, timeout=60: (-1, '', err)
+    with pytest.raises(Exception) as got:
+        x.get_node_apt_updates('n1')
+    assert str(got.value) == f'yum check-update on n1 failed ({says})'
