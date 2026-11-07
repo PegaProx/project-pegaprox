@@ -5310,6 +5310,13 @@ class PegaProxManager:
 
             # Get all VMs on this node
             vms = self.get_vm_resources()
+            # JB Nov 2026 - a read that timed out is an empty list that says so, and 0 guests sent a rolling update
+            # straight on to the reboot with the guests still there
+            if getattr(vms, 'unavailable', False):
+                task.status = 'failed'
+                task.error = f"The guest list of the cluster could not be read, nothing was moved off {node_name}"
+                self.logger.error(f"[MAINT] {task.error}")
+                return
             node_vms = [
                 vm for vm in vms
                 if vm.get('node') == node_name and
@@ -5340,6 +5347,12 @@ class PegaProxManager:
             # guests, so maintenance just flags the node (guests stay running; the admin
             # owns any reboot downtime).
             if self.get_best_target_node(exclude_nodes=[node_name]) is None:
+                # a single node still lists itself: no nodes at all means the read failed
+                if not self.get_node_status():
+                    task.status = 'failed'
+                    task.error = f"The node list could not be read, nothing was moved off {node_name}"
+                    self.logger.error(f"[MAINT] {task.error}")
+                    return
                 self.logger.warning(
                     f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
                     f"{node_name} (single-node cluster or all peers offline) — skipping "
@@ -5481,6 +5494,8 @@ class PegaProxManager:
                     self.logger.warning(f"[WARN] {remaining} VMs still on {node_name} after post-evacuation wait")
                 elif remaining < 0:
                     self.logger.warning(f"[WARN] could not verify VM count on {node_name} - API unreachable")
+                # a guest still here is why the rolling update has its pause, and what it would otherwise reboot
+                self._note_guests_left(node_name, task, remaining)
 
             # #647 - the CRM can still finish a move we counted as failed; a guest that
             # has left the node by now is no reason to pause the rolling update
@@ -5527,10 +5542,30 @@ class PegaProxManager:
             task.status = 'failed'
             task.error = str(e)
     
+    def _note_guests_left(self, node_name, task, remaining):
+        known = {f.get('vmid') for f in task.failed_vms}
+        if remaining < 0:
+            task.failed_vms.append({'vmid': None, 'name': f'guests on {node_name}',
+                                    'error': 'Could not verify that the node is empty'})
+            return
+        if remaining == 0:
+            return
+        try:
+            left = [v for v in self.get_vm_resources() if v.get('node') == node_name and v.get('status') == 'running'
+                    and v.get('type') in ('qemu', 'lxc') and v.get('vmid') not in known]
+        except Exception:
+            left = []
+        for vm in left:
+            task.failed_vms.append({'vmid': vm.get('vmid'), 'name': vm.get('name', 'VM'), 'error': 'Still on the node after the wait'})
+        if not left and not known:
+            task.failed_vms.append({'vmid': None, 'name': f'{remaining} guest(s) on {node_name}', 'error': 'Still on the node after the wait'})
+
     def _count_vms_on_node(self, node_name):
         """Quick check how many running VMs/CTs are still on a node"""
         try:
             vms = self.get_vm_resources()
+            if getattr(vms, 'unavailable', False):
+                return -1
             return len([v for v in vms if v.get('node') == node_name
                         and v.get('type') in ('qemu', 'lxc')
                         and v.get('status') == 'running'])
