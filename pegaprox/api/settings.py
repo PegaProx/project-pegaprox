@@ -6282,6 +6282,10 @@ def get_node_repos(cluster_id, node):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's package sources, read like they are changed
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

@@ -267,6 +267,10 @@ def export_cluster_config(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # read for a re-configure, which a confined caller may not do
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2344,6 +2348,11 @@ def get_cpu_compatibility(cluster_id):
     """CPU compatibility matrix for EVC-like migration safety"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every running guest of the cluster and the CPU of every node, one config read per
+    # guest: not for a caller confined to some guests, and refused before that walk
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2360,6 +2369,10 @@ def get_predictive_analysis(cluster_id):
     """Get predictive load analysis for all nodes"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the load forecast of every node; balancing is cluster configuration
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -2381,6 +2394,9 @@ def get_excluded_nodes(cluster_id):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2682,6 +2698,10 @@ def remove_excluded_vm(cluster_id, vmid):
 def get_excluded_pools(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the pools of every tenant on the cluster, as the excluded nodes above
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     mgr = cluster_managers.get(cluster_id)
     if not mgr: return jsonify({'error': 'Cluster not found'}), 404
     pools = mgr.get_balancing_excluded_pools()
@@ -2733,6 +2753,10 @@ def get_fallback_hosts(cluster_id):
     """Get list of fallback hosts for HA"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the addresses of the nodes
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -3761,7 +3785,7 @@ def get_ha_status(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_ha_status())
+    return ha_status_answer(cluster_id, cluster_managers[cluster_id])
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/status', methods=['GET'])
@@ -3773,7 +3797,37 @@ def get_ha_status_detailed(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     
-    return jsonify(cluster_managers[cluster_id].get_ha_status())
+    return ha_status_answer(cluster_id, cluster_managers[cluster_id])
+
+
+# what of PegaProx's HA status a caller confined to some guests gets besides the nodes
+HA_STATUS_FOR_CONFINED = ('enabled', 'check_interval', 'failure_threshold', 'error')
+
+
+def ha_status_answer(cluster_id, mgr):
+    """PegaProx's HA status as the caller of this request may see it. Whole for the admin and
+    an operator of the cluster. A caller confined to some guests gets whether HA is on, the
+    nodes their guests run on (the dashboard raises its node alerts from these on every
+    cluster switch) and, on XCP-ng, their own guests in HA. Fallback and quorum hosts, the
+    fences, storages, agents and the recoveries of other nodes are the setup of the whole
+    cluster. Asked before the manager, whose XCP-ng answer walks every guest."""
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[HA] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    status = mgr.get_ha_status()
+    if mine is None or not isinstance(status, dict):
+        return jsonify(status)
+    out = {k: status[k] for k in HA_STATUS_FOR_CONFINED if k in status}
+    if isinstance(status.get('nodes'), dict):
+        out['nodes'] = {n: v for n, v in status['nodes'].items() if n in mine}
+    if isinstance(status.get('recovery_in_progress'), list):
+        # keyed by the node that failed
+        out['recovery_in_progress'] = [n for n in status['recovery_in_progress'] if n in mine]
+    if isinstance(status.get('protected_vms'), list):
+        out['protected_vms'] = scope_vm_rows(cluster_id, status['protected_vms'])
+    return jsonify(out)
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])
@@ -4576,18 +4630,20 @@ def set_ha_status(cluster_id):
         })
 
 
-def _ha_sid_authorized(cluster_id, sid, perm='vm.config'):
+def _ha_sid_authorized(cluster_id, sid, perm='vm.config', user=None):
     """sec (audit): the HA routes take a caller-supplied guest and had cluster-level gating only.
     ha.view and ha.config are BOTH granted by the shipped tenant_admin template, so a caller
     admitted by the #248/#555 fallbacks could enumerate every guest's HA state and add/remove
     foreign guests from HA (an availability lever). The plugin twin already filters its listing;
-    this is the same question for the core routes."""
+    this is the same question for the core routes.
+
+    user: the identity of a filter over many sids, built once by the caller."""
     from pegaprox.utils.auth import build_authz_user
     from pegaprox.utils.rbac import user_can_access_vm
     _kind, _, _num = str(sid or '').partition(':')
     if _kind not in ('vm', 'ct') or not _num.isdigit():
         return False
-    _u = build_authz_user(request.session.get('user', ''), request.session)
+    _u = user if user is not None else build_authz_user(request.session.get('user', ''), request.session)
     return user_can_access_vm(_u, cluster_id, int(_num), perm,
                               'lxc' if _kind == 'ct' else 'qemu')
 
@@ -4616,6 +4672,11 @@ def get_proxmox_ha_resources(cluster_id):
 def get_proxmox_ha_groups(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the groups (PVE 9: the node affinity rules with the guests in them) of the whole
+    # cluster; a guest's own HA state is per guest in /proxmox-ha/resources
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

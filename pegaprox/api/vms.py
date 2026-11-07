@@ -409,6 +409,10 @@ def get_cluster_vms_list(cluster_id):
 def get_cluster_info(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every node with its corosync address: not for a caller confined to some guests
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -500,6 +504,9 @@ def _confirmed_api_fingerprint(manager, host, port, node_names):
 def get_join_info(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -589,6 +596,9 @@ def get_datacenter_options(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # a caller confined to some guests gets the MAC prefix alone, which the NIC dialog of
+    # their guest makes addresses with; the rest is the configuration of the whole cluster
+    confined = caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -599,7 +609,10 @@ def get_datacenter_options(cluster_id):
         response = manager._create_session().get(url, timeout=5)
         
         if response.status_code == 200:
-            return jsonify(response.json().get('data', {}))
+            data = response.json().get('data', {})
+            if confined:
+                data = {'mac_prefix': data['mac_prefix']} if isinstance(data, dict) and data.get('mac_prefix') else {}
+            return jsonify(data)
         return jsonify({})
     except Exception as e:
         return jsonify({'error': safe_error(e, 'Failed to get datacenter options')}), 500
@@ -2324,6 +2337,12 @@ def get_ha_manager_status(cluster_id):
     """Get Proxmox HA manager status (quorum, master, lrm nodes)"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every HA guest of the cluster is in here; a confined caller gets theirs (see below)
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[HA] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2338,17 +2357,62 @@ def get_ha_manager_status(cluster_id):
         
         if resp.status_code == 200:
             data = resp.json().get('data', {})
-            return jsonify(data)
         else:
             # Fallback to current status
             url2 = f"https://{host}:{port}/api2/json/cluster/ha/status/current"
             resp2 = manager._create_session().get(url2, timeout=30)
-            if resp2.status_code == 200:
-                return jsonify(resp2.json().get('data', []))
-            return jsonify([])
+            if resp2.status_code != 200:
+                return jsonify([])
+            data = resp2.json().get('data', [])
+        return jsonify(data if mine is None else _ha_status_for_confined(cluster_id, data, mine))
     except Exception as e:
         logging.error(f"Error getting HA manager status: {e}")
         return jsonify([])
+
+
+def _ha_status_for_confined(cluster_id, data, mine):
+    """The HA manager status for a caller confined to some guests: the services they may see
+    (the per-sid check of /proxmox-ha/resources) and the nodes in `mine`, where their guests
+    run. Takes both answers, manager_status (a dict) and status/current (a list). What it
+    does not know is left out."""
+    from pegaprox.api.clusters import _ha_sid_authorized
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+
+    def sees(sid):
+        return _ha_sid_authorized(cluster_id, sid, 'vm.view', user=user)
+
+    if isinstance(data, list):
+        out = []
+        for row in data:
+            kind = row.get('type') if isinstance(row, dict) else None
+            if (kind in ('quorum', 'master') or (kind == 'lrm' and row.get('node') in mine)
+                    or (kind == 'service' and sees(row.get('sid')))):
+                out.append(row)
+        return out
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    if isinstance(data.get('quorum'), dict):
+        out['quorum'] = data['quorum']
+    ms = data.get('manager_status')
+    if isinstance(ms, dict):
+        services = ms.get('service_status') if isinstance(ms.get('service_status'), dict) else {}
+        nodes = ms.get('node_status') if isinstance(ms.get('node_status'), dict) else {}
+        out['manager_status'] = {k: ms[k] for k in ('master_node', 'timestamp') if k in ms}
+        out['manager_status'].update(node_status={n: v for n, v in nodes.items() if n in mine},
+                                     service_status={sid: v for sid, v in services.items() if sees(sid)})
+    lrm = data.get('lrm_status')
+    if isinstance(lrm, dict):
+        out['lrm_status'] = {}
+        for node, v in lrm.items():
+            if node not in mine:
+                continue
+            if isinstance(v, dict) and isinstance(v.get('results'), dict):
+                v = dict(v, results={uid: r for uid, r in v['results'].items()
+                                     if isinstance(r, dict) and sees(r.get('sid'))})
+            out['lrm_status'][node] = v
+    return out
 
 
 # Firewall API
@@ -2357,6 +2421,12 @@ def get_ha_manager_status(cluster_id):
 def get_firewall_options(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the datacenter firewall is read, like it is changed, by no caller confined to some guests:
+    # its rules, aliases and IP sets name the addresses of other guests. A guest's own firewall
+    # has its own routes
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2408,6 +2478,9 @@ def set_firewall_options(cluster_id):
 def get_firewall_rules(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2514,6 +2587,9 @@ def get_firewall_groups(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2537,6 +2613,9 @@ def get_firewall_aliases(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2560,6 +2639,9 @@ def get_firewall_ipsets(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2963,6 +3045,11 @@ def get_pci_mappings(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # the mappings of the whole cluster; a guest's passthrough dialog reads its own through
+    # the per-guest passthrough/mappings route
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -2986,6 +3073,9 @@ def get_usb_mappings(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -3284,6 +3374,11 @@ def maintenance_capacity_preview_api(cluster_id, node_name):
     # remaining nodes' RAM past `threshold`? Non-blocking hint for the UI.
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the load of the other nodes, for a maintenance a confined caller may not start (as the
+    # plan below)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -3830,6 +3925,9 @@ def check_can_remove_node(cluster_id, node_name):
     try:
         ok, err = check_cluster_access(cluster_id)
         if not ok: return err
+        _cerr = require_unconfined(cluster_id)
+        if _cerr:
+            return _cerr
         
         if cluster_id not in cluster_managers:
             return jsonify({'can_remove': False, 'error': 'Cluster not found', 'blockers': ['Cluster not found']}), 200
@@ -6463,6 +6561,10 @@ def get_node_pci_devices(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    # the hardware dialog of the caller's own guest reads the node it runs on
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -6496,6 +6598,9 @@ def get_node_usb_devices(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     manager, error = get_connected_manager(cluster_id)
     if error:
         return error
@@ -7233,6 +7338,17 @@ def _read_mappings(manager, kind, check_node=None):
     return out, None
 
 
+def _mappings_on_nodes(mappings, nodes):
+    """The mappings of _read_mappings that have a device on one of `nodes`, with the entries
+    and nodes of those only. New dicts."""
+    out = []
+    for m in mappings:
+        entries = [e for e in m['entries'] if e['node'] in nodes]
+        if entries:
+            out.append(dict(m, entries=entries, nodes=[n for n in m['nodes'] if n in nodes]))
+    return out
+
+
 @bp.route('/api/clusters/<cluster_id>/vms/<node>/qemu/<int:vmid>/passthrough/mappings', methods=['GET'])
 @require_auth(perms=['vm.config'])
 def get_vm_passthrough_mappings(cluster_id, node, vmid):
@@ -7254,9 +7370,18 @@ def get_vm_passthrough_mappings(cluster_id, node, vmid):
     try:
         if kind == 'dir':
             return _vm_dir_mappings(manager, cluster_id, node, vmid)
-        mappings, read_err = _read_mappings(manager, kind, check_node=node)
+        # a caller confined to some guests gets the mappings on the nodes those run on, with the
+        # devices of those nodes only, and PVE checks no other node for them
+        try:
+            mine = caller_guest_nodes(cluster_id)
+        except Exception as e:
+            logging.error(f"[MAPPING] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+            return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+        mappings, read_err = _read_mappings(manager, kind, check_node=node if mine is None or node in mine else None)
         if mappings is None:
             return jsonify({'error': read_err}), 502
+        if mine is not None:
+            mappings = _mappings_on_nodes(mappings, mine)
         access = manager.pve_root_access()
         return jsonify({'kind': kind, 'node': node, 'mappings': mappings,
                         'raw_allowed': access['root'], 'access': access})
@@ -7743,6 +7868,11 @@ def get_network_list_api(cluster_id, node):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # the NIC, create and migrate dialogs read the node of the caller's own guest, with the
+    # SDN vnets merged in that these dialogs offer
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     networks = manager.get_network_list(node)
@@ -7758,6 +7888,9 @@ def get_iso_list_api(cluster_id, node):
         return err
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     storage = request.args.get('storage')
@@ -14333,6 +14466,9 @@ def get_cluster_fingerprint_api(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     

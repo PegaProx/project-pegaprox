@@ -23,7 +23,8 @@ from pegaprox.utils.auth import require_auth, load_users, verify_password
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.ssh import read_capped as _read_capped
 from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
-                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error)
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error,
+                                  require_guest_node, caller_guest_nodes)
 from pegaprox.api.helpers import unread_failure
 
 bp = Blueprint('nodes', __name__)
@@ -39,6 +40,10 @@ def get_node_summary_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    # a caller confined to some guests reads the nodes those run on, as /metrics lists them
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     return jsonify(manager.get_node_summary(node))
@@ -59,6 +64,9 @@ def get_node_ip_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     mgr = cluster_managers[cluster_id]
     # #781 (Panxatony) — read only what this endpoint uses. It formerly unpacked mgr.api_port too
@@ -100,6 +108,9 @@ def get_node_rrddata_api(cluster_id, node):
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     manager = cluster_managers[cluster_id]
     timeframe = request.args.get('timeframe', 'hour')
@@ -111,6 +122,11 @@ def get_node_rrddata_api(cluster_id, node):
 def get_node_network_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's interfaces, addresses and gateways: not for a caller confined to some guests.
+    # The NIC dialog of their guest reads the bridge list of its node (vms.get_network_list_api)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -131,6 +147,9 @@ def get_node_network_changes_api(cluster_id, node):
     """The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -194,6 +213,9 @@ def _reject_bad_node(node):
 def get_node_netstats_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -212,6 +234,10 @@ def get_node_netstats_api(cluster_id, node):
 def get_node_cluster_health_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # corosync and quorum of the whole cluster
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -260,6 +286,9 @@ def get_cluster_qdevice_api(cluster_id):
 def get_node_sensors_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -284,6 +313,9 @@ def get_node_sensors_api(cluster_id, node):
 def get_node_temperature_history_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     from pegaprox.background.metrics import load_node_temps
@@ -314,6 +346,9 @@ def get_node_metrics_history_api(cluster_id, node):
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     from pegaprox.background.metrics import history_range, load_metrics_range, history_series
     start, end, why = history_range(request.args)
     if why:
@@ -445,6 +480,10 @@ def get_node_hardware_api(cluster_id, node):
     """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's hardware, which no pool or guest grant covers
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     bad, code = _reject_bad_node(node)
     if bad is not None: return bad, code
     if cluster_id not in cluster_managers:
@@ -671,6 +710,9 @@ def get_cluster_hardware_health_api(cluster_id):
     populates the cache. Consent-gated like the per-node read."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     from pegaprox.core import bmc
@@ -922,7 +964,50 @@ def get_cluster_networks_api(cluster_id):
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
-    return jsonify(mgr.get_cluster_networks())
+    # decided before the walk, which fires one config read per guest
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[API] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    got = mgr.get_cluster_networks()
+    if mine is None:
+        return jsonify(got)
+    return jsonify(_networks_for_confined(cluster_id, got, mine))
+
+
+def _networks_for_confined(cluster_id, got, mine):
+    """The /networks answer for a caller confined to some guests: the guests they may see,
+    the nodes in `mine` (where those run) and the bridges there. `got` is the manager's
+    30 s cache that every caller is served from, so the cut is made of copies."""
+    if not isinstance(got, dict):
+        return got   # XCP-ng: the pool's networks with counts, no guest and no node in them
+    nets = [n for n in got.get('networks') or [] if isinstance(n, dict)]
+    stores = [s for s in got.get('storage_assignments') or [] if isinstance(s, dict)]
+    rows = [r for x in nets + stores for r in x.get('vms') or [] if isinstance(r, dict)]
+    # one pass over every guest the answer names, not one per bridge or storage
+    allowed = {(r.get('vmid'), r.get('type')) for r in scope_vm_rows(cluster_id, rows)}
+
+    def theirs(vms):
+        return [r for r in vms or [] if isinstance(r, dict) and (r.get('vmid'), r.get('type')) in allowed]
+
+    out = []
+    for n in nets:
+        vms = theirs(n.get('vms'))
+        nodes = [x for x in n.get('nodes') or [] if x in mine]
+        if not vms and not nodes:
+            continue
+        row = dict(n, vms=vms, nodes=nodes)
+        # the settings of a bridge are those of the first node that listed it
+        if (n.get('nodes') or [None])[0] not in mine:
+            row.update(cidr='', address='', gateway='', bridge_ports='', comments='')
+        out.append(row)
+    kept = []
+    for s in stores:
+        vms = theirs(s.get('vms'))
+        if vms:
+            kept.append(dict(s, vms=vms))
+    return dict(got, networks=out, storage_assignments=kept)
 
 
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
@@ -932,6 +1017,9 @@ def get_node_dns_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok:
         return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -977,6 +1065,9 @@ def update_node_dns_api(cluster_id, node):
 def get_node_hosts_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1016,6 +1107,9 @@ def get_node_time_api(cluster_id, node):
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
     
     got = cluster_managers[cluster_id].get_node_time(node)
     return unread_failure(got, f'the time settings of node {node}') or jsonify(got)
@@ -1071,6 +1165,9 @@ def get_node_certificates_api(cluster_id, node):
     """Get node certificates"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1303,6 +1400,10 @@ def get_node_subscription_api(cluster_id, node):
     """Get node subscription status"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # hands the key unmasked, the aggregate in datacenter.py masks it
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -1850,6 +1951,9 @@ def get_smbios_autoconfig_status(cluster_id, node):
     """Check if SMBIOS auto-config service is running on node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2093,6 +2197,9 @@ def get_smbios_autoconfig_status_all(cluster_id):
     """Get SMBIOS auto-config status for ALL nodes in cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -3105,6 +3212,10 @@ def restore_deleted_script(cluster_id, script_id):
 def get_node_pifs_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # host network configuration, as /network above
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -3118,6 +3229,9 @@ def get_node_pifs_api(cluster_id, node):
 def get_node_bonds_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
     mgr = cluster_managers[cluster_id]
@@ -3136,7 +3250,8 @@ def get_pool_ha_api(cluster_id):
     mgr = cluster_managers[cluster_id]
     if not hasattr(mgr, 'get_ha_status'):
         return jsonify({'enabled': False})
-    return jsonify(mgr.get_ha_status())
+    from pegaprox.api.clusters import ha_status_answer
+    return ha_status_answer(cluster_id, mgr)
 
 
 @bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])

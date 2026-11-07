@@ -630,6 +630,10 @@ def trigger_xclb_balance_now(group_id):
 def get_node_options_api(cluster_id, node):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's configuration (wake-on-LAN address, ACME domains), read like it is changed
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -664,6 +668,10 @@ def get_node_apt_updates_api(cluster_id, node):
     """Get available APT updates"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the host's packages and their versions
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404

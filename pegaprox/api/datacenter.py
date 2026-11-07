@@ -93,6 +93,10 @@ def get_datacenter_subscriptions(cluster_id):
     """Get subscription status for all nodes in a cluster."""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # every node of the cluster with its server id: not for a caller confined to some guests
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -258,6 +262,10 @@ def get_node_multipath_status(cluster_id, node):
     """Get multipath status for a node - all devices, paths, and their states"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the SAN paths of a host, read over SSH: cluster infrastructure, which no pool or guest grant covers
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -276,6 +284,9 @@ def get_cluster_multipath_status(cluster_id):
     """Get multipath status for entire cluster"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -944,6 +955,12 @@ def get_sdn_overview(cluster_id):
     """Get complete SDN overview including zones, vnets, subnets, controllers, IPAM, DNS"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the SDN of the whole cluster (subnets, controllers, IPAM and DNS plugins) is read, like it is
+    # changed, by no caller confined to some guests. Their NIC dialog gets the vnets with the
+    # bridges of their guest's node (vms.get_network_list_api)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1096,6 +1113,9 @@ def get_sdn_zones(cluster_id):
     """Get SDN zones"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # MK: 501 means SDN not enabled on this cluster - return empty list instead of error
     manager, error = get_connected_manager(cluster_id)
@@ -1212,6 +1232,9 @@ def get_sdn_vnets(cluster_id):
     """Get SDN VNets"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     # LW: VNets are the main abstraction layer - each vnet belongs to exactly one zone
     manager, error = get_connected_manager(cluster_id)
@@ -1328,6 +1351,9 @@ def get_sdn_subnets(cluster_id, vnet_id):
     """Get subnets for a VNet"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1462,6 +1488,9 @@ def apply_sdn_config(cluster_id):
 def get_sdn_fabrics(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     manager, error = get_connected_manager(cluster_id)
     if error: return error
     try:
@@ -1602,6 +1631,9 @@ def _sdn_crud_resource(cluster_id, family, item_id=None):
 def list_sdn_routemaps(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return _sdn_crud_resource(cluster_id, 'route-maps')
 
 
@@ -1651,6 +1683,9 @@ def delete_sdn_routemap(cluster_id, routemap_id):
 def list_sdn_prefixlists(cluster_id):
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
     return _sdn_crud_resource(cluster_id, 'prefix-lists')
 
 
@@ -1705,6 +1740,9 @@ def get_sdn_controllers(cluster_id):
     """Get SDN controllers"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1824,6 +1862,9 @@ def get_sdn_ipams(cluster_id):
     """Get SDN IPAM configurations"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -1943,6 +1984,9 @@ def get_sdn_dns(cluster_id):
     """Get SDN DNS configurations"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2061,6 +2105,9 @@ def get_sdn_zone_details(cluster_id, zone_id):
     """Get detailed zone configuration"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2084,6 +2131,9 @@ def get_sdn_vnet_details(cluster_id, vnet_id):
     """Get detailed VNet configuration"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
@@ -2144,6 +2194,11 @@ def get_node_disks_api(cluster_id, node):
     """Get physical disks on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # the disks of a host with their serials, SMART, LVM and ZFS: a pool or guest grant is a
+    # claim on guests, not on these (see the ZFS detail below)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2159,6 +2214,9 @@ def get_node_disk_smart_api(cluster_id, node, disk):
     """Get SMART data for a disk"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2177,6 +2235,9 @@ def get_node_lvm_api(cluster_id, node):
     """Get LVM volume groups on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2223,6 +2284,9 @@ def get_node_lvmthin_api(cluster_id, node):
     """Get LVM-Thin pools on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2268,6 +2332,9 @@ def get_node_zfs_api(cluster_id, node):
     """Get ZFS pools on a node"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     if cluster_id not in cluster_managers:
         return jsonify({'error': 'Cluster not found'}), 404
@@ -2521,6 +2588,10 @@ def get_metric_servers(cluster_id):
     """Get configured metric servers (InfluxDB, Graphite) from Proxmox"""
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
+    # where the cluster sends its metrics: cluster configuration
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
 
     manager, error = get_connected_manager(cluster_id)
     if error:
