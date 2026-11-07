@@ -17,8 +17,12 @@ OLD_UPTIME = 3_000_000
 class _Clock:
     def __init__(self):
         self.now = 1000.0
+        self.step = 0   # what the wall clock was moved by, as NTP or a resumed VM do
 
     def time(self):
+        return self.now + self.step
+
+    def monotonic(self):
         return self.now
 
     def sleep(self, seconds):
@@ -119,6 +123,15 @@ def test_the_api_itself_going_away_and_coming_back(monkeypatch):
     assert m.clock.now - m.start >= 150
 
 
+def test_a_step_of_the_wall_clock_is_not_a_restart(monkeypatch):
+    def answers(t):
+        m.clock.step = 2 * OLD_UPTIME
+        return _online(OLD_UPTIME + t)
+    m = _manager(monkeypatch, answers)
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=60) is False
+    assert m.clock.now - m.start >= 60
+
+
 def test_an_online_answer_without_an_uptime_proves_nothing(monkeypatch):
     m = _manager(monkeypatch, lambda t: _online(0))
     assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=60) is False
@@ -158,6 +171,7 @@ def test_a_node_that_needs_no_reboot_does_not_fail_the_update(monkeypatch):
     task = _run_task(m)
     assert task.status == 'completed', task.error
     assert task.reboot_issued is False and task.back_online is False
+    assert not any('[ERROR]' in line['text'] for line in task.output_lines)
 
 
 def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
@@ -165,6 +179,8 @@ def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
     task = _run_task(m)
     assert task.status == 'completed', task.error
     assert task.reboot_issued is False
+    # the update stands, but this reboot was wanted and did not happen: say so
+    assert any('[ERROR]' in line['text'] and 'not rebooted' in line['text'] for line in task.output_lines)
 
 
 def test_a_sent_reboot_is_still_waited_for(monkeypatch):
