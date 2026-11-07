@@ -27,6 +27,15 @@ _PBS_SECRETS = {'password': 'pass_encrypted', 'api_token_secret': 'api_token_sec
                 'ssh_key': 'ssh_key_encrypted'}
 
 
+# PBS launch endpoints return a complete worker UPID. Task-read routes use the
+# separate, deliberately permissive valid_pbs_upid path-safety check.
+_PBS_LAUNCH_UPID_RE = re.compile(
+    r'UPID:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?:'
+    r'[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8,9}:[0-9A-Fa-f]{8,16}:[0-9A-Fa-f]{8}:'
+    r'[^:\s]+:[^:\s]*:[^:\s]+:'
+)
+
+
 # MK Sep 2026 (#802) — PBSManager.api_get does not raise; on a refusal it returns
 # {'error': 'HTTP 403', 'status_code': 403}. Routes that then reach for result.get('data', [])
 # hand the browser an empty 200, so a refusal and an empty log look identical to the UI. The
@@ -741,15 +750,26 @@ def get_pbs_groups(pbs_id, store):
     return jsonify(_scope_pbs_rows(mgr, groups, store=store, ns=ns, owners=owners))
 
 
-def _pbs_answer(result):
+def _pbs_answer(result, *, launch=False):
+    """Keep PBS refusals as 502 errors; require a full worker UPID for launches."""
     # JB Nov 2026 - the manager hands PBS's refusal back as a dict. Under a 200 the UI read it as started
-    return jsonify(result), (502 if isinstance(result, dict) and 'error' in result else 200)
+    if isinstance(result, dict) and 'error' in result:
+        return jsonify(result), 502
+    if launch:
+        upid = result.get('data') if isinstance(result, dict) else None
+        if not valid_pbs_upid(upid) or not _PBS_LAUNCH_UPID_RE.fullmatch(upid):
+            return jsonify({'error': 'PBS returned an invalid response',
+                            'code': 'PBS_UPSTREAM'}), 502
+    return jsonify(result), 200
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/gc', methods=['POST'])
 @require_auth(perms=['pbs.datastore.gc'])
 def pbs_start_gc(pbs_id, store):
-    """Start garbage collection"""
+    """Start garbage collection, requiring a valid PBS worker UPID.
+
+    PBS refusals and malformed launch responses return 502 before success auditing.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -762,15 +782,19 @@ def pbs_start_gc(pbs_id, store):
         return jsonify({'error': 'PBS server not found'}), 404
     mgr = pbs_managers[pbs_id]
     result = mgr.start_gc(store)
-    if 'error' not in result:
+    answer, status = _pbs_answer(result, launch=True)
+    if status == 200:
         log_audit(request.session.get('user', 'admin'), 'pbs.gc', f"Started GC on {mgr.name}/{store}")
-    return _pbs_answer(result)
+    return answer, status
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/verify', methods=['POST'])
 @require_auth(perms=['pbs.datastore.verify'])
 def pbs_start_verify(pbs_id, store):
-    """Start verification"""
+    """Start verification, requiring a valid PBS worker UPID.
+
+    PBS refusals and malformed launch responses return 502 before success auditing.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -784,15 +808,19 @@ def pbs_start_verify(pbs_id, store):
     mgr = pbs_managers[pbs_id]
     data = request.json or {}
     result = mgr.start_verify(store, ignore_verified=data.get('ignore_verified', True))
-    if 'error' not in result:
+    answer, status = _pbs_answer(result, launch=True)
+    if status == 200:
         log_audit(request.session.get('user', 'admin'), 'pbs.verify', f"Started verify on {mgr.name}/{store}")
-    return _pbs_answer(result)
+    return answer, status
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/prune', methods=['POST'])
 @require_auth(perms=['pbs.datastore.prune'])
 def pbs_prune(pbs_id, store):
-    """Prune old backups"""
+    """Prune old backups, requiring a valid PBS worker UPID.
+
+    PBS refusals and malformed launch responses return 502 before success auditing.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -822,9 +850,10 @@ def pbs_prune(pbs_id, store):
         dry_run=data.get('dry_run', True),
     )
     action = "dry-run prune" if data.get('dry_run', True) else "PRUNE"
-    if 'error' not in result:
+    answer, status = _pbs_answer(result, launch=True)
+    if status == 200:
         log_audit(request.session.get('user', 'admin'), 'pbs.prune', f"{action} on {mgr.name}/{store}")
-    return _pbs_answer(result)
+    return answer, status
 
 
 def _scope_pbs_rows(mgr, rows, type_key='backup-type', id_key='backup-id',
@@ -1279,7 +1308,10 @@ def get_pbs_jobs(pbs_id):
 @bp.route('/api/pbs/<pbs_id>/jobs/<job_type>/<job_id>/run', methods=['POST'])
 @require_auth(perms=['pbs.jobs.run'])
 def run_pbs_job(pbs_id, job_type, job_id):
-    """Manually trigger a PBS job"""
+    """Manually trigger a PBS job, requiring a valid PBS worker UPID.
+
+    PBS refusals and malformed launch responses return 502 before success auditing.
+    """
     # Check PBS access authorization
     ok, err = check_pbs_access(pbs_id)
     if not ok:
@@ -1301,10 +1333,11 @@ def run_pbs_job(pbs_id, job_type, job_id):
     else:
         return jsonify({'error': f'Unknown job type: {job_type}'}), 400
     
-    if 'error' not in result:
+    answer, status = _pbs_answer(result, launch=True)
+    if status == 200:
         log_audit(request.session.get('user', 'admin'), f'pbs.job.{job_type}', 
                   f"Started {job_type} job '{job_id}' on {mgr.name}")
-    return jsonify(result)
+    return answer, status
 
 
 @bp.route('/api/pbs/<pbs_id>/datastores/<store>/namespaces', methods=['GET'])

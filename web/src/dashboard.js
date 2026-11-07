@@ -18356,6 +18356,16 @@
                 } catch (e) { return { success: false, error: e.message }; }
             };
             
+            /** Accept only a complete PBS worker ID returned by a launch request. */
+            const isPBSLaunchUpid = upid => typeof upid === 'string' && /^UPID:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?:[0-9A-Fa-f]{8}:[0-9A-Fa-f]{8,9}:[0-9A-Fa-f]{8,16}:[0-9A-Fa-f]{8}:[^:\s]+:[^:\s]*:[^:\s]+:$/.test(upid);
+
+            /**
+             * Launch a PBS datastore action and reject invalid legacy 200 responses.
+             * @param {string} action - Datastore operation to perform.
+             * @param {string} store - Target datastore.
+             * @param {Object} data - Operation arguments.
+             * @returns {Promise<Object|undefined>}
+             */
             const pbsAction = async (action, store, data = {}) => {
                 if (!selectedPBS) return;
                 const pbsId = selectedPBS.id;
@@ -18375,6 +18385,12 @@
                     });
                     if (resp && resp.ok) {
                         const result = await resp.json();
+                        const launchAction = action === 'gc' || action === 'verify' || action === 'prune';
+                        const launched = isPBSLaunchUpid(result?.data);
+                        if ((result && typeof result === 'object' && 'error' in result) || (launchAction && !launched)) {
+                            addToast(t('operationFailed'), 'error');
+                            return result;
+                        }
                         const upid = result?.data;
                         addToast(`${action} started on ${store}${upid ? ' (task: ' + String(upid).slice(-8) + ')' : ''}`, 'success');
                         // Refresh tasks
@@ -18394,7 +18410,7 @@
             };
             
             /**
-             * Start a PBS job and refresh its server's tasks and last-run status.
+             * Start a PBS job, rejecting incomplete IDs and error bodies before refreshing its status.
              * @param {'sync'|'verify'|'prune'} jobType - PBS job kind.
              * @param {string} jobId - Job to run.
              * @returns {Promise<void>}
@@ -18407,6 +18423,12 @@
                         method: 'POST',
                     });
                     if (resp && resp.ok) {
+                        const result = await resp.json().catch(() => null);
+                        const launched = isPBSLaunchUpid(result?.data);
+                        if (!launched || (result && typeof result === 'object' && 'error' in result)) {
+                            addToast(t('operationFailed'), 'error');
+                            return;
+                        }
                         addToast(`${jobType} job '${jobId}' started`, 'success');
                         setTimeout(() => {
                             if (selectedPBSIdRef.current !== pbsId) return;

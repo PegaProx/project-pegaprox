@@ -40,7 +40,7 @@ READS = {
     ('GET', '/api/pbs/p1/status'): (200, {'version': {'version': '4.0'}}),
     ('GET', '/api/pbs/p1/datastores'): (200, STORES),
     ('GET', '/api/pbs/p1/jobs'): (200, JOBS),
-    ('POST', '/api/pbs/p1/jobs/sync/push-dr/run'): (200, {'data': 'UPID:run'}),
+    ('POST', '/api/pbs/p1/jobs/sync/push-dr/run'): (200, {'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:sync:push-dr:root@pam:'}),
 }
 LAYOUTS = ['modern', 'corporate', 'corporate-redesigned']
 

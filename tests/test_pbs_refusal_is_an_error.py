@@ -39,6 +39,6 @@ def test_a_refusal_is_an_error_with_the_reason(client, method, verb, url, body):
 @pytest.mark.parametrize('method,verb,url,body', CALLS)
 def test_what_worked_is_as_it_was(client, method, verb, url, body):
     c, mgr = client
-    getattr(mgr, method).return_value = {'data': 'UPID:pbs:1'}
+    getattr(mgr, method).return_value = {'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:garbage_collection:s:root@pam:'}
     r = getattr(c, verb)(url, json=body)
-    assert r.status_code == 200 and r.get_json() == {'data': 'UPID:pbs:1'}
+    assert r.status_code == 200 and r.get_json() == {'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:garbage_collection:s:root@pam:'}
