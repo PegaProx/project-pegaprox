@@ -17,9 +17,12 @@ from test_rolling_update_reboot_953 import _FastTime, _updating_manager  # noqa:
 
 
 @pytest.mark.parametrize('rolling, expected', [
-    ({'status': 'running', 'reboot_timeout': 1800}, 1800), ({'status': 'running', 'reboot_timeout': 60}, 60),
+    ({'status': 'running', 'current_node': 'blade1', 'reboot_timeout': 1800}, 1800),
+    ({'status': 'running', 'current_node': 'blade1', 'reboot_timeout': 60}, 60),
     # a run that ended long ago says nothing about a node updated by hand now
-    ({'status': 'completed', 'reboot_timeout': 60}, 600), ({}, 600), (None, 600)])
+    ({'status': 'completed', 'current_node': 'blade1', 'reboot_timeout': 60}, 600), ({}, 600), (None, 600),
+    # nor does a run that is on another node
+    ({'status': 'running', 'current_node': 'blade2', 'reboot_timeout': 60}, 600)])
 def test_the_update_task_waits_as_long_as_the_run_says(monkeypatch, rolling, expected):
     monkeypatch.setattr(mgrmod, 'time', _FastTime())
     monkeypatch.setattr(mgrmod, '_read_capped', lambda s, *a, **k: '0')
@@ -106,7 +109,8 @@ def test_a_stuck_install_still_times_out(api, seed, monkeypatch):
     assert 'timed out' in logs, logs
 
 
-@pytest.mark.parametrize('rolling, expected', [({'status': 'running', 'reboot_timeout': 1800}, 1800),
+@pytest.mark.parametrize('rolling, expected', [({'status': 'running', 'current_node': 'h1', 'reboot_timeout': 1800}, 1800),
+                                              ({'status': 'running', 'current_node': 'h2', 'reboot_timeout': 60}, 300),
                                               ({'status': 'completed', 'reboot_timeout': 60}, 300), ({}, 300)])
 def test_an_xcpng_host_waits_as_long_as_the_run_says(monkeypatch, rolling, expected):
     from pegaprox.core import xcpng
