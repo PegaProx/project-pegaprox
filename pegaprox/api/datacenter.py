@@ -1364,6 +1364,8 @@ def create_sdn_subnet(cluster_id, vnet_id):
     try:
         host, port = manager.host, manager.api_port
         data = request.json or {}
+        # JB Nov 2026 - PVE requires it and neither create dialog sends it, multi_sdn.py always did
+        data['type'] = 'subnet'
         
         url = f"https://{host}:{port}/api2/json/cluster/sdn/vnets/{vnet_id}/subnets"
         response = manager._create_session().post(url, data=data, timeout=10)
