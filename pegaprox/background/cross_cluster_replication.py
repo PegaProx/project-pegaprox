@@ -66,10 +66,13 @@ def _parse_interval_seconds(schedule):
 
     Supported:
       '0 */N * * *'  -> every N hours
-      '*/N * * * *'  -> every N minutes
+      '*/N * * * *'  -> every N minutes, also as plain '*/N'
       '0 H * * *'    -> daily at hour H (treated as 24h interval)
     """
     parts = schedule.strip().split()
+    # JB Nov 2026 - the form sends '*/15' and '*/30' as they are, for snapshot replication too
+    if len(parts) == 1 and parts[0].startswith('*/'):
+        parts = [parts[0], '*', '*', '*', '*']
     if len(parts) != 5:
         return 6 * 3600  # fallback: 6h
 
