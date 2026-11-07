@@ -2082,7 +2082,11 @@
             };
 
             // MK: cross-cluster replication handlers
+            // JB Nov 2026 - a second click before the answer made a second job for the same guest, with its own quota hold
+            const creatingXRepl = useRef(false);
             const handleCreateXRepl = async () => {
+                if (creatingXRepl.current) return;
+                creatingXRepl.current = true;
                 try {
                     const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
                     const payload = {
@@ -2113,6 +2117,8 @@
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
+                } finally {
+                    creatingXRepl.current = false;
                 }
             };
 

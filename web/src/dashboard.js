@@ -11960,11 +11960,19 @@
             }, [planDetail?.id, srSubTab]);
 
             // actions
+            // JB Nov 2026 - a second click before the answer made a second plan: the route has no duplicate check
+            const creatingPlan = useRef(false);
             const handleCreatePlan = async () => {
+                if (creatingPlan.current) return;
                 if (!createForm.name || !createForm.source_cluster || !createForm.target_cluster) { addToast('Name + clusters required', 'error'); return; }
-                const r = await authFetch(`${API_URL}/site-recovery/plans`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(createForm) });
-                if (r && r.ok) { addToast(t('createPlan') + ' OK'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
-                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                creatingPlan.current = true;
+                try {
+                    const r = await authFetch(`${API_URL}/site-recovery/plans`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(createForm) });
+                    if (r && r.ok) { addToast(t('createPlan') + ' OK'); setShowCreateModal(false); setCreateForm({ name: '', source_cluster: '', target_cluster: '' }); fetchPlans(); }
+                    else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || 'Failed', 'error'); }
+                } finally {
+                    creatingPlan.current = false;
+                }
             };
             const handleDeletePlan = async (planId, force) => {
                 const msg = force ? (t('forceDeletePlan') || 'Force-delete this stuck plan?') : (t('deletePlan') + '?');
