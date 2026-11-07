@@ -8256,31 +8256,32 @@
             );
         }
 
+        // a container NIC defaults to eth<N> of its netN, so a second NIC is not named eth0 again
+        const lxcNicName = (netId) => 'eth' + ((String(netId).match(/(\d+)$/) || [])[1] || '0');
+
         function AddNetworkModal({ isQemu, bridgeList, hardwareOptions, getNextNetId, generateMAC, onAdd, onClose }) {
             const { t } = useTranslation();
-            const [netConfig, setNetConfig] = useState({
-                net_id: 'net1',
-                bridge: bridgeList[0]?.iface || 'vmbr0',
-                model: 'virtio',
-                macaddr: '',
-                firewall: true,
-                tag: '',
-                rate: '',
-                mtu: '',
-                queues: '',
-                name: 'eth0',
-                ip: 'dhcp',
-                gw: '',
-                ip6: '',
-                gw6: '',
-                hwaddr: '',
+            // the free id is known when the dialog opens: taken here, not in an effect that would overwrite early typing
+            const [netConfig, setNetConfig] = useState(() => {
+                const netId = getNextNetId ? getNextNetId() : 'net1';
+                return {
+                    net_id: netId,
+                    bridge: bridgeList[0]?.iface || 'vmbr0',
+                    model: 'virtio',
+                    macaddr: '',
+                    firewall: true,
+                    tag: '',
+                    rate: '',
+                    mtu: '',
+                    queues: '',
+                    name: lxcNicName(netId),
+                    ip: 'dhcp',
+                    gw: '',
+                    ip6: '',
+                    gw6: '',
+                    hwaddr: '',
+                };
             });
-
-            useEffect(() => {
-                if (getNextNetId) {
-                    setNetConfig(prev => ({...prev, net_id: getNextNetId()}));
-                }
-            }, []);
 
             return(
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
@@ -8290,7 +8291,8 @@
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1">Interface ID</label>
-                                    <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value})}
+                                    <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value,
+                                        name: netConfig.name === lxcNicName(netConfig.net_id) ? lxcNicName(e.target.value) : netConfig.name})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>
