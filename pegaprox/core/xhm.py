@@ -979,6 +979,8 @@ def _run_xcpng_to_pve(task):
         except Exception as e:
             task.set_phase('failed', f'VM creation failed: {e}')
             return
+        if not _pve_create_done(tgt_mgr, task, resp, new_vmid, imported_volumes):
+            return
 
         task.log(f"Created VM {new_vmid} on {task.target_node}")
         task.progress = 85
@@ -1428,7 +1430,9 @@ def _run_pve_to_xcpng(task):
             except Exception as e:
                 attach_failed.append(f"device {vdi_info['index']}: {e}")
         if attach_failed:
-            task.set_phase('failed', f"Disks could not be attached, the source VM stays: {'; '.join(attach_failed)}")
+            task.set_phase('failed', f"Disks could not be attached, the source VM stays; VM {task.vm_name} ({new_uuid}) "
+                                     f"and its VDIs ({', '.join(v['uuid'] for v in created_vdis)}) are left on the pool: "
+                                     f"{'; '.join(attach_failed)}")
             return
 
         # attach networks
@@ -1506,23 +1510,58 @@ def _run_pve_to_xcpng(task):
 # helpers
 # ============================================================
 
+def _pve_said(resp):
+    """The reason in a PVE error answer: its message, and the errors of a refused parameter."""
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return (getattr(resp, 'text', '') or '')[:200]
+    said = [str(body.get('message') or '')]
+    if isinstance(body.get('errors'), dict):
+        said += [f'{k}: {v}' for k, v in body['errors'].items()]
+    return ' '.join(' '.join(said).split())[:200]
+
+
+def _pve_create_done(tgt_mgr, task, resp, new_vmid, volumes):
+    """The create call answers with its task, and the VM is locked until that task is through: an
+    attach sent before is refused. False when it did not finish; the run has failed then."""
+    try:
+        upid = resp.json().get('data')
+    except (ValueError, AttributeError):
+        upid = None
+    if not (isinstance(upid, str) and upid.startswith('UPID:')):
+        return True
+    if tgt_mgr._wait_for_task(task.target_node, upid, timeout=300):
+        return True
+    task.set_phase('failed', f"Creating VM {new_vmid} did not finish, the source VM stays; the volumes "
+                             f"({', '.join(v['vol_id'] for v in volumes)}) are left on {task.target_node}")
+    return False
+
+
 def _attach_pve_volumes(tgt_mgr, task, new_vmid, volumes):
     # JB Nov 2026 - these were warnings, and the run went on to destroy the source and say completed with a
     # target that had no disk. A copy that is not attached is no copy yet
+    # PUT, the synchronous call: a 200 means the disk is in the config. POST answers 200 with a task that can still fail.
+    # PVE itself waits up to 10 s for the config lock, so more than the default timeout here
     failed = []
     for vol in volumes:
         try:
-            resp = tgt_mgr._api_post(
+            resp = tgt_mgr._api_put(
                 f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/config",
-                data={f'scsi{vol["index"]}': vol['vol_id']})
+                data={f'scsi{vol["index"]}': vol['vol_id']}, timeout=60)
             if resp.status_code == 200:
                 task.log(f"Attached {vol['vol_id']} as scsi{vol['index']}")
             else:
-                failed.append(f"scsi{vol['index']}: HTTP {resp.status_code}")
+                said = _pve_said(resp)
+                failed.append(f"scsi{vol['index']}: HTTP {resp.status_code}" + (f" - {said}" if said else ''))
         except Exception as e:
             failed.append(f"scsi{vol['index']}: {e}")
     if failed:
-        task.set_phase('failed', f"Disks could not be attached to VM {new_vmid}, the source VM stays: {'; '.join(failed)}")
+        task.set_phase('failed', f"Disks could not be attached, the source VM stays; VM {new_vmid} on {task.target_node} "
+                                 f"and its volumes ({', '.join(v['vol_id'] for v in volumes)}) are left in place: "
+                                 f"{'; '.join(failed)}")
         return False
     return True
 
@@ -2232,6 +2271,8 @@ def _run_esxi_to_pve(task):
                 return
         except Exception as e:
             task.set_phase('failed', f'VM creation failed: {e}')
+            return
+        if not _pve_create_done(tgt_mgr, task, resp, new_vmid, imported_volumes):
             return
 
         task.log(f"Created VM {new_vmid}")
