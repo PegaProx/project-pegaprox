@@ -91,6 +91,9 @@ def folder_copy_refusal(transfer_mode, why):
             f"reads every disk from its own file as it is now. {after}")
 
 
+_BASIC_AUTH_HEADER = re.compile(r'(authorization:[ \t]*basic[ \t]+)[^\s]+', re.I)
+
+
 class V2PMigrationTask:
     """Tracks VMware -> Proxmox migration through all phases.
     
@@ -247,7 +250,8 @@ class V2PMigrationTask:
             import urllib.parse
             for form in {pw, urllib.parse.quote(pw, safe=''), shlex.quote(pw)}:
                 text = text.replace(form, '********')
-        return text
+        # curl -v prints the request headers it sent, the login as base64 among them
+        return _BASIC_AUTH_HEADER.sub(r'\1********', text)
 
     def log(self, msg):
         msg = self._redact(msg)
