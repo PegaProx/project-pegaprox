@@ -3394,25 +3394,35 @@ def _remove_source_once_target_runs(pve_mgr, vmware_mgr, task, power_off=False, 
     # JB Nov 2026 - these paths started the target without reading the answer, and then deleted the source
     # either way. Only a target that runs is a reason to let go of the copy that is known to work. Without start
     # after nothing here started it, and one somebody starts by hand in the meantime is no go-ahead either
+    # by now the cutover has powered the source off or suspended it
     if not getattr(task, 'start_after', True):
-        task.log("remove_source is set, but the target VM was not started here - the source VM stays on ESXi, "
-                 "delete it there once the target runs")
+        _result_warning(task, "Remove source VM: the target VM was not started here, so the source VM stays on "
+                              "ESXi, powered off or suspended. Delete it there once the target runs.")
         return False
     deadline = time.monotonic() + wait
     while _pve_vm_status(pve_mgr, task.target_node, task.proxmox_vmid) != 'running':
         if time.monotonic() >= deadline:
-            task.log("remove_source is set, but the target VM does not run - the source VM stays on ESXi, "
-                     "delete it there once the target runs")
+            _result_warning(task, f"Remove source VM: the target VM did not run within {wait}s, so the source VM "
+                                  "stays on ESXi, powered off or suspended. Power it on there again if the target "
+                                  "does not come up, or delete it once the target runs.")
             return False
         time.sleep(poll)
     task.log("Deleting source VM on ESXi (remove_source=true)")
     try:
         if power_off:
-            vmware_mgr.vm_power_action(task.vm_id, 'stop')
+            off = vmware_mgr.vm_power_action(task.vm_id, 'stop')
+            if isinstance(off, dict) and off.get('error'):
+                # a source that is off already answers this too, the delete has the last word
+                task.log(f"  Power-off of the source VM answered: {str(off['error'])[:200]}")
             time.sleep(3)
-        vmware_mgr.delete_vm(task.vm_id)
+        # the manager answers a refusal with {'error': ...}, it does not raise
+        res = vmware_mgr.delete_vm(task.vm_id)
+        err = res.get('error') if isinstance(res, dict) else None
     except Exception as e:
-        task.log(f"  Source-VM cleanup failed: {e}")
+        err = str(e) or type(e).__name__
+    if err:
+        _result_warning(task, f"Remove source VM: ESXi did not delete the source VM ({str(err)[:200]}). "
+                              "It stays there, delete it by hand.")
         return False
     return True
 

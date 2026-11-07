@@ -6,6 +6,7 @@ copy on Proxmox and nothing on ESXi. The live clone already asked.
 """
 import ast
 import inspect
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -13,14 +14,34 @@ import pytest
 import pegaprox.core.v2p as v2p
 
 
-def _go(monkeypatch, states, **kw):
+def _warnings(task):
+    # what the result in the UI lists next to the outcome
+    return getattr(task, 'warnings', None) or []
+
+
+def _esxi(calls, delete=None, power=None):
+    """Answers the way the ESXi manager does: a dict, with 'error' when ESXi refused."""
+    def delete_vm(vm):
+        calls.append('delete')
+        return delete or {'data': 'ok'}
+
+    def vm_power_action(vm, act):
+        calls.append(act)
+        return power or {'data': 'ok'}
+    return SimpleNamespace(delete_vm=delete_vm, vm_power_action=vm_power_action)
+
+
+def _go(monkeypatch, states, delete=None, power=None, **kw):
     seen = iter(states)
     monkeypatch.setattr(v2p, '_pve_vm_status', lambda mgr, node, vmid: next(seen, states[-1]))
-    monkeypatch.setattr(v2p.time, 'sleep', lambda s: None)
+    # a clock that moves one second per look, so a long wait costs no real time
+    ticks = itertools.count()
+    monkeypatch.setattr(v2p, 'time', SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda s: None))
     calls, logs = [], []
-    esxi = SimpleNamespace(delete_vm=lambda vm: calls.append('delete'), vm_power_action=lambda vm, act: calls.append(act))
     task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, vm_id='vm-1', log=logs.append)
-    return v2p._remove_source_once_target_runs(SimpleNamespace(), esxi, task, wait=kw.pop('wait', 5), poll=0, **kw), calls, logs
+    done = v2p._remove_source_once_target_runs(SimpleNamespace(), _esxi(calls, delete, power), task,
+                                               wait=kw.pop('wait', 5), poll=0, **kw)
+    return done, calls, logs, task
 
 
 def test_a_running_target_lets_the_source_go(monkeypatch):
@@ -33,9 +54,20 @@ def test_a_target_still_on_its_way_up_is_waited_for(monkeypatch):
 
 @pytest.mark.parametrize('state', ['stopped', '', 'paused'])
 def test_a_target_that_does_not_run_keeps_the_source(monkeypatch, state):
-    done, calls, logs = _go(monkeypatch, [state], wait=0)
+    done, calls, logs, task = _go(monkeypatch, [state], wait=0)
     assert (done, calls) == (False, [])
     assert any('stays on ESXi' in line for line in logs), logs
+
+
+def test_a_source_kept_back_is_in_the_result_not_only_the_log(monkeypatch):
+    """The run still ends completed under a ticked remove source, so the result says why the source is there."""
+    done, calls, logs, task = _go(monkeypatch, ['stopped'], wait=60)
+    assert done is False and calls == []
+    assert len(_warnings(task)) == 1, logs
+    said = task.warnings[0]
+    # a slow start is not a verdict, and the source is not running on ESXi either
+    assert 'did not run within 60s' in said and 'powered off or suspended' in said
+    assert 'Power it on there again' in said
 
 
 def test_it_powers_off_first_only_where_that_path_did(monkeypatch):
@@ -53,9 +85,18 @@ def test_without_start_after_it_neither_waits_nor_deletes(monkeypatch):
     task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, vm_id='vm-1', log=logs.append, start_after=False)
     assert v2p._remove_source_once_target_runs(SimpleNamespace(), esxi, task) is False
     assert calls == [] and any('stays on ESXi' in line for line in logs)
+    assert len(_warnings(task)) == 1 and 'not started here' in task.warnings[0], logs
 
 
-def test_a_failed_delete_is_said_and_not_raised(monkeypatch):
+def test_a_delete_esxi_refuses_is_said(monkeypatch):
+    """The manager answers a refusal with {'error': ...} and never raises, so the answer is what counts."""
+    done, calls, logs, task = _go(monkeypatch, ['running'], delete={'error': 'HTTP 400: The VM is powered on'})
+    assert (done, calls) == (False, ['delete'])
+    assert len(_warnings(task)) == 1, logs
+    assert 'did not delete the source VM' in task.warnings[0] and 'HTTP 400: The VM is powered on' in task.warnings[0]
+
+
+def test_a_delete_that_raises_is_said_and_not_raised(monkeypatch):
     monkeypatch.setattr(v2p, '_pve_vm_status', lambda *a: 'running')
 
     def boom(vm):
@@ -63,7 +104,16 @@ def test_a_failed_delete_is_said_and_not_raised(monkeypatch):
     logs = []
     task = SimpleNamespace(target_node='pve1', proxmox_vmid=100, vm_id='vm-1', log=logs.append)
     assert v2p._remove_source_once_target_runs(SimpleNamespace(), SimpleNamespace(delete_vm=boom), task) is False
-    assert any('cleanup failed: no' in line for line in logs), logs
+    assert len(_warnings(task)) == 1, logs
+    assert 'did not delete the source VM (no)' in task.warnings[0]
+
+
+def test_a_refused_power_off_still_lets_the_delete_decide(monkeypatch):
+    """A source that is off already gets an error for the stop too, that alone is no reason to keep it."""
+    done, calls, logs, task = _go(monkeypatch, ['running'], power_off=True, power={'error': 'already powered off'})
+    assert (done, calls) == (True, ['stop', 'delete'])
+    assert any('already powered off' in line for line in logs), logs
+    assert _warnings(task) == []
 
 
 def test_every_delete_of_the_source_asks():
