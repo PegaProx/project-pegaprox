@@ -292,6 +292,9 @@
                 setLoading(false);
             };
 
+            // a container needs a root password or an SSH key, the server refuses it otherwise
+            const ctNeedsCredential = !isQemu && !config.password && !(config.ssh_public_keys || '').trim();
+
             // LW: XCP-ng VMs skip the advanced step (no BIOS/Machine/SCSI/EFI/TPM)
             const steps = isXcpng && isQemu
                 ? [t('general'), t('installMethod') || 'Install', t('hardware'), t('disk'), t('network'), t('options') || 'Options']
@@ -1361,6 +1364,9 @@
                                         />
                                         <p className="text-xs text-gray-500 mt-1">{t('sshKeyHintMultiple') || 'One key per line. Paste or load from file.'}</p>
                                     </div>
+                                    {ctNeedsCredential && (
+                                        <p data-ct-credential-hint className="text-xs text-yellow-400">{t('ctCredentialRequired')}</p>
+                                    )}
                                 </div>
                             );
                         case 2: // Ressourcen
@@ -1854,7 +1860,8 @@
                                     ) : (
                                         <button
                                             onClick={handleCreate}
-                                            disabled={loading || (!isQemu && !config.template)}
+                                            disabled={loading || (!isQemu && !config.template) || ctNeedsCredential}
+                                            title={ctNeedsCredential ? t('ctCredentialRequired') : undefined}
                                             className="corp-vm-btn corp-vm-btn-create"
                                         >
                                             {loading && <Icons.RotateCw className="w-3.5 h-3.5" />}
@@ -1950,7 +1957,8 @@
                                 ) : (
                                     <button
                                         onClick={handleCreate}
-                                        disabled={loading || (!isQemu && !config.template)}
+                                        disabled={loading || (!isQemu && !config.template) || ctNeedsCredential}
+                                        title={ctNeedsCredential ? t('ctCredentialRequired') : undefined}
                                         className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700 disabled:opacity-50"
                                     >
                                         {loading && <Icons.RotateCw />}

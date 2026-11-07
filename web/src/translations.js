@@ -1630,6 +1630,7 @@
                 sshPublicKeys: 'SSH Public Keys',
                 loadSshKeyFile: 'SSH Key Datei laden',
                 sshKeyHintMultiple: 'Ein Key pro Zeile. Einfügen oder aus Datei laden.',
+                ctCredentialRequired: 'Root-Passwort oder SSH Public Key eingeben, um den Container zu erstellen.',
                 // SSH Shell Login
                 dropKeyFileHere: 'Key-Datei hier ablegen oder klicken',
                 keyLoaded: 'Key geladen',
@@ -12939,6 +12940,7 @@
                 sshPublicKeys: 'SSH Public Keys',
                 loadSshKeyFile: 'Load SSH Key File',
                 sshKeyHintMultiple: 'One key per line. Paste or load from file.',
+                ctCredentialRequired: 'Enter a root password or an SSH public key to create the container.',
                 // SSH Shell Login
                 dropKeyFileHere: 'Drop key file here or click',
                 keyLoaded: 'Key loaded',
@@ -23740,6 +23742,7 @@
                 sshPublicKeys: 'SSH 公钥',
                 loadSshKeyFile: '加载 SSH 密钥文件',
                 sshKeyHintMultiple: '每行一个键。粘贴或从文件加载。',
+                ctCredentialRequired: '请输入 root 密码或 SSH 公钥以创建容器。',
                 dropKeyFileHere: '将密钥文件拖放到此处或单击',
                 keyLoaded: '密钥已加载',
                 lines: '行',
@@ -34268,6 +34271,7 @@
                 sshPublicKeys: 'Publiczne klucze SSH',
                 loadSshKeyFile: 'Wczytaj plik klucza SSH',
                 sshKeyHintMultiple: 'Jeden klucz w każdym wierszu. Wklej lub wczytaj z pliku.',
+                ctCredentialRequired: 'Podaj hasło root lub publiczny klucz SSH, aby utworzyć kontener.',
                 dropKeyFileHere: 'Upuść tutaj plik klucza lub kliknij',
                 keyLoaded: 'Klucz wczytany',
                 lines: 'wierszy',
@@ -44184,6 +44188,7 @@
                 sshPublicKeys: 'Clés publiques SSH',
                 loadSshKeyFile: 'Charger le fichier de clé SSH',
                 sshKeyHintMultiple: 'Une clé par ligne. Collez ou chargez à partir d\'un fichier.',
+                ctCredentialRequired: 'Saisissez un mot de passe root ou une clé publique SSH pour créer le conteneur.',
                 // SSH Shell Login
                 dropKeyFileHere: 'Déposez le fichier de clé ici ou cliquez',
                 keyLoaded: 'Clé chargée',
@@ -54906,6 +54911,7 @@
                 sshPublicKeys: 'Llaves públicas SSH',
                 loadSshKeyFile: 'Cargar archivo llade de SSH',
                 sshKeyHintMultiple: 'Una llave por línea. Pegue o carge de un archivo.',
+                ctCredentialRequired: 'Introduzca una contraseña de root o una llave pública SSH para crear el contenedor.',
                 // SSH Shell Login
                 dropKeyFileHere: 'Arrastre aquí el archivo llave',
                 keyLoaded: 'Llave cargada',
@@ -65745,6 +65751,7 @@
                 sshPublicKeys: 'Chaves Públicas SSH',
                 loadSshKeyFile: 'Carregar Arquivo de Chave SSH',
                 sshKeyHintMultiple: 'Uma chave por linha. Cole ou carregue de um arquivo.',
+                ctCredentialRequired: 'Informe uma senha do root ou uma chave pública SSH para criar o contêiner.',
                 // SSH Shell Login
                 dropKeyFileHere: 'Arraste o arquivo de chave aqui ou clique',
                 keyLoaded: 'Chave carregada',
@@ -76268,6 +76275,7 @@
                 sshPublicKeys: 'SSH 공개 키',
                 loadSshKeyFile: 'SSH 키 파일 로드',
                 sshKeyHintMultiple: '줄당 하나의 키. 붙여넣기 또는 파일에서 로드하세요.',
+                ctCredentialRequired: '컨테이너를 만들려면 root 비밀번호 또는 SSH 공개 키를 입력하세요.',
                 // SSH Shell Login
                 dropKeyFileHere: '키 파일을 여기에 놓거나 클릭하세요',
                 keyLoaded: '키가 로드되었습니다',
@@ -87037,6 +87045,7 @@
                 sshPublicKeys: 'Chiavi pubbliche SSH',
                 loadSshKeyFile: 'Carica file chiave SSH',
                 sshKeyHintMultiple: 'Una chiave per riga. Incolla o carica da file.',
+                ctCredentialRequired: 'Inserisci una password root o una chiave pubblica SSH per creare il container.',
                 // Login shell SSH
                 dropKeyFileHere: 'Trascina qui il file della chiave o clicca',
                 keyLoaded: 'Chiave caricata',
