@@ -7263,7 +7263,11 @@ def _monitor_disk_write(pve_mgr, node, vol_path, disk_size, task, disk_key, stop
 def _copy_complete(task, how, output, copied, size):
     # JB Nov 2026 - 90% used to count as done, and a disk with its last tenth missing went on to completed
     status = re.search(r'(?:PIPE|RC)=(\d+)/(\d+)', output)
-    failed = status and status.groups() != ('0', '0')
+    if not status:
+        # every copy command prints its exit status, output without one was cut off or never came
+        task.log(f"  {how} incomplete: {copied} of {size} bytes, no exit status in the output")
+        return False
+    failed = status.groups() != ('0', '0')
     if copied >= size and not failed:
         return True
     task.log(f"  {how} incomplete: {copied} of {size} bytes" + (f", {status.group(0)}" if failed else ""))
@@ -7525,8 +7529,8 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             task.log(f"  SSH: {ssh_out[-250:]}")
 
             _bytes_all2 = re.findall(r'(\d+) bytes', ssh_out)  # #538: last line, not first
-            if _bytes_all2:
-                downloaded = int(_bytes_all2[-1])
+            # this attempt's own count, never what an earlier method got
+            downloaded = int(_bytes_all2[-1]) if _bytes_all2 else 0
             if _copy_complete(task, 'SSH', ssh_out, downloaded, flat_size):
                 dl_success = True
                 task.log(f"  SSH OK: {downloaded/(1024**3):.2f} GB")
