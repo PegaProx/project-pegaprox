@@ -4,6 +4,7 @@
         // ═══════════════════════════════════════════════
         const translations = {
             de: {
+                v2pFirmwareMismatch: "Die Quelle verwendet UEFI. Legacy-BIOS kann den Start verhindern. Wähle Auto oder UEFI, sofern das Gastsystem nicht für BIOS-Boot umgestellt wurde.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'App-Container',
                 ociTitle: 'App-Container aus OCI-Images',
@@ -10759,6 +10760,7 @@
                 haNodeIrCloudHint: 'Starten oder verwerfen in den HA-Einstellungen des Clusters (Layout Modern oder Corporate)',
             },
             en: {
+                v2pFirmwareMismatch: "The source uses UEFI. Legacy BIOS may prevent the guest from booting. Choose Auto or UEFI unless the guest has been converted to BIOS boot.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'App Containers',
                 ociTitle: 'App containers from OCI images',
@@ -21506,6 +21508,7 @@
                 haNodeIrCloudHint: 'Start or dismiss them in the HA settings of the cluster (Modern or Corporate layout)',
             },
             zh: {
+                v2pFirmwareMismatch: "源虚拟机使用 UEFI。传统 BIOS 可能导致客户机无法启动。除非已将客户机转换为 BIOS 启动，否则请选择自动或 UEFI。",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: '应用容器',
                 ociTitle: '基于 OCI 镜像的应用容器',
@@ -32038,6 +32041,7 @@
                 haNodeIrCloudHint: '请在该集群的 HA 设置中启动或丢弃（Modern 或 Corporate 布局）',
             },
             pl: {
+                v2pFirmwareMismatch: "Źródło używa UEFI. Starszy BIOS może uniemożliwić rozruch gościa. Wybierz Auto lub UEFI, chyba że gość został przestawiony na rozruch BIOS.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Kontenery aplikacji',
                 ociTitle: 'Kontenery aplikacji z obrazów OCI',
@@ -42569,6 +42573,7 @@
             // French translations by @IMNotMax (PR #186)
             // Falls back to EN for missing keys
             fr: {
+                v2pFirmwareMismatch: "La source utilise UEFI. Le BIOS hérité peut empêcher le démarrage du système invité. Choisissez Auto ou UEFI, sauf si le système invité a été converti pour démarrer en mode BIOS.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Conteneurs d\'applications',
                 ociTitle: 'Conteneurs d\'applications depuis des images OCI',
@@ -53293,6 +53298,7 @@
                 haNodeIrCloudHint: 'Démarrez-les ou écartez-les dans les paramètres HA du cluster (disposition Modern ou Corporate)',
             },
             es: {
+                v2pFirmwareMismatch: "El origen usa UEFI. El BIOS heredado puede impedir que el invitado arranque. Elija Auto o UEFI, salvo que el invitado se haya convertido al arranque BIOS.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Contenedores de apps',
                 ociTitle: 'Contenedores de aplicaciones desde imágenes OCI',
@@ -64045,6 +64051,7 @@
                 haNodeIrCloudHint: 'Inícielos o descártelos en la configuración HA del clúster (diseño Modern o Corporate)',
             },
             pt: {
+                v2pFirmwareMismatch: "A origem usa UEFI. O BIOS legado pode impedir o arranque do sistema convidado. Escolha Auto ou UEFI, a menos que o convidado tenha sido convertido para arranque BIOS.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Contêineres de apps',
                 ociTitle: 'Contêineres de aplicativos a partir de imagens OCI',
@@ -74776,6 +74783,7 @@
                 haNodeIrCloudHint: 'Inicie-os ou descarte-os nas configurações de HA do cluster (layout Modern ou Corporate)',
             },
             ko: {
+                v2pFirmwareMismatch: "원본은 UEFI를 사용합니다. 레거시 BIOS를 선택하면 게스트가 부팅되지 않을 수 있습니다. 게스트를 BIOS 부팅으로 전환한 경우가 아니라면 자동 또는 UEFI를 선택하세요.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: '앱 컨테이너',
                 ociTitle: 'OCI 이미지 기반 앱 컨테이너',
@@ -85493,6 +85501,7 @@
                 haNodeIrCloudHint: '클러스터의 HA 설정에서 시작하거나 폐기하세요 (Modern 또는 Corporate 레이아웃)',
             },
             it: {
+                v2pFirmwareMismatch: "La sorgente usa UEFI. Il BIOS legacy può impedire l’avvio del sistema ospite. Scegli Auto o UEFI, a meno che il sistema ospite sia stato convertito per l’avvio BIOS.",
                 // app containers from OCI images - LW Oct 2026
                 ociTabLabel: 'Container di app',
                 ociTitle: 'Container di applicazioni da immagini OCI',
