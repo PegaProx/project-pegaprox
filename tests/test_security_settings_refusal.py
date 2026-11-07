@@ -51,3 +51,15 @@ def test_runtime_a_saved_change_stays(browser):  # noqa: F811
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
+
+
+def test_runtime_a_standby_refusal_is_said_in_the_ui_words(browser):  # noqa: F811
+    """The server's sentence is English only; the standby refusal has a text of its own in every language."""
+    app, page = _open(browser, (409, {'code': 'HA_STANDBY', 'error': 'raw standby sentence'}))
+    try:
+        _uppercase(page).click()
+        page.locator('.toast-enter', has_text='Actions and consoles are only available on the active instance').first.wait_for(timeout=5000)
+        assert page.locator('.toast-enter', has_text='raw standby sentence').count() == 0
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()

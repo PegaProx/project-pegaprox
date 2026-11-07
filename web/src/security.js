@@ -6,7 +6,7 @@
         // LW: The locked IPs table was AI-generated (Claude), I just styled it - Oct 2025
         function SecuritySettingsSection({ addToast }) {
             const { t } = useTranslation();
-            const { getAuthHeaders, isAdmin, haStandby, haReadOnly } = useAuth();
+            const { getAuthHeaders, isAdmin, haStandby, haReadOnly, haServing } = useAuth();
             const { isCorporate } = useLayout();
             const [settings, setSettings] = useState({
                 login_max_attempts: 5,
@@ -137,7 +137,8 @@
                     } else {
                         // JB Nov 2026 - a refusal said nothing and the form kept showing the refused value
                         const err = await res.json().catch(() => ({}));
-                        addToast(err.error || t('failedToSaveSettings'), 'error');
+                        const why = err.code === 'HA_STANDBY' ? (haServing ? t('pgHaServingRefused') : t('pgHaStandbyRefused')) : err.error;
+                        addToast(why || t('failedToSaveSettings'), 'error');
                         fetchSettings();
                     }
                 } catch(e) {
