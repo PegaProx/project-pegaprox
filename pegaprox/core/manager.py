@@ -13641,9 +13641,9 @@ echo "AGENT_INSTALLED_OK"
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
         start_time = time.time()
         
-        # First wait a bit for the node to actually go down
-        # 30s seems to work, less and you get false positives
-        time.sleep(30)
+        # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
+        # next node. Online only counts once this one was seen down or has booted since the wait began
+        seen_down = False
         
         while time.time() - start_time < timeout:
             try:
@@ -13651,18 +13651,21 @@ echo "AGENT_INSTALLED_OK"
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    node_status = self.get_node_status()
-                    if node_name in node_status:
-                        if node_status[node_name]['status'] == 'online':
-                            self.logger.info(f"[OK] {node_name} is back online!")
-                            return True
+                    # an empty answer is a failed read, it says nothing about this node
+                    status = self.get_node_status()
+                    node = status.get(node_name)
+                    if status and (not node or node.get('status') != 'online'):
+                        seen_down = True
+                    elif node and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time):
+                        self.logger.info(f"[OK] {node_name} is back online!")
+                        return True
                 
             except Exception as e:
                 self.logger.debug(f"Waiting for {node_name}: {e}")
             
             time.sleep(10)
         
-        self.logger.error(f"Timeout waiting for {node_name} to come online")
+        self.logger.error(f"Timeout waiting for {node_name}: it did not restart and come back online")
         return False
     
     def start_node_update(self, node_name: str, reboot: bool = True, force: bool = False) -> Optional[UpdateTask]:
@@ -13927,25 +13930,29 @@ echo "AGENT_INSTALLED_OK"
                         ssh = None
 
                 
-                task.add_output("Waiting for node to reboot / Warte auf Neustart...")
-                
-                # Wait for node to come back online
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                
-                # JB Nov 2026 - a running rolling update's reboot timeout counts here, this was always 600 s
-                rolling = getattr(self, '_rolling_update', None) or {}
-                reboot_timeout = rolling.get('reboot_timeout') if rolling.get('status') == 'running' else None
-                if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600)):
-                    task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
-                    task.back_online = True
+                # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
+                if not task.reboot_issued:
+                    task.add_output(f"No reboot sent to {node_name}, nothing to wait for / Kein Neustart, kein Warten")
                 else:
-                    task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
-                    task.error = "Node did not come back online in time"
-                    task.status = 'failed'
-                    task.phase = 'wait_timeout'
-                    task.completed_at = datetime.now()
-                    return
+                    task.add_output("Waiting for node to reboot / Warte auf Neustart...")
+                    
+                    # Wait for node to come back online
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    
+                    # JB Nov 2026 - a running rolling update's reboot timeout counts here, this was always 600 s
+                    rolling = getattr(self, '_rolling_update', None) or {}
+                    reboot_timeout = rolling.get('reboot_timeout') if rolling.get('status') == 'running' else None
+                    if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600)):
+                        task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
+                        task.back_online = True
+                    else:
+                        task.add_output(f"[ERROR] Timeout waiting for / beim Warten auf {node_name}")
+                        task.error = "Node did not come back online in time"
+                        task.status = 'failed'
+                        task.phase = 'wait_timeout'
+                        task.completed_at = datetime.now()
+                        return
 
             # Done!
             task.status = 'completed'
