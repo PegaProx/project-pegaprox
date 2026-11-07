@@ -24,8 +24,8 @@ class _Clock:
 
 
 def _manager(monkeypatch, answers):
-    """answers(t) is what the node looks like t seconds into the wait: a dict, None for a
-    node missing from the list, or an exception to raise."""
+    """answers(t) is what the node looks like t seconds into the wait: its row, a whole list
+    (no status key at the top), None for a read that failed, or an exception to raise."""
     clock = _Clock()
     monkeypatch.setattr(mgrmod, 'time', clock)
     m = PegaProxManager.__new__(PegaProxManager)
@@ -38,7 +38,9 @@ def _manager(monkeypatch, answers):
         got = answers(clock.now - start)
         if isinstance(got, Exception):
             raise got
-        return {} if got is None else {'n1': got}
+        if got is None:
+            return {}
+        return got if 'status' not in got else {'n1': got}
     m.get_node_status = status
     m.clock, m.start = clock, start
     return m
@@ -66,9 +68,15 @@ def test_a_slow_shutdown_is_waited_out(monkeypatch):
 
 
 def test_a_node_missing_from_the_list_counts_as_down(monkeypatch):
-    m = _manager(monkeypatch, lambda t: None if t < 60 else {'status': 'online'})
+    m = _manager(monkeypatch, lambda t: {'other': {'status': 'online'}} if t < 60 else {'n1': {'status': 'online'}})
     assert PegaProxManager._wait_for_node_online(m, 'n1') is True
     assert m.clock.now - m.start >= 60
+
+
+def test_a_failed_status_read_is_not_the_node_going_down(monkeypatch):
+    # get_node_status answers {} when its request fails; the node never left
+    m = _manager(monkeypatch, lambda t: None if t < 60 else _online(OLD_UPTIME + t))
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=120) is False
 
 
 def test_a_reboot_between_two_looks_is_seen_in_the_uptime(monkeypatch):
