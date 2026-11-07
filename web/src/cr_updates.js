@@ -310,7 +310,8 @@
             };
             const sortBy = (list) => list.sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
             const totalLine = (n, failed) => (n > 0 || failed > 0 ? `${n} ${t('updatesAvailable')}` : t('noUpdatesAvailable'));
-            const out = [t('updCopyHeading').replace('{cluster}', name)];
+            // a function, so a '$&' or '$$' in the cluster name stays as it is (#1192)
+            const out = [t('updCopyHeading').replace('{cluster}', () => name)];
             if (!src.answer && !src.browser) {
                 const m = src.model;
                 if (m.checkedAt) out.push(crFill(t('crUpdCopyChecked'), { time: crFmtDate(new Date(m.checkedAt * 1000)) }));

@@ -1162,6 +1162,22 @@ def test_runtime_the_session_keeps_a_check_over_a_tab_switch(open_app):
     assert app.errors == []
 
 
+@pytest.mark.parametrize('name', ['Testi-$&', 'Testi-$$', "Testi-$'", 'Testi-$`'])
+def test_runtime_the_copied_heading_keeps_the_cluster_name_as_it_is(open_app, name):
+    # String.replace reads '$&', '$$', "$'" and '$`' in a replacement string as patterns (#1192)
+    app = open_app(cluster={'name': name, 'display_name': name})
+    page = _tab(app)
+    _open_check(page)
+    page.locator('[data-cr-upd-confirm="check"]').click()
+    _need(page, '[data-cr-upd-check-state="ok"]', 'the answer is shown')
+    page.evaluate('''() => Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText: async (s) => { window.__copied = s; } } })''')
+    page.locator('[data-cr-upd-copy]').click()
+    _need(page, '[data-cr-upd-copy-msg]', 'the copy says it worked')
+    assert page.evaluate('() => window.__copied').splitlines()[0] == f'Pending updates - {name}'
+    assert app.errors == []
+
+
 # --- runtime: keyboard and layout ----------------------------------------------------------------
 
 def test_runtime_the_dialogs_hold_the_tab_key(open_app):
