@@ -2118,14 +2118,23 @@ def _run_esxi_to_pve(task):
                     # the parent with the default mode and that is the directory whose
                     # contents we care about. Two steps because -m only applies to the last
                     # component.
-                    f"mkdir -m 700 -p {_q_local(task.scratch)}",
-                    f"mkdir -m 700 -p {_q_local(mount_dir)}",
-                    f"sshfs -o StrictHostKeyChecking={_hk},password_stdin "
-                    f"{_q_local(esxi_user + '@' + _scp_host(esxi_host) + ':/vmfs/volumes/' + datastore_name)} "
-                    f"{_q_local(mount_dir)} <<< {_q_local(esxi_pass)}",
+                    (f"mkdir -m 700 -p {_q_local(task.scratch)}", None),
+                    (f"mkdir -m 700 -p {_q_local(mount_dir)}", None),
+                    # the password goes to sshfs on stdin like the scp fallback's below; as a
+                    # here-string it sat on the node shell's command line while the mount ran
+                    (f"sshfs -o StrictHostKeyChecking={_hk},password_stdin "
+                     f"{_q_local(esxi_user + '@' + _scp_host(esxi_host) + ':/vmfs/volumes/' + datastore_name)} "
+                     f"{_q_local(mount_dir)}", (esxi_pass or '') + "\n"),
                 ]
-                for cmd in mount_cmds:
-                    _, out, err = ssh_pve.exec_command(cmd, timeout=30)
+                for cmd, feed in mount_cmds:
+                    m_in, out, err = ssh_pve.exec_command(cmd, timeout=30)
+                    if feed is not None:
+                        try:
+                            m_in.write(feed)
+                            m_in.flush()
+                            m_in.channel.shutdown_write()
+                        except Exception:
+                            pass
                     out.channel.recv_exit_status()
 
                 # check mount worked
