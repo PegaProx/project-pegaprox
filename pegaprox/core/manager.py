@@ -13931,8 +13931,13 @@ echo "AGENT_INSTALLED_OK"
 
                 
                 # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
+                rolling = getattr(self, '_rolling_update', None) or {}
+                in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
                 if not task.reboot_issued:
                     task.add_output(f"No reboot sent to {node_name}, nothing to wait for / Kein Neustart, kein Warten")
+                elif in_run and rolling.get('wait_for_reboot') is False:
+                    # the run takes it out of maintenance itself, with its own retry
+                    task.add_output(f"Not waiting for {node_name} / Warte nicht auf {node_name}")
                 else:
                     task.add_output("Waiting for node to reboot / Warte auf Neustart...")
                     
@@ -13942,8 +13947,6 @@ echo "AGENT_INSTALLED_OK"
                     
                     # JB Nov 2026 - the reboot timeout of the rolling update this node is in counts here, this
                     # was always 600 s. A node updated by hand meanwhile has nothing to do with that run
-                    rolling = getattr(self, '_rolling_update', None) or {}
-                    in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
                     reboot_timeout = rolling.get('reboot_timeout') if in_run else None
                     if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600)):
                         task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
@@ -13963,7 +13966,7 @@ echo "AGENT_INSTALLED_OK"
             task.add_output(f"[OK] Update completed / abgeschlossen!")
             
             # Auto-exit maintenance mode after successful update
-            if node_name in self.nodes_in_maintenance:
+            if node_name in self.nodes_in_maintenance and (task.back_online or not task.reboot_issued):
                 task.add_output(f"Exiting maintenance mode / Beende Wartungsmodus...")
                 try:
                     self.exit_maintenance_mode(node_name)
