@@ -29084,6 +29084,9 @@
                                                                         <option value="seabios">Legacy BIOS (SeaBIOS)</option>
                                                                         <option value="ovmf">UEFI (OVMF)</option>
                                                                     </select>
+                                                                    {vmwareMigrateForm.bios === 'seabios' && vmwareMigrationPlan.source?.hardware?.firmware === 'efi' && (
+                                                                        <p data-v2p-firmware-warning role="alert" className="text-xs text-yellow-400 mt-2">{t('v2pFirmwareMismatch')}</p>
+                                                                    )}
                                                                 </div>
 
                                                                 {/* NICs from VMware */}
@@ -29174,6 +29177,9 @@
                                                                             <option value="seabios">SeaBIOS (Legacy)</option>
                                                                             <option value="ovmf">OVMF (UEFI)</option>
                                                                         </select>
+                                                                        {vmwareMigrateForm.bios === 'seabios' && vmwareMigrationPlan.source?.hardware?.firmware === 'efi' && (
+                                                                            <p data-v2p-firmware-warning role="alert" className="text-xs text-yellow-400 mt-2">{t('v2pFirmwareMismatch')}</p>
+                                                                        )}
                                                                     </div>
                                                                     <div>
                                                                         <label className="text-xs text-gray-500 mb-1 block">{t('osType')}</label>
