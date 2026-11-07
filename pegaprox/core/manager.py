@@ -4782,9 +4782,11 @@ class PegaProxManager:
                         # Task finished - check if successful
                         exit_status = task_status.get('exitstatus', '')
                         # #184: WARNINGS = task succeeded with non-fatal warnings (NUMA, local disks, etc.)
-                        if exit_status not in ('OK', 'WARNINGS'):
+                        # Proxmox says 'WARNINGS: 2', the bare word never came
+                        ok = exit_status == 'OK' or str(exit_status).startswith('WARNINGS')
+                        if not ok:
                             self.logger.warning(f"Task {task_id} finished with exit status: {exit_status}")
-                        return exit_status in ('OK', 'WARNINGS')
+                        return ok
                     
                 time.sleep(2)  # Poll every 2 seconds
                 
