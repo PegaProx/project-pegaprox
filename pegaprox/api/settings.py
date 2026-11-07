@@ -4975,7 +4975,8 @@ def _ceph_gate_unsafe(summary, gate):
     # JB Nov 2026 - `warnings` holds Ceph's check codes, the sentences below never matched one of them
     warns = ' '.join(str(w) for w in (summary.get('warnings') or [])).upper()
     for code in ('PG_DEGRADED', 'PG_AVAILABILITY', 'PG_DAMAGED', 'OSD_DOWN', 'OSD_HOST_DOWN', 'OSD_ROOT_DOWN',
-                 'OSD_FULL', 'OBJECT_UNFOUND', 'MON_DOWN', 'FS_DEGRADED', 'MDS_INSUFFICIENT_STANDBY'):
+                 'OSD_FULL', 'OBJECT_UNFOUND', 'MON_DOWN', 'FS_DEGRADED', 'MDS_INSUFFICIENT_STANDBY',
+                 'PG_RECOVERY_FULL', 'PG_BACKFILL_FULL'):
         if code in warns:
             return 'warning: ' + code
     return None

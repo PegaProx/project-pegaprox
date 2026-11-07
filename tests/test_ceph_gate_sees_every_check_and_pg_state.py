@@ -24,7 +24,7 @@ def _summary(status='HEALTH_WARN', checks=(), states=(('active+clean', 100),), u
 
 
 @pytest.mark.parametrize('code', ['PG_DEGRADED', 'PG_AVAILABILITY', 'PG_DAMAGED', 'OSD_DOWN', 'OSD_HOST_DOWN',
-                                  'OBJECT_UNFOUND', 'MON_DOWN', 'MDS_INSUFFICIENT_STANDBY'])
+                                  'OBJECT_UNFOUND', 'MON_DOWN', 'MDS_INSUFFICIENT_STANDBY', 'PG_RECOVERY_FULL', 'PG_BACKFILL_FULL'])
 def test_a_check_with_data_at_risk_holds(code):
     assert code in _ceph_gate_unsafe(_summary(checks=[code]), 'degraded')
 
