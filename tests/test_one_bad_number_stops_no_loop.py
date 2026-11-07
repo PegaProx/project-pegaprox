@@ -4,6 +4,7 @@ A threshold stored as text raised at the comparison in the alert loop and took e
 each round. A check_interval stored as text ended the daemon loop of its cluster for good. The forms send numbers, the API
 took anything.
 """
+import json
 import types
 from unittest.mock import MagicMock, patch
 
@@ -29,6 +30,26 @@ def test_a_threshold_that_is_no_number_is_refused(admin, bad):
     c, _ = admin
     assert c.post('/api/clusters/c1/alerts', json=dict(RULE, threshold=bad)).status_code == 400
     assert c.post('/api/alerts', json=dict(RULE, threshold=bad)).status_code == 400
+
+
+def _strict(text):
+    def refuse(token):
+        raise ValueError(f'{token} is no JSON')
+    return json.loads(text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize('token', ['NaN', 'Infinity', '-Infinity', '1e999'])
+def test_a_number_that_is_no_number_is_refused(admin, token):
+    # the JSON parser takes these as floats; stored, the rule list read back as no JSON
+    c, _ = admin
+    body = json.dumps(dict(RULE, threshold=0)).replace('"threshold": 0', f'"threshold": {token}')
+    for url in ('/api/clusters/c1/alerts', '/api/alerts'):
+        assert c.post(url, data=body, content_type='application/json').status_code == 400, url
+    made = c.post('/api/clusters/c1/alerts', json=dict(RULE, threshold=85)).get_json()['alert']['id']
+    r = c.put(f'/api/clusters/c1/alerts/{made}', data=f'{{"threshold": {token}}}', content_type='application/json')
+    assert r.status_code == 400
+    listed = _strict(c.get('/api/clusters/c1/alerts').get_data(as_text=True))['alerts']
+    assert [a['threshold'] for a in listed] == [85]
 
 
 def test_a_number_still_goes_through(admin):
@@ -57,6 +78,19 @@ def test_a_bad_rule_already_stored_does_not_stop_the_rules_after_it(admin, store
             patch.object(al, '_record_eval', side_effect=lambda alert_id, **kw: seen.append(alert_id)):
         al.check_and_send_alerts()  # raised TypeError at the comparison
     assert 'r1' in seen, seen
+
+
+@pytest.mark.parametrize('stored', ['nan', float('nan'), float('inf'), '-Infinity', True])
+def test_a_stored_threshold_that_compares_as_nonsense_is_skipped(admin, stored):
+    seen = {}
+    with patch.object(al, 'load_alerts_config', return_value=_rules(stored, 10)), \
+            patch.dict(al._alert_last_sent, clear=True), \
+            patch.object(al, 'dispatch_alert', return_value=(False, False, [], [])), \
+            patch.object(al, '_upsert_active_alert'), \
+            patch.object(al, '_record_eval', side_effect=lambda alert_id, **kw: seen.setdefault(alert_id, kw)):
+        al.check_and_send_alerts()
+    assert seen['r0'].get('reason', '').startswith('threshold is not a number'), seen['r0']
+    assert 'r1' in seen
 
 
 @pytest.mark.parametrize('bad', ['300', 'abc', None, 0, -5, True, 90000])

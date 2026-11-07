@@ -3,6 +3,7 @@
 
 import os
 import json
+import math
 import logging
 import uuid
 from datetime import datetime
@@ -269,6 +270,9 @@ def _threshold_error(data):
         return None
     value = data['threshold']
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return jsonify({'error': "'threshold' must be a number"}), 400
+    # the JSON parser takes NaN, Infinity and 1e999 as floats, and the rule list then reads back as no JSON
+    if isinstance(value, float) and not math.isfinite(value):
         return jsonify({'error': "'threshold' must be a number"}), 400
     return None
 

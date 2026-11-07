@@ -5,6 +5,7 @@ Background alert checking and notification.
 """
 
 import os
+import math
 import time
 import json
 import logging
@@ -230,12 +231,17 @@ def check_and_send_alerts():
         threshold = alert.get('threshold', 80)
         # JB Nov 2026 - a rule stored with text here raised at the comparison below and took every later rule of
         # every cluster with it, each round
-        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
-            try:
+        # a flag, nan or inf would compare as nonsense: never or always firing
+        try:
+            if isinstance(threshold, bool):
+                raise TypeError
+            if not isinstance(threshold, int):
                 threshold = float(threshold)
-            except (TypeError, ValueError):
-                _record_eval(alert_id, reason=f'threshold is not a number: {threshold!r}')
-                continue
+                if not math.isfinite(threshold):
+                    raise ValueError
+        except (TypeError, ValueError):
+            _record_eval(alert_id, reason=f"threshold is not a number: {alert.get('threshold')!r}")
+            continue
         operator = alert.get('operator', '>')  # >, <, =
         target_type = alert.get('target_type', 'cluster')  # cluster, node, vm
         target_id = alert.get('target_id', '')  # node name or vmid
