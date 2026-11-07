@@ -230,12 +230,29 @@ class V2PMigrationTask:
         is the TPM state Proxmox creates with the VM, and the fixes write to what they get."""
         return (getattr(self, '_disk_vols', None) or {}).get(0) or None
 
-    def _disk_attach_opts(self):
-        # #598 — extra drive options appended to a FINAL target-disk attach only.
-        # aio_mode is whitelisted in __init__ to one of three literal tokens, so
-        # the returned suffix can never carry shell/config metacharacters. Returns
-        # '' by default (no behaviour change; PVE default aio=io_uring).
-        return f',aio={self.aio_mode}' if getattr(self, 'aio_mode', '') else ''
+    def _disk_attach_opts(self, disk_bus):
+        """Options for final target disks, using the resolved bus (including Auto)."""
+        cache = self.disk_cache if self.disk_cache in (
+            'none', 'directsync', 'writethrough', 'writeback', 'unsafe') else ''
+        aio = getattr(self, 'aio_mode', '')
+        # Native AIO requires O_DIRECT, which buffered cache modes disable.
+        if aio == 'native' and cache in ('writethrough', 'writeback', 'unsafe'):
+            aio = 'threads'
+        opts = f',aio={aio}' if aio else ''
+        # Emit only literal supported values: this suffix enters root shell commands
+        # and qm.conf, and API callers need not have used the migration dialog.
+        if self.disk_discard in ('on', 'ignore'):
+            opts += f',discard={self.disk_discard}'
+        # Proxmox supports SSD emulation on IDE/SATA/SCSI, not VirtIO Block.
+        if self.disk_ssd is True and disk_bus in ('ide', 'sata', 'scsi'):
+            opts += ',ssd=1'
+        if cache:
+            opts += f',cache={cache}'
+        scsihw = getattr(self, '_detected_scsihw', self.scsihw_override)
+        if self.disk_iothread is True and (disk_bus == 'virtio' or (
+                disk_bus == 'scsi' and scsihw == 'virtio-scsi-single')):
+            opts += ',iothread=1'
+        return opts
 
     def _redact(self, text):
         # NS Oct 2026 (#1098) - tool output (qemu-img, ssh) can echo the ESXi password,
@@ -870,6 +887,7 @@ def _run_v2p_migration(task):
             scsihw = hw.get('scsi_controller_pve', 'virtio-scsi-single')
         if task.disk_bus == 'scsi' and scsihw not in ('pvscsi', 'lsi', 'lsi53c810', 'megasas', 'virtio-scsi-pci', 'virtio-scsi-single'):
             scsihw = 'virtio-scsi-single'
+        task._detected_scsihw = scsihw
         
         # Disk bus: honor the user's wizard pick, else match VMware.
         # MK #597 — 'virtio' was missing from this allowlist, so an explicit virtio
@@ -918,7 +936,6 @@ def _run_v2p_migration(task):
             'vga': vga_type,
         }
         # optional fields — only set if user configured them
-        disk_cache = getattr(task, 'disk_cache', '') or ''
         if getattr(task, 'numa', False):
             pve_config['numa'] = 1
         if getattr(task, 'agent', True):
@@ -1224,7 +1241,7 @@ def _run_v2p_migration(task):
                 presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
                 # attach to Proxmox VM shell — NS May 2026 (#222): rc-check
                 rc_a2, out_a2, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=30)
                 if rc_a2 != 0:
                     out_full = str(out_a2 or '').strip()
                     # MK 2026-06-09 (#438 crcro): qm prints a "successfully created '<vol>'"
@@ -1623,7 +1640,7 @@ def _run_v2p_migration(task):
 
                     # --- attach (offline pattern; keep the #438 tail) ---
                     rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                        f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=30)
                     if rc_a != 0:
                         out_full = str(out_a or '').strip()
                         task.log(f"  ✗ qm set --{disk_bus}{i} failed (rc={rc_a}): {out_full}")
@@ -1720,7 +1737,7 @@ def _run_v2p_migration(task):
                         if not vol_id:
                             raise _VmkSwitchoverFailed(f'Disk {i}: the block replay and the full copy both failed')
                         rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node,
-                            f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=30)
+                            f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=30)
                         if rc_a != 0:
                             raise _VmkSwitchoverFailed(
                                 f'qm set --{disk_bus}{i} {vol_id} -> {str(out_a or "").strip()[-300:]}')
@@ -1880,7 +1897,7 @@ def _run_v2p_migration(task):
                 # Attach disk — NS May 2026 (#222): rc-check; silent failure used
                 # to leave the volume orphaned on storage and force users to run
                 # `qm rescan` to discover it.
-                attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1"
+                attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1"
                 rc_a, out_a, _ = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
                 if rc_a != 0:
                     out_full = str(out_a or '').strip()
@@ -2018,7 +2035,7 @@ def _run_v2p_migration(task):
             presync_volumes.append((vol_id, vol_path, esxi_flat, disk_size))
             
             # Attach the volume to the VM
-            attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts()} 2>&1"
+            attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1"
             rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
             if rc_at == 0:
                 task.log(f"  Disk {i} attached as {disk_bus}{i} ({vol_id})")
@@ -2220,7 +2237,7 @@ def _run_v2p_migration(task):
                         _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
                         return
                 
-                    attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {new_vol_id}{task._disk_attach_opts()} 2>&1"
+                    attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{i} {new_vol_id}{task._disk_attach_opts(disk_bus)} 2>&1"
                     _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
                     task.log(f"  Full re-download complete ({new_vol_id})")
             
@@ -5282,7 +5299,7 @@ fi
         
         # Attach to VM
         _pve_node_exec(pve_mgr, task.target_node,
-            f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+            f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=15)
         task.log(f"  Attached {disk_bus}{di}: {vol_id}")
         task.record_disk_volume(di, vol_id)
 
@@ -6475,7 +6492,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.record_disk_volume(di, vol_id)
                 if vol_id:
                     rc_set, out_set, _ = _pve_node_exec(pve_mgr, task.target_node,
-                        f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                        f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=15)
                     task.log(f"  {disk_bus}{di}: {vol_id}")
             
             _pve_node_exec(pve_mgr, task.target_node,
@@ -6705,7 +6722,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 dk = f'disk{di}'
                 disk_total = task.disk_progress.get(dk, {}).get('total', 0)
                 size_gb = max(1, math.ceil(disk_total / (1024**3)))
-                disk_line = f"{disk_bus}{di}: {vol_id},size={size_gb}G{task._disk_attach_opts()}"
+                disk_line = f"{disk_bus}{di}: {vol_id},size={size_gb}G{task._disk_attach_opts(disk_bus)}"
                 _pve_node_exec(pve_mgr, task.target_node,
                     f"echo '{disk_line}' >> {conf_path}", timeout=5)
                 task.log(f"  Disk {di}: {disk_line} ✓")
@@ -6832,7 +6849,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     task.log(f"  WARNING: post-pivot no volume for disk {di} — skipping")
                     continue
                 rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=15)
                 at_out = str(out_at or '').strip()
                 if rc_at == 0 and 'error' not in at_out.lower():
                     task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓ (persisted)")
@@ -6871,7 +6888,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             _pve_node_exec(pve_mgr, task.target_node,
                 f"sed -i '/^unused.*{escaped_vol}/d' {conf_path}", timeout=5)
             rc_at, out_at, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts()} 2>&1", timeout=15)
+                f"qm set {task.proxmox_vmid} --{disk_bus}{di} {vol_id}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=15)
             at_out = str(out_at or '').strip()
             if rc_at == 0 and 'error' not in at_out.lower():
                 task.log(f"  Disk {di}: {disk_bus}{di} → {vol_id} ✓")
@@ -6891,7 +6908,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 unused_vol = um.group(2)
                 di = unused_idx  # map unused0 → disk0, etc.
                 rc_rescue, out_rescue, _ = _pve_node_exec(pve_mgr, task.target_node,
-                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol} 2>&1", timeout=15)
+                    f"qm set {task.proxmox_vmid} --{disk_bus}{di} {unused_vol}{task._disk_attach_opts(disk_bus)} 2>&1", timeout=15)
                 if rc_rescue == 0:
                     task.log(f"  Rescued unused{unused_idx} → {disk_bus}{di}: {unused_vol} ✓")
                     attached_count += 1
@@ -7820,7 +7837,7 @@ def _attach_imported_disk(pve_mgr, task, disk_index, disk_bus, importdisk_output
             disk_ref = match2.group(0)
     
     if disk_ref:
-        attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{disk_index} {disk_ref} 2>&1"
+        attach_cmd = f"qm set {task.proxmox_vmid} --{disk_bus}{disk_index} {disk_ref}{task._disk_attach_opts(disk_bus)} 2>&1"
         rc, out, err = _pve_node_exec(pve_mgr, task.target_node, attach_cmd, timeout=30)
         if rc == 0:
             task.log(f"Disk {disk_index} attached as {disk_bus}{disk_index} ({disk_ref})")

@@ -365,7 +365,7 @@ class Run:
     """One migration against the fakes."""
 
     def __init__(self, monkeypatch, mode='offline', ndisks=2, power='POWERED_ON', ssh_key=None,
-                 disk_order=None, **esxi_kw):
+                 disk_order=None, config=None, **esxi_kw):
         self.log = []
         self.vols = {}
         self.clock = Clock()
@@ -378,6 +378,7 @@ class Run:
         cfg = {'esxi_password': 'pw', 'esxi_host': 'esx1.lab', 'esxi_user': 'root',
                'transfer_mode': mode, 'network_bridge': 'vmbr0', 'preserve_mac': True,
                'start_after': True, 'remove_source': False, 'selected_nics': [dict(n) for n in NICS]}
+        cfg.update(config or {})
         self.task = v2p.V2PMigrationTask('t1', 'vw1', 'vm-42', 'pve-cl', 'pve1', 'local-lvm',
                                          vm_name='app01', config=cfg)
         mp = monkeypatch
@@ -732,3 +733,90 @@ def test_auto_says_its_vm_stays_and_the_folder_modes_say_nothing_was_touched():
     assert 'Proxmox VM of this run stays' in auto and 'not touched' not in auto
     for mode in ('offline', 'sshfs_boot', 'snapshot_zero'):
         assert 'the source VM was not touched' in v2p.folder_copy_refusal(mode, 'x')
+
+
+@pytest.mark.parametrize('kw', [dict(mode='offline'), dict(mode='vmkfstools_clone'),
+                                dict(mode='auto', clone_snap_fails=True),
+                                dict(mode='snapshot_zero'),
+                                dict(mode='sshfs_boot', ssh_key='/tmp/v2p-key-fixed')],
+                         ids=lambda kw: kw['mode'])
+@pytest.mark.parametrize('discard,ssd', [('on', True), ('ignore', False)])
+@pytest.mark.parametrize('bus', ['', 'scsi', 'sata', 'ide', 'virtio'], ids=['auto', 'scsi', 'sata', 'ide', 'virtio'])
+def test_final_disks_keep_the_selected_discard_and_ssd_options(monkeypatch, kw, discard, ssd, bus):
+    """Drive the coordinator through each transfer mode and inspect final node commands."""
+    if kw['mode'] == 'snapshot_zero':
+        monkeypatch.setattr(v2p, '_snapshot_zero_v2p_delta_loop', lambda *a, **k: (True, 1, []))
+    r = Run(monkeypatch, config={'disk_discard': discard, 'disk_ssd': ssd,
+                                'disk_bus': bus, 'aio_mode': 'threads'}, **kw).go()
+    assert r.task.status == 'completed', r.task.error
+    resolved_bus = bus or 'scsi'
+    disks = [c for c in r.nodecmds() if re.match(rf'qm set {VMID} --{resolved_bus}\d+ ', c)]
+    assert len(disks) >= 2, r.nodecmds()
+    for cmd in disks:
+        assert f',discard={discard}' in cmd, cmd
+        assert (',ssd=1' in cmd) is (ssd and resolved_bus != 'virtio'), cmd
+        assert ',aio=threads' in cmd, cmd
+    for index in (0, 1):
+        assert any(f'--{resolved_bus}{index} local-lvm:vm-{VMID}-disk-{index+1},' in c for c in disks)
+    assert r.vols[f'local-lvm:vm-{VMID}-disk-0'] == 'tpm'
+
+
+@pytest.mark.parametrize('discard,ssd', [('on;touch /tmp/no', True), (None, 'true'),
+                                       (['on'], 1), ('ignore', False)])
+def test_unrecognized_disk_options_do_not_enter_node_commands(discard, ssd):
+    """Direct API callers cannot inject options or enable SSD with a truthy non-boolean."""
+    task = v2p.V2PMigrationTask('opts', 'vw1', 'vm1', 'pve', 'n1', 'local',
+                              config={'disk_discard': discard, 'disk_ssd': ssd})
+    expected = ',discard=ignore' if discard == 'ignore' else ''
+    if ssd is True:
+        expected += ',ssd=1'
+    assert task._disk_attach_opts('scsi') == expected + ',cache=none'
+
+
+@pytest.mark.parametrize('bus', ['scsi', 'sata', 'ide', 'virtio'])
+def test_imported_disk_attachment_keeps_options_and_failure_diagnostics(monkeypatch, bus):
+    """The import-output adapter keeps full volume refs and reports failed qm set calls."""
+    task = v2p.V2PMigrationTask('opts', 'vw1', 'vm1', 'pve', 'n1', 'local',
+                              config={'disk_discard': 'on', 'disk_ssd': True})
+    task.proxmox_vmid = VMID
+    commands = []
+
+    def refuse(_mgr, _node, cmd, timeout):
+        """Record the real adapter's command and return a failed node operation."""
+        commands.append(cmd)
+        return 1, 'cannot attach', 'node error'
+
+    monkeypatch.setattr(v2p, '_pve_node_exec', refuse)
+    monkeypatch.setattr(v2p, 'broadcast_sse', lambda *a, **k: None)
+    v2p._attach_imported_disk(None, task, 1, bus,
+                             "Successfully imported disk as 'unused0:local:120/vm-120-disk-1.raw'")
+    suffix = ',discard=on' + (',ssd=1' if bus != 'virtio' else '')
+    suffix += ',cache=none' + (',iothread=1' if bus == 'virtio' else '')
+    assert commands == [f'qm set {VMID} --{bus}1 local:120/vm-120-disk-1.raw{suffix} 2>&1']
+    assert any('cannot attach node error' in line for line in task.log_lines)
+
+
+@pytest.mark.parametrize('bus', ['', 'scsi', 'sata', 'ide', 'virtio'], ids=['auto', 'scsi', 'sata', 'ide', 'virtio'])
+@pytest.mark.parametrize('discard,ssd', [('on', True), ('ignore', False)])
+def test_live_pivot_persists_options_without_changing_temporary_drives(monkeypatch, bus, discard, ssd):
+    """Successful QMP mirrors persist the same options in qm.conf without restarting."""
+    monkeypatch.setattr(v2p, '_drive_mirror_to_local', lambda *a, **k: True)
+    monkeypatch.setattr(v2p, '_poll_drive_mirrors', lambda *a, **k: True)
+    r = Run(monkeypatch, mode='sshfs_boot', ssh_key='/tmp/v2p-key-fixed',
+            config={'disk_bus': bus, 'disk_discard': discard, 'disk_ssd': ssd,
+                    'aio_mode': 'threads'}).go()
+    assert r.task.status == 'completed', r.task.error
+    assert any('ZERO downtime' in line for line in r.task.log_lines), r.task.log_lines
+    resolved_bus = bus or 'scsi'
+    lines = [shlex.split(c)[1] for c in r.nodecmds()
+             if c.startswith(f"echo '{resolved_bus}") and ' >> /etc/pve/' in c]
+    assert len(lines) == 2, lines
+    for index, line in enumerate(lines):
+        assert line.startswith(f'{resolved_bus}{index}: local-lvm:vm-{VMID}-disk-{index+1},size=')
+        assert f',aio=threads,discard={discard}' in line
+        assert (',ssd=1' in line) is (ssd and resolved_bus != 'virtio')
+    temporary_args = [shlex.split(c)[1] for c in r.nodecmds() if c.startswith("echo 'args:")]
+    assert temporary_args, r.nodecmds()
+    assert all('discard=' not in line and 'ssd=' not in line for line in temporary_args)
+    starts = [post for post in r.posts() if post[1].endswith('/status/start')]
+    assert len(starts) == 1
