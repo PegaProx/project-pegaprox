@@ -18445,7 +18445,8 @@ echo "AGENT_INSTALLED_OK"
                 net_str = ','.join(parts)
             
             data = {net_id: net_str}
-            response = self._api_post(url, data=data)
+            # JB Nov 2026 - a container's config has no POST, the disk route below already went through this
+            response = self._api_put(url, data=data) if vm_type == 'lxc' else self._api_post(url, data=data)
             
             if response.status_code == 200:
                 self.logger.info(f"[OK] Added network {net_id} to {vm_type}/{vmid}")
