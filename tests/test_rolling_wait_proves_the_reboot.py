@@ -42,8 +42,8 @@ def _rebooted_task():
 
 
 def _run(api, seed, monkeypatch, row, xcpng=False):
-    """row(seconds since the task finished) is the node as the status read says; a run with its
-    node's answers, up to where it stops or holds."""
+    """row(seconds since the task finished) is the node as the status read says, None for a read
+    without its row; a run with its node's answers, up to where it stops or holds."""
     import pegaprox.api.settings as settings_mod
     clock = _Clock()
     monkeypatch.setattr(settings_mod, 'time', clock)
@@ -62,8 +62,10 @@ def _run(api, seed, monkeypatch, row, xcpng=False):
         fake.get_node_status.return_value = {'blade1': {'status': 'online', 'uptime': OLD_UPTIME}}
     else:
         # the route and the quorum gate read it before the reboot too: nothing is going on yet
-        fake.get_node_status.side_effect = lambda: {
-            'blade1': answer() if fake.start_node_update.called else _up(OLD_UPTIME)}
+        def rows():
+            got = answer() if fake.start_node_update.called else _up(OLD_UPTIME)
+            return {'blade1': got} if got else {'blade2': _up(OLD_UPTIME)}
+        fake.get_node_status.side_effect = rows
     fake._ha_cluster_status.return_value = [{'type': 'cluster', 'quorate': 1}] + [
         {'type': 'node', 'name': n, 'online': 1} for n in ('blade1', 'blade2', 'blade3')]
     fake.get_ceph_health_summary.return_value = None
@@ -135,6 +137,28 @@ def test_no_answer_is_not_the_node_going_down(api, seed, monkeypatch):
     state, logs, _ = _run(api, seed, monkeypatch, row)
     _held_for_the_reboot(state, logs)
     assert 'is now offline' not in logs, logs
+
+
+def test_a_partial_read_is_not_the_node_going_down(api, seed, monkeypatch):
+    # get_node_status drops a node whose details ran out of time; this one never left
+    state, logs, _ = _run(api, seed, monkeypatch, lambda t: None if t < 100 else _up(OLD_UPTIME + t))
+    _held_for_the_reboot(state, logs)
+    assert 'is now offline' not in logs, logs
+
+
+@pytest.mark.parametrize('status', ['unknown', 'maintenance'])
+def test_only_offline_says_the_node_went_down(api, seed, monkeypatch, status):
+    state, logs, _ = _run(api, seed, monkeypatch,
+                          lambda t: {'status': status, 'uptime': 0} if t < 100 else _up(OLD_UPTIME + t))
+    _held_for_the_reboot(state, logs)
+    assert 'is now offline' not in logs, logs
+
+
+def test_a_node_that_left_the_list_is_back_by_its_uptime(api, seed, monkeypatch):
+    state, logs, clock = _run(api, seed, monkeypatch, lambda t: None if t < 100 else _up(t - 90))
+    assert state.get('paused_reason') is None, logs
+    assert 'blade1 back online' in logs, logs
+    assert clock.offset >= 100
 
 
 def test_a_down_xcpng_host_holds_the_run(api, seed, monkeypatch):

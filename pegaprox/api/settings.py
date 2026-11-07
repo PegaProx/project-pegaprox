@@ -5380,14 +5380,16 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             if is_xcpng:
                 row = mgr.node_reboot_look(node_name)
             else:
-                ns = mgr.get_node_status()
-                row = (ns.get(node_name) or {}) if ns else None
+                # no row says nothing: its details ran out of time, or the read failed
+                row = (mgr.get_node_status() or {}).get(node_name)
         except Exception:
             return None
-        if row is None:
+        if not row:
             return None
-        if row.get('status') != 'online':
+        if row.get('status') == 'offline':
             return 'down'
+        if row.get('status') != 'online':
+            return None
         return 'booted' if _booted_since(row, since) else 'up'
 
     def _recheck(node_name, phase, info):
