@@ -9,7 +9,8 @@ All only read. The POST takes its scenario in the body, so a standby with the li
 answers it from its own managers like any read (app.py _STANDBY_LOCAL_WRITES) and the
 active tells its members about nothing. A caller confined to some guests of the cluster
 gets the rows of those guests only, and of the nodes they run on: the counts stay, the names
-of the other guests and the load of the other nodes do not. The tenants of a report are the
+of the other guests and the load of the other nodes do not. Their picker offers those nodes
+and what is on them. The tenants of a report are the
 caller's own tenant to anyone but an administrator, and none to a confined caller; the
 ranking is a whole-cluster view and is refused to a confined caller.
 """
@@ -132,15 +133,38 @@ def whatif_options(cluster_id):
     if err:
         return err
     try:
+        nodes = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[WHATIF] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    try:
         out = whatif.options(mgr)
     except whatif.Unreadable as e:
         return jsonify({'error': str(e)}), 503
     except Exception as e:
         logging.error(f"[WHATIF] options of {cluster_id} failed: {e}")
         return jsonify({'error': safe_error(e, 'Failed to read the cluster for the what-if simulator')}), 500
+    if nodes is not None:
+        out = _options_on_nodes(out, nodes)
     thr = thresholds_for(cluster_id)
     out['thresholds'] = {k: v for k, v in thr.items() if k != 'nodes'}
     return jsonify(out)
+
+
+def _options_on_nodes(out, nodes):
+    """The picker of a caller confined to some guests: the nodes in `nodes` (where those run),
+    the storages, PBS storages and bridges there with those nodes only, and the SDN VNets that
+    the bridge list of such a node offers them, none without a node."""
+    def there(rows):
+        kept = []
+        for r in rows or []:
+            on = [n for n in r.get('nodes') or [] if n in nodes]
+            if on:
+                kept.append(dict(r, nodes=on))
+        return kept
+    return dict(out, nodes=[n for n in out.get('nodes') or [] if n.get('name') in nodes],
+                storages=there(out.get('storages')), pbs=there(out.get('pbs')),
+                bridges=there(out.get('bridges')), vnets=list(out.get('vnets') or []) if nodes else [])
 
 
 @bp.route('/api/clusters/<cluster_id>/whatif', methods=['POST'])

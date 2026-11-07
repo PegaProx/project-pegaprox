@@ -40,10 +40,11 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers
 from pegaprox.core.db import get_db
 from pegaprox.core import ha
-from pegaprox.utils.auth import require_auth
+from pegaprox.utils.auth import require_auth, build_authz_user
 from pegaprox.utils.audit import log_audit
 from pegaprox.utils.concurrent import run_per_node
-from pegaprox.api.helpers import require_unconfined, check_cluster_access, parse_pve_error, load_server_settings
+from pegaprox.api.helpers import (require_unconfined, check_cluster_access, parse_pve_error, load_server_settings,
+                                  caller_is_scoped)
 
 bp = Blueprint('multi_sdn', __name__)
 
@@ -731,10 +732,17 @@ def _row_to_dict(row):
     return d
 
 
-def _caller_can_access_all(member_ids):
+def _caller_can_access_all(member_ids, user=None):
+    """Whether the caller reaches every member and is confined on none: the record is the SDN
+    of each member (controller, peers, subnets), which the per-cluster SDN reads refuse to a
+    caller confined to some guests. user: the identity, built once for a list."""
     for cid in member_ids:
         ok, _err = check_cluster_access(cid)
         if not ok:
+            return False
+        if user is None:
+            user = build_authz_user(request.session.get('user', ''), request.session)
+        if caller_is_scoped(user, cid):
             return False
     return True
 
@@ -765,10 +773,11 @@ def list_multi_vnets():
     ALL member clusters — it's a cross-cluster object)."""
     db = get_db()
     rows = db.query('SELECT * FROM multi_cluster_vnets ORDER BY created_at DESC')
+    user = build_authz_user(request.session.get('user', ''), request.session)
     out = []
     for row in rows:
         rec = _row_to_dict(row)
-        if _caller_can_access_all(rec.get('member_clusters', [])):
+        if _caller_can_access_all(rec.get('member_clusters', []), user):
             out.append(rec)
     return jsonify(out)
 
@@ -804,7 +813,8 @@ def validate_multi_vnet():
     defn, err = _validate_definition(body)
     if err:
         return jsonify({'ok': False, 'error': err}), 400
-    denied = _require_members_access(defn['member_clusters'])
+    # the dry run of a create, and it reads the vnets and zones of every member
+    denied = _require_members_access(defn['member_clusters'], mutating=True)
     if denied:
         return denied
 
@@ -1176,7 +1186,7 @@ def scan_multi_vnet(vid):
         return jsonify({'error': 'not found'}), 404
     rec = _row_to_dict(row)
     members = rec.get('member_clusters', [])
-    denied = _require_members_access(members)
+    denied = _require_members_access(members, mutating=True)
     if denied:
         return denied
     defn = rec.get('desired_state') or {}

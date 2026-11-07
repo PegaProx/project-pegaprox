@@ -21,7 +21,8 @@ from flask import Blueprint, jsonify, request
 from pegaprox.globals import cluster_managers
 from pegaprox.utils.auth import require_auth
 from pegaprox.api.helpers import (check_cluster_access, safe_error, load_metrics_window, scope_vm_rows,
-                                  history_report, history_version, run_off_hub, caller_is_scoped)
+                                  history_report, history_version, run_off_hub, caller_is_scoped,
+                                  _request_caller)
 from pegaprox.background.metrics_store import need, guest_columns, FT, HERE, RUN, CPU_SET, MEM_SET
 from pegaprox.core.db import get_db
 
@@ -319,6 +320,9 @@ def capacity_forecast(cluster_id):
         threshold = max(50, min(99.9, threshold))
     except (TypeError, ValueError):
         threshold = 90.0
+    # the storages come by name for the whole cluster, not per node: a caller confined to some
+    # guests gets the cluster series, as the storage reads refuse them the others
+    confined = caller_is_scoped(_request_caller(), cluster_id)
 
     history = _load_history(cluster_id, days=days)
     if len(history) < 6:  # need at least 30min of data
@@ -330,7 +334,8 @@ def capacity_forecast(cluster_id):
             'message': 'not enough history yet — collector needs ~30 min',
             'forecasts': [],
         })
-    need(history, 'storage')
+    if not confined:
+        need(history, 'storage')
 
     now_ts = int(datetime.now().timestamp())
 
@@ -349,7 +354,7 @@ def capacity_forecast(cluster_id):
         mem_used = totals.get('mem_used') or 0
         if mem_total > 0:
             series['memory'].append((ts, mem_used / mem_total * 100))
-        for sid, sd in (cd.get('storage') or {}).items():
+        for sid, sd in ({} if confined else cd.get('storage') or {}).items():
             storage_series.setdefault(sid, []).append((ts, sd.get('pct') or 0))
 
     forecasts = []
