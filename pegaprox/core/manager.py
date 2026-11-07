@@ -13636,14 +13636,15 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"SSH execute error: {e}")
             return -1, '', str(e)
     
-    def _wait_for_node_online(self, node_name: str, timeout: int = 600) -> bool:
+    def _wait_for_node_online(self, node_name: str, timeout: int = 600, since: float = None) -> bool:
         
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
         start_time = time.time()
         
         # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
-        # next node. Online only counts once this one was seen down or has booted since the wait began
+        # next node. Online only counts once this one was seen down or has booted since the reboot was sent
         seen_down = False
+        booted_after = since or start_time
         
         while time.time() - start_time < timeout:
             try:
@@ -13656,7 +13657,7 @@ echo "AGENT_INSTALLED_OK"
                     node = self.get_node_status().get(node_name) or {}
                     if node.get('status') == 'offline':
                         seen_down = True
-                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time):
+                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - booted_after):
                         self.logger.info(f"[OK] {node_name} is back online!")
                         return True
                 
@@ -13825,6 +13826,7 @@ echo "AGENT_INSTALLED_OK"
                 task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
                 
                 # Reconnect for reboot command
+                reboot_asked_at = time.time()
                 ssh = self._ssh_connect(node_ip)
                 if ssh:
                     try:
@@ -13940,7 +13942,7 @@ echo "AGENT_INSTALLED_OK"
                     task.phase = 'wait_online'
                     task.status = 'waiting_online'
                     
-                    if self._wait_for_node_online(node_name):
+                    if self._wait_for_node_online(node_name, since=reboot_asked_at):
                         task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
                         task.back_online = True
                     else:

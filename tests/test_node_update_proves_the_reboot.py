@@ -173,3 +173,20 @@ def test_a_sent_reboot_is_still_waited_for(monkeypatch):
     task = _run_task(m)
     assert task.reboot_issued is True
     assert task.status == 'failed' and task.back_online is False
+
+
+def test_a_reboot_done_before_the_wait_began_counts(monkeypatch):
+    # up again within the seconds between the command and the wait, and never seen down
+    m = _task_manager(monkeypatch, lambda ssh, cmd, task=None: (1 if 'dpkg -s needrestart' in cmd else 0, '', ''))
+    clock = mgrmod.time
+    channel = MagicMock()
+    sent = []
+    channel.exec_command.side_effect = lambda cmd: sent.append(clock.now)
+    client = MagicMock()
+    client.exec_command.return_value = (MagicMock(), MagicMock(), MagicMock())
+    client.get_transport.return_value.open_session.return_value = channel
+    m._ssh_connect = lambda ip, **kw: client
+    m.get_node_status = lambda: {'n1': _online(clock.now - sent[0] - 1)}
+    task = _run_task(m)
+    assert sent and task.status == 'completed', task.error
+    assert task.back_online is True
