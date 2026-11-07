@@ -29,7 +29,7 @@ def test_the_update_task_waits_as_long_as_the_run_says(monkeypatch, rolling, exp
     m = _updating_manager(True)
     m._rolling_update = rolling
     asked = []
-    m._wait_for_node_online = lambda node, timeout=600: asked.append(timeout) or True
+    m._wait_for_node_online = lambda node, timeout=600, **kw: asked.append(timeout) or True
     PegaProxManager._perform_node_update(m, 'blade1', UpdateTask('blade1', reboot=True))
     assert asked == [expected]
 
