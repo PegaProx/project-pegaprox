@@ -174,13 +174,14 @@ def test_a_node_that_needs_no_reboot_does_not_fail_the_update(monkeypatch):
     assert not any('[ERROR]' in line['text'] for line in task.output_lines)
 
 
-def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
+def test_no_connection_for_the_reboot_fails_the_update(monkeypatch):
     m = _task_manager(monkeypatch, lambda ssh, cmd, task=None: (0, '', ''), ssh=False)
     task = _run_task(m)
-    assert task.status == 'completed', task.error
-    assert task.reboot_issued is False
-    # the update stands, but this reboot was wanted and did not happen: say so
-    assert any('[ERROR]' in line['text'] and 'not rebooted' in line['text'] for line in task.output_lines)
+    # the reboot was wanted and did not happen: the new kernel is not running
+    assert task.status == 'failed' and task.phase == 'reboot_failed', (task.status, task.phase, task.error)
+    assert task.reboot_issued is False and task.back_online is False
+    assert 'reboot could not be sent' in task.error
+    assert any('[ERROR]' in line['text'] and 'send the reboot' in line['text'] for line in task.output_lines)
 
 
 def test_a_sent_reboot_is_still_waited_for(monkeypatch):

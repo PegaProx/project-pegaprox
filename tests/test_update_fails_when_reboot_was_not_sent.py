@@ -30,7 +30,7 @@ def _mgr(monkeypatch):
     m._ssh_execute = lambda ssh, cmd, task=None: (1 if 'dpkg -s needrestart' in cmd else 0, '', '')
     m._schedule_update_clear = lambda node, task: None
     m.exit_maintenance_mode = MagicMock(return_value=True)
-    m._wait_for_node_online = lambda node: True
+    m._wait_for_node_online = lambda node, timeout=600, since=None: True
     return m
 
 
@@ -46,6 +46,23 @@ def test_no_second_connection_is_a_failed_update(monkeypatch):
     m._perform_node_update('n1', task)
     assert task.status == 'failed' and 'reboot could not be sent' in task.error, (task.status, task.error)
     m.exit_maintenance_mode.assert_not_called()
+
+
+def test_the_error_says_why_there_was_no_connection(monkeypatch):
+    m = _mgr(monkeypatch)
+    calls = []
+
+    def connect(ip, failure=None, **kw):
+        calls.append(ip)
+        if len(calls) == 1:
+            return _ssh()
+        if failure is not None:
+            failure.update(kind='auth', detail='Authentication failed.')
+        return None
+    m._ssh_connect = connect
+    task = UpdateTask('n1', reboot=True)
+    m._perform_node_update('n1', task)
+    assert task.status == 'failed' and 'Authentication failed.' in task.error, task.error
 
 
 def test_a_reboot_that_was_sent_goes_on_as_it_did(monkeypatch):

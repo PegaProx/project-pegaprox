@@ -13875,7 +13875,8 @@ echo "AGENT_INSTALLED_OK"
                 
                 # Reconnect for reboot command
                 reboot_asked_at = time.monotonic()
-                ssh = self._ssh_connect(node_ip)
+                failure = {}
+                ssh = self._ssh_connect(node_ip, failure=failure)
                 # JB Nov 2026 - no connection means no reboot, and the wait below sees the node online and calls it done:
                 # a kernel update ended as success without its reboot
                 if not ssh:
@@ -13987,8 +13988,6 @@ echo "AGENT_INSTALLED_OK"
                         except:
                             pass
                         ssh = None
-                else:
-                    task.add_output(f"[ERROR] No connection to {node_name} for the reboot, it was not rebooted / Keine Verbindung, kein Neustart")
 
                 
                 # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that
