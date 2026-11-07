@@ -210,7 +210,8 @@ def test_pool_scoped_tenant_admin_creates_no_container_but_the_owner_does(api, s
     assert r.status_code == 403, r.get_data(as_text=True)
     assert not m.create_container.called
     r = api.as_user(owner).post('/api/clusters/cluster_1/nodes/n1/lxc',
-                                json={'vmid': 999, 'ostemplate': 'local:vztmpl/deb.tar.zst'})
+                                json={'vmid': 999, 'ostemplate': 'local:vztmpl/deb.tar.zst',
+                                      'password': 'ct-root-pw'})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert m.create_container.called
 

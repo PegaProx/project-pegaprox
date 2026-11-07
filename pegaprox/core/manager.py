@@ -760,6 +760,30 @@ def hardening_param_value(key, value):
     return v if rule and rule(v) else None
 
 
+def ct_root_credentials(ct_config):
+    """Root password and SSH keys for a new container, as (password, keys, error).
+
+    Empty or missing values come back as None. 'ssh_key' is an alias of 'ssh_public_keys'
+    and the first that holds a key wins, so a blank field cannot hide the other one. A value
+    that is no string is an error (False would go out as the password 'False', a list key
+    would get lost), and so is a NUL in the password: PVE hashes it with crypt(), which
+    ends the password there, so root would get another one than was asked for.
+    """
+    password = ct_config.get('password')
+    if password is not None and not isinstance(password, str):
+        return None, None, 'Password must be a string'
+    if password and '\x00' in password:
+        return None, None, 'Password must not contain a NUL character'
+    keys = None
+    for field in ('ssh_public_keys', 'ssh_key'):
+        val = ct_config.get(field)
+        if val is not None and not isinstance(val, str):
+            return None, None, 'SSH public keys must be a string, one key per line'
+        if keys is None and val and val.strip():
+            keys = val
+    return password or None, keys, None
+
+
 class PegaProxManager:
     """
     main cluster manager - NS
@@ -15048,7 +15072,12 @@ echo "AGENT_INSTALLED_OK"
             template = ct_config.get('template')
             if not template:
                 return {'success': False, 'error': 'Template is required for container creation'}
-            
+
+            # sent as given or not at all, see ct_root_credentials
+            password, ssh_keys, cred_err = ct_root_credentials(ct_config)
+            if cred_err:
+                return {'success': False, 'error': cred_err}
+
             # Build data payload
             # MK: defaults are conservative, users can change later
             data = {
@@ -15058,9 +15087,11 @@ echo "AGENT_INSTALLED_OK"
                 'memory': ct_config.get('memory', 512),  # MB
                 'swap': ct_config.get('swap', 512),
                 'cores': ct_config.get('cores', 1),
-                'password': ct_config.get('password', 'changeme'),  # should probably require this
             }
-            
+            # only a password the caller chose, a key-only container gets none from us
+            if password:
+                data['password'] = password
+
             # Root disk
             storage = ct_config.get('storage', 'local-lvm')
             disk_size = ct_config.get('disk_size', '8')  # GB
@@ -15159,7 +15190,6 @@ echo "AGENT_INSTALLED_OK"
                 data['onboot'] = '1'
             
             # SSH public keys
-            ssh_keys = ct_config.get('ssh_public_keys') or ct_config.get('ssh_key')
             if ssh_keys:
                 data['ssh-public-keys'] = ssh_keys
             

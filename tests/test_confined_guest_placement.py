@@ -54,7 +54,8 @@ def _manager(api, cluster_id=CID, cluster_type='proxmox'):
 # --- create --------------------------------------------------------------------------------------
 
 CREATE = [('qemu', 'create_vm', {'vmid': 900, 'name': 'new', 'memory': 1024}),
-          ('lxc', 'create_container', {'vmid': 901, 'hostname': 'new', 'ostemplate': 'local:vztmpl/d.tar.zst'})]
+          ('lxc', 'create_container', {'vmid': 901, 'hostname': 'new', 'ostemplate': 'local:vztmpl/d.tar.zst',
+                                       'password': 'ct-root-pw'})]   # a CT without a credential is a 400
 
 
 @pytest.mark.parametrize('kind,method,body', CREATE)

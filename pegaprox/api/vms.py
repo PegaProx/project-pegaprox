@@ -15119,7 +15119,11 @@ def create_vm_api(cluster_id, node):
 @bp.route('/api/clusters/<cluster_id>/nodes/<node>/lxc', methods=['POST'])
 @require_auth(perms=["vm.create"])
 def create_container_api(cluster_id, node):
-    """Create a new container on a node"""
+    """Create a new container on a node
+
+    The body needs a root password ('password', a non-empty string) or an SSH public key
+    ('ssh_public_keys', or 'ssh_key'), else 400. With only a key no root password is set.
+    """
     ok, err = check_cluster_access(cluster_id)
     if not ok: return err
     _cerr = require_unconfined(cluster_id)   # same as the VM twin above (#1081)
@@ -15130,7 +15134,22 @@ def create_container_api(cluster_id, node):
         return jsonify({'error': 'Cluster not found'}), 404
     
     manager = cluster_managers[cluster_id]
+    # XCP-ng and ESXi have no containers, say that rather than ask for a root password
+    if getattr(manager, 'cluster_type', 'proxmox') in ('xcpng', 'esxi'):
+        return jsonify({'error': 'Containers can only be created on a Proxmox cluster',
+                        'code': 'UNSUPPORTED'}), 400
     ct_config = request.json or {}
+    if not isinstance(ct_config, dict):
+        return jsonify({'error': 'Expected a JSON object'}), 400
+
+    # like the PVE wizard: a root password or an SSH key, else nobody gets in as root.
+    # An empty password counts as none, one PVE would not set as given is refused.
+    from pegaprox.core.manager import ct_root_credentials
+    _ct_pw, _ct_keys, _ct_err = ct_root_credentials(ct_config)
+    if _ct_err:
+        return jsonify({'error': _ct_err}), 400
+    if not _ct_pw and not _ct_keys:
+        return jsonify({'error': 'Set a root password or an SSH public key for the container'}), 400
 
     # NS #502 — tenant quota pre-flight (fail-open)
     # MK Oct 2026 - under the tenant's lock with a hold, as the VM twin above

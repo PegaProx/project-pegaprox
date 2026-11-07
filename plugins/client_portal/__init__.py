@@ -820,6 +820,8 @@ def _create_ct():
         return {'error': 'Container creation is not enabled'}, 403
 
     data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return {'error': 'Expected a JSON object'}, 400
     # --- validate strictly against the hoster's guardrails ---
     template = data.get('template', '')
     if template not in (cc.get('templates') or []):
@@ -839,8 +841,13 @@ def _create_ct():
     if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$', hostname):
         return {'error': 'Invalid hostname — letters/digits/hyphens only, must start and end alphanumeric'}, 400
     password = data.get('password') or ''
+    if not isinstance(password, str):
+        return {'error': 'Password must be a string'}, 400
     if len(password) < 8:
         return {'error': 'Password must be at least 8 characters'}, 400
+    # PVE's crypt() would end the password at a NUL, root would get another one
+    if '\x00' in password:
+        return {'error': 'Password must not contain a NUL character'}, 400
 
     # --- tenant quota (block if enforced) ---
     # MK Sep 2026 - two ways past this. `if tenant_id:` skipped the whole check for an
