@@ -3723,19 +3723,22 @@ class XcpngManager:
                     pass
                 ssh = None
 
-                # wait for node
-                task.phase = 'wait_online'
-                task.status = 'waiting_online'
-                task.add_output("Waiting for node to come back online...")
+                # wait for node, unless the rolling update it is in asked not to
                 rolling = getattr(self, '_rolling_update', None) or {}
                 in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
-                reboot_timeout = rolling.get('reboot_timeout') if in_run else None
-                online = self._wait_for_host_online(node_name, timeout=int(reboot_timeout or 300))
-                task.back_online = bool(online)
-                if online:
-                    task.add_output(f"{node_name} is back online")
+                if in_run and rolling.get('wait_for_reboot') is False:
+                    task.add_output(f"Not waiting for {node_name}")
                 else:
-                    task.add_output(f"WARNING: {node_name} did not come back within timeout")
+                    task.phase = 'wait_online'
+                    task.status = 'waiting_online'
+                    task.add_output("Waiting for node to come back online...")
+                    reboot_timeout = rolling.get('reboot_timeout') if in_run else None
+                    online = self._wait_for_host_online(node_name, timeout=int(reboot_timeout or 300))
+                    task.back_online = bool(online)
+                    if online:
+                        task.add_output(f"{node_name} is back online")
+                    else:
+                        task.add_output(f"WARNING: {node_name} did not come back within timeout")
 
             task.status = 'completed'
             task.phase = 'done'
