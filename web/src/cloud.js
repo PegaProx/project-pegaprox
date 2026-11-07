@@ -2356,7 +2356,9 @@
                                 <CloudField label={t('cloud.colWhen') || 'Schedule'}><select className="cloud-input" value={form.schedule_type} onChange={e => setForm({ ...form, schedule_type: e.target.value })}>{['once', 'daily', 'weekly', 'weekdays', 'weekends'].map(x => <option key={x} value={x}>{x}</option>)}</select></CloudField>
                                 <CloudField label={t('cloud.colTime') || 'Time'}><input className="cloud-input" type="time" value={form.time} onChange={e => setForm({ ...form, time: e.target.value })} /></CloudField>
                             </div>
-                            {form.schedule_type === 'weekly' && <CloudField label={t('days') || 'Days'}>
+                            {/* not a CloudField: a wrapping label would hand every click on the caption or gap to the first checkbox */}
+                            {form.schedule_type === 'weekly' && <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: '.8rem', color: 'var(--cloud-text-secondary)' }}>
+                                <span>{t('days') || 'Days'}</span>
                                 <div data-cloud-sched-days="" style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                                     {['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].map(d => (
                                         <label key={d} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
@@ -2366,7 +2368,7 @@
                                         </label>
                                     ))}
                                 </div>
-                            </CloudField>}
+                            </div>}
                             {form.schedule_type === 'once' && <CloudField label={t('cloud.colDate') || 'Date'}><input className="cloud-input" type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></CloudField>}
                         </CloudModal>
                     )}

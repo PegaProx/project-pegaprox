@@ -59,3 +59,30 @@ def test_runtime_a_row_offers_no_run_that_cannot_work(browser):  # noqa: F811
         assert not app.errors, app.errors
     finally:
         app.ctx.close()
+
+
+def test_runtime_a_click_on_the_caption_or_the_gap_ticks_no_day(browser):  # noqa: F811
+    app, page = _page(browser)
+    try:
+        _new_weekly(page)
+        group = page.locator('[data-cloud-sched-days]')
+        group.wait_for(timeout=5000)
+        ticked = lambda: page.locator('[data-cloud-sched-day]:checked').count()  # noqa: E731
+        # the caption sits at the top left of the field around the group; check after each click,
+        # two clicks on one checkbox would cancel out
+        field = group.locator('xpath=..').bounding_box()
+        page.mouse.click(field['x'] + 6, field['y'] + 6)
+        page.wait_for_timeout(150)
+        assert ticked() == 0, 'caption'
+        # a point of the group that no day covers
+        gap = group.evaluate('''g => { const r = g.getBoundingClientRect();
+            for (let y = r.top + 2; y < r.bottom; y += 4) for (let x = r.right - 2; x > r.left; x -= 4)
+                if (document.elementFromPoint(x, y) === g) return [x, y];
+            return null; }''')
+        assert gap, 'no blank spot in the day group'
+        page.mouse.click(gap[0], gap[1])
+        page.wait_for_timeout(150)
+        assert ticked() == 0, 'gap'
+        assert not app.errors, app.errors
+    finally:
+        app.ctx.close()
