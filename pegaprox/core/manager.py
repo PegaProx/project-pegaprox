@@ -13651,12 +13651,12 @@ echo "AGENT_INSTALLED_OK"
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    # an empty answer is a failed read, it says nothing about this node
-                    status = self.get_node_status()
-                    node = status.get(node_name)
-                    if status and (not node or node.get('status') != 'online'):
+                    # no row says nothing: a failed read, or its details ran out of time. Only
+                    # offline counts as down, and the uptime shows a node that left the list
+                    node = self.get_node_status().get(node_name) or {}
+                    if node.get('status') == 'offline':
                         seen_down = True
-                    elif node and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time):
+                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time):
                         self.logger.info(f"[OK] {node_name} is back online!")
                         return True
                 

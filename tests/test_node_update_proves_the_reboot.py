@@ -6,6 +6,8 @@ pulled the next node while this one went down.
 """
 from unittest.mock import MagicMock
 
+import pytest
+
 import pegaprox.core.manager as mgrmod
 from pegaprox.core.manager import PegaProxManager, UpdateTask
 
@@ -67,8 +69,32 @@ def test_a_slow_shutdown_is_waited_out(monkeypatch):
     assert m.clock.now - m.start >= 200
 
 
-def test_a_node_missing_from_the_list_counts_as_down(monkeypatch):
-    m = _manager(monkeypatch, lambda t: {'other': {'status': 'online'}} if t < 60 else {'n1': {'status': 'online'}})
+def test_a_partial_read_is_not_the_node_going_down(monkeypatch):
+    # get_node_status drops a node whose details ran out of time; this one never left
+    m = _manager(monkeypatch, lambda t: {'other': _online(9)} if t < 60 else _online(OLD_UPTIME + t))
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=120) is False
+
+
+@pytest.mark.parametrize('status', ['unknown', 'maintenance'])
+def test_only_offline_says_the_node_went_down(monkeypatch, status):
+    m = _manager(monkeypatch, lambda t: {'status': status, 'uptime': 0} if t < 60 else _online(OLD_UPTIME + t))
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=120) is False
+
+
+@pytest.mark.parametrize('status', ['unknown', 'maintenance'])
+def test_a_row_that_is_not_online_is_not_back(monkeypatch, status):
+    # seen down, and then neither online nor offline: not back yet
+    def answers(t):
+        if t < 60:
+            return {'status': 'offline', 'uptime': 0}
+        return {'status': status, 'uptime': 5}
+    m = _manager(monkeypatch, answers)
+    assert PegaProxManager._wait_for_node_online(m, 'n1', timeout=120) is False
+
+
+def test_a_node_that_left_the_list_is_back_by_its_uptime(monkeypatch):
+    # gone from the answers while it reboots, the row that returns has a young uptime
+    m = _manager(monkeypatch, lambda t: {'other': _online(9)} if t < 60 else _online(t - 50))
     assert PegaProxManager._wait_for_node_online(m, 'n1') is True
     assert m.clock.now - m.start >= 60
 
