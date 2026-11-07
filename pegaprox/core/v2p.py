@@ -13,6 +13,7 @@ import uuid
 import re
 import hashlib
 import shlex
+import unicodedata
 from datetime import datetime
 
 from pegaprox.globals import cluster_managers, vmware_managers, _v2p_migrations
@@ -274,13 +275,17 @@ class V2PMigrationTask:
                 self.config.pop('esxi_password', None)
         except Exception:
             pass
-        # and the secret file the HTTPS boot handed to QEMU (#1098)
-        node_secret = getattr(self, '_node_secret', None)
-        if node_secret:
-            self._node_secret = None
+        # and the secret files the run left on the node (_node_secret_file): the one the
+        # HTTPS boot hands to QEMU (#1098), and any a step did not get to remove itself
+        held = getattr(self, '_node_secrets', None)
+        self._node_secrets = []
+        by_node = {}
+        for pve_mgr, node, path in (held if isinstance(held, list) else []):
+            by_node.setdefault((id(pve_mgr), node), (pve_mgr, node, []))[2].append(path)
+        for pve_mgr, node, paths in by_node.values():
             try:
-                pve_mgr, node, path = node_secret
-                _pve_node_exec(pve_mgr, node, f"rm -f {shlex.quote(path)}", timeout=10)
+                _pve_node_exec(pve_mgr, node, 'rm -f ' + ' '.join(shlex.quote(p) for p in paths),
+                               timeout=10)
             except Exception:
                 pass
 
@@ -492,8 +497,9 @@ def _node_cannot_reach(pve_mgr, node, host, port, wait=5):
     return _first_lines(' '.join(lines[:-1])) or f'exit code {code}'
 
 
-def _sshfs_mount_cmd(mnt_path, safe_pass, opts, source):
-    """The node's command for one SSHFS mount attempt (#1224).
+def _sshfs_mount_cmd(mnt_path, opts, source):
+    """The node's command for one SSHFS mount attempt (#1224). Run it with the ESXi
+    password as stdin_data: sshfs reads it from there, it is on no command line.
 
     sshfs 3 sends the stderr of the ssh it starts to /dev/null and says no more than
     'read: Connection reset by peer'. ssh -E puts ssh's own messages in a file, printed
@@ -501,10 +507,78 @@ def _sshfs_mount_cmd(mnt_path, safe_pass, opts, source):
     ssh the command's stderr, and an ssh that stays for the mount keeps the call open."""
     return (
         f"mkdir -p {mnt_path} && _log=$(mktemp /tmp/v2p-sshfs-XXXXXXXXXX) && {{ "
-        f"printf '%s' {safe_pass} | sshfs -o password_stdin,{opts} "
+        f"sshfs -o password_stdin,{opts} "
         f"-o \"ssh_command=ssh -E $_log\" {source} {mnt_path}; "
         f"_rc=$?; [ $_rc -eq 0 ] || cat \"$_log\" >&2; rm -f \"$_log\"; exit $_rc; }}"
     )
+
+
+# what a disk file name from the ESXi listing may not hold. Every shell command on the node
+# or on ESXi quotes it; these characters are refused on top of that, and a comma where the
+# name becomes part of a QEMU -drive spec (a comma starts the next option there)
+_DISK_NAME_REFUSED = re.compile(r'[\x00-\x1f\x7f-\x9f"\'`$\\/]')
+# and what breaks or reorders the line the name is shown on (task log, refusal): line and
+# paragraph separators, format characters such as a bidi override or a zero width space.
+# Other spaces are fine.
+_DISK_NAME_REFUSED_KINDS = frozenset(('Cc', 'Cf', 'Cs', 'Zl', 'Zp'))
+
+
+def disk_name_problem(name, drive_spec=False):
+    """What in the disk file `name` keeps the migration from using it, or None. Spaces,
+    umlauts, parentheses, '#', '&' and '+' are fine."""
+    if not isinstance(name, str) or not name.strip():
+        return 'nothing'
+    m = _DISK_NAME_REFUSED.search(name)
+    ch = m.group(0) if m else next(
+        (c for c in name if unicodedata.category(c) in _DISK_NAME_REFUSED_KINDS), None)
+    if ch:
+        return ('a control character or line break' if ch.isspace() or not ch.isprintable()
+                else f'the character {ch!r}')
+    if drive_spec and ',' in name:
+        return 'a comma, which the Live Mirror cannot hand to QEMU'
+    return None
+
+
+def _node_secret_file(pve_mgr, task, name, secret):
+    """Write `secret` to a new root-only file in /run on the target node and return its
+    path, None when that failed.
+
+    The secret goes over the command's stdin: a command line is readable by every local
+    account on the node while it runs, and on this host when the call falls back to the
+    ssh binary. The file is registered on the task, so the end of the run removes it
+    wherever it stopped; the caller removes it as soon as it is done (_drop_node_secret)."""
+    path = f"/run/pegaprox-v2p-{task.id}-{name}"
+    q = shlex.quote(path)
+    held = getattr(task, '_node_secrets', None)
+    if not isinstance(held, list):
+        held = task._node_secrets = []
+    # registered before the write: a write cut off halfway leaves part of the secret
+    held.append((pve_mgr, task.target_node, path))
+    # cat exits 0 on whatever part of stdin arrived, none at all included: only a file of
+    # the secret's full size counts, sshpass or curl would log in with less
+    size = len(str(secret).encode('utf-8', 'surrogatepass'))
+    rc, _, _ = _pve_node_exec(pve_mgr, task.target_node,
+        f"umask 077; rm -f {q} && cat > {q} && [ \"$(wc -c < {q})\" -eq {size} ]",
+        timeout=15, stdin_data=secret)
+    return path if rc == 0 else None
+
+
+def _drop_node_secret(pve_mgr, task, path):
+    if not path:
+        return
+    _pve_node_exec(pve_mgr, task.target_node, f"rm -f {shlex.quote(path)}", timeout=10)
+    held = getattr(task, '_node_secrets', None)
+    if isinstance(held, list):
+        held[:] = [h for h in held if h[2] != path]
+
+
+def _curl_login_config(user, password):
+    """A curl config file (-K) holding the ESXi login, so the password is on neither the
+    shell's nor curl's command line. In curl's quoted form a space is just a space."""
+    v = f"{user}:{password}"
+    for ch, esc in (('\\', '\\\\'), ('"', '\\"'), ('\n', '\\n'), ('\r', '\\r'), ('\t', '\\t')):
+        v = v.replace(ch, esc)
+    return f'user = "{v}"\n'
 
 
 # what sshfs and ssh print around a failed mount that never names its cause
@@ -529,9 +603,9 @@ def _write_node_script(pve_mgr, node, body, tag, timeout=15):
     task id the mount next to them gives away) and ran in a later call. A local account
     that created the name first got its own file run as root; with protected_regular the
     root write fails and the run still went ahead. mktemp makes a new 0600 file nobody else
-    can swap in sticky /tmp, and nothing runs when the write did not happen. Writing and
-    running stay two calls: some bodies carry the ESXi password, and a command line is
-    readable by every local account for as long as it runs.
+    can swap in sticky /tmp, and nothing runs when the write did not happen. The body
+    travels inline on the write call's command line, so it never holds a secret: the
+    scripts read the ESXi password from a file of _node_secret_file.
     """
     tag = re.sub(r'[^a-z0-9-]', '', str(tag).lower()) or 'script'
     if not body.endswith('\n'):
@@ -781,6 +855,19 @@ def _run_v2p_migration(task):
         elif task.transfer_mode not in ('vmkfstools_clone', 'auto'):
             task.set_phase('failed', folder_copy_refusal(task.transfer_mode, folder_gap))
             return
+        # the names ESXi listed go into root commands on the node and on ESXi from here on,
+        # and the Live Mirror puts them into QEMU -drive specs. Only these three modes never
+        # end there: Auto can fall back to it, and so can the pre-sync flow that a mode name
+        # this code does not know runs.
+        drive_spec = task.transfer_mode not in ('offline', 'snapshot_zero', 'vmkfstools_clone')
+        for df in descriptor_files:
+            why = disk_name_problem(df, drive_spec=drive_spec)
+            if why:
+                task.set_phase('failed',
+                    f"The name of the disk file {df[:120]!r} in [{datastore}] {vm_dir} holds {why}, "
+                    f"which the migration does not take. Rename the disk on ESXi and start the "
+                    f"migration again. Nothing was copied, the source VM was not touched.")
+                return
 
         # Verify sshfs on Proxmox node (auto-install + re-verify).
         # NS Apr 2026 — old check looked for the substring "sshfs" in apt-get output,
@@ -1045,7 +1132,6 @@ def _run_v2p_migration(task):
         
         # Mount ESXi datastore via SSHFS (for file listing/discovery only)
         task.log("Mounting ESXi datastore via SSHFS...")
-        safe_pass = shlex.quote(esxi_pass)
 
         # Pre-flight: check root partition space and resolve TMPDIR for subprocesses
         rc_df, df_out, _ = _pve_node_exec(pve_mgr, task.target_node,
@@ -1121,8 +1207,9 @@ def _run_v2p_migration(task):
         )
         
         _src = f"{esxi_user}@{esxi_host}:{shlex.quote(ds_mount_path)}"
-        mount_cmd = _sshfs_mount_cmd(mnt_path, safe_pass, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
-        rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30)
+        mount_cmd = _sshfs_mount_cmd(mnt_path, f"{sshfs_ssh_opts},{sshfs_algo_opts}", _src)
+        rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd, timeout=30,
+                                      stdin_data=esxi_pass)
         # what the node's sshfs/ssh said goes into the log for each attempt, the last
         # thing it said into the failure
         _mount_err = ''
@@ -1131,24 +1218,26 @@ def _run_v2p_migration(task):
             task.log(f"SSHFS mount attempt 1/3 failed, trying fewer options: "
                      f"{_mount_err or f'exit code {rc}, no output'}")
             # Fallback 1: perf options but simpler SSH (no algo workaround)
-            mount_cmd2 = _sshfs_mount_cmd(mnt_path, safe_pass,
+            mount_cmd2 = _sshfs_mount_cmd(mnt_path,
                 f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes,kernel_cache,"
                 f"max_read=1048576,big_writes,large_read,"
                 f"entry_timeout=3600,attr_timeout=3600", _src)
-            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30)
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd2, timeout=30,
+                                          stdin_data=esxi_pass)
         if rc != 0:
             _said = _mount_said(err, out)
             _mount_err = _said or _mount_err
             task.log(f"SSHFS mount attempt 2/3 failed, trying fewer options: "
                      f"{_said or f'exit code {rc}, no output'}")
             # Fallback 2: minimal options (maximum compatibility)
-            mount_cmd3 = _sshfs_mount_cmd(mnt_path, safe_pass,
+            mount_cmd3 = _sshfs_mount_cmd(mnt_path,
                 f"StrictHostKeyChecking={_hk},ConnectTimeout=10,"
                 f"reconnect,ServerAliveInterval=15,"
                 f"cache=yes", _src)
-            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30)
+            rc, out, err = _pve_node_exec(pve_mgr, task.target_node, mount_cmd3, timeout=30,
+                                          stdin_data=esxi_pass)
             if rc != 0:
                 _mount_err = _mount_said(err, out) or _mount_err or f'exit code {rc}, no output'
                 task.set_phase('failed', f'SSHFS mount failed: {_mount_err}'); return
@@ -3495,8 +3584,8 @@ def _list_delta_files_on_esxi(esxi_host, esxi_user, esxi_pass, datastore, vm_dir
     for desc in descriptor_files:
         # base name without extension
         bn = desc[:-5] if desc.endswith('.vmdk') else desc
-        # match <bn>-NNNNNN-delta.vmdk
-        cmd = f"ls -1 '{base_path}/{bn}-'*'-delta.vmdk' 2>/dev/null | sort"
+        # match <bn>-NNNNNN-delta.vmdk; only the * between the quoted parts is a pattern
+        cmd = f"ls -1 {shlex.quote(f'{base_path}/{bn}-')}*-delta.vmdk 2>/dev/null | sort"
         rc, out, _ = _ssh_esxi_exec(esxi_host, esxi_user, esxi_pass, cmd, timeout=15)
         items = [l.strip() for l in (out or '').splitlines() if l.strip()]
         per_disk.append(items)
@@ -4971,7 +5060,7 @@ def _cleanup_copy_isolation(pve_mgr, node, iso):
 
 
 def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
-                        datastore, vm_dir, descriptor_files, disk_bus):
+                        datastore, vm_dir, descriptor_files, disk_bus, pass_file=None):
     """Copy disks from ESXi to Proxmox -- maximum speed, minimal VM impact.
     
     Speed stack:
@@ -4989,13 +5078,13 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
     1. SSH + compression + parallel streams
     2. SSH single stream (always works)
     
+    Without key_path, ssh logs in with the password in pass_file (_node_secret_file).
+
     Returns True on success, False on failure.
     """
     import time, re, math
 
     BS_MB = 4
-    esxi_pass = task.esxi_password
-    safe_pass = shlex.quote(esxi_pass)
 
     # Build SSH command prefix -- works with key or password
     # Include legacy algorithm options for ESXi compatibility (OpenSSH 9.x → ESXi)
@@ -5013,12 +5102,16 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         )
         SSH_PREFIX = "ssh"
     else:
+        if not pass_file:
+            task.log("  No SSH key and no password file on the node for the copy")
+            return False
         ssh_base = (
             f"-o StrictHostKeyChecking={_node_hkc()} "
             f"-o ServerAliveInterval=30 -o ServerAliveCountMax=5 "
             f"{ESXI_ALGO_OPTS}"
         )
-        SSH_PREFIX = f"SSHPASS={safe_pass} sshpass -e ssh"  # NS Feb 2026 - env var instead of -p (hides from /proc)
+        # the password stays in its 0600 file, the scripts below only name it
+        SSH_PREFIX = f"sshpass -f {shlex.quote(pass_file)} ssh"
     ssh_fast = f"{ssh_base} -o Compression=no -c aes128-gcm@openssh.com"
     
     # nice/ionice: idle priority so VM I/O is never impacted
@@ -5161,10 +5254,12 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
                 skip = s * bps
                 count = min(bps, total_blocks - skip)
                 if count <= 0: break
+                # ESXi's shell parses the remote command once more: quoted for both
+                remote = f"{NICE} {DD_READ} if={shlex.quote(esxi_path)} skip={skip} count={count} 2>/dev/null"
                 if compress_name != 'none':
                     lines.append(
                         f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                        f'"{NICE} {DD_READ} if={esxi_path} skip={skip} count={count} 2>/dev/null | {esxi_compress}" '
+                        f'{shlex.quote(f"{remote} | {esxi_compress}")} '
                         f'| {pve_decompress} '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
@@ -5172,7 +5267,7 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
                 else:
                     lines.append(
                         f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                        f'"{NICE} {DD_READ} if={esxi_path} skip={skip} count={count} 2>/dev/null" '
+                        f'{shlex.quote(remote)} '
                         f'| {NICE} {DD_WRITE_SEEK} of={dev_path} seek={skip} 2>/dev/null &'
                     )
                     lines.append('pids="$pids $!"')
@@ -5203,16 +5298,17 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         # ==============================================================
         if not copied:
             task.log(f"  Method 2: SSH single + {compress_name}")
+            remote = f"{NICE} {DD_READ} if={shlex.quote(esxi_path)} 2>/dev/null"
             if compress_name != 'none':
                 pipe = (
                     f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{NICE} {DD_READ} if={esxi_path} 2>/dev/null | {esxi_compress}" '
+                    f'{shlex.quote(f"{remote} | {esxi_compress}")} '
                     f'| {pve_decompress} | {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null'
                 )
             else:
                 pipe = (
                     f'{NICE} {SSH_PREFIX} {ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{NICE} {DD_READ} if={esxi_path} 2>/dev/null" '
+                    f'{shlex.quote(remote)} '
                     f'| {NICE} {DD_WRITE_SPARSE} of={dev_path} 2>/dev/null'
                 )
             script = _write_node_script(pve_mgr, task.target_node,
@@ -5247,12 +5343,13 @@ def _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
         if rc_xxh == 0 and esxi_xxhash and disk_gb < 100:  # Only for disks < 100GB
             task.log(f"  Verifying integrity (xxhash)...")
             # Hash first 64MB + last 64MB (spot check, not full hash)
+            q_esx = shlex.quote(esxi_path)
+            tail_skip = disk_total // 1048576 - 64
+            esx_read = shlex.quote(f"{{ dd if={q_esx} bs=1M count=64 2>/dev/null; "
+                                   f"dd if={q_esx} bs=1M skip={tail_skip} count=64 2>/dev/null; }}")
             verify_body = f"""#!/bin/bash
 # Hash first 64MB + last 64MB on both sides
-ESX_HASH=$({SSH_PREFIX} {ssh_base} {esxi_user}@{esxi_host} "{{
-  dd if={esxi_path} bs=1M count=64 2>/dev/null;
-  dd if={esxi_path} bs=1M skip=$((({disk_total} / 1048576) - 64)) count=64 2>/dev/null;
-}}" | xxhsum 2>/dev/null | awk '{{print $1}}')
+ESX_HASH=$({SSH_PREFIX} {ssh_base} {esxi_user}@{esxi_host} {esx_read} | xxhsum 2>/dev/null | awk '{{print $1}}')
 
 PVE_HASH=$({{
   dd if={dev_path} bs=1M count=64 2>/dev/null;
@@ -5355,7 +5452,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # This works because QEMU SSH driver connects to a LOCAL sshd/socat proxy
         import random
         tunnel_port = random.randint(10000, 60000)
-        safe_pass = shlex.quote(esxi_pass)
         
         # Generate a local-only key pair (no ESXi deployment needed)
         local_key = f"/tmp/v2p-localkey-{task.id[:8]}"
@@ -5431,7 +5527,9 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         # Match the original disk controller so guest OS finds root device
         device_spec = _qemu_device_spec(drive_id, di, disk_bus)
         
-        args_parts.append(f"-drive {drive_spec}")
+        # qemu-server splits the args: line into words like a shell does: a path with a
+        # space stays one word only quoted (the names hold no quote or backslash)
+        args_parts.append(f"-drive {shlex.quote(drive_spec)}")
         args_parts.append(f"-device {device_spec}")
     
     args_line = " ".join(args_parts)
@@ -5488,15 +5586,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     esxi_test_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat0}"
     
     qemu_ssh_works = False
+    qtest_spec = json.dumps({'file.driver': 'ssh', 'file.host': esxi_host, 'file.port': 22,
+                             'file.path': esxi_test_path, 'file.user': esxi_user,
+                             'file.host-key-check.mode': 'known_hosts',
+                             'file.identity-file': key_path})
     rc_qtest, out_qtest, err_qtest = _pve_node_exec(pve_mgr, task.target_node,
-        f"timeout 10 qemu-img info "
-        f"'json:{{\"file.driver\":\"ssh\","
-        f"\"file.host\":\"{esxi_host}\","
-        f"\"file.port\":22,"
-        f"\"file.path\":\"{esxi_test_path}\","
-        f"\"file.user\":\"{esxi_user}\","
-        f"\"file.host-key-check.mode\":\"known_hosts\","
-        f"\"file.identity-file\":\"{key_path}\"}}' 2>&1",
+        f"timeout 10 qemu-img info {shlex.quote('json:' + qtest_spec)} 2>&1",
         timeout=20, ignore_node_backoff=True)
     qtest_out = (str(out_qtest or '') + str(err_qtest or '')).strip()
     if rc_qtest == 0 and ('virtual size' in qtest_out or 'file format' in qtest_out):
@@ -5505,9 +5600,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     else:
         task.log(f"QEMU SSH driver test failed: {qtest_out[:200]}")
         # Try alternative: qemu-img with simpler SSH URL syntax
+        import urllib.parse
+        qt2_url = f"ssh://{esxi_user}@{esxi_host}{urllib.parse.quote(esxi_test_path, safe='/')}"
         rc_qt2, out_qt2, err_qt2 = _pve_node_exec(pve_mgr, task.target_node,
-            f"timeout 10 qemu-img info "
-            f"ssh://{esxi_user}@{esxi_host}{esxi_test_path} 2>&1",
+            f"timeout 10 qemu-img info {shlex.quote(qt2_url)} 2>&1",
             timeout=20, ignore_node_backoff=True)
         qt2_out = (str(out_qt2 or '') + str(err_qt2 or '')).strip()
         if rc_qt2 == 0 and ('virtual size' in qt2_out or 'file format' in qt2_out):
@@ -5528,12 +5624,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         import urllib.parse
         # NS Oct 2026 (#1098) - the password sat in the URL as basic auth, so it landed in
         # the args: line of the VM config (served by the config API) and in qemu-img error
-        # text. QEMU reads it from a root-only secret file now, gone when the task ends.
+        # text. QEMU reads it from a root-only secret file now, gone when the task ends
+        # (_scrub_credentials).
         secret_id = 'v2pesxipw'
-        secret_path = f"/run/pegaprox-v2p-{task.id}.secret"
-        _pve_node_exec(pve_mgr, task.target_node,
-            f"umask 077; printf '%s' {shlex.quote(esxi_pass)} > {secret_path}", timeout=5)
-        task._node_secret = (pve_mgr, task.target_node, secret_path)
+        secret_path = _node_secret_file(pve_mgr, task, 'qemu', esxi_pass)
         secret_obj = f"secret,id={secret_id},file={secret_path}"
         ssl_opt = 'on' if getattr(vmware_mgr, 'ssl_verify', False) else 'off'
 
@@ -5555,7 +5649,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             f"'json:{{\"file.driver\":\"https\",\"file.url\":\"{test_url}\","
             f"\"file.username\":\"{esxi_user}\",\"file.password-secret\":\"{secret_id}\","
             f"\"file.sslverify\":\"{ssl_opt}\"}}' 2>&1",
-            timeout=15, ignore_node_backoff=True)
+            timeout=15, ignore_node_backoff=True) if secret_path else \
+            (1, '', 'the secret file for QEMU could not be written on the node')
         ht_out = (str(out_ht or '') + str(err_ht or '')).strip()
         
         if rc_ht == 0 and ('virtual size' in ht_out or 'file format' in ht_out):
@@ -5626,16 +5721,17 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
             local_fuse_path = f"{mnt_path}/{vm_dir}/{flat_file}"
             
+            q_fuse, q_mnt = shlex.quote(local_fuse_path), shlex.quote(mnt_path)
             rc_chk, out_chk, err_chk = _pve_node_exec(pve_mgr, task.target_node,
                 f"for i in 1 2 3 4 5 6 7 8 9 10; do "
-                f"test -f '{local_fuse_path}' && stat --format='%s' '{local_fuse_path}' && exit 0; "
+                f"test -f {q_fuse} && stat --format='%s' {q_fuse} && exit 0; "
                 f"sleep 1; "
                 f"done; "
                 f"echo NOTFOUND; "
-                f"echo '--- mount ---'; mount | grep '{mnt_path}' 2>&1 || true; "
-                f"echo '--- mnt_path ---'; ls -la '{mnt_path}' 2>&1 || true; "
-                f"echo '--- vm_dir ---'; ls -la '{mnt_path}/{vm_dir}' 2>&1 || true; "
-                f"echo '--- target_file ---'; ls -lh '{local_fuse_path}' 2>&1 || true; "
+                f"echo '--- mount ---'; mount | grep {q_mnt} 2>&1 || true; "
+                f"echo '--- mnt_path ---'; ls -la {q_mnt} 2>&1 || true; "
+                f"echo '--- vm_dir ---'; ls -la {shlex.quote(mnt_path + '/' + vm_dir)} 2>&1 || true; "
+                f"echo '--- target_file ---'; ls -lh {q_fuse} 2>&1 || true; "
                 f"exit 1",
                 timeout=20, ignore_node_backoff=True)
             chk_out = (str(out_chk or '') + str(err_chk or '')).strip()
@@ -5667,7 +5763,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"detect-zeroes=on"
                 )
                 device_spec = _qemu_device_spec(drive_id, di, disk_bus)
-                args_parts.append(f"-drive {drive_spec}")
+                args_parts.append(f"-drive {shlex.quote(drive_spec)}")
                 args_parts.append(f"-device {device_spec}")
             
             args_line = scsi_prefix + " ".join(args_parts)
@@ -5678,7 +5774,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
             
             # Test: can QEMU open the SSHFS file?
             rc_ftest, out_ftest, err_ftest = _pve_node_exec(pve_mgr, task.target_node,
-                f"timeout 30 qemu-img info -f raw '{sshfs_flat_paths[0]}' 2>&1",
+                f"timeout 30 qemu-img info -f raw {shlex.quote(sshfs_flat_paths[0])} 2>&1",
                 timeout=40, ignore_node_backoff=True)
             ftest_out = (str(out_ftest or '') + str(err_ftest or '')).strip()
             if 'virtual size' in ftest_out or 'file format' in ftest_out:
@@ -5727,7 +5823,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                     f"--format=raw "
                     f"--cache=writeback "
                     f"--aio=threads "
-                    f"'{fuse_path}' 2>&1", timeout=15,
+                    f"{shlex.quote(fuse_path)} 2>&1", timeout=15,
                     ignore_node_backoff=True)
                 ns_out = (str(out_ns or '') + str(err_ns or '')).strip()
                 
@@ -5782,7 +5878,6 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
     elif not qemu_ssh_works and not sshfs_boot and not sshfs_flat_paths:
         # SSHFS mount failed entirely -- try remounting
         task.log("SSHFS not available - trying to remount...")
-        safe_pass_r = shlex.quote(esxi_pass)
         sshfs_algo = (
             "ssh_command=ssh -o HostKeyAlgorithms=+ssh-rsa\\,ssh-ed25519 "
             "-o KexAlgorithms=+diffie-hellman-group14-sha1\\,diffie-hellman-group14-sha256 "
@@ -5798,21 +5893,22 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
         if resolved2 and not resolved2.startswith('/'):
             resolved2 = f"/vmfs/volumes/{resolved2}"
         ds_remount = resolved2 if resolved2 and resolved2.startswith('/vmfs/') else f"/vmfs/volumes/{datastore}"
+        # sshfs reads the password from stdin, which is where it goes
         rc_remount, _, _ = _pve_node_exec(pve_mgr, task.target_node,
             f"fusermount -u {mnt_path} 2>/dev/null; "
             f"mkdir -p {mnt_path} && "
-            f"printf '%s' {safe_pass_r} | sshfs -o password_stdin,"
+            f"sshfs -o password_stdin,"
             f"StrictHostKeyChecking={_node_hkc()},"
             f"reconnect,ServerAliveInterval=15,"
             f"cache=yes,{sshfs_algo} "
             f"{esxi_user}@{esxi_host}:{shlex.quote(ds_remount)} {mnt_path} 2>&1",
-            timeout=20)
+            timeout=20, stdin_data=esxi_pass)
         if rc_remount == 0:
             # Retry with NBD after remount
             for di, desc_file in enumerate(descriptor_files):
                 flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
                 fp = f"{mnt_path}/{vm_dir}/{flat_file}"
-                rc_t, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f '{fp}'", timeout=5)
+                rc_t, _, _ = _pve_node_exec(pve_mgr, task.target_node, f"test -f {shlex.quote(fp)}", timeout=5)
                 if rc_t == 0:
                     sshfs_flat_paths.append(fp)
             task.log(f"SSHFS remounted - {len(sshfs_flat_paths)} disks found")
@@ -5909,7 +6005,7 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                                     f"qemu-nbd --fork --persistent "
                                     f"--socket={rsock} --format=raw "
                                     f"--cache=writeback --aio=threads "
-                                    f"'{rfpath}' 2>&1", timeout=15)
+                                    f"{shlex.quote(rfpath)} 2>&1", timeout=15)
                                 time.sleep(1)
                                 rc_rs, _, _ = _pve_node_exec(pve_mgr, task.target_node,
                                     f"test -S {rsock}", timeout=5)
@@ -6229,8 +6325,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 # dd path — preferred for raw flat-vmdk sources, works on any sector size
                 script_body = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
-                    f"dd if='{sshfs_src}' of='{dev_path}' bs=4M conv=notrunc status=progress "
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
+                    f"dd if={shlex.quote(sshfs_src)} of='{dev_path}' bs=4M conv=notrunc status=progress "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -6239,10 +6335,10 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 # -W = out-of-order writes (skips O_DIRECT alignment), -T writeback = buffered target IO
                 script_body = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
                     f"qemu-img convert -W -U -p -n -t writeback -T writeback "
                     f"-f {src_format} -O raw "
-                    f"'{sshfs_src}' '{dev_path}' "
+                    f"{shlex.quote(sshfs_src)} '{dev_path}' "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -6270,8 +6366,8 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 task.log(f"  Retrying with minimal dd...")
                 script_body_min = (
                     f"#!/bin/bash\n"
-                    f"export TMPDIR='{v2p_tmpdir}'\n"
-                    f"dd if='{sshfs_src}' of='{dev_path}' bs=4M "
+                    f"export TMPDIR={shlex.quote(v2p_tmpdir)}\n"
+                    f"dd if={shlex.quote(sshfs_src)} of='{dev_path}' bs=4M "
                     f"&> '{progress_log}'\n"
                     f"echo \"EXIT_CODE=$?\" >> '{progress_log}'\n"
                 )
@@ -6609,9 +6705,12 @@ def _do_sshfs_boot_migration(pve_mgr, task, vmware_mgr, esxi_host, esxi_user, es
                 sk = s * bps; ct = min(bps, total_blocks - sk)
                 if ct <= 0: break
                 # Always pipe through compress/decompress (if none, they're "cat")
+                # ESXi's shell parses the remote command once more: quoted for both
+                remote = (f"{BG_NICE} {BG_DD_READ} if={shlex.quote(esxi_path)} skip={sk} count={ct} "
+                          f"2>/dev/null | {bg_compress}")
                 lines.append(
                     f'{BG_NICE} ssh {bg_ssh_fast} {esxi_user}@{esxi_host} '
-                    f'"{BG_NICE} {BG_DD_READ} if={esxi_path} skip={sk} count={ct} 2>/dev/null | {bg_compress}" '
+                    f'{shlex.quote(remote)} '
                     f'| {bg_decompress} '
                     f'| {BG_NICE} {BG_DD_SEEK} of={dev_path} seek={sk} 2>/dev/null &'
                 )
@@ -7087,9 +7186,13 @@ def _do_offline_qemuimg_copy(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     else:
         task.log("SSH key not available - using sshpass for transfer")
     
-    ok = _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
-                             datastore, vm_dir, descriptor_files, disk_bus)
-    
+    pass_file = None if key_path else _node_secret_file(pve_mgr, task, 'copy', esxi_pass)
+    try:
+        ok = _qemu_img_ssh_copy(pve_mgr, task, esxi_host, esxi_user, key_path,
+                                 datastore, vm_dir, descriptor_files, disk_bus, pass_file=pass_file)
+    finally:
+        _drop_node_secret(pve_mgr, task, pass_file)
+
     if key_path:
         _cleanup_temp_ssh_key(pve_mgr, task.target_node, key_path, esxi_host, esxi_user)
     _cleanup_sshfs(pve_mgr, task.target_node, mnt_path)
@@ -7301,7 +7404,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
 
     Returns (vol_id, vol_path) on success or (None, None) on failure.
     """
-    import re, base64, urllib.parse
+    import re, urllib.parse
     
     flat_file = desc_file.replace('.vmdk', '-flat.vmdk')
     esxi_flat_path = f"/vmfs/volumes/{datastore}/{vm_dir}/{flat_file}"
@@ -7379,17 +7482,19 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     
     # 6. Store credentials on Proxmox node
     # NS Oct 2026 (#1029) - both in /run, 0600 from creation: curl writes the jar (an ESXi
-    # session) with the default umask, and a /tmp name could be taken first
-    auth_file = f"/run/pegaprox-v2p-{task.id}-auth-{disk_index}"
+    # session) with the default umask, and a /tmp name could be taken first. The login is
+    # a curl config file written from stdin, so the password is on no command line, curl's
+    # included, and a space in it is no word break.
     cookie_jar = f"/run/pegaprox-v2p-{task.id}-cookies-{disk_index}"
-    b64auth = base64.b64encode(f"{esxi_user}:{esxi_pass}".encode()).decode()
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"umask 077; echo '{b64auth}' | base64 -d > {auth_file} && : > {cookie_jar}", timeout=10)
+    auth_file = _node_secret_file(pve_mgr, task, f"curl-{disk_index}",
+                                  _curl_login_config(esxi_user, esxi_pass))
+    curl_login = f"-K {auth_file}" if auth_file else ''
+    _pve_node_exec(pve_mgr, task.target_node, f"umask 077; : > {cookie_jar}", timeout=10)
 
     # 7. Establish cookie session
     task.log(f"  Establishing ESXi session...")
     _pve_node_exec(pve_mgr, task.target_node,
-        f"curl -sk --user $(cat {auth_file}) "
+        f"curl -sk {curl_login} "
         f"-c {cookie_jar} -o /dev/null "
         f"'https://{esxi_host}/folder?dcPath=ha-datacenter&dsName={ds_param}' 2>/dev/null",
         timeout=15)
@@ -7400,7 +7505,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     
     # Try cookie+auth (most likely to work)
     test_cmd = (
-        f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) -r 0-1048575 "
+        f"curl -sk -b {cookie_jar} {curl_login} -r 0-1048575 "
         f"-o {test_file} -w 'HTTP=%{{http_code}} DL=%{{size_download}}' "
         f"'{url}' 2>/dev/null && "
         f"echo ' FSIZE='$(stat -c%s {test_file} 2>/dev/null || echo 0)"
@@ -7430,7 +7535,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     if test_bytes == 0:
         task.log(f"  0 bytes - running verbose curl diagnostic...")
         diag_cmd = (
-            f"curl -vsk -b {cookie_jar} --user $(cat {auth_file}) -r 0-1023 "
+            f"curl -vsk -b {cookie_jar} {curl_login} -r 0-1023 "
             f"'{url}' 2>&1 | head -40"
         )
         rc_d, out_d, _ = _pve_node_exec(pve_mgr, task.target_node, diag_cmd, timeout=15)
@@ -7476,7 +7581,7 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             dd_log = f"/tmp/v2p-{task.id}-dl-{disk_index}.log"
 
             dl_cmd = (
-                f"curl -sk -b {cookie_jar} --user $(cat {auth_file}) "
+                f"curl -sk -b {cookie_jar} {curl_login} "
                 f"--connect-timeout 30 --max-time 86400 "
                 f"'{url}' 2>/dev/null "
                 f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log}; "
@@ -7518,26 +7623,33 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             _pve_node_exec(pve_mgr, task.target_node,
                 "which sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null 2>&1", timeout=30)
 
-            safe_p = shlex.quote(esxi_pass)
             dd_log2 = f"/tmp/v2p-{task.id}-sshdd-{disk_index}.log"
+            # sshpass reads the password from its 0600 file: SSHPASS=<pw> in the command
+            # was on the node shell's command line for the whole copy
+            pass_file = _node_secret_file(pve_mgr, task, f"ssh-{disk_index}", esxi_pass)
+            q_pass = shlex.quote(pass_file or '')
+            # ESXi's shell parses the remote command once more: quoted for both
+            remote = f"dd if={shlex.quote(esxi_flat_path)} bs=4M"
 
             ssh_cmd = (
-                f"SSHPASS={safe_p} sshpass -e ssh -o StrictHostKeyChecking={_node_hkc()} "  # NS Feb 2026 - env var instead of -p
+                f"sshpass -f {q_pass} ssh -o StrictHostKeyChecking={_node_hkc()} "
                 f"-o ConnectTimeout=15 "
                 f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
                 f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
                 f"{esxi_user}@{esxi_host} "
-                f"\"dd if={shlex.quote(esxi_flat_path)} bs=4M\" 2>/dev/null "
+                f"{shlex.quote(remote)} 2>/dev/null "
                 f"| dd of='{vol_path}' bs=4M status=progress 2>{dd_log2}; "
                 f"echo PIPE=${{PIPESTATUS[0]}}/${{PIPESTATUS[1]}}; "
-                f"cat {dd_log2}; rm -f {dd_log2}"
+                f"rm -f {q_pass}; cat {dd_log2}; rm -f {dd_log2}"
             )
             # MK May 2026 (#438 follow-up): capture stderr — sshpass + ssh
             # failure modes (auth denied, host key mismatch, missing binary)
             # land on stderr, not stdout. The previous `_` discard meant the
             # task log showed only "SSH: " with empty tail and no actionable
             # diagnostic.
-            rc_s, out_s, err_s = _pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
+            rc_s, out_s, err_s = (_pve_node_exec(pve_mgr, task.target_node, ssh_cmd, timeout=86400)
+                                  if pass_file else (1, '', 'the password file could not be written on the node'))
+            _drop_node_secret(pve_mgr, task, pass_file)
             ssh_out = str(out_s or '').strip()
             task.log(f"  SSH: {ssh_out[-250:]}")
 
@@ -7561,13 +7673,13 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
             sshfs_src = f"/tmp/v2p-{task.id}/{vm_dir}/{flat_file}"
             task.log(f"  SSHFS dd from {sshfs_src}...")
             rc_chk, out_chk, _ = _pve_node_exec(pve_mgr, task.target_node,
-                f"ls -la '{sshfs_src}' 2>&1", timeout=10)
+                f"ls -la {shlex.quote(sshfs_src)} 2>&1", timeout=10)
             if rc_chk == 0:
                 dd_log3 = f"/tmp/v2p-{task.id}-dd3-{disk_index}.log"
                 # MK May 2026 (#438 follow-up): capture stderr for the dd-via-SSHFS
                 # path too — same anti-pattern as METHOD 1 + 2 above.
                 rc_dd, out_dd, err_dd = _pve_node_exec(pve_mgr, task.target_node,
-                    f"dd if='{sshfs_src}' of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
+                    f"dd if={shlex.quote(sshfs_src)} of='{vol_path}' bs=4M status=progress 2>{dd_log3}; echo RC=$?/0; "
                     f"cat {dd_log3}; rm -f {dd_log3}", timeout=86400)
                 dd_out = str(out_dd or '').strip()
                 task.log(f"  SSHFS: {dd_out[-200:]}")
@@ -7585,9 +7697,9 @@ def _ssh_pipe_transfer(pve_mgr, task, esxi_host, esxi_user, esxi_pass, datastore
     finally:
         _stop_mon.set()
         _mon_t.join(timeout=3)
-
-    # Cleanup
-    _pve_node_exec(pve_mgr, task.target_node, f"rm -f {auth_file} {cookie_jar}", timeout=5)
+        # Cleanup
+        _drop_node_secret(pve_mgr, task, auth_file)
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {cookie_jar}", timeout=5)
 
     if not dl_success:
         task.log(f"  ALL methods failed ({downloaded} of {flat_size} bytes)")
@@ -7670,8 +7782,6 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     If pve_checksums is provided, skips Proxmox checksum computation (pre-computed).
     Returns True on success, False on failure.
     """
-    import base64
-    
     BLOCK_SIZE = DELTA_BLOCK_SIZE  # 256 MB blocks (fewer checksums = faster downtime)
     num_blocks = (flat_size + BLOCK_SIZE - 1) // BLOCK_SIZE
     bs_mb = BLOCK_SIZE // (1024 * 1024)
@@ -7730,13 +7840,12 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
         return True
     
     # 4. Transfer only changed blocks via SSH dd
-    # Write password file on Proxmox node
-    b64pass = base64.b64encode(esxi_pass.encode()).decode()
-    # in /run and 0600 from the first byte, like the auth file of the HTTPS fallback
-    pass_file = f"/run/pegaprox-v2p-{task.id}-delta-pass"
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"umask 077; echo '{b64pass}' | base64 -d > {pass_file}",
-        timeout=10)
+    # Password file on the node, in /run and 0600 from the first byte. It goes there over
+    # stdin: an echo of it, base64 or not, was on the command line of the write.
+    pass_file = _node_secret_file(pve_mgr, task, f"delta-{disk_index}", esxi_pass)
+    if not pass_file:
+        task.log("  The password file for the block copy could not be written on the node")
+        return False
     
     # Build a script that transfers all differing blocks
     # MK Oct 2026 (#1124) - a pipe read returns at most 64 KiB and count=1 took that as the
@@ -7744,17 +7853,20 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     # complete, pipefail makes a failed ssh count instead of an empty write that exits 0.
     xfer_lines = ['#!/bin/bash', 'set -o pipefail', 'ERRORS=0']
     _hk = _node_hkc()
+    q_flat, q_pass = shlex.quote(esxi_flat_path), shlex.quote(pass_file)
     for i in diff_blocks:
+        # ESXi's shell parses the remote command once more: quoted for both
+        remote = f"dd if={q_flat} bs={BLOCK_SIZE} skip={i} count=1 2>/dev/null"
         xfer_lines.append(
-            f"sshpass -f {pass_file} ssh -o StrictHostKeyChecking={_hk} "
+            f"sshpass -f {q_pass} ssh -o StrictHostKeyChecking={_hk} "
             f"-o HostKeyAlgorithms=+ssh-rsa,ssh-ed25519 "
             f"-o KexAlgorithms=+diffie-hellman-group14-sha1,diffie-hellman-group14-sha256 "
             f"{esxi_user}@{esxi_host} "
-            f"\"dd if={shlex.quote(esxi_flat_path)} bs={BLOCK_SIZE} skip={i} count=1 2>/dev/null\" "
+            f"{shlex.quote(remote)} "
             f"| dd of={shlex.quote(vol_path)} bs={BLOCK_SIZE} seek={i} count=1 conv=notrunc iflag=fullblock 2>/dev/null "
             f"|| ERRORS=$((ERRORS+1))"
         )
-    xfer_lines.append(f'rm -f {pass_file}')
+    xfer_lines.append(f'rm -f {q_pass}')
     xfer_lines.append('echo "DELTA_DONE errors=$ERRORS"')
     xfer_lines.append('exit $ERRORS')
     
@@ -7772,8 +7884,9 @@ def _delta_sync_blocks(pve_mgr, task, esxi_host, esxi_user, esxi_pass,
     task.log(f"  Delta result: rc={rc_x}, {result[-200:]}")
 
     # Cleanup
-    _pve_node_exec(pve_mgr, task.target_node,
-        f"rm -f {script_file or ''} {pass_file}", timeout=5)
+    if script_file:
+        _pve_node_exec(pve_mgr, task.target_node, f"rm -f {script_file}", timeout=5)
+    _drop_node_secret(pve_mgr, task, pass_file)
 
     if not (rc_x == 0 or 'DELTA_DONE errors=0' in result):
         return False

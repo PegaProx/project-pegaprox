@@ -846,19 +846,21 @@ class BlockCopy:
         t.target_node, t.target_storage, t.proxmox_vmid, t.config = 'pve1', 'local-lvm', VMID, {}
         self.task = t
 
-    def _sh(self, shell, cmd):
+    def _sh(self, shell, cmd, stdin=''):
         import subprocess
-        p = subprocess.run([shell, '-c', cmd], capture_output=True, text=True, env=self.env, timeout=60)
+        p = subprocess.run([shell, '-c', cmd], capture_output=True, text=True, env=self.env, timeout=60,
+                           input=stdin)
         return p.returncode, p.stdout, p.stderr
 
     def _esxi(self, host, user, pw, cmd, timeout=30):
         return self._sh('sh', cmd)
 
     def _node(self, mgr, node, cmd, timeout=600, **kw):
-        # the password file goes to /run on the node, here it stays in the test folder
+        # the password file goes to /run on the node, here it stays in the test folder; what
+        # the call hands on stdin (the password) reaches the command, as on the node
         cmd = cmd.replace('/run/pegaprox-', f'{self.tmp}/run-pegaprox-')
         self.node_cmds.append(cmd)
-        return self._sh('bash', cmd)
+        return self._sh('bash', cmd, kw.get('stdin_data') or '')
 
     def go(self):
         return v2p._delta_sync_blocks(None, self.task, 'esx1.lab', 'root', 'pw', str(self.flat),

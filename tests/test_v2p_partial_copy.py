@@ -42,7 +42,7 @@ class _World:
             self.sent.append(cmd)
             if cmd.startswith('pvesm free'):
                 self.freed.append(cmd)
-            if 'sshpass -e ssh' in cmd:
+            if 'sshpass -f ' in cmd:
                 return _answer(self.ssh)
             if '-r 0-1048575' in cmd:
                 return 0, ('HTTP=206 DL=1048576 FSIZE=1048576' if self.https is not None else ''), ''
@@ -120,7 +120,7 @@ def test_a_short_copy_by_the_last_method_fails(monkeypatch):
 def test_https_with_every_byte_and_a_clean_status_is_done(monkeypatch):
     world = _World(monkeypatch, 'not asked', https=f'RC=0/0\n{_dd(SIZE)}')
     assert world.copy()[0] == 'store:vm-100-disk-0'
-    assert world.ran('--connect-timeout') and not world.ran('sshpass -e ssh')
+    assert world.ran('--connect-timeout') and not world.ran('sshpass -f ')
 
 
 @pytest.mark.parametrize('https', [f'RC=0/0\n{_dd(int(SIZE * 0.95))}', f'RC=18/0\n{_dd(SIZE)}'],
@@ -139,7 +139,7 @@ def test_a_short_or_failed_https_download_is_not_done(monkeypatch, https):
 def test_the_ssh_pipe_does_not_inherit_the_https_byte_count(monkeypatch, ssh):
     world = _World(monkeypatch, ssh, https=f'RC=18/0\n{_dd(SIZE)}')
     assert world.copy() == (None, None)
-    assert world.ran('sshpass -e ssh')
+    assert world.ran('sshpass -f ')
     assert not any('SSH OK' in line for line in world.logs), world.logs
     assert world.recorded == [] and len(world.freed) == 1
 

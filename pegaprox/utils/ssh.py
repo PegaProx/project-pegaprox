@@ -185,10 +185,27 @@ def ssh_login_args(user, host):
     return ['-l', user, '--', str(host)]
 
 
+def _feed_stdin(stdin, data):
+    """Hand `data` to a remote command's stdin and close it, so a read there sees the end.
+    A channel that went away is the command's problem: it reads nothing and says so."""
+    try:
+        stdin.write(data)
+        stdin.flush()
+    except Exception:
+        pass
+    try:
+        stdin.channel.shutdown_write()
+    except Exception:
+        pass
+
+
 def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
-              connect_timeout=8):
+              connect_timeout=8, stdin_data=None):
     """Execute command on remote host via SSH.
     Handles ESXi which only allows 'keyboard-interactive' and 'publickey'.
+
+    stdin_data: text for the command's stdin, for a secret that must not be part of
+    `cmd` (a command line is readable by every local account while it runs).
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -385,6 +402,8 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         try:
             ha_transport.guard_ssh(host, cmd, again=True)
             stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+            if stdin_data is not None:
+                _feed_stdin(stdin, stdin_data)
             out = read_capped(stdout)
             err = read_capped(stderr)
             rc = stdout.channel.recv_exit_status()
@@ -429,11 +448,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 # any import / setup error → fall through, ssh just runs without sharing
                 pass
         ssh_args.extend(login_args + [cmd])
+        # ssh hands its stdin on to the remote command
+        extra = {} if stdin_data is None else {'input': stdin_data}
         # long after the guard was asked at the top: checked again, bounded and in a
         # process group of its own in an automatic group (#625)
         result = ha_transport.node_cmd(
             ssh_args, capture_output=True, text=True, timeout=timeout, env=env,
-            host=host, again=True
+            host=host, again=True, **extra
         )
         if result.returncode == 0:
             return result.returncode, result.stdout, result.stderr
@@ -541,16 +562,18 @@ def _is_cluster_member(pve_mgr, node):
         return False
 
 
-def _run_on_client(client, cmd, timeout):
+def _run_on_client(client, cmd, timeout, stdin_data=None):
     """(rc, out, err) of one command on a connected paramiko client, which is closed after.
 
     One deadline of `timeout` for the call: stdout is read to EOF or until `timeout` passes
     without a byte, stderr and the exit status get what is left. recv_exit_status alone
     waits for ever; past the deadline the call answers 124 (what coreutils' timeout says)
-    while the command may still be running."""
+    while the command may still be running. stdin_data goes to the command's stdin."""
     deadline = time.monotonic() + max(1, timeout)
     try:
         _in, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        if stdin_data is not None:
+            _feed_stdin(_in, stdin_data)
         ch = stdout.channel
         out = read_capped(stdout)
         try:
@@ -574,7 +597,7 @@ def _run_on_client(client, cmd, timeout):
             pass
 
 
-def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback):
+def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback, stdin_data=None):
     """The stored key's go at a node command, before any password (#1224).
 
     Through pve_mgr._ssh_connect: it asks ssh_blocked_reason, checks the host key the
@@ -610,7 +633,7 @@ def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback):
     except Exception as e:
         client, failure = None, {'kind': 'error', 'detail': str(e)}
     if client is not None:
-        result = _run_on_client(client, cmd, timeout)
+        result = _run_on_client(client, cmd, timeout, stdin_data=stdin_data)
         # logged in: whatever the command said, the node answers
         try:
             pve_mgr._reset_node_failures(node)
@@ -646,7 +669,7 @@ def _stored_key_exec(pve_mgr, node, host, user, cmd, timeout, fallback):
 
 
 def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
-                   ignore_node_backoff=False):
+                   ignore_node_backoff=False, stdin_data=None):
     """Execute a command on a Proxmox node via the Proxmox API.
     Uses POST /nodes/{node}/execute or falls back to SSH.
 
@@ -663,7 +686,10 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
 
     MK Nov 2026 (#1224) - SSH offers the stored key first (_stored_key_exec), the
     password after it. use_controlmaster only concerns the password leg's ssh. Only a
-    node of the manager's own node list gets a command at all."""
+    node of the manager's own node list gets a command at all.
+
+    stdin_data: text the command reads on stdin, for a secret that must stay off its
+    command line. Such a call goes over SSH only, the API call has no stdin."""
     # MK Nov 2026 (#1224) - routes hand node names on from the URL, and _get_node_ip's DNS
     # step resolves any name: the stored key, or the password, went to whatever address
     # that gave. A name the cluster does not list gets nothing, an unknown list neither.
@@ -682,20 +708,21 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             # Older managers without the breaker — proceed as before
             pass
 
-    # Method 1: Try Proxmox API exec (PVE 7.4+)
-    try:
-        resp = pve_mgr._api_post(
-            f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node}/execute",
-            data={'commands': cmd}
-        )
-        if resp.status_code == 200:
-            try:
-                pve_mgr._reset_node_failures(node)
-            except Exception:
-                pass
-            return 0, resp.json().get('data', ''), ''
-    except Exception:
-        pass
+    # Method 1: Try Proxmox API exec (PVE 7.4+). It has no stdin to hand on.
+    if stdin_data is None:
+        try:
+            resp = pve_mgr._api_post(
+                f"https://{pve_mgr.host}:{pve_mgr.api_port}/api2/json/nodes/{node}/execute",
+                data={'commands': cmd}
+            )
+            if resp.status_code == 200:
+                try:
+                    pve_mgr._reset_node_failures(node)
+                except Exception:
+                    pass
+                return 0, resp.json().get('data', ''), ''
+        except Exception:
+            pass
 
     # Method 2: SSH directly to the node
     # Resolve node IP: check cache, then API, then hostname, then cluster host
@@ -777,7 +804,8 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         # the node's own password where it has one (#1136)
         _ssh_pass = ssh_password_to(pve_mgr, node_host)
         settled, _key_note = _stored_key_exec(pve_mgr, node, node_host, _ssh_user, cmd,
-                                              timeout, fallback=bool(_ssh_pass))
+                                              timeout, fallback=bool(_ssh_pass),
+                                              stdin_data=stdin_data)
         if settled is not None:
             return settled
         if not _ssh_pass:
@@ -797,7 +825,8 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
                          "path then authenticates by password only")
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
-                                  timeout=timeout, use_controlmaster=use_controlmaster)
+                                  timeout=timeout, use_controlmaster=use_controlmaster,
+                                  stdin_data=stdin_data)
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (

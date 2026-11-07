@@ -18,6 +18,7 @@ real in a sandbox where /tmp and /run are directories under tmp_path; nothing th
 reach a host runs.
 """
 import ast
+import base64
 import os
 import pathlib
 import re
@@ -380,13 +381,14 @@ class _Sandbox:
     and with which mode is real. Everything else is recorded and answered."""
 
     RUNS = re.compile(r'^\s*(?:\S+=\S*\s+)*(?:bash|nohup)\s')
-    WRITES = re.compile(r'mktemp |cat > |base64 -d > ')
+    WRITES = re.compile(r'mktemp |cat > ')
 
     def __init__(self, root, answers=None):
         self.root = pathlib.Path(root)
         (self.root / 'tmp').mkdir(parents=True, exist_ok=True)
         (self.root / 'run').mkdir(parents=True, exist_ok=True)
         self.cmds = []
+        self.fed = []           # (command, what it got on stdin)
         self.ran = []           # (command, path it runs, that file's mode and text then)
         self.answers = answers or {}
 
@@ -398,6 +400,8 @@ class _Sandbox:
 
     def __call__(self, mgr, node, cmd, timeout=600, **kw):
         self.cmds.append(cmd)
+        if kw.get('stdin_data') is not None:
+            self.fed.append((cmd, kw['stdin_data']))
         for prefix, answer in self.answers.items():
             if cmd.startswith(prefix):
                 return answer
@@ -410,7 +414,9 @@ class _Sandbox:
             return 0, 'DELTA_DONE errors=0\nfallback loader installed\n', ''
         if not self.WRITES.search(cmd):
             return 0, '', ''
-        p = subprocess.run(['bash', '-c', self.local(cmd)], capture_output=True, text=True)
+        # what the node call hands the command on stdin (a secret file's content)
+        p = subprocess.run(['bash', '-c', self.local(cmd)], capture_output=True, text=True,
+                           input=kw.get('stdin_data') or '')
         return p.returncode, self.node(p.stdout), p.stderr
 
     def plant(self, node_path, text='echo planted-by-a-local-account\n'):
@@ -477,8 +483,17 @@ def test_the_delta_sync_runs_its_own_script_and_keeps_the_password_out_of_tmp(mo
     assert ok
     _assert_ran_only_what_it_wrote(box, script_name, text, 'DELTA_DONE')
     assert pathlib.Path(box.local(pass_name)).read_text() == '', 'the password went into their file'
-    writes = [c for c in box.cmds if 'base64 -d >' in c]
+    # the password reaches the node on stdin only, into a file in /run that is 0600 from the
+    # start and removed after the copy
+    forms = ('S3cr3t!pw', base64.b64encode(b'S3cr3t!pw').decode())
+    assert not [c for c in box.cmds if any(f in c for f in forms)]
+    writes = [c for c, data in box.fed if data == 'S3cr3t!pw']
     assert writes and all(w.startswith('umask 077;') and ' > /run/' in w for w in writes), writes
+    for w in writes:
+        path = re.search(r'cat > (\S+)', w).group(1)
+        lp = pathlib.Path(box.local(path))
+        assert lp.read_text() == 'S3cr3t!pw' and stat.S_IMODE(lp.stat().st_mode) == 0o600
+        assert f'rm -f {path}' in box.cmds
 
 
 def test_the_script_writer_makes_a_new_private_file_and_says_where(monkeypatch, tmp_path):
@@ -579,15 +594,22 @@ def test_the_https_fallback_keeps_its_credentials_in_run():
     with the default umask) sat under /tmp names built from the task id."""
     fn = next(n for n in ast.walk(ast.parse(_V2P_SRC))
               if isinstance(n, ast.FunctionDef) and n.name == '_ssh_pipe_transfer')
-    paths = {t.id: _flat(n.value) for n in ast.walk(fn) if isinstance(n, ast.Assign)
-             for t in n.targets if isinstance(t, ast.Name) and t.id in ('auth_file', 'cookie_jar')}
-    assert set(paths) == {'auth_file', 'cookie_jar'}
-    assert all(p.startswith('/run/') for p in paths.values()), paths
-    writes = [_flat(c.args[2]) for c in ast.walk(fn)
-              if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-              and c.func.id == '_pve_node_exec' and len(c.args) >= 3
-              and '{auth_file}' in _flat(c.args[2]) and 'base64 -d' in _flat(c.args[2])]
-    assert writes and all(w.startswith('umask 077;') and '{cookie_jar}' in w for w in writes)
+    values = {t.id: n.value for n in ast.walk(fn) if isinstance(n, ast.Assign)
+              for t in n.targets if isinstance(t, ast.Name) and t.id in ('auth_file', 'cookie_jar')}
+    assert set(values) == {'auth_file', 'cookie_jar'}
+    assert _flat(values['cookie_jar']).startswith('/run/')
+    # the login file comes from the writer of secret files, which puts them in /run
+    auth = values['auth_file']
+    assert isinstance(auth, ast.Call) and getattr(auth.func, 'id', '') == '_node_secret_file'
+    writer = next(n for n in ast.walk(ast.parse(_V2P_SRC))
+                  if isinstance(n, ast.FunctionDef) and n.name == '_node_secret_file')
+    assert any(_flat(n.value).startswith('/run/') for n in ast.walk(writer)
+               if isinstance(n, ast.Assign) and getattr(n.targets[0], 'id', '') == 'path')
+    jar = [_flat(c.args[2]) for c in ast.walk(fn)
+           if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+           and c.func.id == '_pve_node_exec' and len(c.args) >= 3
+           and _flat(c.args[2]).endswith('> {cookie_jar}')]
+    assert jar and all(w.startswith('umask 077;') for w in jar)
 
 
 def test_the_datastore_mount_is_root_only():
