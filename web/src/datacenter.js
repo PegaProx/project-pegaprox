@@ -1886,13 +1886,14 @@
                     // JB Nov 2026 - Proxmox renumbers what follows, so the rows kept here would point at the wrong rule from now on
                     if (res.ok) {
                         const rulesRes = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/firewall/rules`);
-                        if (rulesRes.ok) setFirewallRules(await rulesRes.json());
-                        else setFirewallRules(firewallRules.filter(r => r.pos !== pos));
+                        if (rulesRes?.ok) setFirewallRules(await rulesRes.json());
+                        // no fresh list: pos is the index in the ruleset, so the rules after the deleted one move up by one
+                        else setFirewallRules(firewallRules.filter(r => r.pos !== pos).map(r => r.pos > pos ? { ...r, pos: r.pos - 1 } : r));
                     } else {
                         const err = await res.json().catch(() => ({}));
                         addToast(err.error || t('error') || 'Error', 'error');
                     }
-                } catch(e) { console.error(e); }
+                } catch(e) { console.error(e); addToast(t('connectionError'), 'error'); }
             };
 
             // LW Nov 2026 - the redesigned summary draws from what the dashboard holds: it does not wait for the reads below.
