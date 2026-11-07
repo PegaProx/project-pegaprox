@@ -5453,8 +5453,10 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
             pve_ws_url,
             sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
             header={"Cookie": f"PVEAuthCookie={pve_ticket}", "Host": f"{host}:{port}"},
+            redirect_limit=0,
             timeout=timeout,
         )
+        _refuse_ws_redirect(pve_ws)
         img = vnc_grab.grab_frame(pve_ws, vnc_ticket, timeout=timeout)
     finally:
         try:
@@ -5614,6 +5616,8 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         if not _verify_tls:
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = _ssl.CERT_NONE
+        from pegaprox.core.manager import pve_opener
+        opener = pve_opener(ssl_ctx)
 
         # #955 - a token cluster has no password to log in with, see _console_uses_token
         _token_auth = _console_uses_token(mgr)
@@ -5628,7 +5632,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                 login_req = urllib.request.Request(
                     f"https://{mgr.auth_host}:{port}/api2/json/access/ticket", data=login_data, method='POST'
                 )
-                with urllib.request.urlopen(login_req, context=ssl_ctx, timeout=10) as r:
+                with opener.open(login_req, timeout=10) as r:
                     login_result = _json.loads(r.read().decode('utf-8'))
                 pve_ticket = login_result['data']['ticket']
                 csrf_token = login_result['data']['CSRFPreventionToken']
@@ -5650,7 +5654,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                 vnc_req = urllib.request.Request(vnc_url, data=urllib.parse.urlencode({'websocket': '1'}).encode('utf-8'), method='POST')
                 vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
                 vnc_req.add_header('CSRFPreventionToken', csrf_token)
-                with urllib.request.urlopen(vnc_req, context=ssl_ctx, timeout=10) as r:
+                with opener.open(vnc_req, timeout=10) as r:
                     vnc_result = _json.loads(r.read().decode('utf-8'))
                 vnc_ticket = vnc_result['data']['ticket']
                 vnc_port = vnc_result['data']['port']
@@ -5692,8 +5696,10 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
                 sslopt=({} if _verify_tls else {"cert_reqs": _ssl.CERT_NONE}),
                 header=_pve_console_ws_auth(mgr, f"{host}:{port}", pve_ticket,
                                             reuse_manager_auth=_reuse_manager_auth),
+                redirect_limit=0,
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
+            _refuse_ws_redirect(pve_ws)
             _apply_vnc_socket_options(pve_ws.sock)
         except Exception as e:
             try:
@@ -8991,6 +8997,26 @@ def _pve_console_ws_auth(manager, netloc, fresh_ticket=None, reuse_manager_auth=
     return headers
 
 
+def _refuse_ws_redirect(pve_ws):
+    """Fail an upgrade to PVE that was answered with a redirect.
+
+    websocket-client follows up to three of them, plain ws:// included, and sends the
+    same headers again, the session cookie or the API token. The upgrades pass
+    redirect_limit=0, and then a 3xx comes back as a socket that looks connected, so
+    it is closed here and raised like any refused upgrade. pveproxy sends none."""
+    status = getattr(pve_ws, 'status', None)
+    if status in (301, 302, 303, 307, 308):
+        import websocket as _wsc
+        try:
+            pve_ws.close()
+        except Exception:
+            pass
+        raise _wsc.WebSocketBadStatusException(
+            f'Proxmox VE answered the console upgrade with a redirect (HTTP {status}), '
+            f'which PegaProx does not follow', status)
+    return pve_ws
+
+
 def _console_uses_token(manager):
     """True when the cluster talks to PVE with an API token.
 
@@ -11276,6 +11302,8 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
         if not _verify_tls:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
+        from pegaprox.core.manager import pve_opener
+        opener = pve_opener(ssl_context)
         
         # Step 1: Login - not on a token cluster, there is no password (#955)
         _token_auth = _console_uses_token(manager)
@@ -11292,7 +11320,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
                 data=login_data, method='POST'
             )
         
-            with urllib.request.urlopen(login_req, context=ssl_context, timeout=10) as response:
+            with opener.open(login_req, timeout=10) as response:
                 login_result = json.loads(response.read().decode('utf-8'))
 
             pve_ticket = login_result['data']['ticket']
@@ -11330,7 +11358,7 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
             vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
             vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
             vnc_req.add_header('CSRFPreventionToken', csrf_token)
-            with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
+            with opener.open(vnc_req, timeout=10) as response:
                 vnc_result = json.loads(response.read().decode('utf-8'))
             vnc_ticket = vnc_result['data']['ticket']
             vnc_port = vnc_result['data']['port']
@@ -11346,8 +11374,10 @@ def handle_vnc_websocket(ws, cluster_id, node, vm_type, vmid):
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
+            redirect_limit=0,
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
+        _refuse_ws_redirect(pve_ws)
         # MK Apr 2026 — TCP_NODELAY + keepalive: survives idle conntrack drops
         _apply_vnc_socket_options(pve_ws.sock)
 
@@ -11671,8 +11701,11 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             # MK Apr 2026 — wrap synchronous urllib.urlopen in asyncio.to_thread
             # so concurrent VNC handlers don't serialize on the TLS handshake.
             import asyncio as _aiowrap
+            from pegaprox.core.manager import pve_opener
+            opener = pve_opener(ssl_ctx)
+
             def _do_urlopen(req):
-                with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as r:
+                with opener.open(req, timeout=10) as r:
                     return r.read()
 
             # Login to Proxmox to get auth ticket. Not on a token cluster: config.user
@@ -11823,8 +11856,10 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
                 pve_ws_url,
                 sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
                 header=ws_auth_header,
+                redirect_limit=0,
                 timeout=VNC_PVE_CONNECT_TIMEOUT,
             )
+            _refuse_ws_redirect(pve_ws)
             _connect_ms = int((_t_connect.monotonic() - _connect_started) * 1000)
 
             # MK Apr 2026: TCP_NODELAY + aggressive keepalive (replaces older NS comment).
@@ -12322,6 +12357,8 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
         if not _verify_tls:
             ssl_context.check_hostname = False
             ssl_context.verify_mode = ssl.CERT_NONE
+        from pegaprox.core.manager import pve_opener
+        opener = pve_opener(ssl_context)
         
         # Step 1: Login - not on a token cluster, there is no password (#955)
         _token_auth = _console_uses_token(manager)
@@ -12338,7 +12375,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
                 data=login_data, method='POST'
             )
         
-            with urllib.request.urlopen(login_req, context=ssl_context, timeout=10) as response:
+            with opener.open(login_req, timeout=10) as response:
                 login_result = json.loads(response.read().decode('utf-8'))
 
             pve_ticket = login_result['data']['ticket']
@@ -12376,7 +12413,7 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             vnc_req = urllib.request.Request(vnc_url, data=vnc_data, method='POST')
             vnc_req.add_header('Cookie', f'PVEAuthCookie={pve_ticket}')
             vnc_req.add_header('CSRFPreventionToken', csrf_token)
-            with urllib.request.urlopen(vnc_req, context=ssl_context, timeout=10) as response:
+            with opener.open(vnc_req, timeout=10) as response:
                 vnc_result = json.loads(response.read().decode('utf-8'))
             vnc_ticket = vnc_result['data']['ticket']
             vnc_port = vnc_result['data']['port']
@@ -12392,8 +12429,10 @@ def vnc_websocket_proxy(ws, cluster_id, node, vm_type, vmid):
             sslopt=({} if _verify_tls else {"cert_reqs": ssl.CERT_NONE}),
             header=_pve_console_ws_auth(manager, f"{host}:{port}", pve_ticket,
                                         reuse_manager_auth=_reuse_manager_auth),
+            redirect_limit=0,
             timeout=VNC_PVE_CONNECT_TIMEOUT
         )
+        _refuse_ws_redirect(pve_ws)
         # MK Apr 2026 — TCP_NODELAY + keepalive (consolidated helper)
         _apply_vnc_socket_options(pve_ws.sock)
 
@@ -12566,6 +12605,8 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
     if not _verify_tls:
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = _ssl.CERT_NONE
+    from pegaprox.core.manager import pve_opener
+    opener = pve_opener(ssl_ctx)
     host, port = mgr.host, mgr.api_port
 
     # Step 1: real PVE session login
@@ -12575,7 +12616,7 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
             data=_urlencode({'username': pve_usr, 'password': pve_pwd}).encode('utf-8'),
             method='POST'
         )
-        with _urlreq.urlopen(login_req, context=ssl_ctx, timeout=10) as resp:
+        with opener.open(login_req, timeout=10) as resp:
             login_result = json.loads(resp.read().decode('utf-8'))
         auth_ticket = login_result['data']['ticket']
         csrf_token = login_result['data']['CSRFPreventionToken']
@@ -12593,7 +12634,7 @@ def get_termproxy_ticket_api(cluster_id, node, vm_type, vmid):
         tp_req = _urlreq.Request(tp_url, data=b'', method='POST')
         tp_req.add_header('Cookie', f'PVEAuthCookie={auth_ticket}')
         tp_req.add_header('CSRFPreventionToken', csrf_token)
-        with _urlreq.urlopen(tp_req, context=ssl_ctx, timeout=10) as resp:
+        with opener.open(tp_req, timeout=10) as resp:
             tp_result = json.loads(resp.read().decode('utf-8'))
         term_ticket = tp_result['data']['ticket']
         term_port = tp_result['data']['port']

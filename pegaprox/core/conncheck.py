@@ -337,7 +337,9 @@ def probe_host(mgr, host, authed, node_fps=None):
     if node_fps:
         res['tls'] = 'match' if res['fingerprint'] in node_fps else 'mismatch'
 
-    sess = mgr._create_session() if authed else requests.Session()
+    from pegaprox.core.manager import RedirectRefused, _refuse_redirects
+    # like the manager's own session, the bare one stops at a redirect as well
+    sess = mgr._create_session() if authed else _refuse_redirects(requests.Session())
     url = f"https://{mgr._bracket_ipv6(host.strip('[]'))}:{port}/api2/json/version"
     try:
         if authed:
@@ -351,6 +353,12 @@ def probe_host(mgr, host, authed, node_fps=None):
                 verify = _ca.cafile or _ca.openssl_cafile or True
             r = sess.get(url, timeout=HOST_TIMEOUT, verify=verify)
         res['http'] = r.status_code
+    except RedirectRefused as e:
+        # pveproxy sends none, so something in between answers for the node
+        res['ms'] = int((time.monotonic() - t0) * 1000)
+        res['http'] = getattr(e.response, 'status_code', None)
+        return _item('api_host', 'warn', item_id=f'api:{host}', hint='api_http',
+                     detail=_err_text(e), **res)
     except requests.exceptions.SSLError as e:
         res['ms'] = int((time.monotonic() - t0) * 1000)
         return _item('api_host', 'fail', item_id=f'api:{host}', hint='api_tls_untrusted',

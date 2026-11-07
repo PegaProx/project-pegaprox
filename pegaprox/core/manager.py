@@ -30,6 +30,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # MK: requests verify=False doesn't fully kill hostname checking in newer urllib3,
 # had a user report that IP-only clusters fail while DNS works fine (#88)
 import ssl
+import urllib.error
+import urllib.request
 from requests.adapters import HTTPAdapter
 from urllib3.util.ssl_ import create_urllib3_context
 
@@ -41,6 +43,52 @@ class _NoHostnameCheckAdapter(HTTPAdapter):
         ctx.verify_mode = ssl.CERT_NONE
         kwargs['ssl_context'] = ctx
         return super().init_poolmanager(*args, **kwargs)
+
+
+class RedirectRefused(requests.exceptions.RequestException):
+    """A Proxmox VE API answered with a redirect, which PegaProx does not follow."""
+
+
+def _refuse_redirects(session):
+    """Every request of `session` stops at a redirect and raises RedirectRefused.
+
+    pveproxy sends none. One that arrived would carry the call to a host nobody configured
+    or down to plain http, and on a 307 the body with it, the login form and its password
+    too. Session.get() asks for redirects on its own, so the flag is set here whatever
+    the caller passed.
+    """
+    request = getattr(session, 'request', None)
+    if request is None:
+        return session
+
+    def no_redirects(method, url, *args, **kwargs):
+        kwargs['allow_redirects'] = False
+        resp = request(method, url, *args, **kwargs)
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            from urllib.parse import urlsplit
+            resp.close()
+            raise RedirectRefused(f'Proxmox VE at {urlsplit(url).hostname} answered with a redirect '
+                                  f'(HTTP {code}), which PegaProx does not follow', response=resp)
+        return resp
+    session.request = no_redirects
+    return session
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, 'Proxmox VE answered with a redirect, '
+                                     'which PegaProx does not follow', headers, fp)
+
+
+def pve_opener(context=None):
+    """A urllib opener for the console logins and tickets that stops at a redirect.
+
+    urlopen() follows one by itself: a 302 to the vncproxy or termproxy POST went on as a
+    GET to the Location, plain http included, with the Cookie and CSRF headers copied.
+    Here it is an HTTPError instead.
+    """
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _NoRedirectHandler)
 
 from pegaprox.constants import (SSH_MAX_CONCURRENT, LOG_DIR,
                                HA_MIGRATE_SETTLE_SECONDS, HA_MIGRATE_SETTLE_POLL)
@@ -1099,6 +1147,7 @@ class PegaProxManager:
         # one with a '..' segment would be folded into another endpoint by requests
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(session)
+        _refuse_redirects(session)
         # an automatic leader that lost its lease sends no change from here (#625)
         ha_transport.guard_session(session)
 
@@ -1608,6 +1657,7 @@ class PegaProxManager:
                         session.verify = False
                     if not self._ssl_verify:
                         session.mount('https://', _NoHostnameCheckAdapter())  # MK: #88
+                    _refuse_redirects(session)
                     # the login passes in every role, the token it may mint needs the lease
                     ha_transport.guard_session(session)
 
@@ -16314,6 +16364,7 @@ echo "AGENT_INSTALLED_OK"
         if not getattr(self, '_ssl_verify', False):
             ctx.check_hostname = False
             ctx.verify_mode = _ssl.CERT_NONE
+        opener = pve_opener(ctx)
 
         last = None
         # MK Oct 2026 (#1136) - a fallback whose node has a root password of its own logs
@@ -16332,7 +16383,7 @@ echo "AGENT_INSTALLED_OK"
                 )
                 # short per-host budget: a dead node should cost seconds, not the whole
                 # request. Four candidates at 10s each is how a tile poll reached 50s.
-                with _ur.urlopen(req, context=ctx, timeout=6) as resp:
+                with opener.open(req, timeout=6) as resp:
                     res = _json.loads(resp.read().decode('utf-8'))
                 ticket = res['data']['ticket']
                 if idx:
@@ -16346,6 +16397,10 @@ echo "AGENT_INSTALLED_OK"
                     return ticket, res['data'].get('CSRFPreventionToken')
                 return ticket
             except _uerr.HTTPError as he:
+                if he.code in (301, 302, 303, 307, 308):
+                    # not followed, and no word on the password: the next host may still do
+                    last = he
+                    continue
                 # the node answered and said no — credentials, not reachability
                 self.logger.warning(f"[CONSOLE] auth-ticket rejected by {host}: HTTP {he.code}")
                 refused.append(host_pwd)
@@ -16412,6 +16467,7 @@ echo "AGENT_INSTALLED_OK"
             else:
                 s.verify = False
                 s.mount('https://', _NoHostnameCheckAdapter(**_pool_kw))
+            _refuse_redirects(s)
             ha_transport.guard_session(s)
             # self.host is already IPv6-bracketed by the property — use it directly.
             login_url = f"https://{self.host}:{self.api_port}/api2/json/access/ticket"

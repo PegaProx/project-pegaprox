@@ -12,6 +12,11 @@ from unittest import mock
 from pegaprox.core.manager import PegaProxManager
 
 
+def _opener(fake_urlopen):
+    """pve_opener as the mint calls it, answering through `fake_urlopen`."""
+    return lambda context=None: types.SimpleNamespace(open=fake_urlopen)
+
+
 def _mgr(config_host, current_host):
     """A PegaProxManager with just enough state for the host properties + the ticket mint,
     without running the heavy __init__/connect path."""
@@ -58,7 +63,7 @@ def test_mint_ticket_hits_registered_node_not_the_fallback():
         captured['url'] = req.full_url
         return _Resp()
 
-    with mock.patch('urllib.request.urlopen', _fake_urlopen):
+    with mock.patch('pegaprox.core.manager.pve_opener', _opener(_fake_urlopen)):
         ticket = m.mint_console_auth_ticket()
 
     assert ticket == 'PVE:tkt'
@@ -96,7 +101,7 @@ def test_an_unreachable_registered_node_does_not_end_the_story():
             raise TimeoutError("registered node is down")
         return _Resp()
 
-    with mock.patch('urllib.request.urlopen', _fake_urlopen):
+    with mock.patch('pegaprox.core.manager.pve_opener', _opener(_fake_urlopen)):
         assert m.mint_console_auth_ticket() == 'PVE:tkt'
 
     assert '10.0.0.1' in seen[0], "the registered node must still be asked first"
@@ -115,7 +120,7 @@ def test_a_rejection_still_stops_at_the_registered_node():
         seen.append(req.full_url)
         raise urllib.error.HTTPError(req.full_url, 401, 'denied', {}, None)
 
-    with mock.patch('urllib.request.urlopen', _fake_urlopen):
+    with mock.patch('pegaprox.core.manager.pve_opener', _opener(_fake_urlopen)):
         assert m.mint_console_auth_ticket() is None
 
     assert len(seen) == 1, f"sprayed logins across the cluster after a 401: {seen}"

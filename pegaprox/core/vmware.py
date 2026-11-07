@@ -114,7 +114,8 @@ class VMwareManager:
                 auth=(self.username, self.password),
                 headers={'Content-Type': 'application/json'},
                 verify=self.ssl_verify,
-                timeout=15
+                timeout=15,
+                allow_redirects=False
             )
             
             if resp.status_code == 201:
@@ -138,7 +139,8 @@ class VMwareManager:
                                 f"{self._base_url}{legacy_path}",
                                 headers=headers,
                                 verify=self.ssl_verify,
-                                timeout=15
+                                timeout=15,
+                                allow_redirects=False
                             )
                         else:
                             resp = requests.post(
@@ -146,7 +148,8 @@ class VMwareManager:
                                 auth=(self.username, self.password),
                                 headers=headers,
                                 verify=self.ssl_verify,
-                                timeout=15
+                                timeout=15,
+                                allow_redirects=False
                             )
                         if resp.status_code in (200, 201):
                             try:
@@ -164,7 +167,9 @@ class VMwareManager:
                     # Check if host is reachable at all
                     reachable = False
                     try:
-                        check = requests.get(f"{self._base_url}/", verify=self.ssl_verify, timeout=10)
+                        # ESXi sends / on to /ui/, any answer below 500 is enough here
+                        check = requests.get(f"{self._base_url}/", verify=self.ssl_verify, timeout=10,
+                                             allow_redirects=False)
                         reachable = check.status_code < 500 or check.status_code == 503
                     except:
                         pass
@@ -188,7 +193,7 @@ class VMwareManager:
                 logging.warning(f"[VMware:{self.id}] Connection failed: {self.last_error}")
                 return False
             else:
-                self.last_error = f'Connection failed: HTTP {resp.status_code}'
+                self.last_error = self._redirect_error(resp) or f'Connection failed: HTTP {resp.status_code}'
                 self.connected = False
                 logging.warning(f"[VMware:{self.id}] Connection failed: {self.last_error}")
                 return False
@@ -208,7 +213,7 @@ class VMwareManager:
                         test_resp = requests.get(
                             f"{self._base_url}{test_path}",
                             headers=self._headers(),
-                            verify=self.ssl_verify, timeout=10)
+                            verify=self.ssl_verify, timeout=10, allow_redirects=False)
                         if test_resp.status_code == 200:
                             validation_ok = True
                             break
@@ -389,6 +394,18 @@ class VMwareManager:
     def _headers(self) -> dict:
         return {'vmware-api-session-id': self.session_id} if self.session_id else {}
 
+    def _redirect_error(self, resp) -> str:
+        """The error for an answer that redirects, '' for any other.
+
+        No request in this class follows a redirect (allow_redirects=False on each one).
+        The host check looked at the configured host only, a Location can name any other
+        host or plain http, and a 307 would send the body and the session id along.
+        """
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            return f'ESXi host {self.host} answered with a redirect (HTTP {code}), which PegaProx does not follow'
+        return ''
+
     def _build_validated_url(self, path: str) -> str:
         """Build the full vSphere URL from base + path with defensive validation.
 
@@ -420,13 +437,14 @@ class VMwareManager:
                 headers=self._headers(),
                 params=params,
                 verify=self.ssl_verify,
-                timeout=30
+                timeout=30,
+                allow_redirects=False
             )
             if resp.status_code == 401:
                 # Session expired, try reconnect
                 if self.connect():
-                    resp = requests.get(url, headers=self._headers(),
-                                       params=params, verify=self.ssl_verify, timeout=30)
+                    resp = requests.get(url, headers=self._headers(), params=params,
+                                        verify=self.ssl_verify, timeout=30, allow_redirects=False)
             if resp.status_code == 200:
                 try:
                     self._consecutive_400s = 0  # Reset on success
@@ -435,7 +453,8 @@ class VMwareManager:
                     return {'data': resp.text}
             if resp.status_code == 400:
                 self._consecutive_400s = getattr(self, '_consecutive_400s', 0) + 1
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}', 'status_code': resp.status_code}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}',
+                    'status_code': resp.status_code}
         except Exception as e:
             return {'error': str(e)}
     
@@ -453,20 +472,23 @@ class VMwareManager:
                 headers={**self._headers(), 'Content-Type': 'application/json'},
                 json=data,
                 verify=self.ssl_verify,
-                timeout=60
+                timeout=60,
+                allow_redirects=False
             )
             if resp.status_code == 401:
                 if self.connect():
                     # the same call once more: checked again, the lease may be gone by now
                     resp = ha_transport.http('POST', url, again=True,
                                              headers={**self._headers(), 'Content-Type': 'application/json'},
-                                             json=data, verify=self.ssl_verify, timeout=60)
+                                             json=data, verify=self.ssl_verify, timeout=60,
+                                             allow_redirects=False)
             if resp.status_code in (200, 201, 204):
                 try:
                     return {'data': resp.json()}
                 except Exception:
                     return {'data': 'ok'}
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}', 'status_code': resp.status_code}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}',
+                    'status_code': resp.status_code}
         except Exception as e:
             return {'error': str(e)}
     
@@ -482,11 +504,12 @@ class VMwareManager:
                 'DELETE', url,
                 headers=self._headers(),
                 verify=self.ssl_verify,
-                timeout=30
+                timeout=30,
+                allow_redirects=False
             )
             if resp.status_code in (200, 204):
                 return {'data': 'ok'}
-            return {'error': f'HTTP {resp.status_code}: {resp.text[:200]}'}
+            return {'error': self._redirect_error(resp) or f'HTTP {resp.status_code}: {resp.text[:200]}'}
         except Exception as e:
             return {'error': str(e)}
     
@@ -1179,7 +1202,7 @@ class VMwareManager:
                     'PATCH', url,
                     headers={**self._headers(), 'Content-Type': 'application/json'},
                     json={'annotation': config['notes']},
-                    verify=self.ssl_verify, timeout=30
+                    verify=self.ssl_verify, timeout=30, allow_redirects=False
                 )
             except:
                 pass
@@ -1594,6 +1617,7 @@ class VMwareManager:
                     headers=self._headers(),
                     verify=self.ssl_verify,
                     timeout=8,
+                    allow_redirects=False,
                 )
                 self._last_ping = now
                 if resp.status_code in (200, 201):

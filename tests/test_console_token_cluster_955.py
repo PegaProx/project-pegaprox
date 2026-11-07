@@ -109,6 +109,10 @@ class _Pve:
             return _Answer({'ticket': 'PVEVNC:ours', 'port': 5908})
         raise AssertionError(f'unexpected urllib call {url}')
 
+    def opener(self, context=None):
+        # pve_opener, the urllib opener the console handlers dial PVE with
+        return types.SimpleNamespace(open=self.urlopen)
+
     def create_connection(self, url, header=None, **k):
         self.upgrades.append((url, dict(header or {})))
         return _PveWs()
@@ -117,7 +121,7 @@ class _Pve:
 @pytest.fixture
 def pve(monkeypatch):
     fake = _Pve()
-    monkeypatch.setattr('urllib.request.urlopen', fake.urlopen)
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener', fake.opener)
     monkeypatch.setattr(websocket, 'create_connection', fake.create_connection)
     return fake
 
@@ -278,7 +282,8 @@ def test_minting_a_session_ticket_does_not_post_a_token_secret(monkeypatch):
     import logging
     from pegaprox.core.manager import PegaProxManager
     posted = []
-    monkeypatch.setattr('urllib.request.urlopen', lambda req, *a, **k: posted.append(req.full_url))
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener', lambda context=None: types.SimpleNamespace(
+        open=lambda req, *a, **k: posted.append(req.full_url)))
     m = PegaProxManager.__new__(PegaProxManager)
     m.config = types.SimpleNamespace(host='10.0.0.9', user=_ID, pass_=_VALUE, api_port=8006,
                                      fallback_hosts=[])
@@ -303,7 +308,7 @@ def test_a_password_cluster_still_logs_in_for_its_own_vncproxy(api, seed, monkey
     seed.user('root', role='admin')
     mgr = api.set_manager('c1', _PasswordManager())
     fake = _Pve(password_ok=True)
-    monkeypatch.setattr('urllib.request.urlopen', fake.urlopen)
+    monkeypatch.setattr('pegaprox.core.manager.pve_opener', fake.opener)
     monkeypatch.setattr(websocket, 'create_connection', fake.create_connection)
     view = api.app.view_functions['__flask_sock.vnc_websocket_proxy'].__wrapped__
     with api.app.test_request_context(f'{_PATH}?{_query(False)}'):

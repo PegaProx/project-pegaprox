@@ -95,6 +95,33 @@ class _PinnedFingerprintAdapter(requests.adapters.HTTPAdapter):
         return super().proxy_manager_for(proxy, **proxy_kwargs)
 
 
+class RedirectRefused(requests.exceptions.RequestException):
+    """The PBS answered with a redirect, which PegaProx does not follow."""
+
+
+def _refuse_redirects(session):
+    """Every request of `session` stops at a redirect and raises RedirectRefused.
+
+    The PBS API sends none. One that arrived would take the call to a host
+    pbs_target_refusal never saw, or down to plain http where the fingerprint pin has no
+    say, and a 307 sends the body along, the password of the ticket login included.
+    Session.get() asks for redirects itself, so the wrapper overrides whatever it is given.
+    """
+    request = session.request
+
+    def no_redirects(method, url, *args, **kwargs):
+        kwargs['allow_redirects'] = False
+        resp = request(method, url, *args, **kwargs)
+        code = getattr(resp, 'status_code', None)
+        if code in (301, 302, 303, 307, 308):
+            resp.close()
+            raise RedirectRefused(f'PBS answered with a redirect (HTTP {code}), which PegaProx '
+                                  f'does not follow', response=resp)
+        return resp
+    session.request = no_redirects
+    return session
+
+
 class PBSManager:
     """Manages connection to a Proxmox Backup Server instance
     
@@ -144,6 +171,7 @@ class PBSManager:
         # MK Oct 2026 - no path from a request is folded into another endpoint (as for PVE)
         from pegaprox.utils.sanitization import refuse_climbing_paths
         refuse_climbing_paths(self._session)
+        _refuse_redirects(self._session)
         # an automatic leader that lost its lease changes nothing on the PBS (#625)
         from pegaprox.core import ha_transport
         ha_transport.guard_session(self._session)

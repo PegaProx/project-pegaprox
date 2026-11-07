@@ -4100,12 +4100,15 @@ def storage_preflight(cluster_id):
             return jsonify({'ok': False, 'issues': issues, 'info': info}), 200
 
     # 3) Auth probe
+    from pegaprox.core.pbs import RedirectRefused, _refuse_redirects
     try:
         import requests as _r
         s = _r.Session(); s.verify = False
         if given_fp:
             from pegaprox.core.pbs import _PinnedFingerprintAdapter
             s.mount('https://', _PinnedFingerprintAdapter(given_fp))
+        # the check above saw this host only: a redirect would carry the login elsewhere
+        _refuse_redirects(s)
         ar = s.post(f'https://{_url_host(server)}:{port}/api2/json/access/ticket',
                     data={'username': username, 'password': password}, timeout=8)
         if ar.status_code != 200:
@@ -4124,6 +4127,8 @@ def storage_preflight(cluster_id):
                     info['datastores'] = names
                     if datastore not in names:
                         issues.append(f"Datastore '{datastore}' not found. Available: {', '.join(names) or '(none)'}")
+    except RedirectRefused as e:
+        issues.append(str(e))
     except Exception as e:
         issues.append(f'auth probe error: {e}')
 
