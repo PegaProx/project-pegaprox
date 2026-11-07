@@ -19,3 +19,13 @@ def test_each_kind_goes_its_way(kind, verb):
     got = PegaProxManager.add_network(m, 'n1', 100, kind, {'net_id': 'net1', 'bridge': 'vmbr0', 'model': 'virtio', 'name': 'eth1'})
     assert got['success'] is True, got
     assert [s[0] for s in sent] == [verb] and sent[0][1].endswith(f'/{kind}/100/config') and 'net1' in sent[0][2], sent
+
+
+def test_a_type_other_than_qemu_takes_the_container_verb_too():
+    # the URL and the net string treat anything but qemu as a container
+    m = MagicMock(host='h', api_port=8006, is_connected=True)
+    sent = []
+    m._api_post = lambda url, data=None, **k: sent.append(('post', url, data)) or SimpleNamespace(status_code=200, text='')
+    m._api_put = lambda url, data=None, **k: sent.append(('put', url, data)) or SimpleNamespace(status_code=200, text='')
+    PegaProxManager.add_network(m, 'n1', 100, 'ct', {'net_id': 'net1', 'bridge': 'vmbr0', 'name': 'eth1'})
+    assert [(s[0], s[1].rsplit('/', 3)[1]) for s in sent] == [('put', 'lxc')], sent
