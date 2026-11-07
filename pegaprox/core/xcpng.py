@@ -3750,25 +3750,41 @@ class XcpngManager:
                 except Exception:
                     pass
 
-    def _wait_for_host_online(self, node_name, timeout=300):
-        """Wait for XCP-ng host to come back after reboot by polling XAPI."""
-        import socket
-        host_ip = self._get_host_ip(node_name)
-        time.sleep(20)  # give it time to shut down
+    def node_reboot_look(self, node_name):
+        """A host as it is right now, {'status', 'uptime', ...}; None without an answer.
 
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        JB Nov 2026 - the pool master answers for its members and every row says online, so a host
+        that is down still looked up. Its own port says that, and the cached rows hold an old uptime.
+        """
+        import socket
+        try:
+            socket.create_connection((self._get_host_ip(node_name), 443), timeout=5).close()
+        except OSError:
+            return {'status': 'offline', 'uptime': 0}
+        try:
+            api = self._api()
+            rows = self._fetch_nodes(api) if api else []
+        except Exception as e:
+            # a master that restarted has forgotten this session
+            self.logger.debug(f"Looking at {node_name}: {e}")
+            self.is_connected = False
+            return None
+        return next((n for n in rows if n.get('node') == node_name), None)
+
+    def _wait_for_host_online(self, node_name, timeout=300):
+        """Wait for XCP-ng host to come back after reboot: seen down, or booted since the wait began."""
+        start = time.time()
+        seen_down = False
+        while time.time() - start < timeout:
             try:
-                sock = socket.create_connection((host_ip, 443), timeout=5)
-                sock.close()
-                # brief pause then verify XAPI responds
-                time.sleep(5)
-                api = self._api()
-                if api:
+                row = self.node_reboot_look(node_name)
+                if row and row.get('status') != 'online':
+                    seen_down = True
+                elif row and (seen_down or 0 < (row.get('uptime') or 0) < time.time() - start):
                     self._cached_nodes = None
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Waiting for {node_name}: {e}")
             time.sleep(10)
         return False
 

@@ -323,7 +323,7 @@ EXITS = {
     ('pegaprox/core/xcpng.py', 'XcpngManager._ssh_connect', 'ssh-paramiko'): (1, 'guard'),
     ('pegaprox/core/xcpng.py', 'XcpngManager._ssh_exec', 'ssh-exec'): (1, 'client'),
     ('pegaprox/core/xcpng.py', 'XcpngManager._perform_node_update', 'ssh-exec'): (3, 'client'),
-    ('pegaprox/core/xcpng.py', 'XcpngManager._wait_for_host_online', 'socket'): (1, 'read'),
+    ('pegaprox/core/xcpng.py', 'XcpngManager.node_reboot_look', 'socket'): (1, 'read'),
     # the HTTP side of XAPI: RRD reads, and uploads into an SR
     ('pegaprox/core/xcpng.py', 'XcpngManager._rrd_fetch', 'http-direct'): (1, 'read'),
     ('pegaprox/core/xcpng.py', 'XcpngManager.upload_to_storage', 'http-guarded'): (1, 'guard'),

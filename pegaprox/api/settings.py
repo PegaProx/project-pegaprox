@@ -5366,6 +5366,30 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
             return None
         return len(available_updates) if available_updates else 0
 
+    def _booted_since(row, since):
+        try:
+            up, since = float(row.get('uptime') or 0), float(since or 0)
+            return bool(up and since and time.time() - up > since)
+        except (TypeError, ValueError):
+            return False
+
+    def _reboot_look(node_name, since):
+        """A node after its reboot was sent: 'down', 'booted' (up, and started after since), 'up'
+        (which proves nothing yet) or None when nothing answered."""
+        try:
+            if is_xcpng:
+                row = mgr.node_reboot_look(node_name)
+            else:
+                ns = mgr.get_node_status()
+                row = (ns.get(node_name) or {}) if ns else None
+        except Exception:
+            return None
+        if row is None:
+            return None
+        if row.get('status') != 'online':
+            return 'down'
+        return 'booted' if _booted_since(row, since) else 'up'
+
     def _recheck(node_name, phase, info):
         """A node no worker followed through its phase (a restart came in between): what it
         looks like now decides where the run goes on. Returns (phase, in maintenance)."""
@@ -5377,13 +5401,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
         row = row if isinstance(row, dict) else {}
         online = row.get('status') == 'online'
         held = rolling_in_maintenance(mgr, node_name, ns)
-        rebooted = False
-        try:
-            # booted after the phase began: the reboot happened while nobody watched
-            up, since = float(row.get('uptime') or 0), float(info.get('phase_at') or 0)
-            rebooted = bool(up and since and time.time() - up > since)
-        except (TypeError, ValueError):
-            pass
+        # booted after the phase began: the reboot happened while nobody watched
+        rebooted = _booted_since(row, info.get('phase_at'))
         _log(f"Re-check of {node_name}: {'online' if online else 'not online'}, "
              f"{'in' if held else 'not in'} maintenance" + (', rebooted since' if rebooted else ''))
         if not online:
@@ -5626,6 +5645,8 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 _log(f"✓ {node_name} rebooted during the update and is back online")
 
         if todo('rebooting') and node_rebooted and not back_online:
+            # the phase before this one began before the reboot was sent
+            reboot_since = (((rolling_runs.current(mgr) or {}).get('node_state') or {}).get(node_name) or {}).get('phase_at')
             if from_phase == 'rebooting' and recheck:
                 _phase(node_name, 'rebooting', f"Waiting for {node_name} to come back from its reboot (timeout: {reboot_timeout}s)...")
             else:
@@ -5634,16 +5655,14 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
 
             # Phase 1: Wait for offline - not for one that went down while nobody watched
             node_went_offline = from_phase == 'rebooting' and recheck
+            seen_down = False
             offline_waited = 0
             while not node_went_offline and offline_waited < 120 and _status() != 'cancelled':
-                try:
-                    ns = mgr.get_node_status()
-                    if node_name not in ns or ns[node_name].get('status') != 'online':
-                        node_went_offline = True
-                        _log(f"{node_name} is now offline")
-                        break
-                except Exception:
+                look = _reboot_look(node_name, reboot_since)
+                if look in ('down', 'booted'):
                     node_went_offline = True
+                    seen_down = look == 'down'
+                    _log(f"{node_name} is now offline" if seen_down else f"{node_name} has already restarted")
                     break
                 time.sleep(5)
                 offline_waited += 5
@@ -5659,15 +5678,16 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 while waited < reboot_timeout:
                     if _status() == 'cancelled':
                         break
-                    try:
-                        ns = mgr.get_node_status()
-                        if node_name in ns and ns[node_name].get('status') == 'online':
-                            node_back_online = True
-                            _set(drop={'rebooting_nodes': node_name}, log=f"✓ {node_name} back online ({waited}s)")
-                            time.sleep(10)
-                            break
-                    except Exception:
-                        pass
+                    # JB Nov 2026 - online alone is no proof: a node that has not gone down yet says it,
+                    # and on XCP-ng every host does, and the next node was then pulled
+                    look = _reboot_look(node_name, reboot_since)
+                    if look == 'down':
+                        seen_down = True
+                    elif look == 'booted' or (look == 'up' and seen_down):
+                        node_back_online = True
+                        _set(drop={'rebooting_nodes': node_name}, log=f"✓ {node_name} back online ({waited}s)")
+                        time.sleep(10)
+                        break
                     time.sleep(10)
                     waited += 10
                     if waited % 60 == 0:
@@ -5676,7 +5696,7 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                 if not node_back_online and _status() != 'cancelled':
                     status = _hold('reboot_timeout', 'paused_reboot', {
                         'node': node_name, 'timeout': reboot_timeout,
-                        'message': f"{node_name} did not come back online within {reboot_timeout}s. Check manually, then Continue or Cancel."
+                        'message': f"{node_name} was not seen restarting and back online within {reboot_timeout}s. Check manually, then Continue or Cancel."
                     }, {'index': idx, 'phase': 'finishing'}, f"✗ {node_name} reboot timeout ({reboot_timeout}s). Pausing.")
                     if status == 'running':
                         _set(drop={'rebooting_nodes': node_name}, log="▶ Resumed after reboot timeout")
