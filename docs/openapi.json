@@ -20834,6 +20834,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS refused the operation or returned an invalid response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -20940,6 +20943,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS refused the operation or returned an invalid response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -21004,6 +21010,9 @@
           "400": {
             "description": "Bad request"
           },
+          "502": {
+            "description": "PBS refused the operation or returned an invalid response"
+          },
           "401": {
             "description": "Not authenticated"
           },
@@ -21067,6 +21076,9 @@
           },
           "400": {
             "description": "Bad request"
+          },
+          "502": {
+            "description": "PBS refused the operation or returned an invalid response"
           },
           "401": {
             "description": "Not authenticated"
@@ -21328,6 +21340,9 @@
           },
           "400": {
             "description": "Bad request"
+          },
+          "502": {
+            "description": "PBS refused the operation or returned an invalid response"
           },
           "401": {
             "description": "Not authenticated"

@@ -171,6 +171,8 @@ def build(app):
                 op['summary'] = summary
             if description:
                 op['description'] = description
+            if tag == 'pbs' and _uses(fn, ('_pbs_answer',)):
+                op['responses']['502'] = {'description': 'PBS refused the operation or returned an invalid response'}
             if params:
                 op['parameters'] = params
             if method in ('POST', 'PUT', 'PATCH'):

@@ -3,8 +3,11 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+import json
+from pathlib import Path
 
 import pegaprox.globals as ppglobals
+from pegaprox.cli.gen_openapi import build
 
 
 PBS = 'pbs_launch_errors'
@@ -20,6 +23,33 @@ OPERATIONS = [
     (f'/api/pbs/{PBS}/jobs/verify/daily/run', 'run_verify_job'),
     (f'/api/pbs/{PBS}/jobs/prune/daily/run', 'run_prune_job'),
 ]
+
+
+@pytest.mark.parametrize('source', ['generated', 'committed', 'served'])
+@pytest.mark.parametrize('path', [
+    '/api/pbs/{pbs_id}/datastores/{store}/gc',
+    '/api/pbs/{pbs_id}/datastores/{store}/verify',
+    '/api/pbs/{pbs_id}/datastores/{store}/prune',
+    '/api/pbs/{pbs_id}/jobs/{job_type}/{job_id}/run',
+])
+def test_launch_api_reference_documents_the_upstream_failure(api, admin, source, path):
+    """External clients see the same 502 contract as the launch routes return."""
+    if source == 'generated':
+        paths = build(api.app)
+    elif source == 'committed':
+        paths = json.loads((Path(__file__).parents[1] / 'docs/openapi.json').read_text())['paths']
+    else:
+        import pegaprox.api.settings as settings
+        settings._openapi_doc.clear()
+        try:
+            response = admin.get('/api/pegaprox/openapi.json')
+            assert response.status_code == 200
+            paths = response.get_json()['paths']
+        finally:
+            settings._openapi_doc.clear()
+    responses = paths[path]['post']['responses']
+    assert '502' in responses
+    assert {'200', '400', '401', '403'} <= responses.keys()
 
 
 @pytest.fixture
