@@ -348,7 +348,9 @@ def test_opening_a_console_stops_at_a_redirect_on_every_step(net, api, seed, ste
     admin = api.as_user(seed.user('root_adm', role='admin'))
     r = admin.post('/api/clusters/c1/vms/pve1/qemu/100/vnc-poll', json={'action': 'open'})
     assert net.target.seen == []
-    assert r.status_code == 502 and 'redirect' in r.get_json()['error'], r.get_json()
+    # websocket-client 1.9.2 stops at the 3xx itself ('Redirect limit exhausted'), 1.9.0 hands
+    # it back and _refuse_ws_redirect closes it; either way the upgrade names the redirect
+    assert r.status_code == 502 and 'redirect' in r.get_json()['error'].lower(), r.get_json()
 
 
 @pytest.mark.parametrize('code', CODES)
@@ -361,7 +363,7 @@ def test_the_console_upgrade_of_a_token_cluster_keeps_the_token_with_the_endpoin
     admin = api.as_user(seed.user('root_adm', role='admin'))
     r = admin.post('/api/clusters/c1/vms/pve1/qemu/100/vnc-poll', json={'action': 'open'})
     assert net.target.seen == []
-    assert r.status_code == 502 and 'redirect' in r.get_json()['error'], r.get_json()
+    assert r.status_code == 502 and 'redirect' in r.get_json()['error'].lower(), r.get_json()
     assert ('GET', '/api2/json/nodes/pve1/qemu/100/vncwebsocket') in [(mt, p.split('?')[0])
                                                                       for mt, p, _ in endpoint.seen]
 
@@ -392,7 +394,7 @@ def test_the_screenshot_frame_is_not_fetched_through_a_redirect(net, db):
     with pytest.raises(Exception) as caught:
         vms._screenshot_via_rfb(m, 'pve1', 'qemu', 100, timeout=5)
     assert net.target.seen == []
-    assert 'redirect' in str(caught.value)
+    assert 'redirect' in str(caught.value).lower()
 
 
 def test_every_console_upgrade_and_ticket_call_refuses_redirects():
