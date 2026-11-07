@@ -29,7 +29,7 @@ def _task_manager(monkeypatch, rolling):
     m._rolling_update = rolling
     m.nodes_in_maintenance = {'blade1': object()}
     m.asked = []
-    m._wait_for_node_online = lambda node, timeout=600: m.asked.append(node) or True
+    m._wait_for_node_online = lambda node, timeout=600, **kw: m.asked.append(node) or True
     return m
 
 
@@ -91,7 +91,7 @@ def test_the_run_goes_on_without_waiting_through_the_real_task(api, seed, monkey
     fake._rolling_update = None
     real = _updating_manager(True)
     real.asked = []
-    real._wait_for_node_online = lambda node, timeout=600: real.asked.append(node) or True
+    real._wait_for_node_online = lambda node, timeout=600, **kw: real.asked.append(node) or True
 
     def start(node, reboot=True):
         real._rolling_update = fake._rolling_update

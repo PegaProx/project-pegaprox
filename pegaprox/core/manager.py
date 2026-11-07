@@ -13636,14 +13636,15 @@ echo "AGENT_INSTALLED_OK"
             self.logger.error(f"SSH execute error: {e}")
             return -1, '', str(e)
     
-    def _wait_for_node_online(self, node_name: str, timeout: int = 600) -> bool:
+    def _wait_for_node_online(self, node_name: str, timeout: int = 600, since: float = None) -> bool:
         
         self.logger.info(f"Waiting for {node_name} to come back online (timeout: {timeout}s)...")
         start_time = time.time()
         
         # JB Nov 2026 - a node still shutting down answers online, and a rolling update then pulled the
-        # next node. Online only counts once this one was seen down or has booted since the wait began
+        # next node. Online only counts once this one was seen down or has booted since the reboot was sent
         seen_down = False
+        booted_after = since or start_time
         
         while time.time() - start_time < timeout:
             try:
@@ -13651,12 +13652,12 @@ echo "AGENT_INSTALLED_OK"
                 # Force reconnect in case session expired
                 self.session = None  # force new session
                 if self.connect_to_proxmox():
-                    # an empty answer is a failed read, it says nothing about this node
-                    status = self.get_node_status()
-                    node = status.get(node_name)
-                    if status and (not node or node.get('status') != 'online'):
+                    # no row says nothing: a failed read, or its details ran out of time. Only
+                    # offline counts as down, and the uptime shows a node that left the list
+                    node = self.get_node_status().get(node_name) or {}
+                    if node.get('status') == 'offline':
                         seen_down = True
-                    elif node and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - start_time):
+                    elif node.get('status') == 'online' and (seen_down or 0 < (node.get('uptime') or 0) < time.time() - booted_after):
                         self.logger.info(f"[OK] {node_name} is back online!")
                         return True
                 
@@ -13825,6 +13826,7 @@ echo "AGENT_INSTALLED_OK"
                 task.add_output("[SYNC] Initiating reboot / Starte Neustart...")
                 
                 # Reconnect for reboot command
+                reboot_asked_at = time.time()
                 ssh = self._ssh_connect(node_ip)
                 if ssh:
                     try:
@@ -13948,7 +13950,7 @@ echo "AGENT_INSTALLED_OK"
                     # JB Nov 2026 - the reboot timeout of the rolling update this node is in counts here, this
                     # was always 600 s. A node updated by hand meanwhile has nothing to do with that run
                     reboot_timeout = rolling.get('reboot_timeout') if in_run else None
-                    if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600)):
+                    if self._wait_for_node_online(node_name, timeout=int(reboot_timeout or 600), since=reboot_asked_at):
                         task.add_output(f"[OK] {node_name} is back online / ist wieder online!")
                         task.back_online = True
                     else:
