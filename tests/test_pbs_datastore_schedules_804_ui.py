@@ -118,7 +118,8 @@ def test_scheduled_run_refreshes_datastore_last_run_on_poll(browser):
 def test_manual_run_refreshes_jobs_last_run(browser):
     """Run now reloads job status as well as tasks for the selected PBS."""
     reads = dict(READS)
-    reads[('POST', '/api/pbs/p1/jobs/sync/sync-alpha/run')] = (200, {'data': 'UPID:run'})
+    reads[('POST', '/api/pbs/p1/jobs/sync/sync-alpha/run')] = (
+        200, {'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:sync:sync-alpha:root@pam:'})
     app = _App(browser, _FakeServer(role='standalone', extra=reads), clock=True)
     try:
         page = app.page

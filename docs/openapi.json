@@ -20947,7 +20947,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Start garbage collection",
+        "summary": "Start garbage collection, requiring a valid PBS worker UPID.",
+        "description": "PBS refusals and malformed launch responses return 502 before success auditing.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21010,7 +21011,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Start verification",
+        "summary": "Start verification, requiring a valid PBS worker UPID.",
+        "description": "PBS refusals and malformed launch responses return 502 before success auditing.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21073,7 +21075,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Prune old backups",
+        "summary": "Prune old backups, requiring a valid PBS worker UPID.",
+        "description": "PBS refusals and malformed launch responses return 502 before success auditing.",
         "parameters": [
           {
             "name": "pbs_id",
@@ -21333,7 +21336,8 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Manually trigger a PBS job",
+        "summary": "Manually trigger a PBS job, requiring a valid PBS worker UPID.",
+        "description": "PBS refusals and malformed launch responses return 502 before success auditing.",
         "parameters": [
           {
             "name": "pbs_id",

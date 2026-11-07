@@ -32,7 +32,7 @@ class _FakePbs:
 
     def start_gc(self, store):
         self.gc_calls.append(store)
-        return {'data': 'UPID:...'}
+        return {'data': 'UPID:pbs:00001234:0000ABCD:00000001:65000000:garbage_collection:store1:root@pam:'}
 
 
 @pytest.fixture
