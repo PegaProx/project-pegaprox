@@ -1015,24 +1015,35 @@ def _run_xcpng_to_pve(task):
             pass
 
         # start if requested
+        started = False
         if task.start_after:
             try:
                 time.sleep(2)  # give PVE a moment
-                tgt_mgr._api_post(
+                resp = tgt_mgr._api_post(
                     f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{task.target_node}/qemu/{new_vmid}/status/start",
                     data={}
                 )
-                task.log(f"Started VM {new_vmid}")
+                if resp.status_code == 200:
+                    task.log(f"Started VM {new_vmid}")
+                    started = True
+                else:
+                    said = _pve_said(resp)
+                    task.log(f"Auto-start failed: HTTP {resp.status_code}" + (f" - {said}" if said else ''))
             except Exception as e:
                 task.log(f"Auto-start failed: {e}")
 
-        # remove source if requested
+        # remove source if requested, and only for a target that runs: the copy that is known to
+        # work goes last
         if task.remove_source:
-            try:
-                api.VM.destroy(vm_ref)
-                task.log("Source VM destroyed on XCP-ng")
-            except Exception as e:
-                task.log(f"Warning: couldn't remove source VM: {e}")
+            if not (started and _pve_target_runs(tgt_mgr, task.target_node, new_vmid)):
+                task.log(f"remove_source is set, but VM {new_vmid} does not run - the source VM stays on XCP-ng, "
+                         f"remove it there once the target runs")
+            else:
+                try:
+                    api.VM.destroy(vm_ref)
+                    task.log("Source VM destroyed on XCP-ng")
+                except Exception as e:
+                    task.log(f"Warning: couldn't remove source VM: {e}")
 
         task.set_phase('completed')
         task.log(f"Migration complete! VM {task.vm_name} -> PVE VMID {new_vmid}")
@@ -1462,16 +1473,21 @@ def _run_pve_to_xcpng(task):
         task.progress = 95
 
         # start if requested
+        started = False
         if task.start_after:
             try:
                 time.sleep(2)
                 xapi.Async.VM.start(new_vm_ref, False, False)
                 task.log(f"Started VM on XCP-ng")
+                started = True
             except Exception as e:
                 task.log(f"Auto-start failed: {e}")
 
-        # cleanup source
-        if task.remove_source:
+        # cleanup source, once the target runs: the async start above can still fail
+        if task.remove_source and not (started and _xcp_target_runs(xapi, new_vm_ref)):
+            task.log(f"remove_source is set, but VM {task.vm_name} does not run on XCP-ng - the source VM "
+                     f"{task.source_vmid} stays on Proxmox, remove it there once the target runs")
+        elif task.remove_source:
             try:
                 # NS Oct 2026 (#1079) - hours can pass since planning, and a VMID freed in
                 # the meantime may already belong to somebody else's new guest. Destroy only
@@ -1538,6 +1554,36 @@ def _pve_create_done(tgt_mgr, task, resp, new_vmid, volumes):
     task.set_phase('failed', f"Creating VM {new_vmid} did not finish, the source VM stays; the volumes "
                              f"({', '.join(v['vol_id'] for v in volumes)}) are left on {task.target_node}")
     return False
+
+
+def _pve_target_runs(tgt_mgr, node, vmid, wait=60, poll=2):
+    """True once the migrated VM reports running on Proxmox, False after wait seconds."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            r = tgt_mgr._api_get(f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/nodes/{node}"
+                                 f"/qemu/{vmid}/status/current")
+            if r.status_code == 200 and (r.json().get('data') or {}).get('status') == 'running':
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
+def _xcp_target_runs(xapi, vm_ref, wait=60, poll=2):
+    """True once the migrated VM is Running on XCP-ng, False after wait seconds."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if str(xapi.VM.get_power_state(vm_ref)) == 'Running':
+                return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
 
 
 def _attach_pve_volumes(tgt_mgr, task, new_vmid, volumes):

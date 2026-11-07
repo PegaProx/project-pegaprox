@@ -245,6 +245,7 @@ def _xapi():
     x.VM.clone.return_value = 'newvm'
     x.VM.get_VBDs.return_value = []
     x.VM.get_uuid.return_value = 'new-uuid'
+    x.VM.get_power_state.return_value = 'Running'
     return x
 
 
@@ -284,9 +285,10 @@ def pve_to_xcp(db, monkeypatch):
         monkeypatch.setattr(xhm, '_connect_ssh', lambda *a, **k: _Ssh())
         monkeypatch.setattr(xhm.ha_transport, 'http', _put)
         monkeypatch.setattr(xhm.time, 'sleep', lambda s: None)
+        # the source only goes once the target runs, so it is started and runs here
         task = xhm.XHMigrationTask('t1079', 'pve_to_xcpng', 'pve1', 'pve-a', '100', 'xcp1', '',
                                    'sr1', config={'remove_source': remove_source,
-                                                  'start_after': False})
+                                                  'start_after': True})
         xhm._run_pve_to_xcpng(task)
         return task, [c for c in node_cmds if 'qm destroy' in c]
 
