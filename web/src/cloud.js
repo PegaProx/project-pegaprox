@@ -2378,7 +2378,12 @@
                 if (res.nodes && typeof res.nodes === 'object') return Object.entries(res.nodes).map(([node, v]) => ({ node, ...(v || {}) }));
                 return [];
             }, [res]);
-            const totalVulns = nodes.reduce((a, n) => a + (((n.packages || n.vulnerabilities || n.cves || []).length) || Number(n.count) || 0), 0);
+            // JB Nov 2026 - packages is always there and holds pending updates, so an empty one hid the CVEs behind it and a
+            // node with CVEs read as clean. Without debsecan the security updates are the closest there is
+            const nodeVulns = (n) => (n.cves && n.cves.length ? n.cves
+                : (n.vulnerabilities && n.vulnerabilities.length ? n.vulnerabilities
+                : (n.debsecan_available ? [] : (n.packages || []).filter(p => p.security))));
+            const totalVulns = nodes.reduce((a, n) => a + (nodeVulns(n).length || Number(n.count) || 0), 0);
             return (
                 <div className="cloud-body">
                     <CloudPageHeader title={t('cveScanner') || 'CVE Scanner'} sub={t('cloud.cveSub') || 'Package vulnerability scan (debsecan)'}>
@@ -2394,17 +2399,17 @@
                                 <CloudKpiCard icon={totalVulns ? 'AlertTriangle' : 'Shield'} value={totalVulns} label={t('cloud.cveVulns') || 'Vulnerabilities'} accent={totalVulns ? '#ef4444' : '#22c55e'} />
                             </div>
                             {nodes.map((n, i) => {
-                                const pkgs = n.packages || n.vulnerabilities || n.cves || [];
+                                const pkgs = nodeVulns(n);
                                 return (
                                     <div className="cloud-card cloud-table-card" key={n.node || i}>
                                         {cloudHead({ icon: <Icons.Cpu />, title: n.node || ('node ' + i), count: pkgs.length })}
                                         {n.error ? <div className="cloud-empty" style={{ padding: 14 }}>{n.error}</div> : (pkgs.length ? <div className="cloud-table-scroll"><table className="cloud-table">
                                             <thead><tr><th>{t('cloud.colPackage') || 'Package'}</th><th>{t('cloud.colInstalled') || 'Installed'}</th><th>CVE</th><th>{t('cloud.colSeverity') || 'Severity'}</th></tr></thead>
-                                            <tbody>{pkgs.slice(0, 200).map((p, j) => { const sev = String(p.severity || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
+                                            <tbody>{pkgs.slice(0, 200).map((p, j) => { const level = p.severity || p.urgency; const sev = String(level || '').toLowerCase(); return (<tr className="cloud-table-row cloud-table-row-static" key={j}>
                                                 <td className="cloud-table-mono">{p.package || p.pkg || p.name || '—'}</td>
-                                                <td className="cloud-cell-muted">{p.installed || p.version || '—'}</td>
+                                                <td className="cloud-cell-muted">{p.installed || p.version || p.current || '—'}</td>
                                                 <td className="cloud-table-mono">{p.cve || p.id || '—'}</td>
-                                                <td>{p.severity ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{p.severity}</span> : <span className="cloud-cell-muted">—</span>}</td>
+                                                <td>{level ? <span className={'cloud-chip ' + (sev.indexOf('high') >= 0 || sev.indexOf('crit') >= 0 ? 'cloud-chip-err' : 'cloud-chip-soft')}>{level}</span> : <span className="cloud-cell-muted">—</span>}</td>
                                             </tr>); })}</tbody>
                                         </table></div> : <div className="cloud-empty" style={{ padding: 14 }}>{t('cloud.cveClean') || 'No known vulnerabilities.'}</div>)}
                                     </div>
