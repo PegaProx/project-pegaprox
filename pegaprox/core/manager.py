@@ -13930,6 +13930,8 @@ echo "AGENT_INSTALLED_OK"
                         except:
                             pass
                         ssh = None
+                else:
+                    task.add_output(f"[ERROR] No connection to {node_name} for the reboot, it was not rebooted / Keine Verbindung, kein Neustart")
 
                 
                 # JB Nov 2026 - a node that got no reboot never goes down, and the wait now asks for that

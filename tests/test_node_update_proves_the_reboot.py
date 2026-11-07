@@ -158,6 +158,7 @@ def test_a_node_that_needs_no_reboot_does_not_fail_the_update(monkeypatch):
     task = _run_task(m)
     assert task.status == 'completed', task.error
     assert task.reboot_issued is False and task.back_online is False
+    assert not any('[ERROR]' in line['text'] for line in task.output_lines)
 
 
 def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
@@ -165,6 +166,8 @@ def test_no_connection_for_the_reboot_does_not_fail_the_update(monkeypatch):
     task = _run_task(m)
     assert task.status == 'completed', task.error
     assert task.reboot_issued is False
+    # the update stands, but this reboot was wanted and did not happen: say so
+    assert any('[ERROR]' in line['text'] and 'not rebooted' in line['text'] for line in task.output_lines)
 
 
 def test_a_sent_reboot_is_still_waited_for(monkeypatch):
