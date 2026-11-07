@@ -522,6 +522,8 @@ def execute_scheduled_action(action):
     if not mgr.is_connected:
         logging.error(f"[SCHEDULER] Cluster {cluster_id} not connected")
         return
+    # outside a request the audit cannot tell the cluster, and the cluster audit and timeline go by its id
+    where = {'cluster': getattr(mgr.config, 'name', cluster_id), 'cluster_id': cluster_id}
     
     try:
         # MK: Handle rolling_update action type separately
@@ -544,7 +546,7 @@ def execute_scheduled_action(action):
                             f"{action.get('created_by')!r} may no longer {action_type} {vm_type}/{vmid}")
             log_audit('scheduler', 'scheduled.refused',
                       f"Scheduled {action_type} of VM {vmid} in {cluster_id} not run: its creator "
-                      f"{action.get('created_by')!r} may no longer do it")
+                      f"{action.get('created_by')!r} may no longer do it", **where)
             return
 
         # Find the node where the VM is running
@@ -577,7 +579,7 @@ def execute_scheduled_action(action):
             url = f"https://{host}:{port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot"
             response = mgr._create_session().post(url, data={'snapname': snap_name})
             logging.info(f"[SCHEDULER] Snapshot result: {response.status_code}")
-            _audit_scheduled(action_type, vmid, cluster_id, response)
+            _audit_scheduled(action_type, vmid, cluster_id, response, where)
             return
         else:
             logging.error(f"[SCHEDULER] Unknown action: {action_type}")
@@ -586,22 +588,23 @@ def execute_scheduled_action(action):
         response = mgr._create_session().post(url)
         logging.info(f"[SCHEDULER] {action_type} result: {response.status_code}")
         
-        _audit_scheduled(action_type, vmid, cluster_id, response)
+        _audit_scheduled(action_type, vmid, cluster_id, response, where)
         
     except Exception as e:
         logging.error(f"[SCHEDULER] Failed to execute {action_type}: {e}")
         log_audit('scheduler', f'scheduled.{action_type}.failed',
-                  f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: {e}")
+                  f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: {e}", **where)
 
 
-def _audit_scheduled(action_type, vmid, cluster_id, response):
+def _audit_scheduled(action_type, vmid, cluster_id, response, where):
     # JB Nov 2026 - it said executed whatever Proxmox answered, and a snapshot said nothing at all
     if response.status_code == 200:
-        log_audit('scheduler', f'scheduled.{action_type}', f"Scheduled {action_type} executed on VM {vmid} in {cluster_id}")
+        log_audit('scheduler', f'scheduled.{action_type}', f"Scheduled {action_type} executed on VM {vmid} in {cluster_id}",
+                  **where)
         return
     logging.error(f"[SCHEDULER] {action_type} of {vmid} refused: HTTP {response.status_code}")
     log_audit('scheduler', f'scheduled.{action_type}.failed',
-              f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: HTTP {response.status_code}")
+              f"Scheduled {action_type} failed on VM {vmid} in {cluster_id}: HTTP {response.status_code}", **where)
 
 
 def _channel_ids(value):

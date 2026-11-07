@@ -40,3 +40,29 @@ def test_a_refusal_says_failed_with_the_status(api, seed, db, action):
 def test_an_exception_says_failed_too(api, seed, db):
     got = _run(api, seed, 'stop', boom=OSError('no route'))
     assert len(got) == 1 and got[0][0] == 'scheduled.stop.failed' and 'no route' in got[0][1], got
+
+
+@pytest.mark.parametrize('action,status,boom,creator,said', [
+    ('stop', 200, None, 'adm', 'scheduled.stop'),
+    ('stop', 500, None, 'adm', 'scheduled.stop.failed'),
+    ('snapshot', 500, None, 'adm', 'scheduled.snapshot.failed'),
+    ('stop', 200, OSError('no route'), 'adm', 'scheduled.stop.failed'),
+    ('stop', 200, None, 'gone', 'scheduled.refused'),
+])
+def test_the_row_belongs_to_its_cluster(api, seed, db, action, status, boom, creator, said):
+    # read back the way a reader confined to the cluster gets it: by the row's cluster id
+    seed.user('adm', role='admin')
+    mgr = api.make_fake_manager(cluster_id='c1', get_vm_resources=[{'vmid': 100, 'node': 'n1', 'type': 'qemu'}])
+    mgr.is_connected = True
+    mgr.host, mgr.api_port = 'h', 8006
+    mgr.config.name = 'Lab'
+    post = mgr._create_session.return_value.post
+    if boom:
+        post.side_effect = boom
+    else:
+        post.return_value = types.SimpleNamespace(status_code=status, text='')
+    api.set_manager('c1', mgr)
+    sch.execute_scheduled_action({'id': 1, 'cluster_id': 'c1', 'vmid': 100, 'vm_type': 'qemu', 'action': action,
+                                  'created_by': creator})
+    rows = [r for r in db.get_audit_log(scope=(['c1'], 'someone-else')) if r['action'].startswith('scheduled.')]
+    assert [(r['action'], r['cluster_id'], r['cluster']) for r in rows] == [(said, 'c1', 'Lab')], rows
