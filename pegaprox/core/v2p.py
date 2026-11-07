@@ -93,6 +93,10 @@ def folder_copy_refusal(transfer_mode, why):
 
 _BASIC_AUTH_HEADER = re.compile(r'(authorization:[ \t]*basic[ \t]+)[^\s]+', re.I)
 
+# the cache modes of a PVE drive; native AIO opens the disk with O_DIRECT, which only these two keep
+DISK_CACHE_MODES = ('none', 'writethrough', 'writeback', 'directsync', 'unsafe')
+DIRECT_CACHE_MODES = ('none', 'directsync')
+
 
 class V2PMigrationTask:
     """Tracks VMware -> Proxmox migration through all phases.
@@ -184,8 +188,12 @@ class V2PMigrationTask:
         self.memory = self.config.get('memory', 0)
         self.scsihw_override = self.config.get('scsihw', '')
         self.disk_format = self.config.get('disk_format', 'raw')
-        self.disk_cache = self.config.get('disk_cache', 'none')
-        self.disk_iothread = self.config.get('disk_iothread', True)
+        # JB Nov 2026 (#1270) - both end up in the root `qm set` / conf line of the disk:
+        # literal PVE tokens only, anything else counts as unset
+        _cache = str(self.config.get('disk_cache', '') or '').strip().lower()
+        self.disk_cache = _cache if _cache in DISK_CACHE_MODES else ''
+        _iot = self.config.get('disk_iothread', True)
+        self.disk_iothread = _iot if isinstance(_iot, bool) else str(_iot).strip().lower() in ('1', 'true', 'on')
         self.disk_discard = self.config.get('disk_discard', 'on')
         self.disk_ssd = self.config.get('disk_ssd', False)
         # #598 — optional per-VM QEMU aio backend for the FINAL target disk(s).
@@ -239,7 +247,18 @@ class V2PMigrationTask:
         # aio_mode is whitelisted in __init__ to one of three literal tokens, so
         # the returned suffix can never carry shell/config metacharacters. Returns
         # '' by default (no behaviour change; PVE default aio=io_uring).
-        return f',aio={self.aio_mode}' if getattr(self, 'aio_mode', '') else ''
+        opts = ''
+        # JB Nov 2026 (#1270) - PVE runs a disk in its own IO thread only on VirtIO Block or on
+        # SCSI behind virtio-scsi-single; elsewhere the flag is ignored or refused
+        bus, hw = getattr(self, '_attach_bus', ''), getattr(self, '_attach_scsihw', '')
+        if getattr(self, 'disk_iothread', False) and (bus == 'virtio' or (bus == 'scsi' and hw == 'virtio-scsi-single')):
+            opts += ',iothread=1'
+        # none is what PVE does without the option
+        if getattr(self, 'disk_cache', '') in DISK_CACHE_MODES and self.disk_cache != 'none':
+            opts += f',cache={self.disk_cache}'
+        if getattr(self, 'aio_mode', ''):
+            opts += f',aio={self.aio_mode}'
+        return opts
 
     def _redact(self, text):
         # NS Oct 2026 (#1098) - tool output (qemu-img, ssh) can echo the ESXi password,
@@ -968,6 +987,8 @@ def _run_v2p_migration(task):
         # boots fine via the generic --{disk_bus} path below.
         detected_bus = hw.get('disk_bus', 'scsi')
         disk_bus = task.disk_bus if task.disk_bus in ('scsi', 'sata', 'ide', 'virtio') else detected_bus
+        # every attach of a final disk reads these for its drive options (#1270)
+        task._attach_bus, task._attach_scsihw = disk_bus, scsihw
         
         # Network: match VMware (vmxnet3, E1000, E1000e)
         detected_nic = hw.get('nic_type_pve', 'e1000')
@@ -1009,7 +1030,6 @@ def _run_v2p_migration(task):
             'vga': vga_type,
         }
         # optional fields — only set if user configured them
-        disk_cache = getattr(task, 'disk_cache', '') or ''
         if getattr(task, 'numa', False):
             pve_config['numa'] = 1
         if getattr(task, 'agent', True):
