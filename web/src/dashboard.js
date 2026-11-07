@@ -20232,7 +20232,10 @@
                                 full: cloneConfig.full,
                                 target_node: cloneConfig.target_node,
                                 target_storage: cloneConfig.target_storage,
-                                description: cloneConfig.description
+                                description: cloneConfig.description,
+                                // JB Nov 2026 - the dialog asks for these and the route applies them, and they stopped here
+                                ...Object.fromEntries(['ciuser', 'cipassword', 'sshkeys', 'ipconfig0', 'nameserver', 'searchdomain']
+                                    .filter(k => cloneConfig[k]).map(k => [k, cloneConfig[k]]))
                             })
                         }
                     );
@@ -20240,6 +20243,7 @@
                     if (response && response.ok) {
                         const result = await response.json();
                         addToast(result.message || `${t('cloneStarted') || 'Clone started'}: ${vm.vmid} ↑ ${cloneConfig.newid}`);
+                        if (result.cloudinit_warning) addToast(result.cloudinit_warning, 'error');
                         setDashCloneVm(null);
                         setTimeout(() => fetchClusterResources(selectedCluster.id), 3000);
                         return true;   // #702 — signal success so the table-view modal can self-close
