@@ -3727,7 +3727,10 @@ class XcpngManager:
                 task.phase = 'wait_online'
                 task.status = 'waiting_online'
                 task.add_output("Waiting for node to come back online...")
-                online = self._wait_for_host_online(node_name, timeout=300)
+                rolling = getattr(self, '_rolling_update', None) or {}
+                in_run = rolling.get('status') == 'running' and rolling.get('current_node') == node_name
+                reboot_timeout = rolling.get('reboot_timeout') if in_run else None
+                online = self._wait_for_host_online(node_name, timeout=int(reboot_timeout or 300))
                 task.back_online = bool(online)
                 if online:
                     task.add_output(f"{node_name} is back online")

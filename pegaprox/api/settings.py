@@ -5597,7 +5597,9 @@ def run_rolling_update(mgr, cluster_id, who, resume=None):
                     _note = ' (reboot sent)' if last_phase == 'wait_online' and getattr(update_task, 'reboot_issued', False) else ''
                     _log(f"Update phase: {last_phase}{_note}")
                 time.sleep(10)
-                update_waited += 10
+                # the reboot has its own timeout, which the task keeps; this one is for the install
+                if getattr(update_task, 'phase', '') != 'wait_online':
+                    update_waited += 10
 
             if _status() == 'cancelled' and update_task.status not in ('completed', 'failed'):
                 _log(f"Cancelled while {node_name} updates - the update goes on on the node until it is done")
