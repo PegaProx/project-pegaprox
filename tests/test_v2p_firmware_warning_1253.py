@@ -3,7 +3,6 @@ import re
 from types import SimpleNamespace
 
 import pytest
-from playwright.sync_api import expect
 
 from pegaprox.core.vmware import VMwareManager
 from test_ha_ui import _App, _FakeServer, browser, ESXI_READS, SSE_TOKEN, CLUSTER, VM, _blocks, LANGS  # noqa: F401
@@ -22,6 +21,8 @@ def _source(firmware):
 @pytest.mark.parametrize('firmware', ['efi', 'bios', ''])
 def test_runtime_firmware_choices_keep_the_warning_in_sync(browser, layout, firmware):
     """Drive both selects in the actual built wizard after the plan has loaded."""
+    from playwright.sync_api import expect
+
     source = _source(firmware)
     plan = {'source': source, 'targets': [{'cluster_id': 'c1', 'cluster_name': 'Testi',
             'nodes': ['pve1'], 'storages': {'pve1': ['local-lvm']}}], 'esxi_host': 'esx01.lab'}
