@@ -101,3 +101,42 @@ def test_a_guest_that_left_during_the_wait_is_fine(mgr):
     mgr.get_vm_resources = lambda *a, **k: next(answers, last)
     task = _evacuate(mgr)
     assert task.status == 'completed' and task.failed_vms == []
+
+
+def test_a_node_list_that_comes_back_on_a_second_read_still_fails(mgr):
+    # the target pick read nothing, a second read recovered and the guests were called a single node's
+    reads = iter([{}, dict(NODES)])
+    mgr.get_node_status = lambda: next(reads, dict(NODES))
+    mgr.get_vm_resources = lambda *a, **k: [dict(GUEST)]
+    task = _evacuate(mgr)
+    assert task.status == 'failed' and 'node list' in task.error, (task.status, task.error)
+    mgr.migrate_vm.assert_not_called()
+
+
+def test_a_node_list_without_the_node_itself_fails(mgr):
+    # a node whose details ran out of time is left out of the list; its peer is offline
+    mgr.get_node_status = lambda: {'n2': {'status': 'offline', 'score': 0}}
+    mgr.get_vm_resources = lambda *a, **k: [dict(GUEST)]
+    task = _evacuate(mgr)
+    assert task.status == 'failed' and 'does not contain n1' in task.error, (task.status, task.error)
+    mgr.migrate_vm.assert_not_called()
+
+
+def test_the_target_comes_from_the_node_list_it_is_given(mgr):
+    mgr.get_node_status = MagicMock(return_value={})
+    got = PegaProxManager.get_best_target_node(mgr, exclude_nodes=['n1'], node_status=dict(NODES))
+    assert got == 'n2'
+    mgr.get_node_status.assert_not_called()
+
+
+def test_an_unread_list_after_the_wait_is_no_proof_once_a_failed_move_lands(mgr):
+    # web could not be moved and a second guest is counted on the node. The read that would name
+    # it is unread, then the CRM finishes the move of web: the second guest is still there
+    other = dict(GUEST, vmid=101, name='db')
+    reads = iter([[dict(GUEST)], [dict(GUEST)], UnreadList(), [dict(GUEST, node='n2'), other]])
+    mgr.get_vm_resources = lambda *a, **k: next(reads)
+    mgr._count_vms_on_node = lambda node: 2
+    mgr.migrate_vm = MagicMock(return_value=False)
+    task = _evacuate(mgr)
+    assert task.status == 'completed_with_errors', (task.status, task.error, task.failed_vms)
+    assert [f['vmid'] for f in task.failed_vms] == [None] and 'verify' in task.failed_vms[0]['error']

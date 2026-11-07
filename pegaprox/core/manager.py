@@ -3628,7 +3628,7 @@ class PegaProxManager:
         return selected
     
     def get_best_target_node(self, exclude_nodes: List[str] = None, vmid: int = None,
-                             allowed_nodes=None, pin_mode: str = 'strict') -> Optional[str]:
+                             allowed_nodes=None, pin_mode: str = 'strict', node_status=None) -> Optional[str]:
         """Find the best target node for migration
 
         LW: Now also excludes nodes configured in excluded_nodes (like ProxLB)
@@ -3668,7 +3668,9 @@ class PegaProxManager:
         if config_excluded:
             self.logger.debug(f"Excluding configured nodes from balancing: {config_excluded}")
         
-        node_status = self.get_node_status()
+        # node_status: a read the caller already decided on, used as it is
+        if node_status is None:
+            node_status = self.get_node_status()
         
         # Filter available nodes
         available_nodes = [
@@ -3898,9 +3900,12 @@ class PegaProxManager:
         that cannot or does not move stays where it is with the reason in
         task.templates_left; it never fails the evacuation, a template has nothing running
         that the node's reboot could take down."""
-        if not templates:
+        if not templates or self._evacuation_called_off(node_name, task):
             return
         for row in self.template_placement(templates):
+            # each one is a move of its own, none starts once the node has left maintenance
+            if self._evacuation_called_off(node_name, task):
+                return
             vmid, name = row['vmid'], row['name']
             task.current_vm = {'vmid': vmid, 'name': name}
             reason = row['reason']
@@ -4873,6 +4878,9 @@ class PegaProxManager:
             task.allow_local_disks = bool(allow_local_disks)
             task.migrate_templates = bool(migrate_templates)   # #763
             task.relax_anti_affinity = bool(relax_anti_affinity) and not skip_evacuation   # #954
+            # its evacuation stops once a cancel or an exit takes it off the node, even one
+            # that lands before the thread has started
+            task._registered = True
             self.nodes_in_maintenance[node_name] = task
 
         self.logger.info(f"[MAINT] Entering maintenance mode for node: {node_name}"
@@ -5307,9 +5315,28 @@ class PegaProxManager:
             self.logger.warning(f"[MAINT] native HA error on {node_name}: {e}")
             return False
 
+    def _evacuation_called_off(self, node_name, task):
+        """True once a cancel or an exit of maintenance took the task off the node, and the
+        task then says cancelled. A task that was never registered for the node is not checked."""
+        if not getattr(task, '_registered', False):
+            return False
+        if (getattr(self, 'nodes_in_maintenance', None) or {}).get(node_name) is task:
+            return False
+        if task.status != 'cancelled':
+            self.logger.info(f"[MAINT] {node_name} left maintenance, stopping its evacuation")
+        task.status = 'cancelled'
+        task.pending_vms = []
+        task.current_vm = None
+        return True
+
     def _evacuate_node(self, node_name: str, task: MaintenanceTask):
         # move all VMs off this node
+        # a caller that registered the task itself, not through enter_maintenance_mode
+        if (getattr(self, 'nodes_in_maintenance', None) or {}).get(node_name) is task:
+            task._registered = True
         try:
+            if self._evacuation_called_off(node_name, task):
+                return
             task.status = 'evacuating'
 
             # Get all VMs on this node
@@ -5337,7 +5364,8 @@ class PegaProxManager:
             if task.total_vms == 0:
                 self.logger.info(f"[OK] No running VMs on {node_name}, maintenance mode ready")
                 self._evacuate_templates(node_name, task, templates)
-                task.status = 'completed'
+                if not self._evacuation_called_off(node_name, task):
+                    task.status = 'completed'
                 return
 
             self.logger.info(f"[PKG] Found {task.total_vms} VMs to evacuate from {node_name}")
@@ -5350,13 +5378,16 @@ class PegaProxManager:
             # case up front and skip evacuation: a single node can't live-migrate its
             # guests, so maintenance just flags the node (guests stay running; the admin
             # owns any reboot downtime).
-            if self.get_best_target_node(exclude_nodes=[node_name]) is None:
-                # a single node still lists itself: no nodes at all means the read failed
-                if not self.get_node_status():
-                    task.status = 'failed'
-                    task.error = f"The node list could not be read, nothing was moved off {node_name}"
-                    self.logger.error(f"[MAINT] {task.error}")
-                    return
+            # one read decides both: a node list without this node is a failed or partial read,
+            # not a single node, and a second read could answer differently
+            nodes = self.get_node_status()
+            if node_name not in nodes:
+                task.status = 'failed'
+                task.error = (f"The node list could not be read or does not contain {node_name}, "
+                              f"nothing was moved off {node_name}")
+                self.logger.error(f"[MAINT] {task.error}")
+                return
+            if self.get_best_target_node(exclude_nodes=[node_name], node_status=nodes) is None:
                 self.logger.warning(
                     f"[MAINT] No other online node to evacuate {task.total_vms} guest(s) from "
                     f"{node_name} (single-node cluster or all peers offline) — skipping "
@@ -5366,7 +5397,8 @@ class PegaProxManager:
                 task.note = (f"Single node: {task.total_vms} guest(s) not evacuated — no other "
                              f"node to migrate to. They stay running (a reboot will take them down).")
                 self._evacuate_templates(node_name, task, templates)
-                task.status = 'completed'
+                if not self._evacuation_called_off(node_name, task):
+                    task.status = 'completed'
                 return
 
             # Sort VMs by memory (smallest first for faster evacuation)
@@ -5375,14 +5407,8 @@ class PegaProxManager:
 
             # JB Nov 2026 - a cancel or an exit of maintenance takes the task off the node. This thread went on moving every
             # guest off a node that was no longer in maintenance
-            in_maintenance = getattr(self, 'nodes_in_maintenance', None) or {}
-            started_here = in_maintenance.get(node_name) is task
             for vm in node_vms:
-                if started_here and in_maintenance.get(node_name) is not task:
-                    self.logger.info(f"[MAINT] {node_name} left maintenance, stopping its evacuation")
-                    task.pending_vms = []
-                    task.status = 'cancelled'
-                    task.current_vm = None
+                if self._evacuation_called_off(node_name, task):
                     return
                 vm_name = vm.get('name', 'unnamed')
                 vmid = vm.get('vmid')
@@ -5465,6 +5491,9 @@ class PegaProxManager:
                             "--with-local-disks (this can take a while on big VMs)"
                         )
 
+                # picking the target takes reads: an exit meanwhile starts no further move
+                if self._evacuation_called_off(node_name, task):
+                    return
                 self.logger.info(f"[SYNC] Evacuating {vm_name} (VMID: {vmid}) to {target_node}")
 
                 # MK: #78 — use longer timeout for evacuations. Local storage
@@ -5496,6 +5525,8 @@ class PegaProxManager:
                 while waited < 300:
                     time.sleep(10)
                     waited += 10
+                    if self._evacuation_called_off(node_name, task):
+                        return
                     remaining = self._count_vms_on_node(node_name)
                     if remaining == 0:
                         self.logger.info(f"[OK] All VMs cleared from {node_name} after {waited}s")
@@ -5528,6 +5559,8 @@ class PegaProxManager:
 
             # after the running guests, before the status the rolling update waits for
             self._evacuate_templates(node_name, task, templates)
+            if self._evacuation_called_off(node_name, task):
+                return
 
             if task.off_pin_vms:
                 _names = ', '.join(f"{o['name']} ({o['vmid']})" for o in task.off_pin_vms)
@@ -5558,17 +5591,20 @@ class PegaProxManager:
     
     def _note_guests_left(self, node_name, task, remaining):
         known = {f.get('vmid') for f in task.failed_vms}
-        if remaining < 0:
-            task.failed_vms.append({'vmid': None, 'name': f'guests on {node_name}',
-                                    'error': 'Could not verify that the node is empty'})
-            return
         if remaining == 0:
             return
         try:
-            left = [v for v in self.get_vm_resources() if v.get('node') == node_name and v.get('status') == 'running'
-                    and v.get('type') in ('qemu', 'lxc') and v.get('vmid') not in known]
+            vms = self.get_vm_resources() if remaining > 0 else None
         except Exception:
-            left = []
+            vms = None
+        # nothing to name the counted guests by: a marker without a vmid, which the recheck of
+        # the failed moves cannot clear when an earlier failure has left the node meanwhile
+        if vms is None or getattr(vms, 'unavailable', False):
+            task.failed_vms.append({'vmid': None, 'name': f'guests on {node_name}',
+                                    'error': 'Could not verify that the node is empty'})
+            return
+        left = [v for v in vms if v.get('node') == node_name and v.get('status') == 'running'
+                and v.get('type') in ('qemu', 'lxc') and v.get('vmid') not in known]
         for vm in left:
             task.failed_vms.append({'vmid': vm.get('vmid'), 'name': vm.get('name', 'VM'), 'error': 'Still on the node after the wait'})
         if not left and not known:
@@ -13883,7 +13919,8 @@ echo "AGENT_INSTALLED_OK"
                 # a kernel update ended as success without its reboot
                 if not ssh:
                     task.add_output(f"[ERROR] Could not connect to send the reboot / Keine Verbindung fuer den Neustart: {node_name}")
-                    task.error = "The reboot could not be sent: no SSH connection to the node"
+                    why = failure.get('detail') or failure.get('kind')
+                    task.error = "The reboot could not be sent: no SSH connection to the node" + (f" ({why})" if why else '')
                     task.status = 'failed'
                     task.phase = 'reboot_failed'
                     task.completed_at = datetime.now()
