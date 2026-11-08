@@ -6062,7 +6062,7 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-img-nums { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         @media (max-width: 820px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-img-nums { grid-template-columns: minmax(0, 1fr); } }
 
-        /* -- 43. blueprints above the template library (#1220): the list with its actions, the editor with its NIC rows, the deploy dialog and the progress of a deploy -- */
+        /* -- 43. blueprints above the template library (#1220): the list with its actions, the editor with its source, its grids and NIC rows, the deploy dialog and the progress of a deploy -- */
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp { display: flex; flex-direction: column; gap: 10px; min-width: 0; margin-bottom: 14px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-name { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6071,6 +6071,16 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-acts { display: inline-flex; align-items: center; gap: 4px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-fine { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--cr-text-muted); overflow-wrap: anywhere; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-editor, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-deploy { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-source { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-source .cr-seg { flex-wrap: wrap; max-width: 100%; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-top { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 1fr); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-hw { grid-template-columns: minmax(64px, 0.5fr) minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1.4fr); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-ci { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-opts { display: flex; flex-wrap: wrap; gap: 8px 24px; min-width: 0; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-src { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; line-height: 1.25; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-src > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-src-vmid { font-size: 11.5px; color: var(--cr-text-muted); }
+        body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-warns { margin: 4px 0 0; padding-left: 16px; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-unit { display: flex; gap: 6px; min-width: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-field .cr-bp-unit .cr-input { flex: 1 1 auto; min-width: 0; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-field .cr-bp-unit .cr-select { flex: 0 0 72px; width: 72px; }
@@ -6095,6 +6105,8 @@
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-logbox > summary { font-size: 12px; color: var(--cr-accent); cursor: pointer; }
         body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-log { margin: 6px 0 0; max-height: 220px; overflow: auto; padding: 6px 8px; font-family: var(--font-mono); font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--cr-text-secondary); background: var(--cr-bg-sunken); border: 1px solid var(--cr-border-secondary); border-radius: 4px; }
         @media (max-width: 820px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-nic { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-bp-nic-id { grid-column: 1 / -1; } }
+        @media (max-width: 820px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-top, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-hw, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-ci { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } }
+        @media (max-width: 520px) { body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-top, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-hw, body[data-layout="corporate"][data-corp-variant="redesigned"] .cr-nc-form.cr-bp-grid-ci { grid-template-columns: minmax(0, 1fr); } }
 
         /* -- 14. phones: the drawer and the wrapped header of #189 stay as they are -- */
         @media (max-width: 820px) {
