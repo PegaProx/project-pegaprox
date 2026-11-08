@@ -128,6 +128,7 @@ def test_a_blueprint_is_saved_and_listed_as_sent(admin):
     ({'searchdomain': 'bad_domain!'}, 'searchdomain'),
     ({'tags': ['Web Server']}, 'tags'),
     ({'start': 'yes'}, 'start'),
+    ({'cores': '\u00b2'}, 'cores'),       # a superscript two: isdigit() says yes, int() says no
 ])
 def test_a_blueprint_the_server_would_send_wrong_is_refused_at_the_field(admin, over, field):
     r = _create(admin, **over)
@@ -293,6 +294,20 @@ def test_a_deploy_without_a_template_builds_one_through_the_library(lab, db, no_
     lib = dict(db.conn.execute('SELECT * FROM cloud_init_deployments WHERE id = ?', (build['dep_id'],)).fetchone())
     # the library lists the build like its own
     assert (lib['node'], lib['template_id'], lib['vmid'], lib['status']) == ('pve1', 'debian-12', build['vmid'], 'queued')
+
+
+def test_a_shared_template_elsewhere_serves_a_shared_target_storage_only(api, admin, db, no_thread):
+    # PVE clones onto another node into shared storage only; into the node's own storage
+    # the node gets a template of its own first
+    _built(db, 9001, 'pve2', 'ceph')
+    api.set_manager('c1', _mgr([_template(9001, 'pve2')], shared=['ceph']))
+    bid = _create(admin).get_json()['blueprint']['id']
+    r = _deploy(admin, bid, vmid=150, storage='ceph')
+    assert r.status_code == 202 and r.get_json()['build_needed'] is False, r.get_json()
+    assert no_thread[0][7]['vmid'] == 9001 and no_thread[0][8] is None
+    r = _deploy(admin, bid, vmid=151, name='web-02')
+    assert r.status_code == 202 and r.get_json()['build_needed'] is True, r.get_json()
+    assert no_thread[1][7] is None and no_thread[1][8]['vmid'] not in (151, 9001)
 
 
 @pytest.mark.parametrize('over,code,field', [

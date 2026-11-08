@@ -44647,7 +44647,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword? (required for Windows), start?, template_vmid? (a template blueprint: required until one is remembered for the cluster)}. A library blueprint clones the library's template of the image on that node or shared storage, or builds one on the node first; a template blueprint clones the PVE template, remembered for the cluster when the caller may edit the blueprint. The NIC bridges have to be on the node or SDN VNets, a Windows deploy needs qemu-server 8.2.4 on it. 202 with the deployment to poll and warnings: [str] (also in its log).",
+        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword? (required for Windows), start?, template_vmid? (a template blueprint: required until one is remembered for the cluster)}. A library blueprint clones the library's template of the image on that node or shared storage, or builds one on the node first; a template blueprint clones the PVE template, remembered for the cluster when the caller may edit the blueprint. A clone from another node goes into shared storage only, as PVE has it. The NIC bridges have to be on the node or SDN VNets, a Windows deploy needs qemu-server 8.2.4 on it. 202 with the deployment to poll and warnings: [str] (also in its log).",
         "parameters": [
           {
             "name": "bp_id",

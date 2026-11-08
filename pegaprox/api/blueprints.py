@@ -99,9 +99,14 @@ class _Bad(Exception):
         return jsonify(body), 400
 
 
+def _digits(v):
+    # str.isdigit() also says yes to a superscript two, which int() refuses
+    return isinstance(v, str) and v.isascii() and v.isdigit()
+
+
 def _int(body, key, low, high, default=None):
     v = body.get(key, default)
-    whole = (isinstance(v, int) and not isinstance(v, bool)) or (isinstance(v, str) and v.strip().isdigit())
+    whole = (isinstance(v, int) and not isinstance(v, bool)) or (isinstance(v, str) and _digits(v.strip()))
     if not whole or not low <= int(v) <= high:
         raise _Bad(f'{key} must be a whole number from {low} to {high}', key)
     return int(v)
@@ -276,17 +281,21 @@ def _os(r):
 
 
 def _mappings(bp_id=None):
-    """{blueprint id: {cluster id: template vmid}}, only of the clusters the caller may
-    reach: the list of blueprints is one for every account."""
+    """{blueprint id: {cluster id: template vmid}}, only the templates the caller may
+    clone on a cluster they reach: the list of blueprints is one for every account, and a
+    VMID nobody may clone is of no use to them."""
     sql, args = 'SELECT blueprint_id, cluster_id, vmid FROM blueprint_templates', ()
     if bp_id is not None:
         sql, args = sql + ' WHERE blueprint_id = ?', (bp_id,)
-    out, reach = {}, {}
+    out, reach, caller = {}, {}, None
     for r in get_db().conn.execute(sql, args).fetchall():
         cid = r['cluster_id']
         if cid not in reach:
             reach[cid] = check_cluster_access(cid)[0]
-        if reach[cid]:
+        if not reach[cid]:
+            continue
+        caller = caller or _caller()
+        if _may_clone(caller, cid, int(r['vmid'])):
             out.setdefault(r['blueprint_id'], {})[cid] = int(r['vmid'])
     return out
 
@@ -457,10 +466,11 @@ def _shared_storages(mgr):
     return set()
 
 
-def find_template(mgr, cluster_id, template_id, node):
+def find_template(mgr, cluster_id, template_id, node, storage=None):
     """The template the library built from `template_id` on this cluster that a full
-    clone onto `node` can start from: one on that node, else one on shared storage.
-    None when there is none, then the deploy builds one on the node first."""
+    clone onto `node` can start from: one on that node, else one on shared storage if the
+    clone goes into shared `storage` as well (PVE clones onto another node into shared
+    storage only). None when there is none, then the deploy builds one on the node first."""
     rows = get_db().conn.execute('''
         SELECT vmid, node, storage FROM cloud_init_deployments
         WHERE cluster_id = ? AND template_id = ? AND status = 'completed' AND vmid IS NOT NULL
@@ -486,6 +496,8 @@ def find_template(mgr, cluster_id, template_id, node):
             return {'vmid': int(r['vmid']), 'node': g.get('node'), 'storage': r['storage'],
                     'shared': r['storage'] in shared}
     shared = _shared_storages(mgr)
+    if storage is not None and storage not in shared:
+        return None
     for r, g in built:
         if r['storage'] in shared:
             return {'vmid': int(r['vmid']), 'node': g.get('node'), 'storage': r['storage'], 'shared': True}
@@ -578,6 +590,8 @@ def template_facts(raw, shared_storages):
         'shared': len(on_storage) == len(vols) and all(s in shared_storages for s in on_storage),
         '_boot_gb': (disk_gb_of(raw.get(boot, '')) or 0) if boot else 0,
         '_disk_gb': sum(sizes),
+        # the clone keeps them, a blueprint sets the cores only
+        '_sockets': max(int(raw['sockets']), 1) if _digits(str(raw.get('sockets', ''))) else 1,
     }
 
 
@@ -751,9 +765,9 @@ def _check_vmid(caller, vmid):
     return None if ok else (jsonify({'error': msg}), 403)
 
 
-def usable_template(mgr, cluster_id, caller, os_kind, vmid, node):
-    """(template, facts, None) for a PVE template this deploy may clone onto `node`, or
-    (None, None, (error, field, code)) saying why not."""
+def usable_template(mgr, cluster_id, caller, os_kind, vmid, node, storage=None):
+    """(template, facts, None) for a PVE template this deploy may clone onto `node` (into
+    `storage`), or (None, None, (error, field, code)) saying why not."""
     live = _qemu_templates(mgr).get(vmid)
     if live is None:
         return None, None, (f'VMID {vmid} is no VM template on this cluster', 'template_vmid', 400)
@@ -763,7 +777,8 @@ def usable_template(mgr, cluster_id, caller, os_kind, vmid, node):
     raw = _read_config(mgr, tnode, vmid)
     if raw is None:
         return None, None, (f'the config of template {vmid} could not be read', 'template_vmid', 502)
-    facts = template_facts(raw, _shared_storages(mgr))
+    shared = _shared_storages(mgr)
+    facts = template_facts(raw, shared)
     want = os_kind == 'windows'
     if facts['windows'] != want:
         return None, None, (f"template {vmid} is a {'Windows' if facts['windows'] else 'Linux'} guest "
@@ -774,6 +789,10 @@ def usable_template(mgr, cluster_id, caller, os_kind, vmid, node):
     if tnode != node and not facts['shared']:
         return None, None, (f'template {vmid} is on {tnode} with disks on storage only that node has; '
                             f'deploy onto {tnode}', 'node', 400)
+    if tnode != node and storage is not None and storage not in shared:
+        # qemu-server: "can't clone to non-shared storage"
+        return None, None, (f'template {vmid} is on {tnode}: a clone onto {node} goes to shared storage '
+                            f'only, {storage} is not shared', 'storage', 400)
     return {'vmid': vmid, 'node': tnode, 'storage': '', 'shared': facts['shared']}, facts, None
 
 
@@ -788,7 +807,8 @@ def qemu_server_version(mgr, node):
             return None
         for p in (r.json().get('data') or []):
             if isinstance(p, dict) and p.get('Package') == 'qemu-server':
-                m = _PKG_VERSION.match(str(p.get('Version') or p.get('OldVersion') or ''))
+                # OldVersion is the installed one; Version is what apt would install next
+                m = _PKG_VERSION.match(str(p.get('OldVersion') or ''))
                 return tuple(int(x or 0) for x in m.groups()) if m else None
     except Exception as e:
         logging.debug(f"[blueprints] package versions of {node}: {e}")
@@ -1017,7 +1037,8 @@ def deploy_blueprint(bp_id):
     start?, template_vmid? (a template blueprint: required until one is remembered for the
     cluster)}. A library blueprint clones the library's template of the image on that node
     or shared storage, or builds one on the node first; a template blueprint clones the PVE
-    template, remembered for the cluster when the caller may edit the blueprint. The NIC
+    template, remembered for the cluster when the caller may edit the blueprint. A clone
+    from another node goes into shared storage only, as PVE has it. The NIC
     bridges have to be on the node or SDN VNets, a Windows deploy needs qemu-server 8.2.4 on
     it. 202 with the deployment to poll and warnings: [str] (also in its log)."""
     body = request.get_json(silent=True)
@@ -1063,7 +1084,7 @@ def deploy_blueprint(bp_id):
         if not library:
             raw_tv = body.get('template_vmid')
             if raw_tv not in (None, ''):
-                if isinstance(raw_tv, bool) or not isinstance(raw_tv, (int, str)) or not str(raw_tv).isdigit():
+                if isinstance(raw_tv, bool) or not isinstance(raw_tv, (int, str)) or not _digits(str(raw_tv)):
                     raise _Bad('the template is a VMID', 'template_vmid')
                 template_vmid = int(raw_tv)
     except _Bad as e:
@@ -1090,7 +1111,7 @@ def deploy_blueprint(bp_id):
         if vmid is None:
             return jsonify({'error': 'no free VMID (the tenant range is full or the cluster did not answer)'}), 409
     else:
-        if isinstance(vmid, bool) or not isinstance(vmid, (int, str)) or not str(vmid).isdigit() \
+        if isinstance(vmid, bool) or not isinstance(vmid, (int, str)) or not _digits(str(vmid)) \
                 or not 100 <= int(vmid) <= 999999999:
             return jsonify({'error': 'the VMID is a whole number from 100 up', 'field': 'vmid'}), 400
         vmid = int(vmid)
@@ -1106,11 +1127,11 @@ def deploy_blueprint(bp_id):
             template_vmid = _mapped(bp_id, cluster_id)
         if template_vmid is None:
             return jsonify({'error': 'pick the template this cluster clones', 'field': 'template_vmid'}), 400
-        template, facts, why = usable_template(mgr, cluster_id, caller, _os(row), template_vmid, node)
+        template, facts, why = usable_template(mgr, cluster_id, caller, _os(row), template_vmid, node, storage)
         if why:
             return jsonify({'error': why[0], 'field': why[1]}), why[2]
     else:
-        template = find_template(mgr, cluster_id, row['template_id'], node)
+        template = find_template(mgr, cluster_id, row['template_id'], node, storage)
     if library and template is None:
         try:
             tvmid = _free_vmid(mgr, caller, taken_extra=(vmid,))
@@ -1158,7 +1179,9 @@ def deploy_blueprint(bp_id):
     else:
         # every disk of the template is copied, the boot disk grown to the blueprint's size
         disk = facts['_disk_gb'] - facts['_boot_gb'] + max(float(row['disk_gb'] or 0), facts['_boot_gb'])
-    adds = {'vms': 1, 'cores': int(row['cores']), 'memory_gb': int(row['memory']) / 1024.0, 'disk_gb': disk}
+    # vCPUs are sockets x cores, as the other quota counts of a qemu guest have it
+    cores = int(row['cores']) * (facts['_sockets'] if facts else 1)
+    adds = {'vms': 1, 'cores': cores, 'memory_gb': int(row['memory']) / 1024.0, 'disk_gb': disk}
     vmids = [vmid]
     if build:
         adds = {'vms': 2, 'cores': adds['cores'] + int(tpl.get('cores', 2)),

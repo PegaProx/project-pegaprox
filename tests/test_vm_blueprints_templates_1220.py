@@ -86,9 +86,10 @@ def _res(vmid, node, template=1, kind='qemu'):
 
 
 def _cluster(resources=(), configs=None, shared=('ceph',), bridges=('vmbr0', 'vmbr1'), vnets=(),
-             qemu_server='8.3.0', fail=(), nodes=('pve1', 'pve2')):
+             qemu_server='8.3.0', qemu_candidate='9.9.9', fail=(), nodes=('pve1', 'pve2')):
     """A PVE cluster that answers the reads a blueprint makes, by path; `fail` names the
-    paths (by their end) that answer 403."""
+    paths (by their end) that answer 403. /apt/versions answers as PVE does: OldVersion is
+    the installed qemu-server (none when it is not installed), Version apt's candidate."""
     m = MagicMock(name='mgr')
     m.cluster_type = 'proxmox'
     m.host, m.api_port = '10.0.0.1', 8006
@@ -114,8 +115,10 @@ def _cluster(resources=(), configs=None, shared=('ceph',), bridges=('vmbr0', 'vm
         if path == '/cluster/sdn/vnets':
             return _Resp(data=[{'vnet': v, 'zone': 'z1'} for v in vnets])
         if path.endswith('/apt/versions'):
-            return _Resp(data=[{'Package': 'pve-manager', 'Version': '8.3.0'},
-                               {'Package': 'qemu-server', 'Version': qemu_server, 'OldVersion': qemu_server}])
+            qs = {'Package': 'qemu-server', 'Version': qemu_candidate, 'CurrentState': 'NotInstalled'}
+            if qemu_server:
+                qs.update(OldVersion=qemu_server, CurrentState='Installed')
+            return _Resp(data=[{'Package': 'pve-manager', 'Version': '8.3.0', 'OldVersion': '8.3.0'}, qs])
         cm = re.search(r'/qemu/(\d+)/config$', path)
         if cm and int(cm.group(1)) in configs:
             return _Resp(data=configs[int(cm.group(1))])
@@ -341,9 +344,21 @@ def test_a_template_deploy_clones_it_and_remembers_it(lab, db, no_thread):
 
 
 def test_a_template_on_shared_storage_serves_another_node(lab, no_thread):
-    r = _deploy(lab.admin, lab.linux, vmid=150, template_vmid=9102)
+    r = _deploy(lab.admin, lab.linux, vmid=150, template_vmid=9102, storage='ceph')
     assert r.status_code == 202, r.get_json()
     assert no_thread[0][7] == {'vmid': 9102, 'node': 'pve2', 'storage': '', 'shared': True}
+
+
+def test_a_clone_onto_another_node_needs_a_shared_target_storage(lab, db, no_thread):
+    # qemu-server refuses a clone onto another node into storage that is not shared,
+    # which would only show in the job after the 202
+    r = _deploy(lab.admin, lab.linux, vmid=150, template_vmid=9102, storage='local-lvm')
+    assert r.status_code == 400 and r.get_json()['field'] == 'storage', r.get_json()
+    assert 'pve2' in r.get_json()['error'] and 'local-lvm' in r.get_json()['error']
+    assert no_thread == [] and _maps(db) == []
+    # on its own node any storage does
+    r = _deploy(lab.admin, lab.linux, vmid=150, node='pve2', template_vmid=9102, storage='local-lvm')
+    assert r.status_code == 202, r.get_json()
 
 
 @pytest.mark.parametrize('tv,field,word', [
@@ -363,6 +378,13 @@ def test_a_template_that_would_not_work_is_refused_before_anything_happens(lab, 
     assert r.status_code == 400, r.get_json()
     assert r.get_json()['field'] == field and word in r.get_json()['error']
     assert no_thread == [] and _maps(db) == []
+
+
+@pytest.mark.parametrize('field', ['template_vmid', 'vmid'])
+def test_a_digit_that_is_no_ascii_digit_is_refused_at_the_field(lab, no_thread, field):
+    # a superscript two passes str.isdigit(), int() refuses it
+    r = _deploy(lab.admin, lab.linux, **dict({'template_vmid': 9100, 'vmid': 150}, **{field: '\u00b2'}))
+    assert r.status_code == 400 and r.get_json()['field'] == field and no_thread == []
 
 
 def test_an_unreadable_template_config_is_no_go(lab, no_thread):
@@ -412,7 +434,7 @@ def test_the_template_may_sit_outside_the_tenants_range_the_clone_does_not(api, 
 def test_the_creator_remembers_the_template_for_the_cluster(api, seed, lab, db, no_thread):
     ann = api.as_user(seed.user('ann', permissions=['vm.create']))
     bid = _create(ann, LINUX_T).get_json()['blueprint']['id']
-    assert _deploy(ann, bid, vmid=150, template_vmid=9102).status_code == 202
+    assert _deploy(ann, bid, vmid=150, template_vmid=9102, storage='ceph').status_code == 202
     assert _maps(db) == [(bid, 'c1', 9102, 'ann')]
 
 
@@ -436,6 +458,21 @@ def test_the_remembered_templates_show_only_clusters_the_caller_reaches(api, see
     assert mine[lab.linux] == {'c1': 9100}
     every = {b['id']: b['templates'] for b in lab.admin.get('/api/blueprints').get_json()['blueprints']}
     assert every[lab.linux] == {'c1': 9100, 'c9': 777}
+
+
+def test_the_remembered_templates_show_only_the_ones_the_caller_may_clone(api, seed, lab, db):
+    db.conn.execute("INSERT INTO blueprint_templates VALUES (?, 'c1', 9100, 'root', '2026-11-08')", (lab.linux,))
+    db.conn.commit()
+    # an ACL on VM 100 lets ann reach the cluster, not template 9100
+    ann = seed.user('ann', permissions=['vm.create', 'vm.view'])
+    seed.vm_acl('c1', 100, ['ann'], permissions=['vm.view'])
+    # vm.create, but cloning is not vic's
+    vic = seed.user('vic', role='viewer', permissions=['vm.create'])
+    for name, who in (('ann', ann), ('vic', vic)):
+        mine = {b['id']: b['templates'] for b in api.as_user(who).get('/api/blueprints').get_json()['blueprints']}
+        assert mine[lab.linux] == {}, (name, mine)
+    every = {b['id']: b['templates'] for b in lab.admin.get('/api/blueprints').get_json()['blueprints']}
+    assert every[lab.linux] == {'c1': 9100}
 
 
 # --- Windows ------------------------------------------------------------------------------
@@ -480,6 +517,25 @@ def test_an_unread_qemu_server_version_is_a_warning(api, admin, no_thread):
     assert r.status_code == 202 and 'qemu-server' in ' '.join(r.get_json()['warnings'])
 
 
+def test_the_qemu_server_floor_is_the_installed_version_not_the_pending_upgrade(api, admin, no_thread):
+    # pveupdate refreshes the package index every day: a node on 8.1 lists 8.2 as Version
+    res, cfgs = _standard()
+    m = api.set_manager('c1', _cluster(res, cfgs, qemu_server='8.1.10', qemu_candidate='8.2.7'))
+    assert bpmod.qemu_server_version(m, 'pve2') == (8, 1, 10)
+    bid = _create(admin, WIN_T).get_json()['blueprint']['id']
+    r = _deploy(admin, bid, node='pve2', template_vmid=9200, cipassword='pw')
+    assert r.status_code == 409 and '8.1.10' in r.get_json()['error'] and no_thread == [], r.get_json()
+
+
+def test_a_qemu_server_apt_only_offers_has_no_version(api, admin, no_thread):
+    res, cfgs = _standard()
+    m = api.set_manager('c1', _cluster(res, cfgs, qemu_server=None, qemu_candidate='8.3.0'))
+    assert bpmod.qemu_server_version(m, 'pve2') is None
+    bid = _create(admin, WIN_T).get_json()['blueprint']['id']
+    r = _deploy(admin, bid, node='pve2', template_vmid=9200, cipassword='pw')
+    assert r.status_code == 202 and 'could not be read' in ' '.join(r.get_json()['warnings']), r.get_json()
+
+
 def test_a_linux_deploy_does_not_ask_for_the_qemu_server(lab, no_thread):
     assert _deploy(lab.admin, lab.linux, vmid=150, template_vmid=9100).status_code == 202
     assert not any(p.endswith('/apt/versions') for p in lab.mgr.reads)
@@ -512,6 +568,25 @@ def test_the_templates_own_nics_get_the_address_of_the_first():
     assert not any(k.startswith('net') or k == 'ipconfig1' for k in static)
     two = bpmod.vm_config(_row(nics=[{'bridge': 'vmbr0', 'model': 'virtio'}, {'bridge': 'vmbr1', 'model': 'e1000'}]))
     assert (two['net0'], two['net1'], two['ipconfig1']) == ('virtio,bridge=vmbr0', 'e1000,bridge=vmbr1', 'ip=dhcp')
+
+
+# --- the quota ----------------------------------------------------------------------------
+
+def test_the_quota_counts_the_vcpus_the_clone_runs(api, admin, no_thread, monkeypatch):
+    # the clone keeps the template's sockets and runs sockets x cores, which is what every
+    # other quota count of a qemu guest adds up
+    import pegaprox.api.helpers as helpers
+    res, cfgs = _standard()
+    cfgs[9100] = dict(_linux_cfg(9100), sockets=4)
+    api.set_manager('c1', _cluster(res, cfgs))
+    seen = []
+    monkeypatch.setattr(helpers, 'tenant_quota_gate', lambda user, what, adds, **kw: seen.append(adds) or (None, None))
+    bid = _create(admin, LINUX_T).get_json()['blueprint']['id']
+    assert _deploy(admin, bid, vmid=150, template_vmid=9100).status_code == 202
+    assert seen[-1]['cores'] == 2 * 4 and seen[-1]['vms'] == 1
+    # a template that names no sockets has one
+    assert _deploy(admin, bid, vmid=151, name='web-02', node='pve2', template_vmid=9101).status_code == 202
+    assert seen[-1]['cores'] == 2
 
 
 # --- the bridges --------------------------------------------------------------------------
