@@ -3993,7 +3993,7 @@ def _drive_mirror_to_local(pve_mgr, task, node, vmid, drive_id, target_path, dis
 
 
 def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
-    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (~1-2s downtime)"""
+    """poll drive-mirror jobs until ready, then pivot. for FUSE/SSHFS uses pause-pivot-resume (the guest pauses until QEMU takes the pivot)"""
     import time, re
     
     drive_ids = {m[0] for m in mirrors}
@@ -4002,6 +4002,7 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
     ready_drives = set()
     at_100_since = {}  # drive_id -> timestamp when first reached ~100%
     PAUSE_PIVOT_AFTER = 60  # seconds at 100% before trying pause-pivot
+    PIVOT_WAIT = 10  # seconds the paused guest waits for QEMU to take the pivot
     
     for poll in range(timeout // 2):
         time.sleep(2)
@@ -4058,61 +4059,61 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
             oldest_100 = min(at_100_since.values()) if at_100_since else time.time()
             if time.time() - oldest_100 > PAUSE_PIVOT_AFTER:
                 task.log(f"  All disks at 100% but not 'ready' - using pause-pivot-resume...")
-                task.log(f"  Pausing VM for atomic pivot (~1-2s)...")
+                task.log(f"  Pausing VM for atomic pivot...")
                 
                 # Step 1: Pause VM (HMP "stop" = freeze CPUs, NOT qm stop!)
                 _qm_monitor_cmd(pve_mgr, node, vmid, "stop", timeout=10)
-                time.sleep(1)
+                paused_at = time.monotonic()
                 
-                # Step 2: Wait for mirrors to catch up (should be instant, no new I/O)
-                ready_after_pause = set(ready_drives)
-                for _wait in range(10):
-                    time.sleep(1)
-                    ok2, jobs2 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    if ok2:
-                        for drive_id, _, _ in mirrors:
-                            if drive_id in ready_after_pause:
-                                continue
-                            if drive_id not in jobs2:
-                                ready_after_pause.add(drive_id)
-                            else:
-                                for jl in jobs2.split('\n'):
-                                    if drive_id in jl and 'ready' in jl.lower():
-                                        ready_after_pause.add(drive_id)
-                                        break
-                    if ready_after_pause >= drive_ids:
-                        break
-                
-                # Step 3: Pivot all drives
+                # Step 2+3: pivot every drive whose job still runs.
+                # JB Nov 2026 (#1250) - HMP `info block-jobs` never says whether a job is ready, so
+                # waiting for that word kept the guest stopped for the whole 10 s window, and the
+                # refusal QEMU gives is not worded "not ready". QEMU refuses complete until the job
+                # is ready, so ask it again until it takes it; it answers nothing when it does.
+                pending = [d for d, _, _ in mirrors if re.search(rf'device {re.escape(d)}:', jobs)]
                 pivot_ok = True
-                for drive_id, disk_total, di in mirrors:
-                    ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
-                        'complete', drive_id, timeout=30)
-                    if not ok_p and 'not ready' in str(out_p).lower():
-                        # Force cancel + resume if pivot fails
-                        task.log(f"  {drive_id}: pivot failed (not ready) - cancelling")
-                        _qm_block_job(pve_mgr, node, vmid, 'cancel', drive_id)
-                        pivot_ok = False
-                    elif not ok_p:
-                        task.log(f"  {drive_id}: pivot issue: {str(out_p)[:100]}")
+                last_out = {}
+                while pending:
+                    for drive_id in list(pending):
+                        ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
+                            'complete', drive_id, timeout=30)
+                        low = str(out_p or '').lower()
+                        if ok_p and 'error' not in low:
+                            pending.remove(drive_id)
+                        elif ok_p and 'not found' in low:
+                            # a mirror job ends only by complete, cancel or an error: this one
+                            # is gone without its pivot, so its copy is not the disk
+                            pending.remove(drive_id)
+                            task.log(f"  {drive_id}: the mirror job ended without a pivot")
+                            pivot_ok = False
+                        else:
+                            last_out[drive_id] = str(out_p or '')
+                    if not pending or not pivot_ok or time.monotonic() - paused_at >= PIVOT_WAIT:
+                        break
+                    time.sleep(0.5)
+                for drive_id in pending:
+                    task.log(f"  {drive_id}: QEMU did not take the pivot: {last_out.get(drive_id, '')[:150]}")
+                    pivot_ok = False
                 
                 # Step 4: Wait for pivots to complete
-                time.sleep(2)
-                ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                remaining = [d for d in drive_ids if d in str(jobs3 or '')]
-                if remaining:
-                    time.sleep(3)
+                remaining = list(drive_ids)
+                while pivot_ok:
                     ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
-                    remaining = [d for d in drive_ids if d in str(jobs3 or '')]
+                    if ok3:
+                        remaining = [d for d in drive_ids if re.search(rf'device {re.escape(d)}:', jobs3 or '')]
+                    if not remaining or time.monotonic() - paused_at >= PIVOT_WAIT + 5:
+                        break
+                    time.sleep(0.5)
                 
                 # Step 5: Resume VM
                 _qm_monitor_cmd(pve_mgr, node, vmid, "cont", timeout=10)
+                paused_for = time.monotonic() - paused_at
                 
                 if not remaining and pivot_ok:
                     elapsed = time.time() - start_t
                     total_gb = sum(m[1] for m in mirrors) / (1024**3)
                     task.log(f"  Pause-pivot-resume complete! "
-                             f"({total_gb:.1f} GB in {elapsed:.0f}s) - VM resumed on local storage ✓")
+                             f"({total_gb:.1f} GB in {elapsed:.0f}s, guest paused {paused_for:.1f}s) - VM resumed on local storage ✓")
                     for drive_id, disk_total, di in mirrors:
                         task.update_progress(f'disk{di}', disk_total, disk_total)
                     return True
