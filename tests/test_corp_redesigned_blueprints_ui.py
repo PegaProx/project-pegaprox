@@ -25,6 +25,8 @@ _BUNDLE_FILE = os.environ.get('PEGAPROX_CR_BUNDLE')
 BUNDLE = open(_BUNDLE_FILE, encoding='utf-8').read() if _BUNDLE_FILE else None
 DASHES = (chr(0x2014), chr(0x2013))
 TPL_TAB = 'Cloud-Init Template Library'
+# the name of that sub tab in Corporate Redesigned
+CR_TAB = 'Blueprints & Images'
 
 CATALOG = {'templates': [
     {'id': 'debian-13', 'name': 'Debian 13 (Trixie)', 'distro': 'debian', 'version': '13', 'default_user': 'debian',
@@ -199,7 +201,7 @@ def _wait(page, pred, timeout=5.0):
 
 
 def _templates(app, layout=LAYOUT):
-    """Automation > Cloud-Init Template Library of Testi."""
+    """Automation > Cloud-Init Template Library (Blueprints & Images in the redesign) of Testi."""
     page = app.page
     if layout == 'modern':
         page.get_by_text('Testi').first.click()
@@ -210,7 +212,7 @@ def _templates(app, layout=LAYOUT):
     else:
         page.locator('button', has_text=re.compile(r'^\s*Automation\s*$')).first.click()
     app.mark = len(app.server.calls)
-    page.locator('button', has_text=TPL_TAB).first.click()
+    page.locator('button', has_text=CR_TAB if layout == LAYOUT else TPL_TAB).first.click()
     return page
 
 
@@ -562,11 +564,16 @@ def _read(*parts):
 
 def test_the_section_is_mounted_for_corporate_redesigned_only():
     dash = _read('web', 'src', 'dashboard.js')
-    mounts = [m.start() for m in re.finditer(r'<CrBlueprints\b', dash)]
+    # the sub tab of the redesign draws the blueprints with the images under them (cr_images.js)
+    assert not re.search(r'<CrBlueprints\b', dash)
+    mounts = [m.start() for m in re.finditer(r'<CrBlueprintsTab\b', dash)]
     assert len(mounts) == 1
     head = dash[dash.rindex('{automationSubTab', 0, mounts[0]):mounts[0]]
     assert "automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id" in head
     assert "canRead={holds('vm.create')} canWrite={can('vm.create')}" in dash
+    page = _read('web', 'src', 'cr_images.js')
+    assert len(re.findall(r'<CrBlueprints\b', page)) == 1
+    assert 'canRead={canRead} canWrite={canWrite} nav={nav}' in page
 
 
 def test_every_key_is_in_all_nine_languages_ahead_of_the_pinned_chain():

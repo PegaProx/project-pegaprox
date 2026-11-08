@@ -940,8 +940,23 @@ AUTO_AFFINITY = {'rules': [
      'enabled': True, 'created_at': '2026-10-12T14:03:11.204512'},
     {'id': 'e5f6a7b8', 'name': 'web with cache', 'type': 'together', 'vms': [100, 999], 'vm_ids': [100, 999], 'enforce': False,
      'enabled': True, 'created_at': '2026-10-20T08:30:00.000001'}]}
+# (#1220) Automation > Cloud-Init Template Library as templates_lib.py answers it: the redesign draws
+# its own Blueprints & Images there, the classic cards stay
+AUTO_TEMPLATES = {
+    ('GET', '/api/templates/catalog'): (200, {'templates': [
+        {'id': 'debian-13', 'name': 'Debian 13 (Trixie)', 'distro': 'debian', 'version': '13', 'default_user': 'debian',
+         'cores': 1, 'memory': 1024, 'disk_gb': 8, 'description': 'Lean Debian generic-cloud image.', 'tags': ['lean']},
+        {'id': 'c0ffee12', 'name': 'Company Ubuntu', 'distro': 'ubuntu', 'version': '24.04', 'default_user': 'ops',
+         'cores': 2, 'memory': 2048, 'disk_gb': 20, 'description': 'Our hardened base', 'tags': ['custom'], 'custom': True}]}),
+    ('GET', '/api/clusters/c1/templates/deployments'): (200, {'deployments': [
+        {'id': 't1', 'cluster_id': 'c1', 'node': 'pve1', 'template_id': 'debian-13', 'template_name': 'Debian 13 (Trixie)',
+         'vmid': 9001, 'storage': 'local-lvm', 'status': 'completed', 'progress': 100, 'error': '', 'started_by': 'admin',
+         'started_at': '2026-10-30T08:30:00', 'finished_at': '2026-10-30T08:32:00'}]}),
+    ('GET', '/api/clusters/c1/templates/existing'): (200, {'templates': [{'vmid': 9001, 'name': 'tpl-debian-13', 'node': 'pve1'}]}),
+}
 RES_READS = {'res_snapshots': {('POST', '/api/snapshots/overview'): (200, RES_SNAPS)},
-             'auto_affinity': {('GET', '/api/clusters/c1/affinity-rules'): (200, AUTO_AFFINITY)}}
+             'auto_affinity': {('GET', '/api/clusters/c1/affinity-rules'): (200, AUTO_AFFINITY)},
+             'auto_templates': AUTO_TEMPLATES}
 # the Reports sub tab of each (classic label) and the Cloud nav entry that mounts the same component
 REP_TABS = {'rep_cve': ('CVE Scanner', None), 'rep_costs': ('Cost Dashboard', 'Costs'),
             'rep_power': ('Power & Carbon', 'Power & Carbon'), 'rep_topology': ('Network Topology', 'Topology'),
@@ -1024,7 +1039,10 @@ NOT_IN = {('cloud', 'reports'): 'Cloud has no Reports summary (its Insights entr
           ('cloud', 'rep_api'): 'Cloud mounts ApiLatencyDashboard itself, the Reports call site is not on its path',
           # round 9, B4: Cloud lists snapshots on its own page (not the Resources sub tab)
           ('cloud', 'res_snapshots'): 'Cloud has no Resources snapshot overview (its own snapshot page is not this code)',
-          ('cloud', 'auto_affinity'): 'Cloud has no Automation tab (its affinity page is not this code)'}
+          ('cloud', 'auto_affinity'): 'Cloud has no Automation tab (its affinity page is not this code)',
+          # (#1220) the library and the Resources list with its create buttons: Cloud has its own pages for both
+          ('cloud', 'auto_templates'): 'Cloud has no Automation tab (it has no template library page)',
+          ('cloud', 'res_list'): 'Cloud lists guests on its own pages (not the Resources tab)'}
 
 
 class _GuardServer(_ProfileServer):
@@ -1156,7 +1174,8 @@ VIEWS = ['dashboard', 'node', 'vm', 'ct', 'config', 'config_general', 'config_ha
          'node_dns', 'node_hosts', 'node_time', 'node_certs', 'node_syslog',
          'node_lvm', 'node_lvmthin', 'node_zfs', 'node_repos', 'node_ceph',
          'node_timeline', 'vm_timeline', 'node_shell', 'node_subscription',
-         'rep_cve', 'rep_costs', 'rep_power', 'rep_topology', 'rep_api', 'res_snapshots', 'auto_affinity']
+         'rep_cve', 'rep_costs', 'rep_power', 'rep_topology', 'rep_api', 'res_snapshots', 'auto_affinity',
+         'auto_templates', 'res_list']
 RUNS = {'corporate-dark': ('corporate', ''), 'corporate-light': ('corporate', 'light'),
         'modern': ('modern', ''), 'cloud': ('cloud', '')}
 
@@ -1490,6 +1509,15 @@ def go(app, layout, view):
         page.locator('button', has_text=_exact('Automation')).first.click()
         page.locator('button', has_text='Affinity').first.click()
         page.get_by_text('web with cache').first.wait_for(timeout=8000)
+    elif view == 'auto_templates':
+        # (#1220) the library cards with what the cluster has of each
+        page.locator('button', has_text=_exact('Automation')).first.click()
+        page.locator('button', has_text='Cloud-Init Template Library').first.click()
+        page.get_by_text('Company Ubuntu').first.wait_for(timeout=8000)
+    elif view == 'res_list':
+        # (#1220) the guest list with the create buttons under it
+        page.locator('button', has_text=_exact('Resources')).first.click()
+        page.get_by_text('Create new VM').first.wait_for(timeout=8000)
     elif view == 'harden':
         _harden_drawn(page)
     elif view == 'alerts':

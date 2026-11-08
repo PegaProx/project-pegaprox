@@ -835,7 +835,7 @@
         // Indexes: clusters, VMs, storage (from resources), and a curated action list.
         // Keyboard-first: ↑/↓ to move, enter to pick, esc to close.
         function CommandPalette({ t, clusters, clusterResources, clusterMetrics, selectedCluster,
-                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit }) {
+                                   onClose, onPickCluster, onPickVm, onAction, authFetch, onPickHit, extraActions }) {
             const [query, setQuery] = useState('');
             const [highlight, setHighlight] = useState(0);
             const inputRef = useRef(null);
@@ -922,6 +922,8 @@
                     ['goto-automation', t('automation') || 'Automation', 'Zap'],
                     ['goto-reports', t('reports') || 'Reports', 'FileText'],
                     ['goto-plugins', t('plugins') || 'Plugins', 'Package'],
+                    // LW Nov 2026 - [id, title, icon] of a layout's own (Corporate Redesigned: the blueprints, #1220)
+                    ...(extraActions || []),
                     ['settings',      t('settings') || 'Settings', 'Settings'],
                     ['profile',       t('userProfile') || 'Profile', 'User'],
                     ['logout',        t('logout') || 'Log out', 'Power'],
@@ -933,7 +935,7 @@
                     });
                 });
                 return out;
-            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, t]);
+            }, [clusters, clusterResources, clusterMetrics, selectedCluster, onPickCluster, onPickVm, onAction, extraActions, t]);
 
             // Fuzzy-ish scoring: substring > prefix > word boundary. Simple but fast.
             const results = React.useMemo(() => {
@@ -20509,6 +20511,10 @@
                             setSelectedCluster(cluster);
                             setPendingCreateVm({ type: 'lxc', clusterId: cluster.id });
                         }},
+                        // LW Nov 2026 (#1220) - Corporate Redesigned: the blueprints of the Blueprints & Images sub tab
+                        ...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [
+                            { perm: 'vm.create', label: t('crBpNavNewVm'), icon: <Icons.Template className="w-3.5 h-3.5" />, onClick: () => crTaskNav.openBlueprints(cluster.id) },
+                        ] : []),
                         { separator: true },
                         { perm: 'cluster.config', label: t('renameCluster') || 'Rename', icon: <Icons.Edit className="w-3.5 h-3.5" />, onClick: () => { setRenamingCluster(cluster); setRenameValue(cluster.display_name || cluster.name || ''); } },
                         { perm: 'cluster.config', label: t('assignToGroup') || 'Assign to Group', icon: <Icons.FolderPlus className="w-3.5 h-3.5" />, onClick: () => setShowAssignGroup(cluster) },
@@ -21407,6 +21413,8 @@
                 openQdevice: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setSelectedSidebarQdevice(cid); setActiveTab('overview'); } },
                 // LW Nov 2026 - the alert strip: Automation > Alerts of a cluster, and its Timeline with a kind and a severity picked
                 openAlerts: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('alerts'); } },
+                // LW Nov 2026 (#1220) - Automation > Blueprints & Images of a cluster (the Resources button, the cluster menu, Ctrl+K)
+                openBlueprints: (cid) => { if (crIntoCluster(cid)) { crClearPick(); setActiveTab('automation'); setAutomationSubTab('templates'); } },
                 openTimeline: (cid, pick) => {
                     if (!crIntoCluster(cid)) return;
                     crClearPick();
@@ -23254,6 +23262,14 @@
                                                                 <Icons.Plus className={isCorporate ? 'w-3 h-3' : ''} />
                                                                 {t('createContainer')}
                                                             </button>
+                                                            {/* LW Nov 2026 (#1220) - Corporate Redesigned: a guest from a blueprint, picked on Automation > Blueprints & Images */}
+                                                            {isCorpRedesigned && can('vm.create') && (
+                                                                <button type="button" onClick={() => crTaskNav.openBlueprints(selectedCluster.id)}
+                                                                    className="corp-vm-btn corp-vm-btn-ghost" data-cr-bp-nav="resources">
+                                                                    <Icons.Template className="w-3 h-3" />
+                                                                    {t('crBpNavDeploy')}
+                                                                </button>
+                                                            )}
                                                             </>)}
                                                             {/* LW Oct 2026 - quick CSV export of the current VM list, with the inventory of each guest (ui.js) */}
                                                             <InventoryCsvButton
@@ -23796,7 +23812,7 @@
                                                         { id: 'scripts', label: t('customScripts') || 'Scripts', icon: Icons.Terminal },
                                                         { id: 'snapshots', label: t('snapPoliciesTitle') || 'Snapshots', icon: Icons.Camera },
                                                         { id: 'replication', label: t('replicationOverview') || 'Replication', icon: Icons.RefreshCw },
-                                                        { id: 'templates', label: t('templateLibrary') || 'Templates', icon: Icons.Package },
+                                                        { id: 'templates', label: isCorpRedesigned ? t('crBpNavTab') : (t('templateLibrary') || 'Templates'), icon: Icons.Package },
                                                         { id: 'apps', label: t('ociTabLabel'), icon: Icons.Container },
                                                         { id: 'hardening', label: t('hardenNode') || 'Harden PVE Node', icon: Icons.Shield },
                                                     ].map(sub => (
@@ -24353,15 +24369,16 @@
                                                     />
                                                 )}
 
-                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: blueprints above the library, deployed to any cluster */}
+                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: Blueprints & Images, the blueprints deployed to any cluster,
+                                                    the images of the library and what was deployed or built (cr_images.js) in place of the library cards */}
                                                 {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
                                                     <CrBoundary key={selectedCluster.id} id="blueprints">
-                                                        <CrBlueprints cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
-                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} nav={crTaskNav} />
+                                                        <CrBlueprintsTab cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} isAdmin={isAdmin} nav={crTaskNav} />
                                                     </CrBoundary>
                                                 )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
-                                                {automationSubTab === 'templates' && (
+                                                {automationSubTab === 'templates' && !isCorpRedesigned && (
                                                     <TemplatesLibraryTab
                                                         clusterId={selectedCluster?.id}
                                                         clusterName={selectedCluster?.name}
@@ -32625,6 +32642,8 @@
                             onClose={() => setShowCommandPalette(false)}
                             authFetch={authFetch}
                             onPickHit={(hit) => { setShowCommandPalette(false); navigateToResult(hit); }}
+                            extraActions={isCorpRedesigned && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
+                                ? [['cr-blueprints', t('crBpNavNewVm'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
                                 const c = clusters.find(cl => cl.id === vm._clusterId);
@@ -32646,6 +32665,12 @@
                                 else if (id === 'goto-reports') setActiveTab('reports');
                                 else if (id === 'goto-plugins') setActiveTab('plugins');
                                 else if (id === 'goto-settings') setActiveTab('settings');
+                                else if (id === 'cr-blueprints' && crTaskNav) {
+                                    // the open cluster, else the first Proxmox VE one
+                                    const pve = (c) => !!c && (!c.cluster_type || c.cluster_type === 'proxmox');
+                                    const c = pve(selectedCluster) ? selectedCluster : clusters.find(pve);
+                                    if (c) crTaskNav.openBlueprints(c.id);
+                                }
                             }}
                         />
                     )}
