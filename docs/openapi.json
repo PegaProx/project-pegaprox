@@ -44451,7 +44451,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Save a blueprint: template_id (a library image), cores, memory (MB), disk_gb (0 keeps the image's size), cpu, nics [{bridge, vlan, model, firewall}], ciuser, sshkeys, ip_mode (dhcp/static/none), nameserver, searchdomain, ciupgrade, tags, start.",
+        "summary": "Save a blueprint: source_kind (library, or template: an existing PVE template picked per cluster at the deploy), os (linux/windows; a library image is linux), template_id (a library image, '' for a template source), cores, memory (MB), disk_gb (0 keeps the image's size), cpu, nics [{bridge, vlan, model, firewall}] (1 to 4; for a template source 0 to 4, none keeps the template's own), ciuser, sshkeys, ip_mode (dhcp/static/none), nameserver, searchdomain, ciupgrade, tags, start. Windows keeps no ciuser, sshkeys or searchdomain, and ciupgrade stays on.",
         "requestBody": {
           "required": false,
           "content": {
@@ -44594,7 +44594,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Which template a deploy of this blueprint onto ?node= would clone, or that it builds one there first: {template: {vmid, node, storage, shared} | null, build_needed}.",
+        "summary": "What a deploy of this blueprint onto ?node= starts from. A library blueprint: {source_kind: 'library', template: {vmid, node, storage, shared} | null, build_needed}, the template it would clone or that it builds one there first. A template blueprint: {source_kind: 'template', mapped: vmid | null, templates: [{vmid, name, node, ostype, windows, cloudinit, boot_disk, disk_storages, shared, usable_on_node}]}, the cluster's templates the caller may clone whose OS fits (at most 50 read) and the one remembered.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -44647,7 +44647,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword?, start?}. Clones the library's template of the image on that node or shared storage, or builds one on the node first; 202 with the deployment to poll.",
+        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword? (required for Windows), start?, template_vmid? (a template blueprint: required until one is remembered for the cluster)}. A library blueprint clones the library's template of the image on that node or shared storage, or builds one on the node first; a template blueprint clones the PVE template, remembered for the cluster when the caller may edit the blueprint. The NIC bridges have to be on the node or SDN VNets, a Windows deploy needs qemu-server 8.2.4 on it. 202 with the deployment to poll and warnings: [str] (also in its log).",
         "parameters": [
           {
             "name": "bp_id",
@@ -44702,7 +44702,7 @@
             "description": "Insufficient permissions"
           }
         },
-        "summary": "Recent blueprint deployments of ?cluster_id=, newest first.",
+        "summary": "Recent blueprint deployments of ?cluster_id=, newest first (50). Without it the ones of every cluster the caller may see (100), each row with its cluster_id.",
         "x-pegaprox-auth": "decorator",
         "security": [
           {

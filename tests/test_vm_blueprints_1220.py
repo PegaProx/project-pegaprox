@@ -50,8 +50,10 @@ def _mgr(resources=(), shared=(), nodes=('pve1', 'pve2'), cluster_type='proxmox'
     m.nodes = {n: {'node': n, 'status': 'online'} for n in nodes}
     m.get_vm_resources.return_value = list(resources)
     m.get_next_vmid.return_value = {'success': True, 'vmid': 100}
-    m._api_get.return_value = _Resp(data=[{'storage': s, 'shared': 1} for s in shared]
-                                    + [{'storage': 'local-lvm', 'shared': 0}])
+    storages = _Resp(data=[{'storage': s, 'shared': 1} for s in shared] + [{'storage': 'local-lvm', 'shared': 0}])
+    # the bridges the deploy looks for before it starts (GOOD names vmbr0 and vmbr1)
+    network = _Resp(data=[{'iface': 'vmbr0', 'type': 'bridge'}, {'iface': 'vmbr1', 'type': 'OVSBridge'}])
+    m._api_get.side_effect = lambda url, **kw: network if url.endswith('/network') else storages
     return m
 
 
@@ -489,8 +491,8 @@ def test_deployments_are_read_per_cluster_the_caller_sees(api, seed, lab, db, no
 def test_the_template_probe_answers_per_node(lab, db):
     _built(db, 9002, 'pve1', 'local-lvm')
     r = lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve1').get_json()
-    assert r == {'template': {'vmid': 9002, 'node': 'pve1', 'storage': 'local-lvm', 'shared': False},
-                 'build_needed': False}
+    assert r == {'source_kind': 'library', 'build_needed': False,
+                 'template': {'vmid': 9002, 'node': 'pve1', 'storage': 'local-lvm', 'shared': False}}
     r = lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve2').get_json()
-    assert r == {'template': None, 'build_needed': True}
+    assert r == {'source_kind': 'library', 'template': None, 'build_needed': True}
     assert lab.admin.get(f'/api/clusters/c1/blueprints/{lab.bid}/template?node=pve9').status_code == 400

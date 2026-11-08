@@ -343,8 +343,9 @@ SYNC_TABLES = (
     'recovery_confirmations',
     # the custom node hardening profiles, picks of the built-in controls
     'hardening_profiles',
-    # VM blueprints: a library image plus hardware and Cloud-Init (#1220)
-    'vm_blueprints',
+    # VM blueprints: a library image or a PVE template plus hardware and Cloud-Init, and
+    # the template each cluster deploys one from (#1220)
+    'vm_blueprints', 'blueprint_templates',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',

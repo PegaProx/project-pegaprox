@@ -2222,6 +2222,23 @@ class PegaProxDB:
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_bp_dep_cluster ON blueprint_deployments(cluster_id, started_at DESC)')
+            # a blueprint can also start from an existing PVE template, Windows ones among
+            # them; which template that is gets remembered per cluster
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(vm_blueprints)").fetchall()]
+            if 'source_kind' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN source_kind TEXT DEFAULT 'library'")
+            if 'os' not in cols:
+                cursor.execute("ALTER TABLE vm_blueprints ADD COLUMN os TEXT DEFAULT 'linux'")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_templates (
+                    blueprint_id TEXT NOT NULL,
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    updated_by TEXT DEFAULT '',
+                    updated_at TEXT,
+                    PRIMARY KEY (blueprint_id, cluster_id)
+                )
+            ''')
         except Exception as e:
             logging.error(f"Error creating blueprint tables: {e}")
 
