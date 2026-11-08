@@ -395,7 +395,8 @@ def test_the_classic_section_stays_and_the_preview_has_its_own_tab():
     # the Settings tab: a link in the variant, the classic section everywhere else
     assert ("{isCorpRedesigned\n                                                        ? <CrUpdatesLink onOpen={() => setActiveTab('updates')} />\n"
             "                                                        : <UpdateManagerSection key={selectedCluster.id}") in dash
-    assert dash.count('holds(') == 10
+    # the reads of a standby, the blueprints of the template sub tab (#1220) among them
+    assert dash.count('holds(') == 11
     cr = _read('web', 'src', 'cr_updates.js')
     assert 'window.confirm' not in cr and not re.search(r'(?<![\w.])confirm\(', cr)
     # the routes and bodies of the classic section; every flag explicit

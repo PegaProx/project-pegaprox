@@ -89,6 +89,7 @@ SRC_FILES=(
     cr_nodestore.js
     cr_nodemisc.js
     cr_modules.js
+    cr_blueprints.js
     dashboard.js
 )
 

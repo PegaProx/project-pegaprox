@@ -24353,6 +24353,13 @@
                                                     />
                                                 )}
 
+                                                {/* LW Nov 2026 (#1220) - Corporate Redesigned: blueprints above the library, deployed to any cluster */}
+                                                {automationSubTab === 'templates' && isCorpRedesigned && selectedCluster?.id && (
+                                                    <CrBoundary key={selectedCluster.id} id="blueprints">
+                                                        <CrBlueprints cluster={selectedCluster} clusters={clusters} authFetch={authFetch} addToast={addToast}
+                                                            canRead={holds('vm.create')} canWrite={can('vm.create')} nav={crTaskNav} />
+                                                    </CrBoundary>
+                                                )}
                                                 {/* NS May 2026 — Cloud-Init Template Library sub-tab */}
                                                 {automationSubTab === 'templates' && (
                                                     <TemplatesLibraryTab
