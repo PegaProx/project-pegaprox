@@ -16306,6 +16306,7 @@
           }
         },
         "summary": "Create a new container on a node",
+        "description": "The body needs a root password ('password', a non-empty string) or an SSH public key\n('ssh_public_keys', or 'ssh_key'), else 400. With only a key no root password is set.",
         "parameters": [
           {
             "name": "cluster_id",
@@ -44376,6 +44377,370 @@
         "parameters": [
           {
             "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/blueprints": {
+      "get": {
+        "operationId": "blueprints.list_blueprints_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Every blueprint, newest first. One list for every account, like the custom images of the template library; editing is the creator's or an admin's.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      },
+      "post": {
+        "operationId": "blueprints.create_blueprint_post",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Save a blueprint: template_id (a library image), cores, memory (MB), disk_gb (0 keeps the image's size), cpu, nics [{bridge, vlan, model, firewall}], ciuser, sshkeys, ip_mode (dhcp/static/none), nameserver, searchdomain, ciupgrade, tags, start.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/{bp_id}": {
+      "put": {
+        "operationId": "blueprints.update_blueprint_put",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Replace a blueprint's settings (the whole object, as POST takes it).",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      },
+      "delete": {
+        "operationId": "blueprints.delete_blueprint_delete",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Remove a blueprint. VMs deployed from it are not touched.",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/clusters/{cluster_id}/blueprints/{bp_id}/template": {
+      "get": {
+        "operationId": "blueprints.blueprint_template_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Which template a deploy of this blueprint onto ?node= would clone, or that it builds one there first: {template: {vmid, node, storage, shared} | null, build_needed}.",
+        "parameters": [
+          {
+            "name": "cluster_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/{bp_id}/deploy": {
+      "post": {
+        "operationId": "blueprints.deploy_blueprint_post",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One VM from a blueprint. Body: {cluster_id, node, storage, name, vmid?, ipconfig0? (only and required with ip_mode static), cipassword?, start?}. Clones the library's template of the image on that node or shared storage, or builds one on the node first; 202 with the deployment to poll.",
+        "parameters": [
+          {
+            "name": "bp_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "vm.create"
+        ]
+      }
+    },
+    "/api/blueprints/deployments": {
+      "get": {
+        "operationId": "blueprints.list_deployments_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "Recent blueprint deployments of ?cluster_id=, newest first.",
+        "x-pegaprox-auth": "decorator",
+        "security": [
+          {
+            "apiToken": []
+          },
+          {
+            "sessionId": []
+          }
+        ],
+        "x-pegaprox-permissions": [
+          "cluster.view"
+        ]
+      }
+    },
+    "/api/blueprints/deployments/{dep_id}": {
+      "get": {
+        "operationId": "blueprints.deployment_get",
+        "tags": [
+          "blueprints"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "400": {
+            "description": "Bad request"
+          },
+          "401": {
+            "description": "Not authenticated"
+          },
+          "403": {
+            "description": "Insufficient permissions"
+          }
+        },
+        "summary": "One blueprint deployment with its log.",
+        "parameters": [
+          {
+            "name": "dep_id",
             "in": "path",
             "required": true,
             "schema": {

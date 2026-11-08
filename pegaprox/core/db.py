@@ -2173,6 +2173,58 @@ class PegaProxDB:
         except Exception as e:
             logging.error(f"Error creating custom_cloud_templates table: {e}")
 
+        # MK Nov 2026 (#1220) - blueprints: a library image plus the hardware and Cloud-Init
+        # a VM from it gets (api/blueprints.py), and the deploys made from them
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS vm_blueprints (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    template_id TEXT NOT NULL,
+                    cores INTEGER DEFAULT 2,
+                    memory INTEGER DEFAULT 2048,
+                    disk_gb INTEGER DEFAULT 0,
+                    cpu TEXT DEFAULT '',
+                    nics TEXT DEFAULT '[]',
+                    ciuser TEXT DEFAULT '',
+                    sshkeys TEXT DEFAULT '',
+                    ip_mode TEXT DEFAULT 'dhcp',
+                    nameserver TEXT DEFAULT '',
+                    searchdomain TEXT DEFAULT '',
+                    ciupgrade INTEGER DEFAULT 1,
+                    tags TEXT DEFAULT '',
+                    start INTEGER DEFAULT 0,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_deployments (
+                    id TEXT PRIMARY KEY,
+                    blueprint_id TEXT NOT NULL,
+                    blueprint_name TEXT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    vmid INTEGER,
+                    name TEXT,
+                    template_vmid INTEGER,
+                    build_dep_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    step TEXT DEFAULT '',
+                    progress INTEGER DEFAULT 0,
+                    log TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_bp_dep_cluster ON blueprint_deployments(cluster_id, started_at DESC)')
+        except Exception as e:
+            logging.error(f"Error creating blueprint tables: {e}")
+
         # MK May 2026 — extend audit_log with cluster + severity columns for richer filtering
         try:
             cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_log)").fetchall()]

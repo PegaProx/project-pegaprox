@@ -33,6 +33,7 @@ def register_blueprints(app):
     from pegaprox.api.metrics_exporter import bp as metrics_exporter_bp
     from pegaprox.api.insights import bp as insights_bp
     from pegaprox.api.templates_lib import bp as templates_lib_bp
+    from pegaprox.api.blueprints import bp as blueprints_bp
     from pegaprox.api.oci_catalog import bp as oci_catalog_bp
     from pegaprox.api.push import bp as push_bp, register_alert_handler
     from pegaprox.api.costs import bp as costs_bp
@@ -77,6 +78,7 @@ def register_blueprints(app):
     app.register_blueprint(metrics_exporter_bp)
     app.register_blueprint(insights_bp)
     app.register_blueprint(templates_lib_bp)
+    app.register_blueprint(blueprints_bp)
     app.register_blueprint(oci_catalog_bp)
     app.register_blueprint(push_bp)
     app.register_blueprint(costs_bp)

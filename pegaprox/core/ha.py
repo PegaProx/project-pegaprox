@@ -343,13 +343,15 @@ SYNC_TABLES = (
     'recovery_confirmations',
     # the custom node hardening profiles, picks of the built-in controls
     'hardening_profiles',
+    # VM blueprints: a library image plus hardware and Cloud-Init (#1220)
+    'vm_blueprints',
 )
 LOCAL_TABLES = (
     'sessions', 'audit_log', 'task_users', 'migration_history', 'metrics_history',
     # the signed checkpoints of this host's audit chain, one chain per instance
     'audit_checkpoints',
     'active_alerts', 'site_recovery_events', 'cve_history', 'backup_verifications',
-    'status_uptime', 'cloud_init_deployments', 'dr_drills', 'dr_drill_checks',
+    'status_uptime', 'cloud_init_deployments', 'blueprint_deployments', 'dr_drills', 'dr_drill_checks',
     # the boot screenshots of a test failover, beside the event they belong to
     'site_recovery_screenshots',
     'snapshot_runs', 'drift_events', 'auto_install_runs', 'push_inbox',

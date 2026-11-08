@@ -68,6 +68,7 @@
     "pegaprox/api/auto_install.py",
     "pegaprox/api/auth.py",
     "pegaprox/api/banners.py",
+    "pegaprox/api/blueprints.py",
     "pegaprox/api/ceph.py",
     "pegaprox/api/changes.py",
     "pegaprox/api/clusters.py",
