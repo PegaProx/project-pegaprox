@@ -1,0 +1,94 @@
+name: Build Debian Snapshot
+
+on:
+  push:
+    branches:
+      - Testing
+
+permissions:
+  contents: read
+
+jobs:
+  build-package-debian:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out Testing
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+
+      - name: Build Debian package
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          # NS Oct 2026 - the snapshot carries the time of its commit in UTC, not the time
+          # of the build, so a re-run of the same push builds the same version. Read here
+          # from the checkout, which holds that commit; the container has no git
+          SNAPSHOT_TIME=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M "${COMMIT_SHA}")
+          docker run --rm -i \
+            -e COMMIT_SHA="${COMMIT_SHA}" \
+            -e SNAPSHOT_TIME="${SNAPSHOT_TIME}" \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            debian:trixie \
+            bash -euxo pipefail <<'EOF'
+              export DEBIAN_FRONTEND=noninteractive
+
+              apt-get update
+
+              apt-get install -y \
+                build-essential \
+                debhelper \
+                debhelper-compat \
+                devscripts \
+                jq
+
+              BASE_VERSION=$(jq -r '.version // empty' version.json)
+
+              if [[ ! "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+.*$ ]]; then
+                echo "Error: Invalid version format in version.json"
+                exit 1
+              fi
+
+              echo "Base version: ${BASE_VERSION}"
+              echo "Commit: ${COMMIT_SHA}"
+
+              if [[ ! "${SNAPSHOT_TIME}" =~ ^[0-9]{12}$ ]]; then
+                echo "Error: no commit time for ${COMMIT_SHA}"
+                exit 1
+              fi
+
+              TIMESTAMP="${SNAPSHOT_TIME}"
+              SHORT_SHA="${COMMIT_SHA:0:8}"
+
+              FULL_VERSION="${BASE_VERSION}~snapshot.${TIMESTAMP}.${SHORT_SHA}"
+
+              echo "Snapshot version: ${FULL_VERSION}"
+
+              # NS Oct 2026 - without DEBEMAIL dch warns and reads a line from stdin,
+              # and stdin is the rest of this script: bash stopped after dch with
+              # exit 0 and the upload found no .deb (#973).
+              dch \
+                --force-bad-version \
+                --newversion "${FULL_VERSION}" \
+                "Automated snapshot build for commit ${COMMIT_SHA}." </dev/null
+
+              dpkg-buildpackage -us -uc
+
+              mkdir -p package
+              mv ../*.deb package/
+
+              echo "Created packages:"
+              ls -lh package/
+          EOF
+
+      - name: Upload Debian snapshot package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: debian-package-${{ github.sha }}
+          path: package/*.deb
+          if-no-files-found: error
+          retention-days: 14

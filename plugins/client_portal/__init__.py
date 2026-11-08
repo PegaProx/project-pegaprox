@@ -1,0 +1,1072 @@
+"""
+Client Portal Plugin — Self-service portal for hosting customers
+NS: Apr 2026
+
+Clients log in at /portal and see only their assigned VMs.
+Uses existing VM ACLs for permission enforcement.
+Hoster configures allowed actions via config.json.
+"""
+import os
+import re
+import json
+import logging
+import threading
+from flask import request, jsonify, send_file
+
+from pegaprox.api.plugins import register_plugin_route
+from pegaprox.globals import cluster_managers
+from pegaprox.utils.rbac import (load_vm_acls, user_can_access_vm, get_user_permissions,
+                                 get_user_pool_vmids, acl_grants_user)
+from pegaprox.utils.auth import load_users
+
+
+# One creation lock per tenant - see the note in the create handler. gevent monkey-patches
+# threading.Lock into a greenlet-aware one, which is what the workers here actually are.
+_tenant_create_locks = {}
+_tenant_create_locks_guard = threading.Lock()
+
+
+def _tenant_create_lock(tenant_id):
+    with _tenant_create_locks_guard:
+        lk = _tenant_create_locks.get(tenant_id)
+        if lk is None:
+            lk = threading.Lock()
+            _tenant_create_locks[tenant_id] = lk
+        return lk
+
+PLUGIN_NAME = "Client Portal"
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _load_config():
+    cfg_path = os.path.join(PLUGIN_DIR, 'config.json')
+    try:
+        with open(cfg_path) as f:
+            return json.load(f)
+    except Exception:
+        return {"allowed_actions": ["vm.view", "vm.start", "vm.stop", "vm.console"]}
+
+
+def _portal_user(username):
+    """The acting user for authz checks.
+
+    Always build this with build_authz_user rather than a raw load_users() lookup: the stored
+    record carries no effective_role, so an admin-owned but viewer-scoped API token would reach
+    user_can_access_vm with its owner's admin role and short-circuit the per-VM gate.
+    """
+    from pegaprox.utils.auth import build_authz_user
+    return build_authz_user(username, request.session)
+
+
+def _get_portal_config():
+    """Return portal configuration (public, no secrets)"""
+    cfg = _load_config()
+    # MK #547 — the portal console needs to know if a reverse proxy is in front
+    # so it routes the VNC websocket through the main port instead of port+1.
+    try:
+        from pegaprox.api.helpers import load_server_settings
+        rp_enabled = bool(load_server_settings().get('reverse_proxy_enabled', False))
+    except Exception:
+        rp_enabled = False
+    return {
+        'portal_title': cfg.get('portal_title', 'Client Portal'),
+        'allowed_actions': cfg.get('allowed_actions', []),
+        'show_resource_usage': cfg.get('show_resource_usage', True),
+        'show_ip_addresses': cfg.get('show_ip_addresses', True),
+        'allow_password_change': cfg.get('allow_password_change', True),
+        'allow_snapshots': cfg.get('allow_snapshots', False),
+        # MK Nov 2026 - the page draws the ISO button on it, and it was never sent
+        'allow_iso_mount': bool(cfg.get('allow_iso_mount', False)),
+        'custom_logo_url': cfg.get('custom_logo_url', ''),
+        'theme_color': cfg.get('theme_color', '#e57000'),
+        'reverse_proxy_enabled': rp_enabled,
+    }
+
+
+def _get_my_vms():
+    """Return all VMs the authenticated user can access across all clusters"""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+
+    user = _portal_user(username)
+    user['username'] = username
+
+    # don't let admins use the portal — redirect them
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+
+    cfg = _load_config()
+    all_acls = load_vm_acls()
+    result = []
+
+    for cluster_id, mgr in cluster_managers.items():
+        if not mgr.is_connected:
+            continue
+
+        cluster_acls = all_acls.get(cluster_id, {})
+        # find VMIDs where this user has access
+        user_vmids = set()
+        for vmid_str, acl in cluster_acls.items():
+            if acl_grants_user(acl, username):
+                user_vmids.add(int(vmid_str))
+
+        # #555 — pool-only users: include VMs reachable via their resource-pool perms.
+        # Mirrors user_can_access_vm's pool branch (the action endpoints already honour it),
+        # so a user added to a pool sees the pool's VMs without a per-VM ACL each.
+        user_vmids |= get_user_pool_vmids(user, cluster_id)
+
+        if not user_vmids:
+            continue
+
+        # get VM resources from cluster
+        try:
+            resources = mgr.get_vm_resources()
+        except Exception:
+            continue
+
+        for vm in resources:
+            vmid = vm.get('vmid')
+            if vmid not in user_vmids:
+                continue
+
+            vm_info = {
+                'vmid': vmid,
+                'name': vm.get('name', f'VM {vmid}'),
+                'type': vm.get('type', 'qemu'),
+                'status': vm.get('status', 'unknown'),
+                'node': vm.get('node', ''),
+                'cluster_id': cluster_id,
+                'cluster_name': mgr.config.name,
+                'uptime': vm.get('uptime', 0),
+            }
+
+            if cfg.get('show_resource_usage', True):
+                vm_info['cpu_percent'] = vm.get('cpu_percent', 0)
+                vm_info['mem_percent'] = vm.get('mem_percent', 0)
+                vm_info['maxmem'] = vm.get('maxmem', 0)
+                vm_info['mem'] = vm.get('mem', 0)
+                vm_info['maxcpu'] = vm.get('maxcpu', 0)
+                vm_info['maxdisk'] = vm.get('maxdisk', 0)
+                vm_info['disk'] = vm.get('disk', 0)
+
+            # get IP addresses if guest agent available
+            if cfg.get('show_ip_addresses', True) and vm.get('status') == 'running':
+                try:
+                    host = mgr.host
+                    node = vm.get('node')
+                    vt = vm.get('type', 'qemu')
+                    if vt == 'qemu':
+                        agent_resp = mgr._api_get(
+                            f"https://{host}:8006/api2/json/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
+                        )
+                        if agent_resp.status_code == 200:
+                            interfaces = agent_resp.json().get('data', {}).get('result', [])
+                            ips = []
+                            for iface in interfaces:
+                                for addr in iface.get('ip-addresses', []):
+                                    ip = addr.get('ip-address', '')
+                                    if ip and not ip.startswith('127.') and not ip.startswith('fe80'):
+                                        ips.append(ip)
+                            if ips:
+                                vm_info['ips'] = ips[:3]  # max 3 IPs
+                    elif vt == 'lxc':
+                        # LXC: IPs from config
+                        cfg_resp = mgr._api_get(
+                            f"https://{host}:8006/api2/json/nodes/{node}/lxc/{vmid}/interfaces"
+                        )
+                        if cfg_resp.status_code == 200:
+                            interfaces = cfg_resp.json().get('data', [])
+                            ips = [i.get('inet', '').split('/')[0] for i in interfaces
+                                   if i.get('inet') and not i.get('inet', '').startswith('127.')]
+                            if ips:
+                                vm_info['ips'] = ips[:3]
+                except Exception:
+                    pass
+
+            result.append(vm_info)
+
+    return {'vms': result, 'user': username}
+
+
+def _vm_power():
+    """Handle VM power action (start/stop/shutdown/reboot)"""
+    username = request.session.get('user', '')
+    # NS Aug 2026 (Aikido pentest) — portal routes are reachable by API token; build the
+    # authz user via build_authz_user so user_can_access_vm sees the token-floored
+    # effective_role. A plain load_users() lookup carries no effective_role, letting an
+    # admin-owned viewer-scoped token short-circuit the admin VM bypass and run power actions.
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(username, request.session)
+    cfg = _load_config()
+
+    data = request.get_json() or {}
+    cluster_id = data.get('cluster_id')
+    vmid = data.get('vmid')
+    action = data.get('action')  # start, stop, shutdown, reboot
+
+    if not cluster_id or not vmid or not action:
+        return {'error': 'Missing cluster_id, vmid, or action'}
+
+    # map action to permission
+    # NS Aug 2026 (Aikido) — reboot stops+starts the guest, so it must gate on vm.restart
+    # (the dedicated perm the main API + scheduler use), not vm.start. A vm.start-only portal
+    # user must not be able to reboot a guest through the portal.
+    perm_map = {'start': 'vm.start', 'stop': 'vm.stop', 'shutdown': 'vm.stop', 'reboot': 'vm.restart'}
+    required_perm = perm_map.get(action, 'vm.start')
+
+    # check allowed actions
+    if required_perm not in cfg.get('allowed_actions', []):
+        return {'error': f'Action not allowed by hoster: {action}'}
+
+    # check VM ACL
+    if not user_can_access_vm(user, cluster_id, int(vmid), required_perm):
+        return {'error': 'Permission denied'}
+
+    if cluster_id not in cluster_managers:
+        return {'error': 'Cluster not found'}
+
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return {'error': 'Cluster not connected'}
+
+    # find VM node
+    try:
+        resources = mgr.get_vm_resources()
+        vm = next((r for r in resources if r.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}
+
+        node = vm.get('node')
+        vm_type = vm.get('type', 'qemu')
+        host = mgr.host
+
+        action_map = {
+            'start': f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/status/start",
+            'stop': f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/status/stop",
+            'shutdown': f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/status/shutdown",
+            'reboot': f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/status/reboot",
+        }
+
+        url = action_map.get(action)
+        if not url:
+            return {'error': f'Unknown action: {action}'}
+
+        resp = mgr._api_post(url)
+        if resp.status_code == 200:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, f'portal.vm.{action}', f'Client portal: {action} VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return {'success': True, 'action': action, 'vmid': vmid}
+        else:
+            return {'error': f'Action failed: {resp.text[:100]}'}
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _vm_console():
+    """Get VNC console ticket + WS token for embedded noVNC"""
+    username = request.session.get('user', '')
+    user = _portal_user(username)
+    user['username'] = username
+    cfg = _load_config()
+
+    cluster_id = request.args.get('cluster_id')
+    vmid = request.args.get('vmid')
+
+    if not cluster_id or not vmid:
+        return {'error': 'Missing cluster_id or vmid'}
+
+    if 'vm.console' not in cfg.get('allowed_actions', []):
+        return {'error': 'Console not allowed'}
+
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.console'):
+        return {'error': 'Permission denied'}
+
+    if cluster_id not in cluster_managers:
+        return {'error': 'Cluster not found'}
+
+    mgr = cluster_managers[cluster_id]
+    try:
+        resources = mgr.get_vm_resources()
+        vm = next((r for r in resources if r.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}
+
+        result = mgr.get_vnc_ticket(vm.get('node'), int(vmid), vm.get('type', 'qemu'))
+        if result.get('success'):
+            from pegaprox.utils.realtime import create_ws_token
+            # sec (audit): mint at the caller's EFFECTIVE role. Using the stored role handed an
+            # admin-owned viewer token a ws_token stamped 'admin', and the ws-token validate path
+            # floors its gates by exactly that stamp — so the ceiling was defeated at the source.
+            from pegaprox.utils.auth import request_credential
+            # NS Oct 2026 - and it ends with the portal session it is minted under
+            ws_token = create_ws_token(username,
+                                       user.get('effective_role', user.get('role', 'viewer')),
+                                       sid=request_credential()[0])
+            result['ws_token'] = ws_token
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'vm.console', f'Portal: VNC console opened for VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return result
+        return {'error': result.get('error', 'Console failed')}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _vm_snapshots():
+    """List or create snapshots for a VM"""
+    username = request.session.get('user', '')
+    user = _portal_user(username)
+    user['username'] = username
+    cfg = _load_config()
+
+    if not cfg.get('allow_snapshots', False):
+        return {'error': 'Snapshots not allowed'}
+
+    cluster_id = request.args.get('cluster_id') or (request.get_json() or {}).get('cluster_id')
+    vmid = request.args.get('vmid') or (request.get_json() or {}).get('vmid')
+
+    if not cluster_id or not vmid:
+        return {'error': 'Missing cluster_id or vmid'}
+
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.snapshot'):
+        return {'error': 'Permission denied'}
+
+    if cluster_id not in cluster_managers:
+        return {'error': 'Cluster not found'}
+
+    mgr = cluster_managers[cluster_id]
+    host = mgr.host
+
+    # find VM
+    try:
+        resources = mgr.get_vm_resources()
+        vm = next((r for r in resources if r.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}
+
+        node = vm.get('node')
+        vm_type = vm.get('type', 'qemu')
+    except Exception as e:
+        return {'error': str(e)}
+
+    if request.method == 'GET':
+        # list snapshots
+        try:
+            resp = mgr._api_get(f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot")
+            if resp.status_code == 200:
+                snaps = [s for s in resp.json().get('data', []) if s.get('name') != 'current']
+                return {'snapshots': snaps, 'max': cfg.get('max_snapshots_per_vm', 5)}
+            return {'error': 'Failed to list snapshots'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    elif request.method == 'POST':
+        # create snapshot
+        data = request.get_json() or {}
+        snap_name = data.get('name', f'portal-{int(os.popen("date +%s").read().strip())}')
+        description = data.get('description', f'Created via Client Portal by {username}')
+
+        # check limit
+        max_snaps = cfg.get('max_snapshots_per_vm', 5)
+        try:
+            resp = mgr._api_get(f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot")
+            if resp.status_code == 200:
+                existing = [s for s in resp.json().get('data', []) if s.get('name') != 'current']
+                if len(existing) >= max_snaps:
+                    return {'error': f'Snapshot limit reached ({max_snaps} max). Delete old snapshots first.'}
+        except Exception:
+            pass
+
+        try:
+            snap_resp = mgr._api_post(
+                f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot",
+                data={'snapname': snap_name, 'description': description}
+            )
+            if snap_resp.status_code == 200:
+                from pegaprox.utils.audit import log_audit
+                log_audit(username, 'portal.snapshot_created', f'Snapshot "{snap_name}" on VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+                return {'success': True, 'name': snap_name}
+            return {'error': f'Snapshot failed: {snap_resp.text[:100]}'}
+        except Exception as e:
+            return {'error': str(e)}
+
+    return {'error': 'Method not allowed'}
+
+
+def _vm_snapshot_rollback():
+    """Rollback VM to a snapshot"""
+    username = request.session.get('user', '')
+    user = _portal_user(username)
+    user['username'] = username
+    cfg = _load_config()
+
+    if not cfg.get('allow_snapshots', False):
+        return {'error': 'Snapshots not allowed'}
+
+    data = request.get_json() or {}
+    cluster_id = data.get('cluster_id')
+    vmid = data.get('vmid')
+    snapname = data.get('snapname')
+
+    if not cluster_id or not vmid or not snapname:
+        return {'error': 'Missing cluster_id, vmid, or snapname'}
+
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.snapshot'):
+        return {'error': 'Permission denied'}
+
+    if cluster_id not in cluster_managers:
+        return {'error': 'Cluster not found'}
+
+    mgr = cluster_managers[cluster_id]
+
+    try:
+        resources = mgr.get_vm_resources()
+        vm = next((r for r in resources if r.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}
+
+        node = vm.get('node')
+        vm_type = vm.get('type', 'qemu')
+
+        if not _valid_snapshot_name(snapname):
+            return {'error': 'Invalid snapshot name'}
+        result = mgr.rollback_snapshot(node, int(vmid), vm_type, snapname)
+        if result.get('success'):
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.snapshot_rollback', f'Rollback to "{snapname}" on VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return {'success': True, 'snapname': snapname}
+        return {'error': result.get('error', 'Rollback failed')}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _vm_snapshot_delete():
+    """Delete a snapshot"""
+    username = request.session.get('user', '')
+    user = _portal_user(username)
+    user['username'] = username
+    cfg = _load_config()
+
+    if not cfg.get('allow_snapshots', False):
+        return {'error': 'Snapshots not allowed'}
+
+    data = request.get_json() or {}
+    cluster_id = data.get('cluster_id')
+    vmid = data.get('vmid')
+    snapname = data.get('snapname')
+
+    if not cluster_id or not vmid or not snapname:
+        return {'error': 'Missing cluster_id, vmid, or snapname'}
+
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.snapshot'):
+        return {'error': 'Permission denied'}
+
+    if cluster_id not in cluster_managers:
+        return {'error': 'Cluster not found'}
+
+    mgr = cluster_managers[cluster_id]
+    host = mgr.host
+
+    try:
+        resources = mgr.get_vm_resources()
+        vm = next((r for r in resources if r.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}
+
+        node = vm.get('node')
+        vm_type = vm.get('type', 'qemu')
+
+        if not _valid_snapshot_name(snapname):
+            return {'error': 'Invalid snapshot name'}
+        resp = mgr._api_delete(
+            f"https://{host}:8006/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot/{snapname}"
+        )
+        if resp.status_code == 200:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.snapshot_deleted', f'Deleted snapshot "{snapname}" on VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return {'success': True, 'snapname': snapname}
+        return {'error': f'Delete failed: {resp.text[:100]}'}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def _valid_snapshot_name(name):
+    """sec (audit): the portal interpolated the snapshot name straight into the PVE API path
+    (.../{vmid}/snapshot/{snapname}), while the authz gate above it only validated the vmid — so
+    a name carrying path separators or dot-segments reached a DIFFERENT guest's endpoint, or a
+    different endpoint entirely. The dashboard turned out to have the same hole, so the rule
+    moved to utils.sanitization and the manager sinks enforce it for everyone."""
+    from pegaprox.utils.sanitization import validate_snapshot_name
+    return validate_snapshot_name(name)
+
+
+def _change_password():
+    """Change authenticated user's password"""
+    cfg = _load_config()
+    if not cfg.get('allow_password_change', True):
+        return {'error': 'Password change not allowed'}
+
+    username = request.session.get('user', '')
+    data = request.get_json() or {}
+    current = data.get('current_password', '')
+    new_pwd = data.get('new_password', '')
+
+    if not current or not new_pwd:
+        return {'error': 'Current and new password required'}
+
+    from pegaprox.utils.auth import verify_password, hash_password, save_single_user
+    user = _portal_user(username)
+
+    if user.get('auth_source', 'local') != 'local':
+        return {'error': 'Password managed by external provider'}
+
+    if not verify_password(current, user.get('password_salt', ''), user.get('password_hash', '')):
+        return {'error': 'Current password incorrect'}
+
+    salt, pwd_hash = hash_password(new_pwd)
+    user['password_salt'] = salt
+    user['password_hash'] = pwd_hash
+
+    from datetime import datetime
+    user['password_changed_at'] = datetime.now().isoformat()
+    # regression fix (audit): the identity rewrite in this campaign removed the `users =
+    # load_users()` binding but left `save_users(users)` here, so this route raised NameError
+    # and the portal password change was dead — the hash was never written and the session
+    # revocation below never ran. Single-row write, same as api/auth.py uses.
+    save_single_user(username, user)
+
+    # NS Aug 2026 (Aikido pentest) — a password change must revoke the user's other live
+    # sessions (matches the main dashboard's behaviour, users.py). Keep the current portal
+    # session alive so the customer isn't logged straight back out.
+    from pegaprox.utils.auth import invalidate_all_user_sessions
+    _cur_sid = request.headers.get('X-Session-ID') or request.cookies.get('session_id')
+    invalidate_all_user_sessions(username, except_session=_cur_sid)
+
+    from pegaprox.utils.audit import log_audit
+    log_audit(username, 'portal.password_changed', 'Password changed via client portal')
+
+    return {'success': True}
+
+
+# LW: Apr 2026 — ISO mount for portal customers
+# hoster defines allowed ISOs in config.json: "allowed_isos": ["local:iso/debian.iso", ...]
+# or "iso_storage": "local" to allow all ISOs from a specific storage
+# MK Nov 2026 - all of it only once the hoster sets allow_iso_mount. The routes did not ask the
+# switch, so a hoster who listed ISOs with the switch off still had them mounted through the API.
+# The drive is a CD-ROM slot: it is written as a key of the guest's config, and any other key
+# (scsi0, net0, args) was taken as given
+_CDROM_DRIVE = re.compile(r'^(ide[0-3]|sata[0-5])$')
+
+
+def _iso_mount_off(cfg):
+    if not cfg.get('allow_iso_mount', False):
+        return {'error': 'ISO mounting is not enabled'}, 403
+    return None
+
+def _list_allowed_isos():
+    """List ISOs that portal customers are allowed to mount"""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    cfg = _load_config()
+    off = _iso_mount_off(cfg)
+    if off:
+        return off
+
+    # hoster can specify individual ISOs or an entire storage
+    allowed_list = cfg.get('allowed_isos', [])
+    iso_storage = cfg.get('iso_storage', '')
+
+    isos = []
+    if iso_storage:
+        # list all ISOs from the configured storage across all clusters
+        for cid, mgr in cluster_managers.items():
+            if not mgr.is_connected:
+                continue
+            try:
+                for iso in mgr.get_iso_list(list(mgr.get_node_status().keys())[0], iso_storage):
+                    volid = iso.get('volid', '')
+                    name = volid.split('/')[-1] if '/' in volid else volid
+                    if volid not in [i['volid'] for i in isos]:
+                        isos.append({'volid': volid, 'name': name, 'size': iso.get('size', 0), 'cluster_id': cid})
+            except:
+                pass
+    # also add individually allowed ISOs
+    for iso_id in allowed_list:
+        if iso_id not in [i['volid'] for i in isos]:
+            name = iso_id.split('/')[-1] if '/' in iso_id else iso_id
+            isos.append({'volid': iso_id, 'name': name, 'size': 0, 'cluster_id': ''})
+
+    return {'isos': isos}
+
+
+def _mount_iso():
+    """Mount an allowed ISO to a customer's VM"""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    data = request.get_json() or {}
+    cluster_id = data.get('cluster_id', '')
+    vmid = data.get('vmid')
+    iso_volid = data.get('iso', '')
+    drive = data.get('drive', 'ide2')  # ide2 is standard CD-ROM
+
+    if not all([cluster_id, vmid, iso_volid]):
+        return {'error': 'cluster_id, vmid, iso required'}, 400
+    off = _iso_mount_off(_load_config())
+    if off:
+        return off
+    if not isinstance(drive, str) or not _CDROM_DRIVE.match(drive):
+        return {'error': 'drive must be a CD-ROM slot (ide0-ide3, sata0-sata5)'}, 400
+
+    # check VM access
+    # fix (audit): user_can_access_vm takes the user DICT — passing the username string made
+    # its first `user.get(...)` raise AttributeError, so mounting an ISO from the portal has
+    # always 500'd. Build the identity the same way every other handler here does, and gate on
+    # vm.config: attaching a CD-ROM is a config change, not a read.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _iso_user = _bau(username, request.session)
+    try:
+        if not user_can_access_vm(_iso_user, cluster_id, int(vmid), 'vm.config'):
+            return {'error': 'Access denied'}, 403
+    except (TypeError, ValueError):
+        return {'error': 'vmid must be a number'}, 400
+
+    # MK: security audit — verify ISO is in explicit allowed list or allowed storage
+    cfg = _load_config()
+    allowed = cfg.get('allowed_isos', [])
+    iso_storage = cfg.get('iso_storage', '')
+    # prevent path traversal in volid
+    if '..' in iso_volid or '/' in iso_volid.split(':')[-1].split('/')[0]:
+        return {'error': 'Invalid ISO path'}, 400
+    if iso_volid not in allowed and not (iso_storage and iso_volid.startswith(f'{iso_storage}:iso/')):
+        return {'error': 'This ISO is not allowed'}, 403
+
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not mgr.is_connected:
+        return {'error': 'Cluster not available'}, 503
+
+    # find node
+    try:
+        vms = mgr.get_vm_resources()
+        vm = next((v for v in vms if v.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}, 404
+        node = vm.get('node')
+        vm_type = vm.get('type', 'qemu')
+        if vm_type != 'qemu':
+            return {'error': 'ISO mount only supported for QEMU VMs'}, 400
+
+        url = f"https://{mgr.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
+        resp = mgr._api_post(url, data={drive: f'{iso_volid},media=cdrom'})
+        if resp.status_code == 200:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.iso_mount', f'Mounted {iso_volid} on VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return {'success': True, 'message': f'ISO mounted on {drive}'}
+        return {'error': f'Mount failed: {resp.text[:200]}'}, 500
+    except Exception as e:
+        return {'error': str(e)}, 500
+
+
+def _unmount_iso():
+    """Remove ISO from VM CD-ROM drive"""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    data = request.get_json() or {}
+    cluster_id = data.get('cluster_id', '')
+    vmid = data.get('vmid')
+    drive = data.get('drive', 'ide2')
+
+    if not all([cluster_id, vmid]):
+        return {'error': 'cluster_id, vmid required'}, 400
+    off = _iso_mount_off(_load_config())
+    if off:
+        return off
+    if not isinstance(drive, str) or not _CDROM_DRIVE.match(drive):
+        return {'error': 'drive must be a CD-ROM slot (ide0-ide3, sata0-sata5)'}, 400
+    # same defect as _mount_iso — a username string where a user dict belongs
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _iso_user = _bau(username, request.session)
+    try:
+        if not user_can_access_vm(_iso_user, cluster_id, int(vmid), 'vm.config'):
+            return {'error': 'Access denied'}, 403
+    except (TypeError, ValueError):
+        return {'error': 'vmid must be a number'}, 400
+
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not mgr.is_connected:
+        return {'error': 'Cluster not available'}, 503
+
+    try:
+        vms = mgr.get_vm_resources()
+        vm = next((v for v in vms if v.get('vmid') == int(vmid)), None)
+        if not vm:
+            return {'error': 'VM not found'}, 404
+        node = vm.get('node')
+        url = f"https://{mgr.host}:8006/api2/json/nodes/{node}/qemu/{vmid}/config"
+        resp = mgr._api_post(url, data={drive: 'none,media=cdrom'})
+        if resp.status_code == 200:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.iso_unmount', f'Unmounted ISO from VM {vmid}', cluster=mgr.config.name, cluster_id=cluster_id)
+            return {'success': True}
+        return {'error': f'Unmount failed: {resp.text[:200]}'}, 500
+    except Exception as e:
+        return {'error': str(e)}, 500
+
+
+def _portal_snapshot_policies():
+    """Read-only list of snapshot policies that touch the caller's VMs.
+    Filters: returns only policies whose target_value matches a VM the
+    caller has access to (via VM-ACL / pool / tenant). NS May 2026."""
+    from pegaprox.core.db import get_db
+    username = request.session.get('user', '')
+    user = _portal_user(username)
+    user['username'] = username
+
+    # collect (cluster_id, vmid, tags) the caller can reach via _get_my_vms logic
+    # Re-use the existing helper to avoid duplicating ACL/permission code.
+    try:
+        my_vms_data = _get_my_vms()
+    except Exception:
+        my_vms_data = {'vms': []}
+
+    by_cluster = {}
+    for vm in (my_vms_data.get('vms') or []):
+        cid = vm.get('cluster_id') or vm.get('clusterId')
+        if not cid: continue
+        d = by_cluster.setdefault(cid, {'vmids': set(), 'tags': set()})
+        if vm.get('vmid') is not None:
+            d['vmids'].add(str(vm['vmid']))
+        for t in (vm.get('tags') or '').split(';'):
+            t = t.strip()
+            if t: d['tags'].add(t.lower())
+
+    policies_out = []
+    try:
+        c = get_db().conn.cursor()
+        for cid, ctx in by_cluster.items():
+            c.execute('''SELECT id, cluster_id, name, target_type, target_value,
+                         schedule, schedule_at, retention_count, retention_days,
+                         enabled, last_run_at, last_run_status
+                         FROM snapshot_policies WHERE cluster_id = ? AND enabled = 1''', (cid,))
+            for row in c.fetchall():
+                pol = dict(row)
+                applies = False
+                if pol['target_type'] == 'vm':
+                    wanted = {x.strip() for x in (pol['target_value'] or '').split(',') if x.strip()}
+                    applies = bool(wanted & ctx['vmids'])
+                elif pol['target_type'] == 'tag':
+                    applies = (pol['target_value'] or '').strip().lower() in ctx['tags']
+                if applies:
+                    policies_out.append(pol)
+    except Exception:
+        logging.exception('[client_portal] snapshot-policies failed')
+        return {'error': 'internal error'}, 500
+
+    return {'policies': policies_out}
+
+
+def _ct_create_options():
+    """#556 — expose what a portal user is allowed to create (templates + limits) and
+    their current tenant-quota usage, so the create form can render + pre-validate."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    user = _portal_user(username)
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+    cfg = _load_config(); cc = cfg.get('ct_create') or {}
+    enabled = bool(cfg.get('allow_ct_create')) and bool(cc.get('cluster_id')) and bool(cc.get('node'))
+    out = {
+        'enabled': enabled,
+        'templates': cc.get('templates') or [],          # admin whitelist of ostemplate volids
+        'max_cores': int(cc.get('max_cores', 2) or 2),
+        'max_memory_mb': int(cc.get('max_memory_mb', 2048) or 2048),
+        'max_disk_gb': int(cc.get('max_disk_gb', 16) or 16),
+        'target_cluster': cc.get('cluster_id', '') if enabled else '',
+    }
+    # tenant quota usage (best-effort; only if the user is in a tenant)
+    tenant_id = user.get('tenant_id')
+    if tenant_id:
+        try:
+            from pegaprox.utils.rbac import check_tenant_quota
+            q = check_tenant_quota(tenant_id, add_vms=0, force=True)
+            out['quota'] = q.get('quota', {}); out['usage'] = q.get('usage', {})
+            out['quota_enforce'] = q.get('enforce', 'block')
+        except Exception:
+            pass
+    return out
+
+
+def _create_ct():
+    """#556 — portal self-service: create an LXC within the tenant quota + the hoster's
+    guardrails. Non-admin portal users only. The target cluster/node/storage/bridge are
+    ADMIN-configured (never user-supplied); the user only picks a whitelisted template +
+    capped cores/memory/disk + a hostname/password. The new CT is ACL-granted to the
+    creator so it shows up in their portal."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    user = _portal_user(username)
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+
+    cfg = _load_config(); cc = cfg.get('ct_create') or {}
+    if not cfg.get('allow_ct_create') or not cc.get('cluster_id') or not cc.get('node'):
+        return {'error': 'Container creation is not enabled'}, 403
+
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return {'error': 'Expected a JSON object'}, 400
+    # --- validate strictly against the hoster's guardrails ---
+    template = data.get('template', '')
+    if template not in (cc.get('templates') or []):
+        return {'error': 'Selected template is not allowed'}, 400
+    try:
+        cores = int(data.get('cores', 1)); memory = int(data.get('memory', 512)); disk = int(data.get('disk_gb', 8))
+    except (ValueError, TypeError):
+        return {'error': 'Cores / memory / disk must be numbers'}, 400
+    max_cores = int(cc.get('max_cores', 2) or 2)
+    max_mem = int(cc.get('max_memory_mb', 2048) or 2048)
+    max_disk = int(cc.get('max_disk_gb', 16) or 16)
+    if not (1 <= cores <= max_cores):   return {'error': f'Cores must be between 1 and {max_cores}'}, 400
+    if not (128 <= memory <= max_mem):  return {'error': f'Memory must be between 128 and {max_mem} MB'}, 400
+    if not (1 <= disk <= max_disk):     return {'error': f'Disk must be between 1 and {max_disk} GB'}, 400
+    hostname = (data.get('hostname') or '').strip()
+    import re
+    if not re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$', hostname):
+        return {'error': 'Invalid hostname — letters/digits/hyphens only, must start and end alphanumeric'}, 400
+    password = data.get('password') or ''
+    if not isinstance(password, str):
+        return {'error': 'Password must be a string'}, 400
+    if len(password) < 8:
+        return {'error': 'Password must be at least 8 characters'}, 400
+    # PVE's crypt() would end the password at a NUL, root would get another one
+    if '\x00' in password:
+        return {'error': 'Password must not contain a NUL character'}, 400
+
+    # --- tenant quota (block if enforced) ---
+    # MK Sep 2026 - two ways past this. `if tenant_id:` skipped the whole check for an
+    # account whose tenant field is empty, and the except swallowed a failed check and
+    # carried on creating - so a quota that could not be computed was read as "no quota".
+    # Self-service creation is exactly where a quota has to hold: it is the one route a
+    # customer can call in a loop.
+    from pegaprox.utils.rbac import DEFAULT_TENANT_ID as _DT
+    tenant_id = user.get('tenant_id') or _DT
+
+    # MK Sep 2026 - the quota below is computed over the clusters the TENANT holds, while
+    # the container is created on the one the hoster configured. Nothing tied the two
+    # together, so if ct_create.cluster_id sits outside the customer's tenant the two
+    # halves measure different worlds: usage never counts what this route creates, and an
+    # enforced quota silently stops enforcing on the one path a customer can call in a
+    # loop. Same cluster resolver the quota uses, so they cannot disagree. A default-tenant
+    # account answers None ("all clusters") and is unaffected.
+    from pegaprox.utils.rbac import get_user_clusters as _get_user_clusters
+    _target_cid = cc['cluster_id']
+    try:
+        _allowed = _get_user_clusters(dict(user, tenant_id=tenant_id))
+    except Exception:
+        logging.exception('[client_portal] could not resolve the caller\'s clusters')
+        return {'error': 'Cannot verify your quota right now - try again shortly'}, 503
+    if _allowed is not None and _target_cid not in _allowed:
+        logging.error(f"[client_portal] ct_create targets {_target_cid!r}, which is outside "
+                      f"tenant {tenant_id!r} - refusing, because that tenant's quota would "
+                      f"never account for the container")
+        return {'error': 'Container creation is not configured for your account'}, 403
+
+    # MK Sep 2026 - the check and the create were two separate steps with nothing between
+    # them. Usage is computed from what exists, so two requests arriving together both
+    # measured the world before either had created anything, both passed, and both went on
+    # to create. A customer at one container below the ceiling could have as many as they
+    # could fire in parallel, which on a self-service route is not a theoretical number.
+    # One lock per tenant is enough: the check only has to see the effect of the create it
+    # is racing, and creates for different tenants never need to wait on each other. Keyed
+    # by tenant id, which comes from a stored user record rather than from the request, so
+    # this map is bounded by the install and not by anyone calling it.
+    with _tenant_create_lock(tenant_id):
+        try:
+            from pegaprox.utils.rbac import check_tenant_quota
+            # `disk` is the already-validated disk_gb from the form above, in GB
+            q = check_tenant_quota(tenant_id, add_cores=cores, add_mem_gb=memory / 1024.0,
+                                   add_vms=1, add_disk_gb=float(disk))
+        except Exception:
+            logging.exception('[client_portal] quota check failed')
+            return {'error': 'Cannot verify your quota right now - try again shortly'}, 503
+        if q.get('violations') and q.get('enforce') == 'block':
+            return {'error': 'Quota exceeded (' + ', '.join(q['violations']) + ')',
+                    'quota': q.get('quota'), 'usage': q.get('usage')}, 403
+
+        cluster_id = _target_cid; node = cc['node']
+        mgr = cluster_managers.get(cluster_id)
+        if not mgr or not mgr.is_connected:
+            return {'error': 'Target cluster is currently unavailable'}, 503
+
+        ct_config = {
+            'template': template, 'hostname': hostname, 'name': hostname,
+            'memory': memory, 'cores': cores, 'password': password,
+            'storage': cc.get('storage', 'local-lvm'), 'disk_size': str(disk),
+            'net_bridge': cc.get('bridge', 'vmbr0'),
+        }
+        res = mgr.create_container(node, ct_config)
+        if not res.get('success'):
+            return {'error': res.get('error', 'Container creation failed')}, 500
+        new_vmid = res.get('vmid') or ct_config.get('vmid')
+
+    # grant the creator access to their new CT (portal scopes on VM-ACL / pool)
+    try:
+        from pegaprox.utils.rbac import save_vm_acls
+        acls = load_vm_acls()
+        acls.setdefault(cluster_id, {})[str(new_vmid)] = {'users': [username]}
+        save_vm_acls(acls)
+    except Exception as e:
+        logging.warning(f'[client_portal] CT {new_vmid} created but ACL grant failed: {e}')
+
+    from pegaprox.utils.audit import log_audit
+    log_audit(username, 'portal.ct_created',
+              f'Client portal: created container "{hostname}" (CT {new_vmid}) on {cluster_id}/{node}')
+    return {'success': True, 'vmid': new_vmid, 'cluster_id': cluster_id, 'hostname': hostname}
+
+
+def _destroy_options():
+    """#556 — portal probe: is self-service teardown enabled by the hoster?
+    The frontend uses this (not the public /config blob) to decide whether to
+    render the Destroy button."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    user = _portal_user(username)
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+    cfg = _load_config()
+    return {'enabled': bool(cfg.get('allow_destroy'))}
+
+
+def _destroy_guest():
+    """#556 (down half) — self-service teardown of one of the caller's OWN guests.
+
+    Fail-secure authorization — ALL of the following must pass or we deny:
+      (a) hoster opt-in flag allow_destroy (default off),
+      (b) the target is in the caller's own _get_my_vms() set — the single
+          trusted ACL/pool ownership computation the whole portal uses
+          (closes IDOR/BOLA against another tenant's guest),
+      (c) user_can_access_vm(..., 'vm.stop') — a portal-manageable guest.
+          vm.delete is intentionally NOT in the inherit_role whitelist
+          (rbac.py), so we authorize via vm.stop and NEVER add vm.delete to a
+          role — that would grant delete to every ACL'd user product-wide,
+      (d) a type-the-name confirm matching the LIVE guest name.
+    Then purge-delete, drop the stale VM-ACL row (so a recycled VMID can't
+    inherit this grant), and audit."""
+    username = request.session.get('user', '')
+    if not username:
+        return {'error': 'Not authenticated', 'code': 'AUTH_REQUIRED'}, 401
+    user = _portal_user(username)
+    from pegaprox.models.permissions import ROLE_ADMIN
+    if user.get('effective_role', user.get('role')) == ROLE_ADMIN:
+        return {'redirect': '/', 'reason': 'admin'}
+
+    cfg = _load_config()
+    if not cfg.get('allow_destroy'):
+        return {'error': 'Teardown is not enabled'}, 403
+
+    data = request.get_json(silent=True) or {}
+    cluster_id = data.get('cluster_id')
+    vmid = data.get('vmid')
+    confirm_name = (data.get('confirm_name') or '').strip()
+    if not cluster_id or vmid is None:
+        return {'error': 'Missing cluster_id or vmid'}, 400
+
+    # (b) OWNERSHIP — reuse _get_my_vms (VM-ACL users + resource-pool grants).
+    my = _get_my_vms()
+    if isinstance(my, tuple):
+        my = my[0]
+    if not isinstance(my, dict) or 'vms' not in my:
+        return {'error': 'Not permitted'}, 403
+    target = next((v for v in (my.get('vms') or [])
+                   if str(v.get('vmid')) == str(vmid) and v.get('cluster_id') == cluster_id), None)
+    if not target:
+        return {'error': 'Not found or not permitted'}, 404
+
+    # (c) second, independent authz — vm.stop IS in the inherit_role whitelist.
+    try:
+        vmid_int = int(vmid)
+    except (ValueError, TypeError):
+        return {'error': 'Invalid vmid'}, 400
+    if not user_can_access_vm(user, cluster_id, vmid_int, 'vm.stop'):
+        return {'error': 'Permission denied'}, 403
+
+    # (d) type-the-name confirm — compared to the LIVE name from _get_my_vms,
+    # server-side (the disabled button is only UX; a crafted POST can't skip it).
+    live_name = target.get('name') or ''
+    if not confirm_name or confirm_name != live_name:
+        return {'error': 'Type the exact guest name to confirm'}, 400
+
+    node = target.get('node')
+    vm_type = target.get('type', 'qemu')
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr or not mgr.is_connected:
+        return {'error': 'Cluster is currently unavailable'}, 503
+
+    res = mgr.delete_vm(node, vmid_int, vm_type, purge=True, destroy_unreferenced=True)
+    if not res.get('success'):
+        return {'error': res.get('error', 'Teardown failed')}, 500
+
+    # drop the stale VM-ACL row so a recycled VMID doesn't inherit this grant.
+    try:
+        from pegaprox.core.db import get_db
+        if get_db().delete_vm_acl(cluster_id, vmid_int):
+            # MK Sep 2026 - the row went but the cached snapshot did not: load_vm_acls
+            # keeps a 30s TTL copy and every write path is supposed to invalidate it, so
+            # until this the grant outlived the row it was read from.
+            from pegaprox.utils.rbac import invalidate_vm_acls_cache
+            invalidate_vm_acls_cache()
+    except Exception as e:
+        # ACL cleanup failed AFTER the guest was already purged (irreversible). A
+        # lingering vm_acls row would grant the old owner access if PVE recycles this
+        # VMID for a different guest (BOLA-adjacent) — so log LOUD (error) + audit it
+        # so ops can remove the stale row manually. (CodeAnt review 2026-07-11.)
+        logging.error(f'[client_portal] destroyed {vm_type} {vmid_int} on {cluster_id} but '
+                      f'VM-ACL cleanup FAILED: {e} — remove the stale vm_acls row manually '
+                      f'to avoid a recycled-VMID access grant')
+        try:
+            from pegaprox.utils.audit import log_audit
+            log_audit(username, 'portal.acl_cleanup_failed',
+                      f'ORPHANED VM-ACL after teardown of {vm_type} {vmid_int} on '
+                      f'{cluster_id}/{node} — manual cleanup required ({e})')
+        except Exception:
+            pass
+
+    from pegaprox.utils.audit import log_audit
+    log_audit(username, 'portal.guest_destroyed',
+              f'Client portal: destroyed {vm_type} {vmid_int} ("{live_name}") on {cluster_id}/{node}')
+    return {'success': True, 'vmid': vmid_int}
+
+
+def register(app):
+    """Register plugin routes"""
+    register_plugin_route('client_portal', 'config', _get_portal_config)
+    register_plugin_route('client_portal', 'my-vms', _get_my_vms)
+    register_plugin_route('client_portal', 'ct/create-options', _ct_create_options)
+    register_plugin_route('client_portal', 'ct/create', _create_ct)
+    register_plugin_route('client_portal', 'vm/destroy-options', _destroy_options)
+    register_plugin_route('client_portal', 'vm/destroy', _destroy_guest)
+    register_plugin_route('client_portal', 'vm/power', _vm_power)
+    register_plugin_route('client_portal', 'vm/console', _vm_console)
+    register_plugin_route('client_portal', 'vm/snapshots', _vm_snapshots)
+    register_plugin_route('client_portal', 'vm/snapshot-rollback', _vm_snapshot_rollback)
+    register_plugin_route('client_portal', 'vm/snapshot-delete', _vm_snapshot_delete)
+    register_plugin_route('client_portal', 'account/change-password', _change_password)
+    # ISO mount for portal customers
+    register_plugin_route('client_portal', 'vm/isos', _list_allowed_isos)
+    register_plugin_route('client_portal', 'vm/iso-mount', _mount_iso)
+    register_plugin_route('client_portal', 'vm/iso-unmount', _unmount_iso)
+    # NS May 2026 — read-only view of snapshot policies that affect the
+    # caller's VMs, plus latest run history. Lets customers see "yes my DB
+    # gets snapshotted hourly" without any management surface.
+    register_plugin_route('client_portal', 'snapshot-policies', _portal_snapshot_policies)
+
+    logging.info("[PLUGINS] Client Portal plugin registered")

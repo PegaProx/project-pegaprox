@@ -1,0 +1,10 @@
+{
+    "id": "status_page",
+    "name": "Public Status Page",
+    "version": "1.0.0",
+    "author": "PegaProx Team",
+    "description": "Public cluster health dashboard for monitoring screens. No login required — uses URL auth key.",
+    "min_pegaprox": "0.9.4",
+    "has_frontend": true,
+    "frontend_route": "/status"
+}

@@ -1,0 +1,638 @@
+# -*- coding: utf-8 -*-
+"""migration history, affinity rules & scheduled tasks - split from monolith dec 2025, LW/NS"""
+
+import os
+import json
+import logging
+from datetime import datetime
+from flask import Blueprint, jsonify, request
+
+from pegaprox.constants import *
+from pegaprox.globals import *
+from pegaprox.models.permissions import *
+from pegaprox.core.db import get_db
+from pegaprox.core import ha
+from pegaprox.models.tasks import balancer_cooldown
+
+from pegaprox.utils.auth import require_auth
+from pegaprox.utils.audit import log_audit
+from pegaprox.background.scheduler import load_scheduled_tasks, save_scheduled_tasks, execute_scheduled_task
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access
+
+bp = Blueprint('history', __name__)
+
+@bp.route('/api/scheduled-tasks', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_scheduled_tasks():
+    """Get all scheduled tasks"""
+    config = load_scheduled_tasks()
+    # NS Jul 2026 (CodeAnt IDOR) — scope the task list to the caller's reachable clusters
+    # (was returning every tenant's scheduled tasks to any cluster.view holder).
+    from pegaprox.utils.rbac import get_user_clusters
+    # MK Sep 2026 - g.current_user is the RAW stored record; it has no effective_role, so a
+    # restricted bearer token was scoped as its OWNER. For an admin owner get_user_clusters
+    # then answers None ("all clusters") and the filter below is skipped entirely, which is
+    # how a viewer-capped token read every tenant's rows. acting_user applies the token floor.
+    from pegaprox.api.helpers import acting_user, caller_is_scoped
+    from pegaprox.utils.rbac import acts_as_admin, user_can_access_vm
+    # MK Oct 2026 - the stored record carries no username, which the pool and ACL checks
+    # below key on
+    _who = dict(acting_user() or {})
+    _who.setdefault('username', request.session.get('user', ''))
+    _allowed = get_user_clusters(_who)
+    if _allowed is not None:
+        config = dict(config)
+        config['tasks'] = [t for t in config.get('tasks', []) if t.get('cluster_id') in _allowed]
+    # MK Oct 2026 - a caller confined to a pool or to ACL'd guests got every task on the
+    # cluster, with the guest, node and schedule of each. They get the tasks of guests they
+    # may see; a task whose target is no guest number is left out for them.
+    if not acts_as_admin(_who):
+        _scoped, kept = {}, []
+        for t in config.get('tasks', []):
+            cid = t.get('cluster_id')
+            if cid not in _scoped:
+                _scoped[cid] = caller_is_scoped(_who, cid)
+            if not _scoped[cid]:
+                kept.append(t)
+                continue
+            try:
+                vmid = int(t.get('target_id'))
+            except (TypeError, ValueError):
+                continue
+            # legacy rows say 'vm'; the pool lookup then tries both guest types
+            vt = t.get('target_type')
+            if user_can_access_vm(_who, cid, vmid, 'vm.view', vt if vt in ('qemu', 'lxc') else None):
+                kept.append(t)
+        config = dict(config)
+        config['tasks'] = kept
+    return jsonify(config)
+
+@bp.route('/api/scheduled-tasks', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def create_scheduled_task():
+    """Create a new scheduled task"""
+    data = request.json or {}
+    config = load_scheduled_tasks()
+    
+    import uuid
+    new_task = {
+        'id': str(uuid.uuid4())[:8],
+        'name': data.get('name', 'New Task'),
+        'cluster_id': data.get('cluster_id', ''),
+        'target_type': data.get('target_type', 'qemu'),
+        'target_id': data.get('target_id', ''),
+        'target_node': data.get('target_node', ''),
+        'action': data.get('action', 'snapshot'),  # start, stop, restart, snapshot, backup
+        'schedule_type': data.get('schedule_type', 'daily'),  # hourly, daily, weekly, monthly
+        'schedule_time': data.get('schedule_time', '02:00'),
+        'schedule_day': data.get('schedule_day', 0),
+        'backup_storage': data.get('backup_storage', 'local'),
+        'enabled': data.get('enabled', True),
+        'last_run': None,
+        'created': datetime.now().isoformat()
+    }
+    
+    config['tasks'].append(new_task)
+    save_scheduled_tasks(config)
+    
+    user = request.session.get('user', 'unknown')
+    log_audit(user, 'scheduled_task.created', f"Created scheduled task: {new_task['name']}")
+    
+    return jsonify(new_task), 201
+
+@bp.route('/api/scheduled-tasks/<task_id>', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN])
+def update_scheduled_task(task_id):
+    """Update a scheduled task"""
+    data = request.json or {}
+    config = load_scheduled_tasks()
+    
+    for task in config['tasks']:
+        if task['id'] == task_id:
+            task.update({
+                'name': data.get('name', task['name']),
+                'cluster_id': data.get('cluster_id', task['cluster_id']),
+                'target_type': data.get('target_type', task['target_type']),
+                'target_id': data.get('target_id', task['target_id']),
+                'target_node': data.get('target_node', task['target_node']),
+                'action': data.get('action', task['action']),
+                'schedule_type': data.get('schedule_type', task['schedule_type']),
+                'schedule_time': data.get('schedule_time', task['schedule_time']),
+                'schedule_day': data.get('schedule_day', task['schedule_day']),
+                'backup_storage': data.get('backup_storage', task.get('backup_storage', 'local')),
+                'enabled': data.get('enabled', task['enabled']),
+            })
+            save_scheduled_tasks(config)
+            return jsonify(task)
+    
+    return jsonify({'error': 'Task not found'}), 404
+
+@bp.route('/api/scheduled-tasks/<task_id>', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN])
+def delete_scheduled_task(task_id):
+    """Delete a scheduled task"""
+    config = load_scheduled_tasks()
+    config['tasks'] = [t for t in config['tasks'] if t['id'] != task_id]
+    save_scheduled_tasks(config)
+    
+    user = request.session.get('user', 'unknown')
+    log_audit(user, 'scheduled_task.deleted', f"Deleted scheduled task: {task_id}")
+    
+    return jsonify({'success': True})
+
+@bp.route('/api/scheduled-tasks/<task_id>/run', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def run_scheduled_task_now(task_id):
+    """Run a scheduled task immediately"""
+    config = load_scheduled_tasks()
+    
+    for task in config['tasks']:
+        if task['id'] == task_id:
+            execute_scheduled_task(task)
+            # the scheduler compares this stamp with the group's clock, not the host's (#625)
+            task['last_run'] = ha.schedule_now().isoformat()
+            save_scheduled_tasks(config)
+            return jsonify({'success': True, 'message': f"Task '{task['name']}' executed"})
+    
+    return jsonify({'error': 'Task not found'}), 404
+
+
+# =====================================================
+# MIGRATION HISTORY - LW: Dec 2025
+# SQLite version
+# =====================================================
+
+def load_migration_history():
+    """Load migration history from SQLite database
+    
+    SQLite migration
+    """
+    try:
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute('SELECT * FROM migration_history ORDER BY timestamp DESC LIMIT 1000')
+        
+        migrations = []
+        for row in cursor.fetchall():
+            migrations.append({
+                'id': row['id'],
+                'cluster_id': row['cluster_id'],
+                'vmid': row['vmid'],
+                'vm_name': row['vm_name'],
+                'source_node': row['source_node'],
+                'target_node': row['target_node'],
+                'reason': row['reason'],
+                'status': row['status'],
+                'duration': row['duration_seconds'],
+                'timestamp': row['timestamp'],
+                'trigger': row['trigger_kind'] if 'trigger_kind' in row.keys() else None,
+            })
+        
+        return {'migrations': migrations}
+    except Exception as e:
+        logging.error(f"Error loading migration history from database: {e}")
+        # Legacy fallback
+        if os.path.exists(MIGRATION_HISTORY_FILE):
+            try:
+                with open(MIGRATION_HISTORY_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+    return {'migrations': []}
+
+
+def save_migration_history(config):
+    """Save migration history - now handled per-entry via log_migration()
+    
+    saves directly to db
+    This function is kept for backwards compatibility
+    """
+    # In SQLite version, saving is handled per-entry in log_migration()
+    pass
+
+
+def log_migration(cluster_id: str, vmid: int, vm_name: str, vm_type: str, 
+                  source_node: str, target_node: str, migration_type: str,
+                  status: str, user: str = 'system', duration: float = 0,
+                  reason: str = None, trigger: str = None, details: dict = None):
+    """Log a VM migration event to SQLite database
+    
+    MK: Called from migrate_vm and HA failover functions
+    writes to db now. Oct 2026 - the balancer passes its own reason and trigger,
+    and the table keeps the newest rows per cluster (db.add_migration_event)
+    """
+    try:
+        get_db().add_migration_event(
+            cluster_id, vmid, vm_name, source_node, target_node, status,
+            reason=reason or f"{migration_type} by {user}", trigger=trigger,
+            details=details, duration=duration)
+    except Exception as e:
+        logging.error(f"Error logging migration: {e}")
+    
+    return {
+        'cluster_id': cluster_id,
+        'vmid': vmid,
+        'vm_name': vm_name,
+        'source_node': source_node,
+        'target_node': target_node,
+        'migration_type': migration_type,
+        'status': status,
+        'user': user,
+        'duration': duration,
+        'timestamp': datetime.now().isoformat()
+    }
+
+@bp.route('/api/migration-history', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_migration_history():
+    """Get migration history"""
+    config = load_migration_history()
+    
+    # Optional filters
+    cluster_id = request.args.get('cluster_id')
+    vmid = request.args.get('vmid')
+    limit = int(request.args.get('limit', 100))
+    
+    migrations = config.get('migrations', [])
+    
+    if cluster_id:
+        migrations = [m for m in migrations if m.get('cluster_id') == cluster_id]
+    if vmid:
+        migrations = [m for m in migrations if str(m.get('vmid')) == str(vmid)]
+
+    # NS Jul 2026 (CodeAnt IDOR) — scope the global migration log to the caller's clusters.
+    from pegaprox.utils.rbac import get_user_clusters
+    # MK Sep 2026 - g.current_user is the RAW stored record; it has no effective_role, so a
+    # restricted bearer token was scoped as its OWNER. For an admin owner get_user_clusters
+    # then answers None ("all clusters") and the filter below is skipped entirely, which is
+    # how a viewer-capped token read every tenant's rows. acting_user applies the token floor.
+    from pegaprox.api.helpers import acting_user
+    _allowed = get_user_clusters(acting_user())
+    if _allowed is not None:
+        migrations = [m for m in migrations if m.get('cluster_id') in _allowed]
+
+    # NS Aug 2026 (audit re-verify) — per-VM object filter on EVERY returned row, not only when a
+    # ?vmid= was supplied: cluster scope alone let a VM-ACL/pool-scoped user read foreign VMs'
+    # migration metadata by simply OMITTING the vmid filter. Admins short-circuit True in
+    # user_can_access_vm; a plain cluster-wide operator keeps all their cluster's rows.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    migrations = [m for m in migrations
+                  if user_can_access_vm(_u, m.get('cluster_id'), m.get('vmid'), 'vm.view')]
+
+    return jsonify(_balancer_rows_without_why(migrations[:limit], _u))
+
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/migration-history', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_migration_history(cluster_id, vmid):
+    """Get migration history for a specific VM"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    # NS Aug 2026 (audit) — per-VM object check; cluster access alone let a VM-ACL/pool-scoped user
+    # read a foreign VM's migration metadata (name, node placement, operator, timestamps) by
+    # substituting the vmid — same BOLA class as the console CVE. Mirror snapshots.py / nodes.py.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token got
+    # user_can_access_vm's admin bypass. (It also mutated load_users()' cached dict.)
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(_u, cluster_id, vmid, 'vm.view'):
+        return jsonify({'error': 'Permission denied'}), 403
+
+    config = load_migration_history()
+    
+    migrations = [m for m in config.get('migrations', []) 
+                  if m.get('cluster_id') == cluster_id and m.get('vmid') == vmid]
+    
+    return jsonify(_balancer_rows_without_why(migrations, _u))
+
+
+def _balancer_rows_without_why(rows, user):
+    """A caller confined to some guests of a cluster gets the balancer's moves of their
+    guests without why: the reason quotes the load of every node and the names of rules
+    over guests they cannot see."""
+    from pegaprox.api.helpers import caller_is_scoped
+    scoped, out = {}, []
+    for m in rows:
+        if m.get('trigger'):
+            cid = m.get('cluster_id')
+            if cid not in scoped:
+                scoped[cid] = caller_is_scoped(user, cid)
+            if scoped[cid]:
+                m = dict(m, reason='')
+        out.append(m)
+    return out
+
+
+# MK Oct 2026 - what the balancer of one cluster moved and why, newest first, a page at a
+# time (?before=<id of the last row>). Only the instance whose balancer runs fills the
+# table, so a standby reads this from its active (ha.LEADER_ONLY_READS).
+BALANCE_HISTORY_STATUSES = ('success', 'failed', 'dry_run')
+
+
+@bp.route('/api/clusters/<cluster_id>/balance-history', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_balance_history(cluster_id):
+    """Balancer moves of one cluster with why. ?trigger=balance,predictive,affinity,pin
+    ?status=success|failed|dry_run ?before=<row id> ?limit=1..200"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    mgr = cluster_managers.get(cluster_id)
+    if mgr is None:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    db = get_db()
+    raw = request.args.get('trigger', '')
+    triggers = [t for t in raw.split(',') if t] if raw else None
+    if triggers is not None and (len(triggers) > len(db.BALANCER_TRIGGERS)
+                                 or any(t not in db.BALANCER_TRIGGERS for t in triggers)):
+        return jsonify({'error': f"trigger must be one or more of {', '.join(db.BALANCER_TRIGGERS)}"}), 400
+    status = request.args.get('status') or None
+    if status is not None and status not in BALANCE_HISTORY_STATUSES:
+        return jsonify({'error': f"status must be one of {', '.join(BALANCE_HISTORY_STATUSES)}"}), 400
+    before = request.args.get('before') or None
+    if before is not None:
+        if not before.isdigit() or len(before) > 18:
+            return jsonify({'error': 'before must be the id of a row'}), 400
+        before = int(before)
+    from pegaprox.api.helpers import bounded_limit, caller_is_scoped, scope_vm_rows
+    limit = bounded_limit(request.args.get('limit'), 50, 200)
+
+    from pegaprox.utils.auth import build_authz_user
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(user, cluster_id):
+        # their own guests only, and not why: the reason quotes the load of every node
+        # and the names of rules over guests they cannot see
+        rows = scope_vm_rows(cluster_id, db.list_balancer_moves(cluster_id, triggers, status, before))
+        rows = [dict(r, reason='', details={}) for r in rows[:limit + 1]]
+    else:
+        rows = db.list_balancer_moves(cluster_id, triggers, status, before, limit + 1)
+    page = rows[:limit]
+    return jsonify({
+        'entries': page,
+        'next_before': page[-1]['id'] if len(rows) > limit and page else None,
+        'cooldown': balancer_cooldown(getattr(getattr(mgr, 'config', None), 'migration_cooldown', None)),
+    })
+
+
+# =====================================================
+# AFFINITY RULES - keeps VMs together or apart
+# =====================================================
+
+def load_affinity_rules():
+    """Load affinity rules from SQLite database
+    
+    SQLite migration
+    """
+    try:
+        db = get_db()
+        rules_by_cluster = db.get_affinity_rules()
+        
+        # Convert to flat list format
+        all_rules = []
+        for cluster_id, rules in rules_by_cluster.items():
+            for rule in rules:
+                rule['cluster_id'] = cluster_id
+                all_rules.append(rule)
+        
+        return {'rules': all_rules}
+    except Exception as e:
+        logging.error(f"Error loading affinity rules: {e}")
+        # Legacy fallback
+        if os.path.exists(AFFINITY_RULES_FILE):
+            try:
+                with open(AFFINITY_RULES_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+    return {'rules': []}
+
+
+def save_affinity_rules(config):
+    """Save affinity rules to SQLite database
+    
+    SQLite migration
+    """
+    try:
+        db = get_db()
+        
+        # Group rules by cluster_id
+        rules_by_cluster = {}
+        for rule in config.get('rules', []):
+            cluster_id = rule.get('cluster_id', 'default')
+            if cluster_id not in rules_by_cluster:
+                rules_by_cluster[cluster_id] = []
+            rules_by_cluster[cluster_id].append(rule)
+        
+        db.save_all_affinity_rules(rules_by_cluster)
+        return True
+    except Exception as e:
+        logging.error(f"Error saving affinity rules: {e}")
+        return False
+
+def check_affinity_violation(cluster_id: str, vmid: int, target_node: str, vm_nodes: dict = None,
+                             config: dict = None) -> dict:
+    """Check if moving a VM/CT to a node would violate affinity rules
+
+    NS: Feb 2026 - returns enforce flag so callers can block or just warn.
+    Works for both QEMU and LXC now (Issue #73).
+    MK Oct 2026 - vm_nodes ({'vmid': node}) and config (the rules) from a caller that asks for
+    many guests at once: the migration preflight hands in where each guest will be once the
+    whole set moved, and reads the rules once.
+    """
+    if config is None:
+        config = load_affinity_rules()
+
+    if cluster_id not in cluster_managers:
+        return {'violation': False}
+
+    if vm_nodes is None:
+        manager = cluster_managers[cluster_id]
+        resources = manager.get_vm_resources()
+
+        # Build map of VM -> current node
+        vm_nodes = {}
+        for res in resources:
+            if res.get('type') in ['qemu', 'lxc']:
+                vm_nodes[str(res.get('vmid'))] = res.get('node')
+    
+    for rule in config.get('rules', []):
+        if rule.get('cluster_id') != cluster_id or not rule.get('enabled', True):
+            continue
+
+        rule_type = rule.get('type', 'together')  # together, separate
+        # MK: db stores as 'vms', frontend sends 'vm_ids' - was always reading empty list before
+        vm_ids = [str(v) for v in (rule.get('vm_ids') or rule.get('vms', []))]
+
+        if str(vmid) not in vm_ids:
+            continue
+
+        # Get nodes of other VMs/CTs in this rule
+        other_nodes = set()
+        for vid in vm_ids:
+            if vid != str(vmid) and vid in vm_nodes:
+                other_nodes.add(vm_nodes[vid])
+
+        if rule_type == 'together':
+            # All VMs/CTs should be on same node
+            if other_nodes and target_node not in other_nodes:
+                return {
+                    'violation': True,
+                    'enforce': rule.get('enforce', False),
+                    'rule': rule.get('name', 'Affinity Rule'),
+                    'message': f"VM/CT must stay with IDs {', '.join([v for v in vm_ids if v != str(vmid)])} on node {list(other_nodes)[0]}"
+                }
+
+        elif rule_type == 'separate':
+            # VMs/CTs should be on different nodes
+            if target_node in other_nodes:
+                return {
+                    'violation': True,
+                    'enforce': rule.get('enforce', False),
+                    'rule': rule.get('name', 'Anti-Affinity Rule'),
+                    'message': f"VM/CT must not be on the same node as IDs {', '.join([v for v in vm_ids if v != str(vmid) and vm_nodes.get(v) == target_node])}"
+                }
+
+    return {'violation': False}
+
+@bp.route('/api/affinity-rules', methods=['GET'])
+@bp.route('/api/clusters/<cluster_id>/affinity-rules', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_affinity_rules(cluster_id=None):
+    """Get affinity rules, optionally filtered by cluster"""
+    config = load_affinity_rules()
+    if cluster_id:
+        # NS Jul 2026 (CodeAnt IDOR) — path-scoped alias: enforce cluster access.
+        ok, err = check_cluster_access(cluster_id)
+        if not ok:
+            return err
+        config['rules'] = [r for r in config['rules'] if r.get('cluster_id') == cluster_id]
+        # sec (audit): a rule names every VM it groups, so this listed guests the caller cannot
+        # see. Show a confined caller only the rules whose members they may all view.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import user_can_access_vm
+        from pegaprox.api.helpers import caller_is_scoped
+        _au = build_authz_user(request.session.get('user', ''), request.session)
+        if caller_is_scoped(_au, cluster_id):
+            def _visible(rule):
+                members = rule.get('vm_ids') or rule.get('vms') or []
+                if not members:
+                    return False
+                try:
+                    return all(user_can_access_vm(_au, cluster_id, int(v), 'vm.view') for v in members)
+                except (TypeError, ValueError):
+                    return False
+            config = dict(config)
+            config['rules'] = [r for r in config['rules'] if _visible(r)]
+    else:
+        # NS Jul 2026 (CodeAnt IDOR) — scope the unfiltered list to reachable clusters.
+        from pegaprox.utils.rbac import get_user_clusters
+        # MK Sep 2026 - g.current_user is the RAW stored record; it has no effective_role, so a
+        # restricted bearer token was scoped as its OWNER. For an admin owner get_user_clusters
+        # then answers None ("all clusters") and the filter below is skipped entirely, which is
+        # how a viewer-capped token read every tenant's rows. acting_user applies the token floor.
+        from pegaprox.api.helpers import acting_user
+        _allowed = get_user_clusters(acting_user())
+        if _allowed is not None:
+            config = dict(config)
+            config['rules'] = [r for r in config.get('rules', []) if r.get('cluster_id') in _allowed]
+    return jsonify(config)
+
+@bp.route('/api/affinity-rules', methods=['POST'])
+@bp.route('/api/clusters/<cluster_id>/affinity-rules', methods=['POST'])
+@require_auth(roles=[ROLE_ADMIN])
+def create_affinity_rule(cluster_id=None):
+    """Create a new affinity rule"""
+    data = request.json or {}
+    config = load_affinity_rules()
+
+    import uuid
+    # MK: frontend sends vm_ids, db column is vms - accept both
+    vms_data = data.get('vm_ids') or data.get('vms', [])
+    # NS: cluster_id from URL takes priority over body
+    rule_cluster_id = cluster_id or data.get('cluster_id', '')
+    new_rule = {
+        'id': str(uuid.uuid4())[:8],
+        'name': data.get('name', 'New Rule'),
+        'cluster_id': rule_cluster_id,
+        'type': data.get('type', 'together'),  # together, separate
+        'vms': vms_data,
+        'vm_ids': vms_data,  # keep both so frontend doesn't break
+        'enabled': data.get('enabled', True),
+        'enforce': data.get('enforce', False),
+        'created': datetime.now().isoformat()
+    }
+
+    config['rules'].append(new_rule)
+    save_affinity_rules(config)
+
+    user = request.session.get('user', 'unknown')
+    log_audit(user, 'affinity_rule.created', f"Created affinity rule: {new_rule['name']}")
+
+    return jsonify(new_rule), 201
+
+@bp.route('/api/affinity-rules/<rule_id>', methods=['PUT'])
+@bp.route('/api/clusters/<cluster_id>/affinity-rules/<rule_id>', methods=['PUT'])
+@require_auth(roles=[ROLE_ADMIN])
+def update_affinity_rule(rule_id, cluster_id=None):
+    """Update an affinity rule"""
+    data = request.json or {}
+    config = load_affinity_rules()
+
+    for rule in config['rules']:
+        if rule['id'] == rule_id:
+            # MK: try every possible source for the vm list
+            vms_data = data.get('vm_ids') or data.get('vms') or rule.get('vms') or rule.get('vm_ids', [])
+            rule.update({
+                'name': data.get('name', rule['name']),
+                'cluster_id': cluster_id or data.get('cluster_id', rule.get('cluster_id', '')),
+                'type': data.get('type', rule['type']),
+                'vms': vms_data,
+                'vm_ids': vms_data,
+                'enabled': data.get('enabled', rule['enabled']),
+                'enforce': data.get('enforce', rule.get('enforce', False)),
+            })
+            save_affinity_rules(config)
+            return jsonify(rule)
+
+    return jsonify({'error': 'Rule not found'}), 404
+
+@bp.route('/api/affinity-rules/<rule_id>', methods=['DELETE'])
+@bp.route('/api/clusters/<cluster_id>/affinity-rules/<rule_id>', methods=['DELETE'])
+@require_auth(roles=[ROLE_ADMIN])
+def delete_affinity_rule(rule_id, cluster_id=None):
+    """Delete an affinity rule"""
+    config = load_affinity_rules()
+    config['rules'] = [r for r in config['rules'] if r['id'] != rule_id]
+    save_affinity_rules(config)
+
+    user = request.session.get('user', 'unknown')
+    log_audit(user, 'affinity_rule.deleted', f"Deleted affinity rule: {rule_id}")
+
+    return jsonify({'success': True})
+
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/check-affinity/<target_node>', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def check_vm_affinity(cluster_id, vmid, target_node):
+    """Check if moving VM to target node would violate affinity rules"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    # NS Aug 2026 (AI-pentest) — per-VM object check; cluster access alone let a VM-ACL/pool-scoped
+    # user enumerate a foreign VM's affinity peers + node placement by vmid substitution. Mirror the
+    # migration-history sibling above.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    # sec (audit): was the raw stored record, so an admin-owned viewer-scoped token got
+    # user_can_access_vm's admin bypass. (It also mutated load_users()' cached dict.)
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vm(_u, cluster_id, vmid, 'vm.view'):
+        return jsonify({'error': 'Permission denied'}), 403
+
+    result = check_affinity_violation(cluster_id, vmid, target_node)
+    return jsonify(result)
+
+

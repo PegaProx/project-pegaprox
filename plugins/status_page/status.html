@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- NS May 2026: defense-in-depth CSP. Inline scripts/styles are required for
+         the self-contained page (single-file plugin), but everything else is locked
+         to same-origin. Blocks frame-embed (clickjacking) and form posts. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'">
+    <title>System Status</title>
+    <style>
+        :root {
+            --accent: #e57000;
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --muted: #8b949e;
+            --green: #3fb950;
+            --red: #da3633;
+            --blue: #58a6ff;
+            --purple: #bc8cff;
+            --yellow: #d29922;
+            --amber-bg: rgba(210,153,34,0.12);
+            --amber-border: rgba(210,153,34,0.3);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 24px 20px; }
+        .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+        .header h1 { font-size: 20px; font-weight: 700; }
+        .header-right { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
+
+        /* Status badges */
+        .badge-ok { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; background: rgba(63,185,80,0.12); color: var(--green); }
+        .badge-down { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; background: rgba(218,54,51,0.12); color: var(--red); }
+        .badge-warn { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; background: rgba(229,112,0,0.12); color: var(--accent); }
+
+        /* Maintenance banner */
+        .maintenance-banner {
+            background: var(--amber-bg);
+            border: 1px solid var(--amber-border);
+            border-radius: 10px;
+            padding: 14px 20px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            font-size: 13px;
+            color: var(--yellow);
+            line-height: 1.5;
+        }
+        .maintenance-banner svg { flex-shrink: 0; margin-top: 1px; }
+        .maintenance-banner strong { font-weight: 600; }
+        .maintenance-banner .maint-times { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+        /* Overall status */
+        .overall-status { text-align: center; margin-bottom: 24px; }
+        .overall-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 20px; border-radius: 20px; font-size: 14px; font-weight: 600; }
+        .overall-ok { background: rgba(63,185,80,0.1); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+        .overall-partial { background: rgba(229,112,0,0.1); color: var(--accent); border: 1px solid rgba(229,112,0,0.2); }
+        .overall-down { background: rgba(218,54,51,0.1); color: var(--red); border: 1px solid rgba(218,54,51,0.2); }
+        .overall-uptime { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+        /* Cluster cards */
+        .cluster { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
+        .cluster-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border); }
+        .cluster-header h2 { font-size: 15px; font-weight: 600; }
+        .cluster-header-left { display: flex; align-items: center; gap: 12px; }
+        .cluster-uptime-text { font-size: 11px; color: var(--muted); font-weight: 400; }
+        .cluster-body { padding: 16px 18px; }
+
+        /* Uptime bar */
+        .uptime-bar-container { padding: 0 18px 14px; }
+        .uptime-bar { display: flex; gap: 1.5px; height: 10px; border-radius: 3px; overflow: hidden; }
+        .uptime-bar .day-block { flex: 1; min-width: 0; border-radius: 1.5px; transition: opacity 0.2s; position: relative; }
+        .uptime-bar .day-block:hover { opacity: 0.8; }
+        .uptime-bar-label { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+        /* Nodes */
+        .nodes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .node-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+        .node-card.offline { opacity: 0.5; border-color: var(--red); }
+        .node-name { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
+        .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .dot-green { background: var(--green); box-shadow: 0 0 6px rgba(63,185,80,0.4); }
+        .dot-red { background: var(--red); box-shadow: 0 0 6px rgba(218,54,51,0.4); }
+        .bar-row { margin-bottom: 6px; }
+        .bar-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+        .bar { height: 5px; background: #21262d; border-radius: 3px; overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 3px; transition: width 0.6s ease; }
+
+        /* Summary */
+        .summary-row { display: flex; gap: 24px; flex-wrap: wrap; padding: 12px 0; }
+        .summary-item { text-align: center; }
+        .summary-value { font-size: 24px; font-weight: 700; line-height: 1.2; }
+        .summary-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+        /* Storage */
+        .storage-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+        .storage-item { display: flex; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+        .storage-info { flex: 1; min-width: 0; }
+        .storage-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .storage-type { font-size: 10px; color: var(--muted); }
+
+        /* Sections */
+        .section-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .section + .section { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px; }
+
+        /* Components section */
+        .components-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
+        .components-header { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+        .components-header h2 { font-size: 15px; font-weight: 600; }
+        .component-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+        .component-row:last-child { border-bottom: none; }
+        .component-name { font-size: 13px; font-weight: 500; }
+        .component-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; }
+        .component-status .dot { width: 7px; height: 7px; }
+        .comp-operational { color: var(--green); }
+        .comp-degraded { color: var(--yellow); }
+        .comp-maintenance { color: var(--blue); }
+
+        /* Incidents */
+        .incidents-section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; overflow: hidden; }
+        .incidents-header { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+        .incidents-header h2 { font-size: 15px; font-weight: 600; }
+        .incidents-empty { padding: 24px 18px; text-align: center; color: var(--muted); font-size: 13px; }
+        .incident { padding: 16px 18px; border-bottom: 1px solid var(--border); }
+        .incident:last-child { border-bottom: none; }
+        .incident-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+        .incident-title { font-size: 14px; font-weight: 600; }
+        .incident-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+        .incident-investigating { background: rgba(88,166,255,0.12); color: var(--blue); }
+        .incident-identified { background: rgba(210,153,34,0.12); color: var(--yellow); }
+        .incident-monitoring { background: rgba(188,140,255,0.12); color: var(--purple); }
+        .incident-resolved { background: rgba(63,185,80,0.12); color: var(--green); }
+        .severity-critical { background: rgba(218,54,51,0.12); color: var(--red); }
+        .severity-major { background: rgba(229,112,0,0.12); color: var(--accent); }
+        .severity-minor { background: rgba(139,148,158,0.12); color: var(--muted); }
+        .incident-message { font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+        .incident-meta { font-size: 11px; color: #484f58; margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; }
+
+        /* Error/loading */
+        .error-box { text-align: center; padding: 60px 20px; color: var(--red); }
+        .loading { text-align: center; padding: 80px 20px; color: var(--muted); }
+        .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 0 auto 12px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Footer */
+        .footer { text-align: center; padding: 16px; font-size: 11px; color: #484f58; border-top: 1px solid var(--border); margin-top: 24px; }
+        .footer a { color: var(--accent); text-decoration: none; }
+        .footer-meta { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 6px; }
+        .refresh-indicator { font-size: 11px; color: var(--muted); }
+
+        @media (max-width: 640px) {
+            .header { flex-direction: column; align-items: flex-start; gap: 10px; }
+            .cluster-header { flex-direction: column; align-items: flex-start; gap: 8px; }
+            .cluster-header-left { flex-direction: column; align-items: flex-start; gap: 4px; }
+            .nodes-grid { grid-template-columns: 1fr; }
+            .storage-list { grid-template-columns: 1fr; }
+            .incident-top { flex-direction: column; align-items: flex-start; }
+            .maintenance-banner { flex-direction: column; gap: 8px; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container" id="app">
+    <div class="loading"><div class="spinner"></div>Loading status...</div>
+</div>
+
+<div class="footer" id="footer">
+    <div>
+        <img src="/images/pegaprox.png" alt="PegaProx" style="height:13px;display:inline;vertical-align:middle;margin-right:4px">
+        Powered by <a href="https://pegaprox.com" target="_blank">PegaProx</a> &middot;
+        <a href="https://github.com/PegaProx/project-pegaprox" target="_blank">Open Source</a> &middot; AGPL-3.0
+    </div>
+    <div class="footer-meta">
+        <span id="last-updated" style="font-size:10px;color:#484f58"></span>
+        <span style="color:var(--border)">&middot;</span>
+        <span class="refresh-indicator" id="countdown"></span>
+    </div>
+</div>
+
+<script>
+(function(){
+'use strict';
+var params = new URLSearchParams(window.location.search);
+var KEY = params.get('key') || '';
+var API = window.location.origin + '/api/public/status-page?key=' + encodeURIComponent(KEY);
+var refreshMs = 30000;
+
+function fmtBytes(b) {
+    if (!b) return '0 B';
+    if (b >= 1099511627776) return (b / 1099511627776).toFixed(1) + ' TB';
+    if (b >= 1073741824) return (b / 1073741824).toFixed(1) + ' GB';
+    if (b >= 1048576) return (b / 1048576).toFixed(0) + ' MB';
+    return (b / 1024).toFixed(0) + ' KB';
+}
+
+function fmtUptime(s) {
+    if (!s) return '-';
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600);
+    if (d > 0) return d + 'd ' + h + 'h';
+    var m = Math.floor((s % 3600) / 60);
+    return h > 0 ? h + 'h ' + m + 'm' : m + 'm';
+}
+
+function barColor(pct, type) {
+    if (pct > 90) return 'var(--red)';
+    if (pct > 75) return 'var(--accent)';
+    if (type === 'cpu') return 'var(--green)';
+    if (type === 'mem') return 'var(--blue)';
+    return 'var(--purple)';
+}
+
+function fmtTime(isoStr) {
+    if (!isoStr) return '';
+    try {
+        var d = new Date(isoStr);
+        // A valid date renders as a safe formatted string. If it does NOT parse,
+        // the value is concatenated into HTML downstream, so it must be escaped —
+        // a malicious admin could otherwise store markup (e.g. a <link>/<img> to an
+        // attacker HTTPS resource) in started_at/resolved_at. (Aikido #338694499)
+        if (isNaN(d.getTime())) return escapeHtml(String(isoStr));
+        return d.toLocaleString(undefined, {
+            month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
+        });
+    } catch (e) { return escapeHtml(String(isoStr)); }
+}
+
+function fmtDuration(startIso, endIso) {
+    if (!startIso || !endIso) return '';
+    try {
+        var ms = new Date(endIso) - new Date(startIso);
+        if (ms < 0 || isNaN(ms)) return '';
+        var mins = Math.floor(ms / 60000);
+        if (mins < 60) return mins + 'm';
+        var hrs = Math.floor(mins / 60);
+        var rem = mins % 60;
+        if (hrs < 24) return hrs + 'h ' + rem + 'm';
+        var days = Math.floor(hrs / 24);
+        return days + 'd ' + (hrs % 24) + 'h';
+    } catch (e) { return ''; }
+}
+
+function nowTimeStr() {
+    var d = new Date();
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function escapeHtml(str) {
+    // LW Sep 2026 - textContent -> innerHTML escapes &, < and >, but NOT quotes: the HTML
+    // fragment serialiser only escapes " inside attribute values, and a text node is not
+    // one. Every other call here lands in text content, where that is fine, but the logo
+    // goes into src="..." - so a custom_logo_url containing a double quote broke out of
+    // the attribute and planted persistent script on the PUBLIC status page. Escaping the
+    // quotes here fixes that call site and any future one; in text content it is a no-op
+    // that only changes how the character is spelled in the markup.
+    if (!str) return '';
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// NS May 2026: single audit point for all HTML insertion. Uses a detached
+// <template> element so the live element is updated via replaceChildren —
+// keeps `el.innerHTML = X` pattern out of every call site, which is what
+// Aikido / Semgrep flag. Templates don't execute <script> children and
+// don't fire <img onerror>, so this is genuinely safer than the raw pattern.
+//
+// NS May 2026 (Aikido SAST hardening): added defense-in-depth sanitizer.
+// Even though every existing call site already runs user data through
+// escapeHtml(), this scrub stays safe if a future caller forgets to.
+// Strips <script>/<iframe>/<object>/<embed>, on* event attributes, and
+// javascript: in href/src. Does NOT call innerHTML on the live element —
+// only on the detached <template> (which can't execute scripts or fire
+// resource-load events).
+function _stripDangerousNodes(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    var DANGEROUS_TAGS = ['script', 'iframe', 'object', 'embed', 'link', 'meta', 'base'];
+    DANGEROUS_TAGS.forEach(function(tag) {
+        var nodes = root.querySelectorAll(tag);
+        for (var i = 0; i < nodes.length; i++) {
+            if (nodes[i].parentNode) nodes[i].parentNode.removeChild(nodes[i]);
+        }
+    });
+    var all = root.querySelectorAll('*');
+    for (var j = 0; j < all.length; j++) {
+        var el = all[j];
+        for (var k = el.attributes.length - 1; k >= 0; k--) {
+            var attr = el.attributes[k];
+            var name = (attr.name || '').toLowerCase();
+            var val = attr.value || '';
+            if (name.indexOf('on') === 0) {
+                el.removeAttribute(attr.name);
+            } else if ((name === 'href' || name === 'src' || name === 'action' || name === 'formaction' ||
+                        // MK May 2026: SVG-namespaced variants (xlink:href, ev:href, …)
+                        // can carry the same javascript:/data:/vbscript: payloads.
+                        name.indexOf(':href') > 0 || name.indexOf(':src') > 0) &&
+                       /^\s*(javascript|data|vbscript):/i.test(val)) {
+                el.removeAttribute(attr.name);
+            }
+        }
+    }
+}
+function setHTMLSafe(el, html) {
+    var tpl = document.createElement('template');
+    // safe: assignment to a detached <template>.innerHTML — parses but
+    // does NOT execute. We then sanitize before adopting into the live tree.
+    tpl.innerHTML = String(html == null ? '' : html);
+    _stripDangerousNodes(tpl.content);
+    el.replaceChildren.apply(el, tpl.content.childNodes);
+}
+
+// NS May 2026: clamp & cast user/wire-supplied numbers before they go into
+// CSS attributes (style="width:N%"). Closes the theoretical CSS-attribute
+// injection vector at status.html:414/442/etc.
+function safeNum(v, max) {
+    var n = parseFloat(v);
+    if (!isFinite(n) || isNaN(n)) return 0;
+    if (n < 0) return 0;
+    if (max != null && n > max) return max;
+    return n;
+}
+
+// compute average uptime across all clusters
+function computeOverallUptime(uptime, clusters) {
+    if (!uptime || !clusters || !clusters.length) return null;
+    var sum = 0, count = 0;
+    for (var i = 0; i < clusters.length; i++) {
+        var val = uptime[clusters[i].id];
+        if (val != null && !isNaN(val)) {
+            sum += parseFloat(val);
+            count++;
+        }
+    }
+    return count > 0 ? (sum / count).toFixed(2) : null;
+}
+
+async function load() {
+    try {
+        var r = await fetch(API);
+        if (!r.ok) {
+            var d = {};
+            try { d = await r.json(); } catch(_) {}
+            setHTMLSafe(document.getElementById('app'),
+                '<div class="error-box"><h2 style="margin-bottom:8px">' +
+                (r.status === 401 ? 'Unauthorized' : 'Error') + '</h2><p style="color:var(--muted)">' +
+                escapeHtml(d.error || 'Failed to load status') + '</p></div>');
+            return;
+        }
+        var data = await r.json();
+        render(data);
+        refreshMs = (data.config && data.config.refresh_interval ? data.config.refresh_interval : 30) * 1000;
+    } catch (e) {
+        setHTMLSafe(document.getElementById('app'), '<div class="error-box"><h2>Connection Error</h2><p style="color:var(--muted)">Could not reach the server.</p></div>');
+    }
+}
+
+function render(data) {
+    var cfg = data.config || {};
+    var clusters = data.clusters || [];
+    var uptime = data.uptime || {};
+    var incidents = data.incidents || [];
+    var components = cfg.components || [];
+
+    if (cfg.theme_color) document.documentElement.style.setProperty('--accent', cfg.theme_color);
+    document.title = cfg.page_title || 'System Status';
+
+    // overall status calc
+    var allOnline = clusters.length > 0 && clusters.every(function(c) { return c.status === 'online'; });
+    var allOffline = clusters.length > 0 && clusters.every(function(c) { return c.status === 'offline'; });
+    var anyNodeDown = clusters.some(function(c) {
+        return c.status === 'offline' || (c.nodes || []).some(function(n) { return !n.online; });
+    });
+    var overallClass = 'overall-ok', overallText = 'All Systems Operational';
+    if (allOffline) { overallClass = 'overall-down'; overallText = 'All Systems Down'; }
+    else if (anyNodeDown) { overallClass = 'overall-partial'; overallText = 'Partial Outage'; }
+
+    var overallUptimePct = computeOverallUptime(uptime, clusters);
+
+    var html = '';
+
+    // maintenance banner
+    if (cfg.maintenance_message) {
+        html += '<div class="maintenance-banner">' +
+            '<svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575L6.457 1.047zM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5zm1 6a1 1 0 1 0-2 0 1 1 0 0 0 2 0z"/></svg>' +
+            '<div><strong>Scheduled Maintenance</strong>: ' + escapeHtml(cfg.maintenance_message);
+        if (cfg.maintenance_start || cfg.maintenance_end) {
+            html += '<div class="maint-times">';
+            if (cfg.maintenance_start) html += 'Starts: ' + fmtTime(cfg.maintenance_start);
+            if (cfg.maintenance_start && cfg.maintenance_end) html += ' &mdash; ';
+            if (cfg.maintenance_end) html += 'Ends: ' + fmtTime(cfg.maintenance_end);
+            html += '</div>';
+        }
+        html += '</div></div>';
+    }
+
+    // header
+    html += '<div class="header">' +
+        '<div style="display:flex;align-items:center;gap:12px">' +
+        (cfg.custom_logo_url ? '<img src="' + escapeHtml(cfg.custom_logo_url) + '" alt="" style="height:28px">' : '') +
+        '<h1>' + escapeHtml(cfg.page_title || 'System Status') + '</h1>' +
+        '</div>' +
+        '<div class="header-right">' +
+        '<span class="refresh-indicator" id="countdown-inline"></span>' +
+        '</div></div>';
+
+    // overall status badge
+    html += '<div class="overall-status">' +
+        '<span class="overall-badge ' + overallClass + '">&#x25CF; ' + overallText + '</span>';
+    if (overallUptimePct !== null) {
+        html += '<div class="overall-uptime">' + overallUptimePct + '% average uptime (30 days)</div>';
+    }
+    html += '</div>';
+
+    // components
+    if (components.length > 0) {
+        html += '<div class="components-card"><div class="components-header"><h2>Services</h2></div>';
+        for (var ci = 0; ci < components.length; ci++) {
+            var comp = components[ci];
+            var compClass = 'comp-operational';
+            var compDot = 'dot-green';
+            var compLabel = 'Operational';
+            if (comp.status === 'degraded') {
+                compClass = 'comp-degraded';
+                compDot = '';
+                compLabel = 'Degraded Performance';
+            } else if (comp.status === 'maintenance') {
+                compClass = 'comp-maintenance';
+                compDot = '';
+                compLabel = 'Under Maintenance';
+            }
+            html += '<div class="component-row">' +
+                '<span class="component-name">' + escapeHtml(comp.name) + '</span>' +
+                '<span class="component-status ' + compClass + '">' +
+                '<span class="dot" style="background:currentColor;' +
+                (comp.status === 'degraded' ? 'box-shadow:0 0 6px rgba(210,153,34,0.4)' : '') +
+                (comp.status === 'maintenance' ? 'box-shadow:0 0 6px rgba(88,166,255,0.4)' : '') +
+                (comp.status === 'operational' ? 'box-shadow:0 0 6px rgba(63,185,80,0.4)' : '') +
+                '"></span>' + compLabel + '</span></div>';
+        }
+        html += '</div>';
+    }
+
+    // clusters
+    for (var i = 0; i < clusters.length; i++) {
+        var c = clusters[i];
+        var online = c.status === 'online';
+        var nodes = c.nodes || [];
+        var nodesUp = nodes.filter(function(n) { return n.online; }).length;
+        var nodesTotal = nodes.length;
+        var clusterUptimePct = uptime[c.id];
+
+        var clusterBadge;
+        if (!online) {
+            clusterBadge = '<span class="badge-down">&#x25CF; Offline</span>';
+        } else if (nodesUp === nodesTotal) {
+            clusterBadge = '<span class="badge-ok">&#x25CF; Online</span>';
+        } else {
+            clusterBadge = '<span class="badge-warn">&#x25CF; ' + nodesUp + '/' + nodesTotal + ' Nodes</span>';
+        }
+
+        html += '<div class="cluster"><div class="cluster-header">' +
+            '<div class="cluster-header-left"><h2>' + escapeHtml(c.name) + '</h2>';
+        if (clusterUptimePct != null) {
+            html += '<span class="cluster-uptime-text">' + parseFloat(clusterUptimePct).toFixed(1) + '% uptime (30 days)</span>';
+        }
+        html += '</div>' + clusterBadge + '</div>';
+
+        // uptime bar (90-day)
+        html += buildUptimeBar(c, uptime);
+
+        if (!online) {
+            html += '<div class="cluster-body" style="text-align:center;padding:24px;color:var(--red)">Cluster unreachable</div></div>';
+            continue;
+        }
+
+        html += '<div class="cluster-body">';
+
+        // nodes
+        if (cfg.show_node_details && nodes.length) {
+            html += '<div class="section"><div class="section-title">Nodes</div><div class="nodes-grid">';
+            for (var ni = 0; ni < nodes.length; ni++) {
+                var n = nodes[ni];
+                var dotClass = n.online ? 'dot-green' : 'dot-red';
+                html += '<div class="node-card ' + (n.online ? '' : 'offline') + '">' +
+                    '<div class="node-name"><span class="dot ' + dotClass + '"></span>' + escapeHtml(n.name) + '</div>';
+                if (n.online) {
+                    // NS May 2026: safeNum() casts coerce wire data to bounded floats
+                    // before they hit a CSS attribute or text node — closes the
+                    // CSS-attribute-injection vector flagged on review.
+                    var cpuPct = safeNum(n.cpu_percent, 100);
+                    var memPct = safeNum(n.mem_percent, 100);
+                    html += '<div class="bar-row"><div class="bar-label"><span>CPU</span><span>' + cpuPct + '%</span></div><div class="bar"><div class="bar-fill" style="width:' + cpuPct + '%;background:' + barColor(cpuPct, 'cpu') + '"></div></div></div>' +
+                        '<div class="bar-row"><div class="bar-label"><span>RAM</span><span>' + memPct + '%</span></div><div class="bar"><div class="bar-fill" style="width:' + memPct + '%;background:' + barColor(memPct, 'mem') + '"></div></div></div>' +
+                        '<div style="font-size:10px;color:var(--muted);margin-top:6px">Uptime: ' + fmtUptime(n.uptime) + '</div>';
+                } else {
+                    html += '<div style="font-size:12px;color:var(--red);margin-top:4px">Offline</div>';
+                }
+                html += '</div>';
+            }
+            html += '</div></div>';
+        }
+
+        // VM summary
+        if (cfg.show_vm_summary && c.vm_summary && c.vm_summary.total > 0) {
+            var vm = c.vm_summary;
+            html += '<div class="section"><div class="section-title">Virtual Machines</div><div class="summary-row">' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--text)">' + vm.total + '</div><div class="summary-label">Total</div></div>' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--green)">' + vm.running + '</div><div class="summary-label">Running</div></div>' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--muted)">' + vm.stopped + '</div><div class="summary-label">Stopped</div></div>' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--blue)">' + vm.qemu + '</div><div class="summary-label">VMs</div></div>' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--purple)">' + vm.lxc + '</div><div class="summary-label">Containers</div></div>' +
+                '</div></div>';
+        }
+
+        // storage
+        if (cfg.show_storage && c.storage && c.storage.length) {
+            html += '<div class="section"><div class="section-title">Storage</div><div class="storage-list">';
+            for (var si = 0; si < c.storage.length; si++) {
+                var s = c.storage[si];
+                var sPct = safeNum(s.percent, 100);
+                html += '<div class="storage-item"><div class="storage-info">' +
+                    '<div class="storage-name">' + escapeHtml(s.name) + '</div>' +
+                    '<div class="storage-type">' + escapeHtml(s.type) + ' &middot; ' + fmtBytes(s.used) + ' / ' + fmtBytes(s.total) + '</div>' +
+                    '</div><div style="width:80px">' +
+                    '<div style="text-align:right;font-size:12px;font-weight:600;color:' + barColor(sPct, 'storage') + ';margin-bottom:2px">' + sPct + '%</div>' +
+                    '<div class="bar"><div class="bar-fill" style="width:' + sPct + '%;background:' + barColor(sPct, 'storage') + '"></div></div>' +
+                    '</div></div>';
+            }
+            html += '</div></div>';
+        }
+
+        html += '</div></div>'; // cluster-body + cluster
+    }
+
+    // MK #309 — PBS backup health section (public-facing)
+    html += renderPbsBackups(data.pbs_backups || [], cfg);
+
+    // incidents section
+    html += renderIncidents(incidents);
+
+    setHTMLSafe(document.getElementById('app'), html);
+
+    // update footer timestamp
+    var updEl = document.getElementById('last-updated');
+    if (updEl) updEl.textContent = 'Last updated at ' + nowTimeStr();
+
+    startCountdown();
+}
+
+function buildUptimeBar(cluster, uptimeData) {
+    var pct = uptimeData[cluster.id];
+    // Generate a 90-block bar. Without daily granularity from the API we
+    // render a visual indicator based on the overall uptime percentage.
+    var totalDays = 90;
+    var html = '<div class="uptime-bar-container"><div class="uptime-bar">';
+
+    if (pct != null && !isNaN(pct)) {
+        var uptimeVal = parseFloat(pct);
+        // rough estimate: days down = totalDays * (1 - uptime/100)
+        var daysDown = Math.round(totalDays * (1 - uptimeVal / 100));
+        if (daysDown < 0) daysDown = 0;
+        if (daysDown > totalDays) daysDown = totalDays;
+
+        // spread downtime blocks toward recent end (right side)
+        var downSet = {};
+        for (var d = 0; d < daysDown; d++) {
+            // place from the right side first (more recent)
+            var idx = totalDays - 1 - d;
+            if (idx >= 0) downSet[idx] = true;
+        }
+
+        for (var i = 0; i < totalDays; i++) {
+            var color = downSet[i] ? 'var(--red)' : 'var(--green)';
+            html += '<div class="day-block" style="background:' + color + '" title="Day ' + (i + 1) + ' of 90"></div>';
+        }
+    } else {
+        // no data
+        for (var j = 0; j < totalDays; j++) {
+            html += '<div class="day-block" style="background:#21262d" title="No data"></div>';
+        }
+    }
+
+    html += '</div><div class="uptime-bar-label"><span>90 days ago</span><span>Today</span></div></div>';
+    return html;
+}
+
+// MK #309 — public-facing backup health block
+function renderPbsBackups(pbsList, cfg) {
+    if (!cfg.show_pbs_backups) return '';
+    if (!pbsList || pbsList.length === 0) return '';
+
+    var html = '<div class="cluster"><div class="cluster-header">' +
+               '<div class="cluster-title"><div class="status-dot status-operational"></div>' +
+               '<span>Backup Health</span></div>' +
+               '<span class="status-text" style="color:var(--muted);font-weight:500">' +
+               pbsList.length + ' PBS server' + (pbsList.length === 1 ? '' : 's') +
+               '</span></div><div class="cluster-body">';
+
+    for (var pi = 0; pi < pbsList.length; pi++) {
+        var p = pbsList[pi];
+        var hasStale = p.stale_count && p.stale_count > 0;
+        var hasFailed = p.failed_verifications && p.failed_verifications > 0;
+        var allGood = p.connected && !hasStale && !hasFailed;
+        var headerColor = !p.connected ? 'var(--red)' : (hasStale || hasFailed ? 'var(--yellow)' : 'var(--green)');
+
+        html += '<div class="section"><div class="section-title" style="display:flex;align-items:center;gap:8px">' +
+                '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + headerColor + '"></span>' +
+                escapeHtml(p.name);
+        if (p.host) html += '<span style="color:var(--muted);font-weight:400;font-size:11px">&middot; ' + escapeHtml(p.host) + '</span>';
+        html += '</div>';
+
+        if (!p.connected) {
+            html += '<div style="padding:8px 0;color:var(--red);font-size:13px">&#9888; Backup server offline</div></div>';
+            continue;
+        }
+
+        // summary counts
+        html += '<div class="summary-row">' +
+                '<div class="summary-item"><div class="summary-value" style="color:var(--text)">' + (p.total_groups || 0) + '</div><div class="summary-label">Backup groups</div></div>';
+        html += '<div class="summary-item"><div class="summary-value" style="color:' + (hasStale ? 'var(--yellow)' : 'var(--green)') + '">' +
+                (p.stale_count || 0) + '</div><div class="summary-label">Stale (&gt; ' + escapeHtml(String(cfg.pbs_stale_hours || 48)) + 'h)</div></div>';
+        html += '<div class="summary-item"><div class="summary-value" style="color:' + (hasFailed ? 'var(--red)' : 'var(--green)') + '">' +
+                (p.failed_verifications || 0) + '</div><div class="summary-label">Failed verifies</div></div>';
+        html += '<div class="summary-item"><div class="summary-value" style="color:var(--blue)">' + (p.datastores ? p.datastores.length : 0) + '</div><div class="summary-label">Datastores</div></div>';
+        html += '</div>';
+
+        // datastore usage
+        if (p.datastores && p.datastores.length) {
+            html += '<div class="storage-list" style="margin-top:10px">';
+            for (var di = 0; di < p.datastores.length; di++) {
+                var d = p.datastores[di];
+                var pct = safeNum(d.percent, 100);
+                html += '<div class="storage-item"><div class="storage-info">' +
+                        '<div class="storage-name">' + escapeHtml(d.name) + '</div>' +
+                        '<div class="storage-type">' + (d.groups || 0) + ' groups &middot; ' +
+                        (d.used != null ? fmtBytes(d.used) : '?') + ' / ' + (d.total != null ? fmtBytes(d.total) : '?') +
+                        '</div></div><div style="width:80px">' +
+                        '<div style="text-align:right;font-size:12px;font-weight:600;color:' + barColor(pct, 'storage') + ';margin-bottom:2px">' + pct + '%</div>' +
+                        '<div class="bar"><div class="bar-fill" style="width:' + pct + '%;background:' + barColor(pct, 'storage') + '"></div></div>' +
+                        '</div></div>';
+            }
+            html += '</div>';
+        }
+
+        // stale groups — up to ~20 already trimmed server-side
+        if (hasStale) {
+            html += '<div style="margin-top:10px;padding:10px 12px;background:rgba(210,153,34,0.08);border-left:3px solid var(--yellow);border-radius:4px">';
+            html += '<div style="font-size:12px;color:var(--yellow);font-weight:600;margin-bottom:4px">Oldest stale backups</div>';
+            html += '<ul style="list-style:none;padding:0;margin:0;font-size:12px;line-height:1.6">';
+            for (var si = 0; si < Math.min(p.stale_groups.length, 10); si++) {
+                var sg = p.stale_groups[si];
+                html += '<li>&bull; <code style="font-family:inherit">' + escapeHtml(sg.group) + '</code> on ' +
+                        escapeHtml(sg.store) + ' — ' + Math.round(sg.age_hours) + 'h old</li>';
+            }
+            html += '</ul></div>';
+        }
+
+        html += '</div>';
+    }
+
+    html += '</div></div>';
+    return html;
+}
+
+function renderIncidents(incidents) {
+    var html = '<div class="incidents-section"><div class="incidents-header"><h2>Recent Incidents</h2></div>';
+
+    if (!incidents || incidents.length === 0) {
+        html += '<div class="incidents-empty">No recent incidents &mdash; all clear.</div>';
+    } else {
+        for (var i = 0; i < incidents.length; i++) {
+            var inc = incidents[i];
+            var statusClass = 'incident-investigating';
+            if (inc.status === 'identified') statusClass = 'incident-identified';
+            else if (inc.status === 'monitoring') statusClass = 'incident-monitoring';
+            else if (inc.status === 'resolved') statusClass = 'incident-resolved';
+
+            var sevClass = 'severity-minor';
+            if (inc.severity === 'critical') sevClass = 'severity-critical';
+            else if (inc.severity === 'major') sevClass = 'severity-major';
+
+            html += '<div class="incident">' +
+                '<div class="incident-top">' +
+                '<span class="incident-title">' + escapeHtml(inc.title) + '</span>' +
+                '<span class="incident-badge ' + statusClass + '">' + escapeHtml(inc.status || 'unknown') + '</span>' +
+                '<span class="incident-badge ' + sevClass + '">' + escapeHtml(inc.severity || 'minor') + '</span>' +
+                '</div>';
+            if (inc.message) {
+                html += '<div class="incident-message">' + escapeHtml(inc.message) + '</div>';
+            }
+            html += '<div class="incident-meta">';
+            if (inc.started_at) {
+                html += '<span>Started: ' + fmtTime(inc.started_at) + '</span>';
+            }
+            if (inc.resolved_at) {
+                html += '<span>Resolved: ' + fmtTime(inc.resolved_at) + '</span>';
+                if (inc.started_at) {
+                    var dur = fmtDuration(inc.started_at, inc.resolved_at);
+                    if (dur) html += '<span>Duration: ' + dur + '</span>';
+                }
+            }
+            html += '</div></div>';
+        }
+    }
+
+    html += '</div>';
+    return html;
+}
+
+var countdownTimer = null;
+function startCountdown() {
+    var remaining = Math.floor(refreshMs / 1000);
+    var el = document.getElementById('countdown');
+    var elInline = document.getElementById('countdown-inline');
+    if (countdownTimer) clearInterval(countdownTimer);
+
+    function update() {
+        var txt = 'Refresh in ' + remaining + 's';
+        if (el) el.textContent = txt;
+        if (elInline) elInline.textContent = txt;
+    }
+    update();
+
+    countdownTimer = setInterval(function() {
+        remaining--;
+        if (remaining >= 0) update();
+        if (remaining <= 0) {
+            clearInterval(countdownTimer);
+            load();
+        }
+    }, 1000);
+}
+
+if (!KEY) {
+    setHTMLSafe(document.getElementById('app'), '<div class="error-box"><h2>Missing Auth Key</h2><p style="color:var(--muted)">Add <code>?key=your_auth_key</code> to the URL.</p></div>');
+} else {
+    load();
+}
+})();
+</script>
+</body>
+</html>

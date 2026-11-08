@@ -1,0 +1,12 @@
+.git
+.github
+config/
+logs/
+backups/
+venv/
+__pycache__
+*.pyc
+*.db
+*.db-journal
+web/Dev/.build/
+ssl/

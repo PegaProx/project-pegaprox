@@ -1,0 +1,789 @@
+# -*- coding: utf-8 -*-
+"""
+Right-sizing + Capacity Forecasting endpoints — MK May 2026.
+
+Reads from the metrics_history snapshot table (5-min cadence, 30d retention)
+and produces:
+  - per-VM right-sizing recommendations (oversized / undersized CPU/RAM)
+  - per-cluster + per-storage capacity forecasts (linear regression →
+    estimated date when 90% threshold gets crossed)
+
+No fancy ML — just simple stats. Linear regression with least squares is
+plenty for "trending up by X%/day" predictions on monitoring data.
+"""
+import json
+import logging
+import math
+from datetime import datetime, timedelta
+from itertools import compress
+from flask import Blueprint, jsonify, request
+
+from pegaprox.globals import cluster_managers
+from pegaprox.utils.auth import require_auth
+from pegaprox.api.helpers import (check_cluster_access, safe_error, load_metrics_window, scope_vm_rows,
+                                  history_report, history_version, run_off_hub, caller_is_scoped,
+                                  _request_caller)
+from pegaprox.background.metrics_store import need, guest_columns, FT, HERE, RUN, CPU_SET, MEM_SET
+from pegaprox.core.db import get_db
+
+bp = Blueprint('insights', __name__)
+
+
+def _load_history(cluster_id, days=30):
+    """Pull all snapshots for a cluster from metrics_history within the window.
+    Returns list of (ts_unix, cluster_data_dict) sorted oldest→newest.
+
+    NS 2026-06-04: fetch+parse happen off-hub + cached/single-flighted in
+    load_metrics_window (shared across clusters + cost/power); here we only do
+    the cheap per-cluster filter.
+    MK Oct 2026 - load_metrics_window reads the one cluster itself now."""
+    try:
+        return load_metrics_window(days, cluster_id)
+    except Exception as e:
+        logging.warning(f"[insights] history load failed for {cluster_id}: {e}")
+    return []
+
+
+def _percentile(values, p):
+    if not values: return None
+    sv = sorted(values)
+    k = (len(sv) - 1) * p / 100
+    f = math.floor(k); c = math.ceil(k)
+    if f == c: return sv[int(k)]
+    return sv[f] * (c - k) + sv[c] * (k - f)
+
+
+def _linear_regression(xs, ys):
+    """Returns (slope, intercept, r_squared) or (None, None, 0.0) on insufficient data.
+    xs: list of unix timestamps, ys: list of values.
+
+    MK: May 2026 (#374) — added R² so callers can distinguish a real trend from
+    noise on a near-stable series. R² is 0 when the regression fits no better
+    than the mean, ~1 when the fit is near-perfect.
+    """
+    n = len(xs)
+    if n < 2: return None, None, 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    den_x = sum((x - mx) ** 2 for x in xs)
+    den_y = sum((y - my) ** 2 for y in ys)
+    if den_x == 0: return None, my, 1.0 if den_y == 0 else 0.0
+    slope = num / den_x
+    intercept = my - slope * mx
+    if den_y == 0:
+        return slope, intercept, 1.0
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    r2 = max(0.0, 1.0 - ss_res / den_y)
+    return slope, intercept, r2
+
+
+def _sizing_stats(history):
+    """{vmid: what right-sizing reads of a guest} over the snapshots: plain arithmetic, it
+    runs off the hub. The averages and the p95 are rounded as the page shows them.
+    MK Oct 2026 - a window whose guests are all stored in columns goes to
+    _sizing_stats_cols, which reads the same figures without a dict per guest and sample."""
+    cols = guest_columns(history)
+    if cols is not None:
+        return _sizing_stats_cols(cols)
+    history = need(history, 'vms')
+    # NOTE: _sizing_stats_cols below is this on the column store, and has to give the very
+    # same result (tests/test_metrics_column_engines.py). A change here goes there as well.
+    by_vm = {}  # vmid -> {cpu: [], mem: [], running_count, latest_meta}
+    for _ts, cd in history:
+        vms = cd.get('vms') or {}
+        for vmid, m in vms.items():
+            entry = by_vm.setdefault(vmid, {'cpu': [], 'mem': [], 'running': 0,
+                                             'meta': {}, 'type': m.get('t', 'qemu')})
+            if m.get('r'):
+                entry['running'] += 1
+            if m.get('cpu') is not None:
+                entry['cpu'].append(m['cpu'])
+            if m.get('mem') is not None:
+                entry['mem'].append(m['mem'])
+            entry['meta'] = m  # last seen wins (current allocation)
+    out = {}
+    for vmid, e in by_vm.items():
+        cpus = e['cpu']; mems = e['mem']
+        meta = e['meta'] or {}
+        s = out[vmid] = {'type': e['type'], 'running': e['running'], 'samples': len(cpus)}
+        try:
+            s.update({
+                'cpu_avg': round(sum(cpus) / len(cpus), 1) if cpus else 0,
+                'cpu_p95': round(_percentile(cpus, 95) or 0, 1),
+                'has_mem': bool(mems),
+                'mem_avg': round(sum(mems) / max(len(mems), 1), 1) if mems else 0,
+                'mem_max': round(max(mems) if mems else 0, 1),
+                'maxcpu': int(meta.get('maxcpu', 0) or 0),
+                'maxmem': int(meta.get('maxmem', 0) or 0),
+            })
+        except (TypeError, ValueError):
+            # a value no number reads from: that guest has no figures, the others keep theirs
+            s['unreadable'] = True
+    return out
+
+
+def _sizing_stats_cols(cols):
+    """_sizing_stats on a metrics_store.GuestColumns: per guest the same values in the same
+    snapshot order reach the same sum, _percentile and max, the type is the first snapshot's
+    and the allocation the last one's. Columns hold numbers only, so nothing is unreadable."""
+    out = {}
+    S, get = cols.S, FT.__getitem__
+    for vmid, g in cols.order:
+        fl = cols.flags_of(g)
+        here = fl.translate(HERE)
+        cpu_set, mem_set = fl.translate(CPU_SET), fl.translate(MEM_SET)
+        cpu, mem = cols.cpu_of(g), cols.mem_of(g)
+        # a figure in every snapshot (most guests): no need to pick the samples out
+        cpus = list(map(get, cpu if cpu_set.count(1) == S else compress(cpu, cpu_set)))
+        mems = list(map(get, mem if mem_set.count(1) == S else compress(mem, mem_set)))
+        last = here.rfind(1)
+        s = out[vmid] = {'type': cols.kind(g, here.find(1)), 'running': fl.translate(RUN).count(1),
+                         'samples': len(cpus)}
+        s.update({
+            'cpu_avg': round(sum(cpus) / len(cpus), 1) if cpus else 0,
+            'cpu_p95': round(_percentile(cpus, 95) or 0, 1),
+            'has_mem': bool(mems),
+            'mem_avg': round(sum(mems) / max(len(mems), 1), 1) if mems else 0,
+            'mem_max': round(max(mems) if mems else 0, 1),
+            'maxcpu': int(cols.at(cols.maxcpu, g, last) or 0),
+            'maxmem': int(cols.at(cols.maxmem, g, last) or 0),
+        })
+    return out
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/right-sizing', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def right_sizing(cluster_id):
+    """Per-VM CPU/RAM utilization analysis. For each VM samples the last
+    `days` of metrics history and computes mean + p95 CPU%, mean + max
+    RAM%. Returns categorized recommendations."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    try:
+        days = max(1, min(90, int(request.args.get('days', 30))))
+    except (TypeError, ValueError):
+        days = 30
+    # how many running samples needed before we trust the recommendation
+    min_samples = 24  # 24 × 5min = 2h of data minimum
+
+    history = _load_history(cluster_id, days=days)
+    if history:
+        # NS Oct 2026 - the history part off the hub and kept (helpers.history_report)
+        by_vm, stamp = history_report(('sizing', cluster_id, days), history_version(history),
+                                      lambda: run_off_hub(_sizing_stats, history), rows=len)
+    else:
+        by_vm, stamp = {}, {}
+    # MK Oct 2026 - counted after the figures: a snapshot the retention pruned between the
+    # window's index and its parts has left the window by now, as it left them
+    sample_count = len(history)
+
+    # Resolve names from current resources
+    mgr = cluster_managers[cluster_id]
+    name_lookup = {}
+    node_lookup = {}
+    try:
+        for r in (mgr.get_vm_resources() or []):
+            vmid = str(r.get('vmid', ''))
+            if vmid:
+                name_lookup[vmid] = r.get('name', '')
+                node_lookup[vmid] = r.get('node', '')
+    except Exception:
+        pass
+
+    recommendations = []
+    # NS Aug 2026 (AI-pentest) — the metrics history is cluster-wide; filter the per-VM sizing output
+    # to VMs the caller can actually read, so a pool-/ACL-scoped user doesn't get every cluster VM's
+    # name/node/CPU/mem stats. Admin & cluster-wide are scope-wins (user_can_access_vm returns True).
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _authz_u = build_authz_user(request.session.get('user', ''), request.session)
+    counts = {'oversized_cpu': 0, 'oversized_mem': 0, 'undersized_cpu': 0,
+              'undersized_mem': 0, 'idle': 0, 'no_data': 0, 'ok': 0}
+    for vmid, e in by_vm.items():
+        try:
+            _vmid_i = int(vmid)
+        except (TypeError, ValueError):
+            _vmid_i = None
+        if _vmid_i is None or not user_can_access_vm(_authz_u, cluster_id, _vmid_i, 'vm.view'):
+            continue
+        if e['running'] < min_samples or e['samples'] < min_samples or e.get('unreadable'):
+            counts['no_data'] += 1
+            continue
+        cpu_avg, cpu_p95 = e['cpu_avg'], e['cpu_p95']
+        mems, mem_avg, mem_max = e['has_mem'], e['mem_avg'], e['mem_max']
+        maxcpu, maxmem = e['maxcpu'], e['maxmem']
+
+        flags = []
+        # CPU heuristics
+        if cpu_avg < 5 and cpu_p95 < 25 and maxcpu >= 2:
+            new_cores = max(1, maxcpu // 2)
+            flags.append({
+                'kind': 'oversized_cpu', 'severity': 'info',
+                'detail': f'avg {cpu_avg}% / p95 {cpu_p95}% on {maxcpu} cores',
+                'current': maxcpu, 'recommended': new_cores,
+                'rationale': 'low CPU utilisation across window — halve cores',
+            })
+            counts['oversized_cpu'] += 1
+        elif cpu_avg > 50 and cpu_p95 > 85:
+            flags.append({
+                'kind': 'undersized_cpu', 'severity': 'warning',
+                'detail': f'avg {cpu_avg}% / p95 {cpu_p95}% on {maxcpu} cores',
+                'current': maxcpu, 'recommended': maxcpu + max(1, maxcpu // 4),
+                'rationale': 'sustained high CPU — add cores',
+            })
+            counts['undersized_cpu'] += 1
+        elif cpu_avg < 1 and cpu_p95 < 3:
+            flags.append({
+                'kind': 'idle', 'severity': 'info',
+                'detail': f'avg {cpu_avg}% / p95 {cpu_p95}%',
+                'rationale': 'effectively idle — candidate for shutdown',
+            })
+            counts['idle'] += 1
+
+        # RAM heuristics
+        if mems and maxmem > 0:
+            if mem_max > 90:
+                gb_now = round(maxmem / (1024**3), 1)
+                flags.append({
+                    'kind': 'undersized_mem', 'severity': 'warning',
+                    'detail': f'avg {mem_avg}% / max {mem_max}% of {gb_now} GB',
+                    'current_gb': gb_now,
+                    'recommended_gb': round(gb_now * 1.5, 1),
+                    'rationale': 'RAM pressure — increase by ~50%',
+                })
+                counts['undersized_mem'] += 1
+            elif mem_avg < 25 and mem_max < 40 and maxmem >= 2 * 1024**3:
+                gb_now = round(maxmem / (1024**3), 1)
+                flags.append({
+                    'kind': 'oversized_mem', 'severity': 'info',
+                    'detail': f'avg {mem_avg}% / max {mem_max}% of {gb_now} GB',
+                    'current_gb': gb_now,
+                    'recommended_gb': round(max(1, gb_now / 2), 1),
+                    'rationale': 'RAM heavily underutilised — halve allocation',
+                })
+                counts['oversized_mem'] += 1
+
+        if flags:
+            recommendations.append({
+                'vmid': vmid, 'type': e['type'],
+                'name': name_lookup.get(vmid, ''),
+                'node': node_lookup.get(vmid, ''),
+                'cpu_avg': cpu_avg, 'cpu_p95': cpu_p95,
+                'mem_avg': mem_avg, 'mem_max': mem_max,
+                'maxcpu': maxcpu, 'maxmem_gb': round(maxmem / (1024**3), 1) if maxmem else 0,
+                'samples': e['samples'],
+                'flags': flags,
+            })
+        else:
+            counts['ok'] += 1
+
+    # sort: warnings first, then oversize, by VMID
+    sev_rank = {'warning': 0, 'info': 1}
+    def _key(r):
+        worst = min(sev_rank.get(f['severity'], 2) for f in r['flags'])
+        return (worst, r.get('name', '') or r['vmid'])
+    recommendations.sort(key=_key)
+
+    return jsonify({
+        'cluster_id': cluster_id,
+        'window_days': days,
+        'snapshots_in_window': sample_count,
+        'min_samples_required': min_samples,
+        'summary': counts,
+        'total_vms': len(by_vm),
+        'recommendations': recommendations,
+        **stamp,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/forecast', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def capacity_forecast(cluster_id):
+    """Linear regression on cluster CPU/RAM totals + per-storage usage.
+    Returns slope, current value, and forecast date when each metric crosses
+    `threshold_pct` (default 90)."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    try:
+        days = max(1, min(90, int(request.args.get('days', 30))))
+    except (TypeError, ValueError):
+        days = 30
+    try:
+        threshold = float(request.args.get('threshold_pct', 90))
+        threshold = max(50, min(99.9, threshold))
+    except (TypeError, ValueError):
+        threshold = 90.0
+    # the storages come by name for the whole cluster, not per node: a caller confined to some
+    # guests gets the cluster series, as the storage reads refuse them the others
+    confined = caller_is_scoped(_request_caller(), cluster_id)
+
+    history = _load_history(cluster_id, days=days)
+    if len(history) < 6:  # need at least 30min of data
+        return jsonify({
+            'cluster_id': cluster_id,
+            'window_days': days,
+            'snapshots_in_window': len(history),
+            'enough_data': False,
+            'message': 'not enough history yet — collector needs ~30 min',
+            'forecasts': [],
+        })
+    if not confined:
+        need(history, 'storage')
+
+    now_ts = int(datetime.now().timestamp())
+
+    # cluster totals series
+    series = {  # name -> [(ts, pct), ...]
+        'cpu': [], 'memory': [],
+    }
+    storage_series = {}  # sid -> [(ts, pct), ...]
+    for ts, cd in history:
+        totals = cd.get('totals') or {}
+        cpu_total = totals.get('cpu_total') or 0
+        cpu_used = totals.get('cpu_used') or 0
+        if cpu_total > 0:
+            series['cpu'].append((ts, cpu_used / cpu_total * 100))
+        mem_total = totals.get('mem_total') or 0
+        mem_used = totals.get('mem_used') or 0
+        if mem_total > 0:
+            series['memory'].append((ts, mem_used / mem_total * 100))
+        for sid, sd in ({} if confined else cd.get('storage') or {}).items():
+            storage_series.setdefault(sid, []).append((ts, sd.get('pct') or 0))
+
+    forecasts = []
+
+    def _forecast_one(label, samples, kind='cluster', extra=None):
+        if len(samples) < 6:
+            return
+        xs = [s[0] for s in samples]
+        ys = [s[1] for s in samples]
+        slope, intercept, r2 = _linear_regression(xs, ys)
+        current = round(ys[-1], 1)
+        # slope is units-per-second; convert to per-day for display
+        slope_per_day = round(slope * 86400, 3) if slope is not None else None
+        eta_days = None
+        eta_iso = None
+        status = 'stable'
+        if slope is not None and slope_per_day is not None:
+            if slope_per_day >= 0.05 and current < threshold:
+                # extrapolate
+                seconds_to_threshold = (threshold - current) / slope if slope > 0 else None
+                if seconds_to_threshold and seconds_to_threshold > 0:
+                    eta_days = round(seconds_to_threshold / 86400, 1)
+                    eta_iso = (datetime.now() + timedelta(seconds=seconds_to_threshold)).isoformat()
+                    # MK: May 2026 (#374) — gate "warning"/"critical" on actual
+                    # trend confidence. False positives on noisy stable clusters
+                    # came from a tiny slope coincidentally producing an ETA
+                    # below 30d when extrapolated. We now require:
+                    #   • R² >= 0.5 (the regression actually fits the data)
+                    #   • slope_per_day >= 1% of current (the trend is non-trivial
+                    #     relative to the current level — keeps small absolute
+                    #     drifts on small percentages from getting promoted)
+                    is_real_trend = (r2 >= 0.5) and (slope_per_day >= 0.01 * current)
+                    if eta_days < 7: status = 'critical' if is_real_trend else 'trending_up'
+                    elif eta_days < 30: status = 'warning' if is_real_trend else 'trending_up'
+                    else: status = 'trending_up'
+            elif current >= threshold:
+                status = 'over_threshold'
+            elif slope_per_day < -0.05:
+                status = 'decreasing'
+        item = {
+            'metric': label, 'kind': kind,
+            'current_pct': current,
+            'slope_per_day_pct': slope_per_day,
+            'r_squared': round(r2, 3),
+            'threshold_pct': threshold,
+            'eta_days': eta_days, 'eta_iso': eta_iso,
+            'status': status, 'samples': len(samples),
+        }
+        if extra: item.update(extra)
+        forecasts.append(item)
+
+    _forecast_one('cluster_cpu', series['cpu'], kind='cluster')
+    _forecast_one('cluster_memory', series['memory'], kind='cluster')
+    for sid, samples in storage_series.items():
+        _forecast_one(sid, samples, kind='storage', extra={'storage': sid})
+
+    return jsonify({
+        'cluster_id': cluster_id,
+        'window_days': days,
+        'threshold_pct': threshold,
+        'snapshots_in_window': len(history),
+        'enough_data': True,
+        'forecasts': forecasts,
+    })
+
+
+# MK May 2026 — top-N noisy neighbors. Pure aggregator over /cluster/resources,
+# no history needed. The cpu_percent + mem_percent are instantaneous; the
+# disk_io/net_io rankings sort by cumulative bytes since VM boot which is
+# fine as a "currently active VM" proxy. For real instantaneous rates we'd
+# need RRD deltas — not the use case operators are asking for here.
+_TOP_METRICS = {
+    'cpu':        ('cpu_percent', '%'),
+    'memory':     ('mem_percent', '%'),
+    'disk_usage': ('disk_percent', '%'),
+    'disk_io':    ('_disk_io', 'B'),   # diskread + diskwrite
+    'net_io':     ('_net_io', 'B'),    # netin + netout
+}
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/rollups', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def rollups(cluster_id):
+    # MK May 2026 — per-tag / per-pool aggregation over /cluster/resources.
+    # Larger fleets want "how much CPU/RAM is the 'prod' tag chewing" without
+    # exporting to Grafana. Pure aggregator, no history.
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    group_by = (request.args.get('group_by') or 'tag').lower()
+    if group_by not in ('tag', 'pool'):
+        return jsonify({'error': 'group_by must be tag or pool'}), 400
+
+    # MK defense-in-depth — bound the rollup payload. Fleets with many
+    # distinct tags would otherwise return an unbounded list. Clamp to
+    # [1, 500] with default 100 — sorted by vm_count desc so the top
+    # groups are kept even when limit kicks in.
+    try:
+        limit = max(1, min(500, int(request.args.get('limit') or 100)))
+    except ValueError:
+        limit = 100
+
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    # sec (private disclosure Sep 2026 — audit M5): scope before aggregating so a pool-/ACL-scoped
+    # caller's per-pool/per-tag rollups reflect only their VMs, not the whole cluster's totals/names.
+    vms = scope_vm_rows(cluster_id, mgr.get_vm_resources() or [])
+    only_running = (request.args.get('status') or 'all').lower() == 'running'
+    if only_running:
+        vms = [v for v in vms if v.get('status') == 'running']
+
+    groups = {}  # key → {vm_count, running_count, cpu_sum, mem_sum, maxmem_sum, disk_sum, maxdisk_sum, ...}
+
+    def _add(key, v):
+        g = groups.setdefault(key, {
+            'key': key, 'vm_count': 0, 'running_count': 0,
+            'cpu_sum_pct': 0.0, 'mem_used_bytes': 0, 'mem_max_bytes': 0,
+            'disk_used_bytes': 0, 'disk_max_bytes': 0,
+            'diskread_bytes': 0, 'diskwrite_bytes': 0,
+            'netin_bytes': 0, 'netout_bytes': 0,
+        })
+        g['vm_count'] += 1
+        if v.get('status') == 'running':
+            g['running_count'] += 1
+        g['cpu_sum_pct'] += v.get('cpu_percent') or 0
+        g['mem_used_bytes'] += v.get('mem') or 0
+        g['mem_max_bytes'] += v.get('maxmem') or 0
+        g['disk_used_bytes'] += v.get('disk') or 0
+        g['disk_max_bytes'] += v.get('maxdisk') or 0
+        g['diskread_bytes'] += v.get('diskread') or 0
+        g['diskwrite_bytes'] += v.get('diskwrite') or 0
+        g['netin_bytes'] += v.get('netin') or 0
+        g['netout_bytes'] += v.get('netout') or 0
+
+    for v in vms:
+        if group_by == 'pool':
+            key = v.get('pool') or '(no pool)'
+            _add(key, v)
+        else:
+            # tags: semicolon-separated. VM with no tag → '(untagged)'.
+            # VM with multiple tags counts ONCE per tag — we double-count
+            # intentionally so 'prod' rollup includes a VM also tagged 'critical'.
+            raw = (v.get('tags') or '').strip()
+            tags = [t.strip() for t in raw.replace(',', ';').split(';') if t.strip()]
+            if not tags:
+                tags = ['(untagged)']
+            for t in tags:
+                _add(t, v)
+
+    # derive percentages, sort by total resource usage
+    rolled = list(groups.values())
+    for g in rolled:
+        g['mem_pct'] = round((g['mem_used_bytes'] / g['mem_max_bytes']) * 100, 1) if g['mem_max_bytes'] > 0 else 0
+        g['disk_pct'] = round((g['disk_used_bytes'] / g['disk_max_bytes']) * 100, 1) if g['disk_max_bytes'] > 0 else 0
+        g['cpu_sum_pct'] = round(g['cpu_sum_pct'], 1)
+    rolled.sort(key=lambda r: r['vm_count'], reverse=True)
+    total_group_count = len(rolled)
+    truncated = total_group_count > limit
+    rolled = rolled[:limit]
+
+    return jsonify({
+        'group_by': group_by,
+        'only_running': only_running,
+        'total_vms': len(vms),
+        'group_count': total_group_count,
+        'truncated': truncated,
+        'limit': limit,
+        'groups': rolled,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/top-talkers', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def top_talkers(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    metric = (request.args.get('metric') or 'cpu').lower()
+    if metric not in _TOP_METRICS:
+        return jsonify({'error': f'unknown metric (one of: {", ".join(_TOP_METRICS)})'}), 400
+
+    try:
+        limit = max(1, min(100, int(request.args.get('limit') or 10)))
+    except ValueError:
+        limit = 10
+
+    only_running = (request.args.get('status') or 'running').lower() != 'all'
+
+    mgr = cluster_managers[cluster_id]
+    if not mgr.is_connected:
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    vms = mgr.get_vm_resources() or []
+    if only_running:
+        vms = [v for v in vms if v.get('status') == 'running']
+
+    # synth composite IO fields once
+    for v in vms:
+        v['_disk_io'] = (v.get('diskread') or 0) + (v.get('diskwrite') or 0)
+        v['_net_io'] = (v.get('netin') or 0) + (v.get('netout') or 0)
+
+    # NS Aug 2026 (AI-pentest + CodeAnt) — filter to VMs the caller can read BEFORE ranking + limit,
+    # so a pool-/ACL-scoped user gets THEIR top-N, not (cluster top-N minus what they can't see).
+    # Admin & cluster-wide are scope-wins.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    _authz_u = build_authz_user(request.session.get('user', ''), request.session)
+    def _vm_ok(v):
+        try:
+            return user_can_access_vm(_authz_u, cluster_id, int(v.get('vmid')), 'vm.view')
+        except (TypeError, ValueError):
+            return False
+    vms = [v for v in vms if _vm_ok(v)]
+
+    sort_key, unit = _TOP_METRICS[metric]
+    vms.sort(key=lambda x: x.get(sort_key) or 0, reverse=True)
+    top = vms[:limit]
+
+    # trim payload to what the UI cares about (already authz-filtered above)
+    out = []
+    for v in top:
+        out.append({
+            'vmid': v.get('vmid'),
+            'name': v.get('name') or f"VM {v.get('vmid')}",
+            'type': v.get('type'),
+            'node': v.get('node'),
+            'status': v.get('status'),
+            'cpu_percent': v.get('cpu_percent'),
+            'mem_percent': v.get('mem_percent'),
+            'disk_percent': v.get('disk_percent'),
+            'disk_io': v.get('_disk_io'),
+            'net_io': v.get('_net_io'),
+            'uptime': v.get('uptime'),
+            'value': v.get(sort_key) or 0,
+        })
+
+    return jsonify({
+        'metric': metric,
+        'unit': unit,
+        'limit': limit,
+        'only_running': only_running,
+        'total_vms': len(vms),
+        'top': out,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/insights/history', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def long_term_history(cluster_id):
+    """Return cluster-aggregate + per-node time-series from the
+    metrics_history snapshots. Powers the long-term-history chart
+    on the dashboard.
+
+    MK 2026-06-03 (#456): existing right-sizing / forecast / rollups
+    endpoints all read the same metrics_history table, but they
+    return computed values (percentiles, forecasts, top-N). This
+    endpoint returns the raw time-series so the UI can render line
+    charts of CPU%/RAM%/disk% per node and aggregated per cluster.
+
+    Query params:
+      days     int  default 7,  max retention_days (= PEGAPROX_METRICS_RETENTION_DAYS)
+      step     int  default 0   bucket size in seconds. 0 = no bucketing
+                                (return every snapshot); >0 = average the
+                                snapshots inside each step-second window
+                                (server-side downsample for long windows).
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    try:
+        days = int(request.args.get('days', 7))
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 365))
+
+    try:
+        step = int(request.args.get('step', 0))
+    except (TypeError, ValueError):
+        step = 0
+    step = max(0, min(step, 86400))  # 1d bucket cap
+
+    raw = _load_history(cluster_id, days=days)
+    if not raw:
+        return jsonify({
+            'cluster_id': cluster_id,
+            'days_requested': days,
+            'step_seconds': step,
+            'samples': [],
+            'note': 'No snapshots in window yet — collector runs every 5 min',
+        })
+    # MK Oct 2026 - a year at 200 nodes is half a second and more of the loops below, which
+    # held the hub: they run in the thread pool now (the node parts are read there too)
+    samples = run_off_hub(_history_samples, raw, step)
+
+    out = {
+        'cluster_id': cluster_id,
+        'days_requested': days,
+        'step_seconds': step,
+        'sample_count': len(samples),
+        'samples': samples,
+    }
+    # cluster.view like right-sizing, forecast and rollups (it asked for an insights.view
+    # that no role holds). The guest counts are the whole cluster's: a caller confined
+    # to some guests gets none, as the report summaries give it none. CPU, memory and nodes stay.
+    from pegaprox.utils.auth import build_authz_user
+    if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id):
+        for s in samples:
+            s.pop('vms_running', None)
+            s.pop('cts_running', None)
+        out['scoped'] = True
+    return jsonify(out)
+
+
+def _history_samples(raw, step):
+    """long_term_history's samples of a window, averaged into step-second buckets where
+    step > 0: plain arithmetic, off the hub."""
+    raw = need(raw, 'nodes')
+    # Build a flat list of (ts, cluster_pct_cpu, cluster_pct_mem, nodes_map)
+    samples = []
+    for ts_unix, cd in raw:
+        totals = cd.get('totals') or {}
+        cpu_total = totals.get('cpu_total') or 0
+        cpu_used = totals.get('cpu_used') or 0
+        mem_total = totals.get('mem_total') or 0
+        mem_used = totals.get('mem_used') or 0
+        cpu_pct = round((cpu_used / cpu_total * 100), 2) if cpu_total else 0
+        mem_pct = round((mem_used / mem_total * 100), 2) if mem_total else 0
+        nodes = {}
+        for nname, ndata in (cd.get('nodes') or {}).items():
+            nodes[nname] = {
+                'cpu': ndata.get('cpu', 0),
+                'mem_percent': ndata.get('mem_percent', 0),
+            }
+        samples.append({
+            'ts': ts_unix,
+            'cpu_pct': cpu_pct,
+            'mem_pct': mem_pct,
+            # None: the snapshot's guest list was not read (the collector stores no counts)
+            'vms_running': totals.get('vms_running'),
+            'cts_running': totals.get('cts_running'),
+            'nodes': nodes,
+        })
+
+    # Optional server-side downsample. Useful when asking for 90d / 365d
+    # so the response isn't 100k+ points the chart library would choke on.
+    if step > 0 and len(samples) > 1:
+        bucketed = []
+        cur_bucket_start = samples[0]['ts'] - (samples[0]['ts'] % step)
+        cur = []
+        for s in samples:
+            if s['ts'] >= cur_bucket_start + step:
+                # flush current bucket
+                if cur:
+                    bucketed.append(_avg_samples(cur, cur_bucket_start))
+                cur_bucket_start = s['ts'] - (s['ts'] % step)
+                cur = []
+            cur.append(s)
+        if cur:
+            bucketed.append(_avg_samples(cur, cur_bucket_start))
+        samples = bucketed
+    return samples
+
+
+def _avg_samples(samples, bucket_ts):
+    """Average a list of samples into a single bucketed sample.
+    bucket_ts is the bucket's leftmost timestamp."""
+    n = max(len(samples), 1)
+    cpu = sum(s['cpu_pct'] for s in samples) / n
+    mem = sum(s['mem_pct'] for s in samples) / n
+    vms = max((s['vms_running'] for s in samples if s.get('vms_running') is not None), default=None)
+    cts = max((s['cts_running'] for s in samples if s.get('cts_running') is not None), default=None)
+    # node-level averaging — union of node names, mean of values
+    node_avgs = {}
+    for s in samples:
+        for nname, nd in (s.get('nodes') or {}).items():
+            slot = node_avgs.setdefault(nname, {'cpu_sum': 0, 'mem_sum': 0, 'count': 0})
+            slot['cpu_sum'] += nd.get('cpu', 0) or 0
+            slot['mem_sum'] += nd.get('mem_percent', 0) or 0
+            slot['count'] += 1
+    nodes_out = {
+        nname: {
+            'cpu': round(slot['cpu_sum'] / slot['count'], 4),
+            'mem_percent': round(slot['mem_sum'] / slot['count'], 2),
+        }
+        for nname, slot in node_avgs.items()
+    }
+    return {
+        'ts': bucket_ts,
+        'cpu_pct': round(cpu, 2),
+        'mem_pct': round(mem, 2),
+        'vms_running': vms,
+        'cts_running': cts,
+        'nodes': nodes_out,
+    }
+
+
+@bp.route('/api/insights/force-snapshot', methods=['POST'])
+@require_auth(perms=['admin.api'])
+def force_snapshot():
+    """Admin-only — kick the metrics collector right now instead of waiting
+    for the next 5-min tick. Useful right after first install / SLA setup
+    so the user sees data immediately rather than 'not enough history'."""
+    try:
+        from pegaprox.background.metrics import collect_metrics_snapshot, save_metrics_snapshot
+        snap = collect_metrics_snapshot()
+        save_metrics_snapshot(snap)
+        # mini-summary — sec (private disclosure Sep 2026 — audit): the summary leaked every cluster's
+        # name + VM/storage/node counts to a cluster-scoped admin.api holder. Confine to their clusters.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.utils.rbac import get_user_clusters as _guc
+        _allowed = _guc(build_authz_user(request.session.get('user', ''), request.session))
+        out = {'ok': True, 'clusters': {}}
+        for cid, cd in (snap.get('clusters') or {}).items():
+            if _allowed is not None and cid not in _allowed:
+                continue
+            out['clusters'][cid] = {
+                'name': cd.get('name'),
+                'vms_sampled': len(cd.get('vms') or {}),
+                'storage_devices': len(cd.get('storage') or {}),
+                'nodes': len(cd.get('nodes') or {}),
+            }
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': safe_error(e)}), 500

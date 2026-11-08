@@ -1,0 +1,273 @@
+# -*- coding: utf-8 -*-
+"""
+PegaProx Permissions & Roles - Layer 0
+No pegaprox imports allowed.
+"""
+
+# User roles
+ROLE_ADMIN = 'admin'
+ROLE_USER = 'user'
+ROLE_VIEWER = 'viewer'
+
+# Builtin roles - cannot be deleted
+BUILTIN_ROLES = [ROLE_ADMIN, ROLE_USER, ROLE_VIEWER]
+
+PERMISSIONS = {
+    # vm stuff
+    'vm.view': 'View VMs and containers',
+    'vm.start': 'Start VMs and containers',
+    'vm.stop': 'Stop VMs and containers',
+    'vm.restart': 'Restart VMs and containers',
+    'vm.console': 'Access VM console',
+    'vm.migrate': 'Migrate VMs between nodes',
+    'vm.clone': 'Clone VMs',
+    'vm.delete': 'Delete VMs and containers',
+    'vm.create': 'Create new VMs and containers',
+    'vm.config': 'Modify VM configuration',
+    'vm.snapshot': 'Create/delete snapshots',
+    'vm.backup': 'Backup VMs',
+    'vm.template': 'Convert to/from template',
+
+    # Cluster permissions
+    'cluster.view': 'View cluster info',
+    'cluster.add': 'Add new clusters',
+    'cluster.delete': 'Remove clusters',
+    'cluster.config': 'Modify cluster settings',
+    'cluster.join': 'Join nodes to cluster',
+    'cluster.admin': 'Full cluster administration (join/remove nodes)',
+
+    # Node permissions
+    'node.view': 'View node status',
+    'node.shell': 'Access node shell',
+    'node.maintenance': 'Toggle maintenance mode',
+    'node.update': 'Update node packages',
+    'node.reboot': 'Reboot nodes',
+    'node.network': 'Modify network config',
+    'node.config': 'Change node options',
+    'node.certificate': 'Manage SSL certificates',
+    'node.power': 'Shutdown/wake nodes',
+
+    # Storage permissions
+    'storage.view': 'View storage',
+    'storage.upload': 'Upload files to storage',
+    'storage.delete': 'Delete files from storage',
+    'storage.config': 'Modify storage config',
+    'storage.create': 'Add new storage',
+    'storage.download': 'Download ISOs/templates',
+
+    # Backup permissions
+    'backup.view': 'View backups',
+    'backup.create': 'Create backups',
+    'backup.restore': 'Restore from backup',
+    'backup.delete': 'Delete backups',
+    'backup.schedule': 'Manage backup schedules',
+    'backup.config': 'Configure backup storage',
+
+    # HA permissions
+    'ha.view': 'View HA status',
+    'ha.config': 'Configure HA settings',
+    'ha.groups': 'Manage HA groups',
+    'ha.resources': 'Add/remove HA resources',
+
+    # Firewall permissions
+    'firewall.view': 'View firewall rules',
+    'firewall.edit': 'Modify firewall rules',
+    'firewall.aliases': 'Manage aliases/IPsets',
+
+    # Pool/Resource permissions
+    'pool.view': 'View resource pools',
+    'pool.manage': 'Create/delete pools',
+    'pool.assign': 'Assign VMs to pools',
+
+    # Replication
+    'replication.view': 'View replication jobs',
+    'replication.manage': 'Create/delete replication',
+
+    # Ceph
+    'ceph.manage': 'Manage Ceph OSD, pools, monitors, MDS',
+
+    # SDN
+    'sdn.manage': 'Manage SDN zones, vnets, subnets, controllers',
+
+    # Alerts
+    'alert.manage': 'Create, edit, delete alert rules',
+
+    # Site Recovery - NS Mar 2026
+    'site_recovery.view': 'View recovery plans and events',
+    'site_recovery.manage': 'Create/edit/delete recovery plans and VMs',
+    'site_recovery.failover': 'Execute failover, failback and test operations',
+
+    # Plugin permissions
+    'plugins.view': 'View installed plugins',
+    'plugins.manage': 'Enable, disable and configure plugins',
+
+    # Admin permissions
+    'admin.users': 'Manage users',
+    'admin.roles': 'Manage custom roles',
+    'admin.tenants': 'Manage tenants',
+    'admin.groups': 'Manage cluster groups',
+    'admin.settings': 'Modify system settings',
+    'admin.scripts': 'Manage and execute custom scripts',
+    'admin.audit': 'View audit logs',
+    'admin.api': 'Manage API tokens',
+
+    # Security permissions (MK 2026-06-10: RBAC-ification of admin-only endpoints)
+    'security.lockout.view': 'View IP / user brute-force lockouts',
+    'security.lockout.manage': 'Clear IP / user lockouts and reset password expiry',
+    'security.settings.manage': 'Edit security settings (IP whitelist, CORS, key rotation, compliance)',
+    'update.manage': 'Run and configure the in-app updater',
+
+    # PBS permissions
+    'pbs.view': 'View PBS servers and datastores',
+    'pbs.config': 'Modify PBS server settings',
+    'pbs.datastore.view': 'View datastore details and snapshots',
+    'pbs.datastore.create': 'Create new datastores on PBS',
+    'pbs.datastore.modify': 'Modify datastore configuration',
+    'pbs.datastore.delete': 'Delete datastores from PBS',
+    'pbs.datastore.gc': 'Run garbage collection on datastores',
+    'pbs.datastore.verify': 'Run verification on datastores',
+    'pbs.datastore.prune': 'Prune snapshots from datastores',
+    'pbs.snapshot.delete': 'Delete individual snapshots',
+    'pbs.snapshot.protect': 'Toggle snapshot protection',
+    'pbs.snapshot.notes': 'Edit snapshot/group notes',
+    'pbs.snapshot.browse': 'Browse and download snapshot files',
+    'pbs.jobs.view': 'View sync/verify/prune jobs',
+    'pbs.jobs.run': 'Manually trigger jobs',
+    'pbs.tasks.view': 'View PBS tasks',
+    'pbs.tasks.stop': 'Stop running PBS tasks',
+    'pbs.jobs.create': 'Create sync/verify/prune jobs',
+    'pbs.jobs.modify': 'Modify existing jobs',
+    'pbs.jobs.delete': 'Delete jobs',
+    'pbs.notifications.view': 'View notification config',
+    'pbs.notifications.manage': 'Create/modify/delete notifications',
+    'pbs.traffic.view': 'View traffic control config',
+    'pbs.traffic.manage': 'Create/modify/delete traffic controls',
+    'pbs.disks.view': 'View disk information',
+    'pbs.disks.smart': 'View disk SMART data',
+    'pbs.subscription.view': 'View subscription status',
+    'pbs.subscription.set': 'Set subscription key',
+
+    # VMware/vCenter permissions
+    'vmware.view': 'View vCenter/ESXi servers',
+    'vmware.config': 'Add/edit/remove vCenter connections',
+    'vmware.vm.view': 'View VMware VMs and details',
+    'vmware.vm.power': 'Start/stop/restart VMware VMs',
+    'vmware.vm.snapshot': 'Create/delete VMware VM snapshots',
+    'vmware.vm.migrate': 'Migrate VMs to Proxmox (V2V)',
+    'vmware.host.view': 'View ESXi host details',
+    'vmware.datastore.view': 'View VMware datastores',
+    'vmware.network.view': 'View VMware networks',
+    'vmware.vm.manage': 'Modify VMware VM configuration',
+    'vmware.cluster.manage': 'Manage VMware cluster settings (DRS, HA)',
+
+    # XCP-ng / XAPI permissions - NS Mar 2026
+    'xapi.view': 'View XCP-ng pools and status',
+    'xapi.config': 'Add/edit/remove XCP-ng pool connections',
+    'xapi.vm.view': 'View XCP-ng VMs',
+    'xapi.vm.power': 'Start/stop/restart XCP-ng VMs',
+    'xapi.vm.create': 'Create VMs from XCP-ng templates',
+    'xapi.vm.config': 'Modify XCP-ng VM configuration',
+    'xapi.vm.delete': 'Delete XCP-ng VMs',
+    'xapi.vm.clone': 'Clone XCP-ng VMs',
+    'xapi.vm.migrate': 'Live migrate VMs within XCP-ng pool',
+    'xapi.vm.snapshot': 'Create/delete XCP-ng VM snapshots',
+    'xapi.host.view': 'View XCP-ng host details',
+    'xapi.storage.view': 'View XCP-ng storage repositories',
+    'xapi.network.view': 'View XCP-ng networks',
+    'xapi.pool.manage': 'Manage XCP-ng pool operations (join/leave)',
+    'xapi.template.view': 'View XCP-ng VM templates',
+    'xapi.template.manage': 'Create/delete XCP-ng VM templates',
+
+    # Telemetry - MK Sep 2026 (#818)
+    'metrics.view': 'Scrape the Prometheus endpoint (/api/metrics)',
+
+    # Automated installations - MK Sep 2026
+    'autoinstall.view': 'View automated installation profiles and runs',
+    'autoinstall.manage': 'Create, edit and revoke automated installation profiles',
+
+    # Change Guardian - NS Oct 2026
+    'changes.view': 'View planned changes and their approval state',
+    'changes.request': 'Draft, submit and cancel change plans',
+    'changes.approve': 'Approve or reject change plans (never the ones one requested)',
+}
+
+# MK Sep 2026 (#818) - permissions whose scope is wider than their name suggests.
+# The UI shows this next to the checkbox, because the moment somebody ticks it is
+# the moment they need to know. Keep these short and factual: an alarming tone on a
+# permission people legitimately need gets read as boilerplate and then ignored.
+PERMISSION_WARNINGS = {
+    'metrics.view': (
+        'Not tenant-scoped. /api/metrics emits gauges for EVERY cluster this '
+        'installation knows - node status, quorum, CPU, VM counts - regardless of '
+        'which clusters or tenants the holder is otherwise limited to. Grant it to '
+        'a dedicated monitoring account, not to a tenant role.'
+    ),
+    'autoinstall.view': (
+        'Not tenant-scoped. Shows every installation profile and every machine that '
+        'fetched one - hardware serials, MAC and IP addresses - across all tenants. '
+        'Only takes effect for accounts that see every cluster.'
+    ),
+    'autoinstall.manage': (
+        'Not tenant-scoped. Answer files carry the root password of every host '
+        'installed from them, and this is the ability to decide what a new Proxmox '
+        'host boots into - treat it like physical access to the rack. Only takes '
+        'effect for accounts that see every cluster.'
+    ),
+    'changes.approve': (
+        'Four eyes: whoever requested a plan never approves it, with any account or token of '
+        'theirs. A holder who is not an administrator approves only plans for guests they '
+        'can reach themselves, never the ones that change nodes, storage, network, firewall, '
+        'HA, backup jobs, access or cluster options.'
+    ),
+    'update.manage': (
+        'Not tenant-scoped. Updating or rolling back replaces and restarts this whole '
+        'installation, for every tenant on it. Only takes effect for accounts that see '
+        'every cluster.'
+    ),
+}
+
+# Default permissions per role
+ROLE_PERMISSIONS = {
+    ROLE_ADMIN: list(PERMISSIONS.keys()),
+    ROLE_USER: [
+        'vm.view', 'vm.start', 'vm.stop', 'vm.restart', 'vm.console', 'vm.migrate',
+        'vm.clone', 'vm.config', 'vm.snapshot', 'vm.backup',
+        'cluster.view',
+        'node.view',
+        'storage.view', 'storage.upload', 'storage.download',
+        'backup.view', 'backup.create', 'backup.restore', 'backup.delete',
+        'ha.view',
+        'firewall.view',
+        'pool.view', 'pool.assign',
+        'replication.view',
+        'site_recovery.view',
+        'plugins.view',
+        'pbs.view', 'pbs.datastore.view', 'pbs.datastore.gc', 'pbs.datastore.verify',
+        'pbs.snapshot.notes', 'pbs.snapshot.browse',
+        'pbs.jobs.view', 'pbs.tasks.view',
+        'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
+        'vmware.view', 'vmware.vm.view', 'vmware.vm.power', 'vmware.vm.snapshot',
+        'vmware.vm.migrate', 'vmware.vm.manage', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',
+        'xapi.view', 'xapi.vm.view', 'xapi.vm.power', 'xapi.vm.snapshot',
+        'xapi.vm.clone', 'xapi.vm.config', 'xapi.vm.migrate',
+        'xapi.host.view', 'xapi.storage.view', 'xapi.network.view', 'xapi.template.view',
+    ],
+    ROLE_VIEWER: [
+        'vm.view', 'vm.console',
+        'cluster.view',
+        'node.view',
+        'storage.view',
+        'backup.view',
+        'ha.view',
+        'firewall.view',
+        'pool.view',
+        'replication.view',
+        'site_recovery.view',
+        'plugins.view',
+        'pbs.view', 'pbs.datastore.view', 'pbs.jobs.view', 'pbs.tasks.view',
+        'pbs.notifications.view', 'pbs.traffic.view', 'pbs.disks.view', 'pbs.subscription.view',
+        'vmware.view', 'vmware.vm.view', 'vmware.host.view', 'vmware.datastore.view', 'vmware.network.view',
+        'xapi.view', 'xapi.vm.view', 'xapi.host.view', 'xapi.storage.view', 'xapi.network.view',
+        'xapi.template.view',
+    ],
+}

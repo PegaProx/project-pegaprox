@@ -1,0 +1,13 @@
+{
+    "ntfy_enabled": true,
+    "ntfy_url": "https://ntfy.sh",
+    "ntfy_topic": "pegaprox-test",
+    "ntfy_token": "",
+    "ntfy_priority_map": {
+        "critical": "max",
+        "warning": "high",
+        "info": "default"
+    },
+    "apprise_enabled": false,
+    "apprise_urls": []
+}

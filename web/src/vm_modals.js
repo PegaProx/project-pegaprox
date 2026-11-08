@@ -1,0 +1,10673 @@
+        // ═══════════════════════════════════════════════
+        // PegaProx - VM Modals
+        // Delete, Clone, Detail, Migrate, Snapshots, Replication
+        // ═══════════════════════════════════════════════
+
+        // LW: keep last-known guest-agent info per VM so a transient poll-miss
+        // (agent briefly busy / call times out) doesn't flip the indicator
+        // Running<->Not installed. Nico saw it "springen" in the corporate layout.
+        const _guestInfoCache = {};
+
+        // NS: console-tile screenshot cache per VM. The corporate detail re-mounts
+        // on every VM-list poll, which used to re-fire the screenshot fetch every
+        // few seconds (→ a qm screendump each time). Reuse the last frame for
+        // SHOT_REUSE_MS so a re-mount doesn't re-grab; manual refresh bypasses it.
+        const _consoleShotCache = {};   // {cluster:vmid: {url, ts}}
+        const SHOT_REUSE_MS = 60000;
+
+        // NS Nov 2026 - the guest-info lists come from the agent. Anything that is not a
+        // list (null, an object, a string) renders as no rows instead of throwing, which
+        // took the whole page down, and a row that is not an object is skipped
+        const guestRows = (v) => Array.isArray(v) ? v.filter(x => x && typeof x === 'object') : [];
+        const guestIps = (info) => Array.isArray(info?.ip_addresses)
+            ? info.ip_addresses.filter(ip => typeof ip === 'string' && ip) : [];
+        // max_restart / max_relocate of a PVE HA resource: 0 is a real value. A resource that
+        // leaves the limit out runs on PVE's own default, which we have not read, so it says so
+        // (`unset`) instead of printing a number. datacenter.js shows the same
+        const haLimit = (v, unset) => (Number.isInteger(v) || /^\d+$/.test(v ?? '')) ? String(v) : unset;
+
+        // Delete VM Modal Component
+        // NS: Added confirmation input after someone accidentally deleted prod VM
+        // Better safe than sorry...
+        function DeleteVmModal({ vm, clusterId, onDelete, onClose }) {
+            const { t } = useTranslation();
+            const [confirmName, setConfirmName] = useState('');
+            const [purge, setPurge] = useState(false);
+            const [destroyUnreferenced, setDestroyUnreferenced] = useState(false);
+            const [loading, setLoading] = useState(false);
+
+            const isQemu = vm.type === 'qemu';
+            const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+            const canDelete = confirmName === vm.vmid.toString();
+
+            const handleDelete = async () => {
+                if (!canDelete) return;
+                setLoading(true);
+                await onDelete(vm, { purge, destroyUnreferenced });
+                setLoading(false);
+                onClose();
+            };
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80">
+                    <div className="w-full max-w-md bg-proxmox-card border border-red-500/30 rounded-xl overflow-hidden animate-scale-in">
+                        <div className="p-6 border-b border-red-500/30 bg-red-500/10">
+                            <div className="flex items-center gap-3">
+                                <div className="p-3 rounded-full bg-red-500/20">
+                                    <Icons.Trash />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-semibold text-white">
+                                        {isQemu ? 'VM' : 'Container'} {t('delete')}
+                                    </h3>
+                                    <p className="text-sm text-red-400">{t('deleteCannotBeUndone')}</p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div className="p-6 space-y-4">
+                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                <div className="flex items-center gap-3">
+                                    <div className={`p-2 rounded-lg ${isQemu ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
+                                        {isQemu ? <Icons.VM /> : <Icons.Container />}
+                                    </div>
+                                    <div>
+                                        <div className="font-medium text-white">{displayName}</div>
+                                        <div className="text-xs text-gray-500">ID: {vm.vmid} · Node: {vm.node}</div>
+                                    </div>
+                                    <span className={`ml-auto px-2 py-1 rounded text-xs ${
+                                        vm.status === 'running' 
+                                            ? 'bg-green-500/10 text-green-400' 
+                                            : 'bg-red-500/10 text-red-400'
+                                    }`}>
+                                        {vm.status}
+                                    </span>
+                                </div>
+                            </div>
+
+                            {vm.status === 'running' && (
+                                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-400">
+                                    ⚠️ {isQemu ? t('vmStillRunning') : t('ctStillRunning')}
+                                </div>
+                            )}
+
+                            <div className="space-y-3">
+                                <label className="flex items-center gap-2 text-sm text-gray-300">
+                                    <input
+                                        type="checkbox"
+                                        checked={purge}
+                                        onChange={(e) => setPurge(e.target.checked)}
+                                        className="rounded"
+                                    />
+                                    {t('purgeDisks')}
+                                </label>
+                                {isQemu && (
+                                    <label className="flex items-center gap-2 text-sm text-gray-300">
+                                        <input
+                                            type="checkbox"
+                                            checked={destroyUnreferenced}
+                                            onChange={(e) => setDestroyUnreferenced(e.target.checked)}
+                                            className="rounded"
+                                        />
+                                        {t('destroyUnreferencedDisks')}
+                                    </label>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-2">
+                                    {t('enterToConfirm')} <span className="font-mono text-red-400">{vm.vmid}</span>:
+                                </label>
+                                <input
+                                    type="text"
+                                    value={confirmName}
+                                    onChange={(e) => setConfirmName(e.target.value)}
+                                    placeholder={vm.vmid.toString()}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-red-500"
+                                    autoFocus
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-3 p-4 border-t border-proxmox-border bg-proxmox-dark">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
+                                {t('cancel')}
+                            </button>
+                            <button
+                                onClick={handleDelete}
+                                disabled={loading || !canDelete}
+                                className="flex items-center gap-2 px-4 py-2 bg-red-600 rounded-lg text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {loading && <Icons.RotateCw />}
+                                <Icons.Trash />
+                                {t('deletePermanently')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Clone VM Modal
+        // LW: Supports both linked clones and full clones
+        // Full clone takes longer but is independent from source
+        function CloneVmModal({ vm, nodes, clusterId, storages, onClone, onClose }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            
+            // NS: same pattern as everywhere else, maybe extract to hook someday
+            async function authFetch(url, opts) {
+                try { return await fetch(url, { ...opts, headers: { ...opts?.headers, ...getAuthHeaders() } }) }
+                catch(e) { console.error(e); return null }
+            }
+            
+            const [cloneConfig, setCloneConfig] = useState({
+                name: `${vm.name || vm.vmid}-clone`,
+                newid: '',
+                full: true,
+                target_node: vm.node,
+                target_storage: '',
+                description: '',
+                // #194: Cloud-Init fields
+                ciuser: '', cipassword: '', sshkeys: '', ipconfig0: '', nameserver: '', searchdomain: ''
+            });
+            const [loading, setLoading] = useState(false);
+            const [loadingVmid, setLoadingVmid] = useState(true);
+            const [showCloudInit, setShowCloudInit] = useState(false);
+            // MK May 2026 (#416 KowMangler): freeze node-list order at mount time so the
+            // dropdown doesn't reshuffle every time the dashboard's cpu/mem poll fires.
+            // Parent keeps updating its `nodes` prop with fresh load values — that's
+            // fine for the rest of the UI, but for the target-node selector the user
+            // wants the list to stay put while they're picking from it.
+            const stableNodes = useMemo(() => {
+                const src = Array.isArray(nodes) ? nodes : [];
+                // Preserve whatever ordering the parent passed in at mount; if the parent
+                // hadn't sorted yet (race on first render), fall back to alpha so the
+                // snapshot at least has a deterministic shape.
+                return [...src].sort((a, b) => {
+                    const an = (typeof a === 'string' ? a : a?.name) || '';
+                    const bn = (typeof b === 'string' ? b : b?.name) || '';
+                    return an.localeCompare(bn);
+                });
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, []);  // intentionally empty deps — snapshot once on mount
+
+            const isQemu = vm.type === 'qemu';
+
+            // LW Nov 2026 (#1218) - the cluster's datastores are refused to an account confined to some
+            // guests, so `storages` comes empty: the picker then lists the target node's own storages
+            const noDatastores = !(storages?.shared || []).length && !Object.keys(storages?.local || {}).length;
+            const [nodeStorages, setNodeStorages] = useState(null);
+            useEffect(() => {
+                if (!noDatastores || !cloneConfig.target_node) { setNodeStorages(null); return; }
+                let gone = false;
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${encodeURIComponent(cloneConfig.target_node)}/storage`);
+                    const d = r?.ok ? await r.json().catch(() => null) : null;
+                    if (!gone) setNodeStorages(Array.isArray(d) ? d : null);
+                })();
+                return () => { gone = true; };
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [noDatastores, clusterId, cloneConfig.target_node]);
+
+            // Build storage list filtered to the selected target node (shared + local on that node)
+            const storageList = useMemo(() => {
+                const neededContent = isQemu ? 'images' : 'rootdir';
+                if (noDatastores && nodeStorages) {
+                    return nodeStorages
+                        .filter(s => s && s.storage && s.enabled !== 0 && s.active !== 0 && (s.content || '').includes(neededContent))
+                        .map(s => ({ name: s.storage, type: s.type, content: s.content, avail: s.avail }));
+                }
+                if (!storages) return [];
+                const target = cloneConfig.target_node;
+                const items = [];
+                // shared datastores are available everywhere
+                (storages.shared || []).forEach(s => {
+                    items.push({ name: s.storage, type: s.type, content: s.content, avail: s.avail });
+                });
+                // local datastores only on the selected target node
+                if (target) {
+                    const nodeLocal = storages.local?.[target] || [];
+                    nodeLocal.forEach(s => {
+                        // skip if already added as shared
+                        if (!items.find(i => i.name === s.storage)) {
+                            items.push({ name: s.storage, type: s.type, content: s.content, avail: s.avail });
+                        }
+                    });
+                }
+                // filter by content type compatible with the VM being cloned
+                // NS Aug 2026 (CodeAnt) — guard s.content: a datastore with no content field would
+                // crash the whole modal (undefined.includes). Matches the s.content && ... guards elsewhere.
+                return items.length > 0 ? items.filter(s => (s.content || '').includes(neededContent)) : items;
+            }, [storages, cloneConfig.target_node, isQemu, noDatastores, nodeStorages]);
+
+            // NS Aug 2026 — leave target_storage EMPTY by default: an empty value isn't sent to the
+            // clone API, so Proxmox keeps the source VM's storage (the pre-picker behaviour). The
+            // old "default to source storage" code was dead (vm._sourceStorage never set, vm.disk is
+            // a byte count) and silently retargeted every clone to the first shared storage. The user
+            // opts into a different target via the picker. Only reset the selection if a target-node
+            // change made the currently-picked storage unavailable on the new node.
+            useEffect(() => {
+                if (cloneConfig.target_storage && !storageList.some(s => s.name === cloneConfig.target_storage)) {
+                    setCloneConfig(prev => ({ ...prev, target_storage: '' }));
+                }
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, [storageList]);
+
+            // Get next available VMID on mount
+            useEffect(() => {
+                (async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/nextid`);
+                        if (r?.ok) {
+                            const d = await r.json();
+                            setCloneConfig(prev => ({ ...prev, newid: d.vmid.toString() }));
+                        }
+                    } catch (err) {
+                        console.error('to get next VMID:', err);
+                    }
+                    setLoadingVmid(false);
+                })();
+            }, [clusterId]);
+
+            const handleClone = async () => {
+                if (!cloneConfig.newid) return;
+                setLoading(true);
+                const ok = await onClone(vm, cloneConfig);
+                setLoading(false);
+                // #702 — close on success. Covers the table view too (its modal is ResourceTable's
+                // own state, which the parent's onClone can't reach); onClose maps to the right
+                // setter in both card and table callers.
+                if (ok) onClose();
+            };
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80">
+                    <div className="w-full max-w-lg bg-proxmox-card border border-blue-500/30 rounded-xl overflow-hidden animate-scale-in">
+                        <div className="p-6 border-b border-blue-500/30 bg-blue-500/10">
+                            <div className="flex items-center gap-3">
+                                <div className="p-3 rounded-full bg-blue-500/20">
+                                    <Icons.Copy />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-semibold text-white">
+                                        {isQemu ? 'VM' : 'Container'} {t('clone')}
+                                    </h3>
+                                    <p className="text-sm text-blue-400">
+                                        {vm.name || vm.vmid} {t('willBeCloned')}
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div className="p-6 space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('newVmId')}</label>
+                                    <input
+                                        type="number"
+                                        value={cloneConfig.newid}
+                                        onChange={(e) => setCloneConfig({...cloneConfig, newid: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                        placeholder={loadingVmid ? t('loading') : 'VMID'}
+                                        disabled={loadingVmid}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('name')}</label>
+                                    <input
+                                        type="text"
+                                        value={cloneConfig.name}
+                                        onChange={(e) => setCloneConfig({...cloneConfig, name: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                        placeholder="clone-name"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('targetNode')}</label>
+                                <select
+                                    value={cloneConfig.target_node}
+                                    onChange={(e) => setCloneConfig({...cloneConfig, target_node: e.target.value})}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                >
+                                    {stableNodes.map(node => {
+                                        const nodeName = typeof node === 'string' ? node : node.name;
+                                        const isSameNode = nodeName === vm.node;
+                                        return(
+                                            <option key={nodeName} value={nodeName}>
+                                                {nodeName} {isSameNode ? `(${t('sameNode')})` : ''}
+                                            </option>
+                                        );
+                                    })}
+                                </select>
+                                {cloneConfig.target_node !== vm.node && (
+                                    <p className="text-xs text-yellow-400 mt-1">
+                                        ⚠️ {t('crossNodeCloneWarning')}
+                                    </p>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-2">{t('cloneMode')}</label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <button
+                                        onClick={() => setCloneConfig({...cloneConfig, full: true})}
+                                        className={`p-3 rounded-lg border text-left transition-all ${
+                                            cloneConfig.full
+                                                ? 'border-blue-500 bg-blue-500/10'
+                                                : 'border-proxmox-border hover:border-gray-600'
+                                        }`}
+                                    >
+                                        <div className="font-medium text-white text-sm">{t('fullClone')}</div>
+                                        <div className="text-xs text-gray-500 mt-1">{t('fullCloneDesc')}</div>
+                                    </button>
+                                    <button
+                                        onClick={() => setCloneConfig({...cloneConfig, full: false})}
+                                        disabled={!isQemu}
+                                        className={`p-3 rounded-lg border text-left transition-all ${
+                                            !cloneConfig.full
+                                                ? 'border-blue-500 bg-blue-500/10'
+                                                : 'border-proxmox-border hover:border-gray-600'
+                                        } ${!isQemu ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                    >
+                                        <div className="font-medium text-white text-sm">{t('linkedClone')}</div>
+                                        <div className="text-xs text-gray-500 mt-1">
+                                            {isQemu ? t('linkedCloneDesc') : t('onlyForVms')}
+                                        </div>
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* Target storage selector */}
+                            {storageList.length > 0 && (
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('targetStorage')}</label>
+                                    <select
+                                        value={cloneConfig.target_storage}
+                                        onChange={(e) => setCloneConfig({...cloneConfig, target_storage: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        <option value="">{t('sourceStorageDefault') || 'Source storage (default)'}</option>
+                                        {storageList.map(s => {
+                                            const availGb = s.avail ? Math.round(s.avail / 1073741824) : '?';
+                                            return(
+                                                <option key={s.name} value={s.name}>
+                                                    {s.name} ({s.type}) - {availGb} GB {t('free')}
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                </div>
+                            )}
+
+                            {/* #194: Cloud-Init config (QEMU only) */}
+                            {isQemu && (
+                                <div>
+                                    <button onClick={() => setShowCloudInit(!showCloudInit)}
+                                        className="flex items-center gap-2 text-xs text-gray-400 hover:text-white transition-colors mb-2">
+                                        <span className={`transform transition-transform ${showCloudInit ? 'rotate-90' : ''}`}>▶</span>
+                                        Cloud-Init ({t('optional')})
+                                    </button>
+                                    {showCloudInit && (
+                                        <div className="space-y-3 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('user') || 'User'}</label>
+                                                    <input type="text" value={cloneConfig.ciuser} onChange={e => setCloneConfig({...cloneConfig, ciuser: e.target.value})}
+                                                        placeholder="root" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('passwordLabel') || 'Password'}</label>
+                                                    <input type="password" value={cloneConfig.cipassword} onChange={e => setCloneConfig({...cloneConfig, cipassword: e.target.value})}
+                                                        placeholder="••••••" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs text-gray-400 mb-1">IP Config</label>
+                                                <input type="text" value={cloneConfig.ipconfig0} onChange={e => setCloneConfig({...cloneConfig, ipconfig0: e.target.value})}
+                                                    placeholder="ip=dhcp  or  ip=192.168.1.100/24,gw=192.168.1.1" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">DNS Server</label>
+                                                    <input type="text" value={cloneConfig.nameserver} onChange={e => setCloneConfig({...cloneConfig, nameserver: e.target.value})}
+                                                        placeholder="8.8.8.8" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">Search Domain</label>
+                                                    <input type="text" value={cloneConfig.searchdomain} onChange={e => setCloneConfig({...cloneConfig, searchdomain: e.target.value})}
+                                                        placeholder="example.com" className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm" />
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs text-gray-400 mb-1">SSH Public Keys</label>
+                                                <textarea value={cloneConfig.sshkeys} onChange={e => setCloneConfig({...cloneConfig, sshkeys: e.target.value})}
+                                                    placeholder="ssh-ed25519 AAAA... user@host" rows="2"
+                                                    className="w-full px-3 py-1.5 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none" />
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('description')} ({t('optional')})</label>
+                                <textarea
+                                    value={cloneConfig.description}
+                                    onChange={(e) => setCloneConfig({...cloneConfig, description: e.target.value})}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm resize-none"
+                                    rows="2"
+                                    placeholder={t('cloneNotes')}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-end gap-3 p-4 border-t border-proxmox-border bg-proxmox-dark">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
+                                {t('cancel')}
+                            </button>
+                            <button
+                                onClick={handleClone}
+                                disabled={loading || !cloneConfig.newid}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                                {loading && <Icons.RotateCw />}
+                                <Icons.Copy />
+                                {t('startClone')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // VM Detail Modal Component
+        function VmDetailModal({ vm, clusterId, onAction, onOpenConsole, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onClose }) {
+            const [loading, setLoading] = useState({});
+            const isQemu = vm.type === 'qemu';
+            const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+            const [guestInfo, setGuestInfo] = useState(null);
+            const [vmHwInfo, setVmHwInfo] = useState(null);
+
+            // copypaste from somewhere else lol
+            function formatBytes(bytes) {
+                if (!bytes) return '0 B';
+                const k = 1024;
+                const s = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return(bytes / Math.pow(k, i)).toFixed(1) + ' ' + s[i];
+            }
+
+            const handleAction = async (action) => {
+                setLoading(prev => ({...prev, [action]: true}));
+                await onAction(vm, action);
+                setLoading(prev => ({...prev, [action]: false}));
+            };
+
+            // TODO: this is also duplicated somewhere
+            const formatUptime = (uptime) => {
+                if (!uptime) return '-';
+                const d = Math.floor(uptime / 86400);
+                const h = Math.floor((uptime % 86400) / 3600);
+                const m = Math.floor((uptime % 3600) / 60);
+                if (d > 0) return `${d}d ${h}h ${m}m`;
+                if (h > 0) return `${h}h ${m}m`;
+                return `${m}m`;
+            };
+
+            // Fetch VM config for hardware info + guest agent
+            useEffect(() => {
+                if (!isQemu) return;
+                const doFetch = async (url) => {
+                    try { const r = await fetch(url, { credentials: 'include', headers: getAuthHeaders() }); return r.ok ? r.json() : null; }
+                    catch { return null; }
+                };
+                // Hardware info
+                doFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`)
+                    .then(cfg => {
+                        if (!cfg) return;
+                        const raw = cfg.raw || cfg;
+                        setVmHwInfo({
+                            machine: raw.machine || 'i440fx',
+                            bios: raw.bios || 'seabios',
+                            cpu: raw.cpu || 'kvm64',
+                            scsihw: raw.scsihw || 'lsi',
+                            cores: raw.cores || 1,
+                            sockets: raw.sockets || 1,
+                            ostype: raw.ostype,
+                            net: (() => { const nk = Object.keys(raw).find(k => k.startsWith('net')); return nk ? raw[nk].split(',')[0].split('=')[0] : null; })(),
+                            agent: raw.agent,
+                        });
+                    });
+                // Guest agent info
+                if (vm.status === 'running') {
+                    doFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
+                        .then(data => { if (data && (data.agent_running || data.is_lxc)) setGuestInfo(data); });  // #560: LXC has no agent but still reports IP/host
+                }
+            }, [vm.vmid, vm.status, clusterId]);
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80" onClick={onClose}>
+                    <div 
+                        className="w-full max-w-2xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden animate-scale-in"
+                        onClick={e => e.stopPropagation()}
+                    >
+                        {/* Header */}
+                        <div className="p-6 border-b border-proxmox-border bg-gradient-to-r from-proxmox-dark to-proxmox-card">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-4">
+                                    <div className={`p-3 rounded-xl ${isQemu ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
+                                        {isQemu ? <Icons.VM /> : <Icons.Container />}
+                                    </div>
+                                    <div>
+                                        <h2 className="text-xl font-bold text-white">{displayName}</h2>
+                                        <div className="flex items-center gap-3 text-sm text-gray-400">
+                                            <span>ID: {vm.vmid}</span>
+                                            <span>•</span>
+                                            <span>{isQemu ? 'QEMU VM' : 'LXC Container'}</span>
+                                            <span>•</span>
+                                            <span>{vm.node}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                                        vm.status === 'running' 
+                                            ? 'bg-green-500/20 text-green-400' 
+                                            : 'bg-red-500/20 text-red-400'
+                                    }`}>
+                                        {vm.status === 'running' ? t('running') || 'Running' : t('stopped') || 'Stopped'}
+                                    </span>
+                                    <button onClick={onClose} className="p-2 hover:bg-proxmox-dark rounded-lg text-gray-400 hover:text-white">
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Stats Grid */}
+                        <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                <div className="text-xs text-gray-500 mb-1">CPU</div>
+                                <div className="text-lg font-bold text-white">{(vm.cpu_percent || 0).toFixed(1)}%</div>
+                                <div className="text-xs text-gray-500">{vm.maxcpu || 1} Cores</div>
+                                <div className="mt-2 h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                    <div 
+                                        className="h-full rounded-full transition-all"
+                                        style={{
+                                            width: `${Math.min(vm.cpu_percent || 0, 100)}%`,
+                                            background: (vm.cpu_percent || 0) < 50 ? '#3b82f6' : (vm.cpu_percent || 0) < 80 ? '#eab308' : '#ef4444'
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                <div className="text-xs text-gray-500 mb-1">RAM</div>
+                                <div className="text-lg font-bold text-white">{(vm.mem_percent || 0).toFixed(1)}%</div>
+                                <div className="text-xs text-gray-500">{formatBytes(vm.mem)} / {formatBytes(vm.maxmem)}</div>
+                                <div className="mt-2 h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                    <div 
+                                        className="h-full rounded-full transition-all"
+                                        style={{
+                                            width: `${vm.mem_percent || 0}%`,
+                                            background: (vm.mem_percent || 0) < 50 ? '#22c55e' : (vm.mem_percent || 0) < 80 ? '#eab308' : '#ef4444'
+                                        }}
+                                    />
+                                </div>
+                            </div>
+                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                <div className="text-xs text-gray-500 mb-1">Disk</div>
+                                <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
+                                <div className="text-xs text-gray-500">{vm.disk > 0 ? `von ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
+                            </div>
+                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                <div className="text-xs text-gray-500 mb-1">Uptime</div>
+                                <div className="text-lg font-bold text-white">{formatUptime(vm.uptime)}</div>
+                                <div className="text-xs text-gray-500">{vm.status === 'running' ? t('sinceStart') : t('offline')}</div>
+                            </div>
+                        </div>
+
+                        {/* Hardware Info Badges */}
+                        {isQemu && vmHwInfo && (
+                            <div className="px-6 pb-2">
+                                <div className="flex flex-wrap gap-2">
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.Cpu className="w-3 h-3 text-blue-400" />
+                                        <span className="text-gray-400">CPU:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.cpu}</span>
+                                        <span className="text-gray-500">({vmHwInfo.sockets}s/{vmHwInfo.cores}c)</span>
+                                    </span>
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.Monitor className="w-3 h-3 text-amber-400" />
+                                        <span className="text-gray-400">Machine:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.machine}</span>
+                                    </span>
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.HardDrive className="w-3 h-3 text-emerald-400" />
+                                        <span className="text-gray-400">BIOS:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.bios === 'ovmf' ? 'UEFI (OVMF)' : 'SeaBIOS'}</span>
+                                    </span>
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.Database className="w-3 h-3 text-purple-400" />
+                                        <span className="text-gray-400">SCSI:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.scsihw}</span>
+                                    </span>
+                                    {vmHwInfo.net && (
+                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                            <Icons.Globe className="w-3 h-3 text-cyan-400" />
+                                            <span className="text-gray-400">NIC:</span>
+                                            <span className="text-white font-medium">{vmHwInfo.net}</span>
+                                        </span>
+                                    )}
+                                    {vmHwInfo.ostype && (
+                                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                            <Icons.Network className="w-3 h-3 text-orange-400" />
+                                            <span className="text-gray-400">OS:</span>
+                                            <span className="text-white font-medium">{vmHwInfo.ostype}</span>
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Guest Agent Info (QEMU) / live container info (LXC, #560) */}
+                        {vm.status === 'running' && guestInfo && (
+                            <div className="px-6 pb-2">
+                                <div className="bg-proxmox-dark rounded-lg p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    {guestIps(guestInfo).length > 0 && (
+                                        <div className="flex items-center gap-3 min-w-0">
+                                            <div className="p-2 rounded-lg bg-cyan-500/10">
+                                                <Icons.Globe className="w-4 h-4 text-cyan-400" />
+                                            </div>
+                                            <div className="min-w-0">
+                                                <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
+                                                <div className="text-sm font-semibold text-white font-mono truncate" title={guestIps(guestInfo).join(', ')}>{guestIps(guestInfo).join(', ')}</div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {guestInfo.hostname && (
+                                        <div className="flex items-center gap-3">
+                                            <div className="p-2 rounded-lg bg-cyan-500/10">
+                                                <Icons.Monitor className="w-4 h-4 text-cyan-400" />
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-gray-500">Hostname</div>
+                                                <div className="text-sm font-semibold text-white font-mono">{guestInfo.hostname}</div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {guestInfo.os_pretty_name && (
+                                        <div className="flex items-center gap-3">
+                                            <div className="p-2 rounded-lg bg-emerald-500/10">
+                                                <Icons.Cpu className="w-4 h-4 text-emerald-400" />
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-gray-500">{t('osVersion')}</div>
+                                                <div className="text-sm font-semibold text-white">{guestInfo.os_pretty_name}</div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {guestInfo.os_kernel && (
+                                        <div className="flex items-center gap-3">
+                                            <div className="p-2 rounded-lg bg-purple-500/10">
+                                                <Icons.Terminal className="w-4 h-4 text-purple-400" />
+                                            </div>
+                                            <div>
+                                                <div className="text-xs text-gray-500">Kernel</div>
+                                                <div className="text-sm font-semibold text-gray-300 font-mono">{guestInfo.os_kernel}</div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    <div className="flex items-center gap-1.5 md:col-span-3 pt-2 border-t border-gray-700/30">
+                                        <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                                        <span className="text-xs text-cyan-400/70">{isQemu ? 'QEMU Guest Agent' : 'Live container info (Proxmox)'}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        {isQemu && vm.status === 'running' && !guestInfo && (
+                            <div className="px-6 pb-2">
+                                <div className="bg-proxmox-dark rounded-lg p-3 flex items-center gap-3">
+                                    <div className="p-1.5 rounded-lg bg-yellow-500/10">
+                                        <Icons.AlertTriangle className="w-4 h-4 text-yellow-500" />
+                                    </div>
+                                    <div className="flex-1">
+                                        <div className="text-sm text-yellow-400">{t('guestAgentNotInstalled')}</div>
+                                        <div className="text-xs text-gray-500">{t('guestAgentInstallHint')}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Quick Actions */}
+                        <div className="px-6 pb-6">
+                            <div className="text-xs text-gray-500 mb-3">{t('quickActions')}</div>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                {vm.status === 'stopped' ? (
+                                    <button
+                                        onClick={() => handleAction('start')}
+                                        disabled={loading.start}
+                                        className="flex items-center justify-center gap-2 p-3 bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 rounded-lg text-green-400 transition-all disabled:opacity-50"
+                                    >
+                                        {loading.start ? <Icons.RotateCw /> : <Icons.PlayCircle />}
+                                        {t('start')}
+                                    </button>
+                                ) : (
+                                    <>
+                                        <button
+                                            onClick={() => handleAction('shutdown')}
+                                            disabled={loading.shutdown}
+                                            className="flex items-center justify-center gap-2 p-3 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/30 rounded-lg text-yellow-400 transition-all disabled:opacity-50"
+                                        >
+                                            {loading.shutdown ? <Icons.RotateCw /> : <Icons.Power />}
+                                            Shutdown
+                                        </button>
+                                        <button
+                                            onClick={() => handleAction('reboot')}
+                                            disabled={loading.reboot}
+                                            className="flex items-center justify-center gap-2 p-3 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-orange-400 transition-all disabled:opacity-50"
+                                        >
+                                            {loading.reboot ? <Icons.RotateCw /> : <Icons.RefreshCw />}
+                                            Reboot
+                                        </button>
+                                    </>
+                                )}
+                                <button
+                                    onClick={() => { onClose(); onOpenConsole(vm); }}
+                                    className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all"
+                                >
+                                    <Icons.Monitor />
+                                    Konsole
+                                </button>
+                                <button
+                                    onClick={() => { onClose(); onOpenConfig(vm); }}
+                                    className="flex items-center justify-center gap-2 p-3 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-gray-300 transition-all"
+                                >
+                                    <Icons.Cog />
+                                    Konfiguration
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* More Actions */}
+                        <div className="px-6 pb-6">
+                            <div className="text-xs text-gray-500 mb-3">{t('moreActions')}</div>
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    onClick={() => { onClose(); onMigrate(vm); }}
+                                    className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
+                                >
+                                    <Icons.ArrowRight />
+                                    Migrieren
+                                </button>
+                                <button
+                                    onClick={() => { onClose(); onClone(vm); }}
+                                    className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
+                                >
+                                    <Icons.Copy />
+                                    Klonen
+                                </button>
+                                {vm.status === 'running' && (
+                                    <>
+                                        {/* Force Reset - QEMU only */}
+                                        {isQemu && (
+                                            <button
+                                                onClick={() => onAction(vm, 'reset')}
+                                                className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-sm text-orange-400 transition-all"
+                                            >
+                                                <Icons.Zap />
+                                                {t('forceReset')}
+                                            </button>
+                                        )}
+                                        <button
+                                            onClick={() => onForceStop(vm)}
+                                            className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-sm text-red-400 transition-all"
+                                        >
+                                            <Icons.XCircle />
+                                            {t('forceStop')}
+                                        </button>
+                                    </>
+                                )}
+                                <button
+                                    onClick={() => { onClose(); onDelete(vm); }}
+                                    className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-sm text-red-400 transition-all"
+                                >
+                                    <Icons.Trash />
+                                    {t('delete')}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Tags */}
+                        {vm.tags && (
+                            <div className="px-6 pb-6">
+                                <div className="text-xs text-gray-500 mb-2">Tags</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
+                                        <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
+                                            {tag}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        // VM Detail Panel Component (inline, not modal)
+        // LW: this shows when you click a VM in detail view mode
+        function VmDetailPanel({ vm, clusterId, clusterType = 'proxmox', onAction, onOpenConsole, onOpenSpice, onOpenLxcShell, onOpenConfig, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, haReadOnly, haConsolesElsewhere } = useAuth();
+            const acts = !haReadOnly;  // #625: a standby shows this VM, the active acts on it
+            const consoles = !haConsolesElsewhere;  // a standby opens the console on the active, unless it serves users
+            
+            // some quick helpers
+            const isQemu = vm.type === 'qemu';
+            const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+            // Proxmox HA only exists on a PVE cluster: an XCP-ng or ESXi guest gets no card and no read
+            const pveHa = (clusterType || 'proxmox') === 'proxmox';
+            
+            const [haEnabled, setHaEnabled] = useState(false);
+            const [haLoading, setHaLoading] = useState(false);
+            const [haResources, setHaResources] = useState(null);
+            
+            // NS: Lock status for VMs
+            const [lockInfo, setLockInfo] = useState({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+            const [unlockLoading, setUnlockLoading] = useState(false);
+            const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
+            
+            // NS: Issue #50 - Guest Agent info
+            const [guestInfo, setGuestInfo] = useState(null);
+            // MK #334 — fsinfo for the modern/compact panel (mirrors the Corporate one)
+            const [fsInfo, setFsInfo] = useState(null);
+            // LW Oct 2026 - the timeline section loads once it is opened
+            const [showTimeline, setShowTimeline] = useState(false);
+
+            // LW: inline arrow fn, less boilerplate
+            const authFetch = async (url, opts = {}) => {
+                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
+                catch(e) { console.error(e); return null; }
+            };
+
+            // LW: these could be extracted to utils but w/e
+            const formatBytes = b => {
+                if(!b) return '0 B';
+                const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(b) / Math.log(k));
+                return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+            };
+
+            const formatUptime = (uptime) => {
+                if(!uptime) return '-';
+                const days = Math.floor(uptime / 86400);
+                const hours = Math.floor((uptime % 86400) / 3600);
+                const mins = Math.floor((uptime % 3600) / 60);
+                if(days > 0) return `${days}d ${hours}h ${mins}m`;
+                if(hours > 0) return `${hours}h ${mins}m`;
+                return `${mins}m`;
+            };
+
+            const proxmoxHost = [
+                vm.node_ip,
+                vm.nodeIp,
+                vm.host,
+                vm.current_host,
+                vm.management_ip,
+                vm.managementIp,
+                vm.ip_address,
+                vm.ipAddress,
+                vm.node
+            ].find(value => typeof value === 'string' && value.trim());
+            const proxmoxUrl = proxmoxHost
+                ? `https://${proxmoxHost.trim()}:8006/#v1:0:=${encodeURIComponent(`${vm.type}/${vm.vmid}`)}:4:::::::`
+                : null;
+
+            const handleAction = async (action) => {
+                await onAction(vm, action);
+            };
+            
+            // NS: Fetch lock status
+            const fetchLockStatus = async (isStale = () => false) => {
+                // an API error says nothing about the lock, so it is not "not locked" either
+                let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null, unread: true };
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/lock`);
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        // NS: Ensure we have valid data structure
+                        next = {
+                            locked: data.locked || false,
+                            lock_reason: data.lock_reason || null,
+                            lock_description: data.lock_description || null,
+                            unlock_command: data.unlock_command || null,
+                            // read:false - the route could not read the config, "not locked" is a guess then
+                            unread: data.read === false
+                        };
+                    }
+                } catch (error) {
+                    console.error('Error fetching lock status:', error);
+                }
+                // #828 - a slow answer for the guest shown before must not land on this one
+                if (!isStale()) setLockInfo(next);
+            };
+            
+            // NS: Unlock VM
+            const handleUnlock = async () => {
+                setUnlockLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, {
+                        method: 'POST'
+                    });
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        if (addToast) addToast(t('vmUnlocked') || `VM ${vm.vmid} unlocked successfully`, 'success');
+                        setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                        setShowUnlockConfirm(false);
+                    } else {
+                        const err = await response.json();
+                        if (addToast) addToast(err.error || 'Unlock failed', 'error');
+                    }
+                } catch (error) {
+                    if (addToast) addToast('Unlock failed', 'error');
+                }
+                setUnlockLoading(false);
+            };
+            
+            // Fetch lock status on mount, and from a clean state for every guest: the previous
+            // one's lock or "unknown" stays off this one until its own answer is in
+            useEffect(() => {
+                let stale = false;
+                setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                fetchLockStatus(() => stale);
+                return () => { stale = true; };
+            }, [vm.vmid, clusterId]);
+
+            // NS: Issue #50 - Fetch guest agent info
+            useEffect(() => {
+                const gkey = `${clusterId}:${vm.vmid}`;
+                // #560 — also fetch for LXC (backend returns os/ip via config+pct, no agent)
+                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); return; }
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(data => {
+                        // LXC has no guest agent → accept on is_lxc, not just agent_running
+                        if (data && (data.agent_running || data.is_lxc)) { _guestInfoCache[gkey] = data; setGuestInfo(data); }
+                        else setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
+                    })
+                    .catch(() => setGuestInfo(_guestInfoCache[gkey] || null));
+            }, [vm.vmid, vm.status, clusterId]);
+
+            // MK #334 — fsinfo; same chain as the corporate panel, only polled when the
+            // agent responded to the prior guest-info call (avoids 500-spam for agent-less VMs).
+            useEffect(() => {
+                if (!isQemu || vm.status !== 'running' || !guestInfo) { setFsInfo(null); return; }
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-fsinfo`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(d => setFsInfo(d || null))
+                    .catch(() => setFsInfo(null));
+            }, [vm.vmid, vm.status, clusterId, !!guestInfo]);
+
+            // NS: Fetch VM config for hardware info (machine type, BIOS, SCSI, CPU model)
+            const [vmHwInfo, setVmHwInfo] = useState(null);
+            useEffect(() => {
+                if (!isQemu) { setVmHwInfo(null); return; }
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(cfg => {
+                        if (!cfg) { setVmHwInfo(null); return; }
+                        const raw = cfg.raw || cfg;
+                        setVmHwInfo({
+                            machine: raw.machine || 'i440fx',
+                            bios: raw.bios || 'seabios',
+                            cpu: raw.cpu || 'kvm64',
+                            scsihw: raw.scsihw || 'lsi',
+                            cores: raw.cores || 1,
+                            sockets: raw.sockets || 1,
+                            ostype: raw.ostype,
+                            net: (() => { const nk = Object.keys(raw).find(k => k.startsWith('net')); return nk ? raw[nk].split(',')[0].split('=')[0] : null; })(),
+                            agent: raw.agent,
+                        });
+                    })
+                    .catch(() => setVmHwInfo(null));
+            }, [vm.vmid, clusterId]);
+
+            // Check HA status for this VM
+            // haResources stays null until the list was read: a failed read is
+            // "unknown", not "not in HA", and the card shows the resource's own limits
+            const haSid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
+            const checkHaStatus = async (isStale = () => false) => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`);
+                    if(response && response.ok) {
+                        const resources = await response.json();
+                        if (isStale() || !Array.isArray(resources)) return;
+                        setHaResources(resources);
+                        setHaEnabled(resources.some(r => r.sid === haSid));
+                    }
+                } catch (error) {
+                    console.error('checking HA status:', error);
+                }
+            };
+            useEffect(() => {
+                let stale = false;
+                setHaResources(null);
+                setHaEnabled(false);
+                if (pveHa) checkHaStatus(() => stale);
+                return () => { stale = true; };
+            }, [vm.vmid, clusterId, pveHa]);
+            const haResource = haResources ? haResources.find(r => r.sid === haSid) : null;
+
+            const toggleProxmoxHa = async () => {
+                setHaLoading(true);
+                try {
+                    const vmType = isQemu ? 'vm' : 'ct';
+                    if(haEnabled) {
+                        // Remove from HA
+                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources/${vmType}:${vm.vmid}`, {
+                            method: 'DELETE'
+                        });
+                        if(response && response.ok) {
+                            setHaEnabled(false);
+                            checkHaStatus();
+                        }
+                    }else{
+                        // Add to HA
+                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                vmid: vm.vmid,
+                                type: vmType,
+                                max_restart: 3,
+                                max_relocate: 3
+                            })
+                        });
+                        if(response && response.ok) {
+                            setHaEnabled(true);
+                            // what PVE holds now, not the values sent above
+                            checkHaStatus();
+                        }
+                    }
+                } catch (error) {
+                    console.error('toggling HA:', error);
+                } finally {
+                    setHaLoading(false);
+                }
+            };
+
+            return (
+                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden" data-vm-detail-panel={`${clusterId}:${vm.vmid}`}>
+                    {/* Header */}
+                    <div className="p-6 border-b border-proxmox-border bg-gradient-to-r from-proxmox-dark to-proxmox-card">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-4">
+                                <div className={`p-3 rounded-xl ${isQemu ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
+                                    {isQemu ? <Icons.VM /> : <Icons.Container />}
+                                </div>
+                                <div>
+                                    <h2 className="text-xl font-bold text-white">{displayName}</h2>
+                                    <div className="flex items-center gap-3 text-sm text-gray-400">
+                                        <span>ID: {vm.vmid}</span>
+                                        <span>•</span>
+                                        <span>{isQemu ? 'QEMU VM' : 'LXC Container'}</span>
+                                        <span>•</span>
+                                        <span>{vm.node}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {proxmoxUrl && (
+                                    <button
+                                        onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}
+                                        className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 hover:bg-cyan-500/20 transition-colors"
+                                        title={t('openInProxmox') || 'Open in Proxmox'}
+                                    >
+                                        <Icons.ExternalLink className="w-4 h-4" />
+                                    </button>
+                                )}
+                                {/* MK: Lock indicator */}
+                                {lockInfo?.locked && (
+                                    <span 
+                                        className="px-2 py-1 rounded-full text-xs font-medium bg-red-500/20 text-red-400 border border-red-500/30 flex items-center gap-1 cursor-pointer hover:bg-red-500/30 transition-colors"
+                                        onClick={() => acts && setShowUnlockConfirm(true)}
+                                        title={lockInfo?.lock_description || 'Locked'}
+                                    >
+                                        <Icons.Lock />
+                                        {lockInfo?.lock_reason || 'Locked'}
+                                    </span>
+                                )}
+                                {lockInfo?.unread && (
+                                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-gray-500/20 text-gray-400 border border-gray-500/30 flex items-center gap-1">
+                                        <Icons.Lock />
+                                        {t('lockStatus')}: {t('unknown')}
+                                    </span>
+                                )}
+                                {haEnabled && (
+                                    <span className="px-2 py-1 rounded-full text-xs font-medium bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 flex items-center gap-1">
+                                        <Icons.Shield />
+                                        HA
+                                    </span>
+                                )}
+                                <span className={`px-3 py-1.5 rounded-full text-sm font-medium ${
+                                    vm.status === 'running' 
+                                        ? 'bg-green-500/20 text-green-400' 
+                                        : 'bg-red-500/20 text-red-400'
+                                }`}>
+                                    {vm.status === 'running' ? '● ' + t('running') : '○ ' + t('stopped')}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    {/* MK: Unlock Confirmation Modal */}
+                    {showUnlockConfirm && lockInfo?.locked && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowUnlockConfirm(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 max-w-md w-full mx-4" onClick={e => e.stopPropagation()}>
+                                <div className="flex items-center gap-3 mb-4">
+                                    <div className="p-2 rounded-lg bg-red-500/20">
+                                        <Icons.AlertTriangle className="text-red-400" />
+                                    </div>
+                                    <h3 className="text-lg font-bold text-white">{t('unlockVm') || 'Unlock VM'}</h3>
+                                </div>
+                                
+                                <div className="space-y-4">
+                                    <div className="bg-proxmox-dark rounded-lg p-4">
+                                        <div className="text-sm text-gray-400 mb-2">{t('lockReason') || 'Lock Reason'}:</div>
+                                        <div className="text-white font-medium">{lockInfo?.lock_description || 'Unknown'}</div>
+                                        <div className="text-xs text-gray-500 mt-1">({lockInfo?.lock_reason || 'unknown'})</div>
+                                    </div>
+                                    
+                                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-4">
+                                        <div className="flex items-start gap-2">
+                                            <Icons.AlertTriangle className="text-yellow-400 mt-0.5 flex-shrink-0" />
+                                            <div className="text-sm text-yellow-300">
+                                                {t('unlockWarning') || 'Warning: Unlocking a VM during an active operation may cause data corruption or other issues. Only proceed if you are sure the operation has failed or been cancelled.'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="bg-proxmox-dark rounded-lg p-3">
+                                        <div className="text-xs text-gray-500 mb-1">CLI {t('command') || 'Command'}:</div>
+                                        <code className="text-sm text-green-400 font-mono">{lockInfo?.unlock_command || `qm unlock ${vm.vmid}`}</code>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex gap-3 mt-6">
+                                    <button
+                                        onClick={() => setShowUnlockConfirm(false)}
+                                        className="flex-1 px-4 py-2 bg-proxmox-dark text-gray-300 rounded-lg hover:bg-proxmox-hover transition-colors"
+                                    >
+                                        {t('cancel')}
+                                    </button>
+                                    <button
+                                        onClick={handleUnlock}
+                                        disabled={unlockLoading}
+                                        className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                                    >
+                                        {unlockLoading ? <Icons.RotateCw className="animate-spin" /> : <Icons.Unlock />}
+                                        {t('unlock') || 'Unlock'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Stats Grid */}
+                    <div className="p-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-proxmox-dark rounded-lg p-4">
+                            <div className="text-xs text-gray-500 mb-1">CPU</div>
+                            <div className="text-lg font-bold text-white">{(vm.cpu_percent || 0).toFixed(1)}%</div>
+                            <div className="text-xs text-gray-500">{vm.maxcpu || 1} {t('cores')}</div>
+                            <div className="mt-2 h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                <div 
+                                    className="h-full rounded-full transition-all"
+                                    style={{
+                                        width: `${Math.min(vm.cpu_percent || 0, 100)}%`,
+                                        background: (vm.cpu_percent || 0) < 50 ? '#3b82f6' : (vm.cpu_percent || 0) < 80 ? '#eab308' : '#ef4444'
+                                    }}
+                                />
+                            </div>
+                        </div>
+                        <div className="bg-proxmox-dark rounded-lg p-4">
+                            <div className="text-xs text-gray-500 mb-1">RAM</div>
+                            <div className="text-lg font-bold text-white">{(vm.mem_percent || 0).toFixed(1)}%</div>
+                            <div className="text-xs text-gray-500">{formatBytes(vm.mem)} / {formatBytes(vm.maxmem)}</div>
+                            <div className="mt-2 h-1.5 rounded-full bg-proxmox-border overflow-hidden">
+                                <div 
+                                    className="h-full rounded-full transition-all"
+                                    style={{
+                                        width: `${vm.mem_percent || 0}%`,
+                                        background: (vm.mem_percent || 0) < 50 ? '#22c55e' : (vm.mem_percent || 0) < 80 ? '#eab308' : '#ef4444'
+                                    }}
+                                />
+                            </div>
+                        </div>
+                        <div className="bg-proxmox-dark rounded-lg p-4">
+                            <div className="text-xs text-gray-500 mb-1">Disk</div>
+                            <div className="text-lg font-bold text-white">{vm.disk > 0 ? formatBytes(vm.disk) : formatBytes(vm.maxdisk || 0)}</div>
+                            <div className="text-xs text-gray-500">{vm.disk > 0 ? `${t('of')} ${formatBytes(vm.maxdisk || 0)}` : t('allocated') || 'allocated'}</div>
+                        </div>
+                        <div className="bg-proxmox-dark rounded-lg p-4">
+                            <div className="text-xs text-gray-500 mb-1">{t('uptime')}</div>
+                            <div className="text-lg font-bold text-white">{formatUptime(vm.uptime)}</div>
+                            <div className="text-xs text-gray-500">{vm.status === 'running' ? t('sinceStart') : t('offline')}</div>
+                        </div>
+                    </div>
+
+                    {/* NS: Hardware info from VM config */}
+                    {isQemu && vmHwInfo && (
+                        <div className="px-6 pb-2">
+                            <div className="flex flex-wrap gap-2">
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                    <Icons.Cpu className="w-3 h-3 text-blue-400" />
+                                    <span className="text-gray-400">CPU:</span>
+                                    <span className="text-white font-medium">{vmHwInfo.cpu}</span>
+                                    <span className="text-gray-500">({vmHwInfo.sockets}s/{vmHwInfo.cores}c)</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                    <Icons.Monitor className="w-3 h-3 text-amber-400" />
+                                    <span className="text-gray-400">Machine:</span>
+                                    <span className="text-white font-medium">{vmHwInfo.machine}</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                    <Icons.HardDrive className="w-3 h-3 text-emerald-400" />
+                                    <span className="text-gray-400">BIOS:</span>
+                                    <span className="text-white font-medium">{vmHwInfo.bios === 'ovmf' ? 'UEFI (OVMF)' : 'SeaBIOS'}</span>
+                                </span>
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                    <Icons.Database className="w-3 h-3 text-purple-400" />
+                                    <span className="text-gray-400">SCSI:</span>
+                                    <span className="text-white font-medium">{vmHwInfo.scsihw}</span>
+                                </span>
+                                {vmHwInfo.net && (
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.Globe className="w-3 h-3 text-cyan-400" />
+                                        <span className="text-gray-400">NIC:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.net}</span>
+                                    </span>
+                                )}
+                                {vmHwInfo.ostype && (
+                                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-proxmox-dark border border-proxmox-border text-xs">
+                                        <Icons.Network className="w-3 h-3 text-orange-400" />
+                                        <span className="text-gray-400">OS:</span>
+                                        <span className="text-white font-medium">{vmHwInfo.ostype}</span>
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* NS: Issue #50 - Guest Agent Info. #560 — also render for LXC:
+                        the backend guest-info route now returns os_pretty_name/kernel/ip
+                        for containers (read via config + pct), so surface OS + IP here too. */}
+                    {(isQemu || vm.type === 'lxc') && vm.status === 'running' && guestInfo && (
+                        <div className="px-6 pb-2">
+                            <div className="bg-proxmox-dark rounded-lg p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                                {guestInfo.hostname && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-cyan-500/10">
+                                            <Icons.Monitor className="w-4 h-4 text-cyan-400" />
+                                        </div>
+                                        <div>
+                                            <div className="text-xs text-gray-500">Hostname</div>
+                                            <div className="text-sm font-semibold text-white font-mono">{guestInfo.hostname}</div>
+                                        </div>
+                                    </div>
+                                )}
+                                {guestInfo.os_pretty_name && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-emerald-500/10">
+                                            <Icons.Cpu className="w-4 h-4 text-emerald-400" />
+                                        </div>
+                                        <div>
+                                            <div className="text-xs text-gray-500">{t('osVersion')}</div>
+                                            <div className="text-sm font-semibold text-white">{guestInfo.os_pretty_name}</div>
+                                        </div>
+                                    </div>
+                                )}
+                                {guestInfo.os_kernel && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-purple-500/10">
+                                            <Icons.Terminal className="w-4 h-4 text-purple-400" />
+                                        </div>
+                                        <div>
+                                            <div className="text-xs text-gray-500">Kernel</div>
+                                            <div className="text-sm font-semibold text-gray-300 font-mono">{guestInfo.os_kernel}</div>
+                                        </div>
+                                    </div>
+                                )}
+                                {/* #560 — IP address (QEMU guest-agent or LXC config/pct) */}
+                                {guestIps(guestInfo).length > 0 && (
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-blue-500/10">
+                                            <Icons.Globe className="w-4 h-4 text-blue-400" />
+                                        </div>
+                                        <div className="min-w-0">
+                                            <div className="text-xs text-gray-500">{t('ipAddress') || 'IP Address'}</div>
+                                            <div className="text-sm font-semibold text-white font-mono truncate" title={guestIps(guestInfo).join(', ')}>{guestIps(guestInfo).join(', ')}</div>
+                                        </div>
+                                    </div>
+                                )}
+                                <div className="flex items-center gap-1.5 md:col-span-3 pt-2 border-t border-gray-700/30">
+                                    <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                                    <span className="text-xs text-cyan-400/70">{isQemu ? 'QEMU Guest Agent' : 'LXC Container'}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MK #334 — guest filesystem usage (modern/compact variant).
+                        Kept tight because the Resources panel can be narrow; full size/pct info
+                        on a second line so the bar always has breathing room. */}
+                    {isQemu && vm.status === 'running' && guestRows(fsInfo?.filesystems).length > 0 && (
+                        <div className="px-6 pb-2">
+                            <div className="bg-proxmox-dark rounded-lg px-3 py-2">
+                                <div className="flex items-center justify-between mb-1.5">
+                                    <div className="flex items-center gap-1.5">
+                                        <Icons.HardDrive className="w-3.5 h-3.5 text-proxmox-orange" />
+                                        <span className="text-[12px] font-medium text-white">{t('guestFilesystems') || 'Filesystem Usage'}</span>
+                                    </div>
+                                    <span className="text-[10px] text-gray-500">{guestRows(fsInfo.filesystems).length}</span>
+                                </div>
+                                <div className="space-y-1">
+                                    {guestRows(fsInfo.filesystems).map((fs, i) => {
+                                        const pct = fs.used_pct == null ? 0 : fs.used_pct;
+                                        const barColor = pct > 90 ? 'var(--corp-thresh-crit)' : pct > 75 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)';
+                                        const sizes = fs.used_bytes != null && fs.total_bytes != null
+                                            ? `${formatBytes(fs.used_bytes)} / ${formatBytes(fs.total_bytes)}` : '';
+                                        return (
+                                            <div key={i} className="flex items-center gap-1.5 text-[11px]" title={`${fs.name || ''} (${fs.type || '?'}) ${sizes}`}>
+                                                <span className="font-mono text-gray-300 truncate flex-shrink-0" style={{maxWidth: '80px'}}>{fs.mountpoint}</span>
+                                                <div className="flex-1 h-1 bg-proxmox-darker rounded overflow-hidden min-w-0">
+                                                    <div className="h-full" style={{width: `${Math.min(pct, 100)}%`, background: barColor}} />
+                                                </div>
+                                                <span className="text-gray-200 font-mono flex-shrink-0" style={{minWidth: '30px', textAlign: 'right'}}>{fs.used_pct != null ? `${fs.used_pct}%` : '—'}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {isQemu && vm.status === 'running' && !guestInfo && (
+                        <div className="px-6 pb-2">
+                            <div className="bg-proxmox-dark rounded-lg p-3 flex items-center gap-3">
+                                <div className="p-1.5 rounded-lg bg-yellow-500/10">
+                                    <Icons.AlertTriangle className="w-4 h-4 text-yellow-500" />
+                                </div>
+                                <div className="flex-1">
+                                    <div className="text-sm text-yellow-400">{t('guestAgentNotInstalled')}</div>
+                                    <div className="text-xs text-gray-500">{t('guestAgentInstallHint')}</div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Quick Actions */}
+                    <div className="px-6 pb-6">
+                        <div className="text-xs text-gray-500 mb-3">{t('quickActions')}</div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                            {!acts ? null : vm.status === 'stopped' ? (
+                                <button
+                                    onClick={() => handleAction('start')}
+                                    disabled={actionLoading?.[`${vm.vmid}-start`]}
+                                    className="flex items-center justify-center gap-2 p-3 bg-green-500/10 hover:bg-green-500/20 border border-green-500/30 rounded-lg text-green-400 transition-all disabled:opacity-50"
+                                >
+                                    {actionLoading?.[`${vm.vmid}-start`] ? <Icons.RotateCw /> : <Icons.PlayCircle />}
+                                    {t('start')}
+                                </button>
+                            ) : (
+                                <>
+                                    <button
+                                        onClick={() => handleAction('shutdown')}
+                                        disabled={actionLoading?.[`${vm.vmid}-shutdown`]}
+                                        className="flex items-center justify-center gap-2 p-3 bg-yellow-500/10 hover:bg-yellow-500/20 border border-yellow-500/30 rounded-lg text-yellow-400 transition-all disabled:opacity-50"
+                                    >
+                                        {actionLoading?.[`${vm.vmid}-shutdown`] ? <Icons.RotateCw /> : <Icons.Power />}
+                                        {t('shutdown')}
+                                    </button>
+                                    <button
+                                        onClick={() => handleAction('reboot')}
+                                        disabled={actionLoading?.[`${vm.vmid}-reboot`]}
+                                        className="flex items-center justify-center gap-2 p-3 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-orange-400 transition-all disabled:opacity-50"
+                                    >
+                                        {actionLoading?.[`${vm.vmid}-reboot`] ? <Icons.RotateCw /> : <Icons.RefreshCw />}
+                                        {t('reboot')}
+                                    </button>
+                                </>
+                            )}
+                            {consoles && (
+                            <button
+                                onClick={() => onOpenConsole(vm)}
+                                className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all"
+                            >
+                                <Icons.Monitor />
+                                {t('console')}
+                            </button>
+                            )}
+                            {!consoles && (
+                                <HaOnActiveLink vm={vm} clusterId={clusterId}
+                                    className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all" />
+                            )}
+                            {/* NS May 2026 — VNC↔Term toggle moved inside Console modal. */}
+                            {/* MK Aug 2026 — SPICE (virt-viewer .vv) sits next to the web console; QEMU only */}
+                            {consoles && isQemu && onOpenSpice && (
+                                <button
+                                    onClick={() => onOpenSpice(vm)}
+                                    title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}
+                                    className="flex items-center justify-center gap-2 p-3 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 rounded-lg text-blue-400 transition-all"
+                                >
+                                    <Icons.ExternalLink />
+                                    {t('spiceConsole') || 'SPICE'}
+                                </button>
+                            )}
+                            <button
+                                onClick={() => onOpenConfig(vm)}
+                                className="flex items-center justify-center gap-2 p-3 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-gray-300 transition-all"
+                            >
+                                <Icons.Cog />
+                                {t('configuration')}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* More Actions */}
+                    <div className="px-6 pb-6">
+                        <div className="text-xs text-gray-500 mb-3">{t('moreActions')}</div>
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                onClick={() => onShowMetrics && onShowMetrics(vm)}
+                                className="flex items-center gap-2 px-3 py-2 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 rounded-lg text-sm text-indigo-400 transition-all"
+                            >
+                                <Icons.BarChart />
+                                {t('performanceMetrics')}
+                            </button>
+                            {acts && (<>
+                            <button
+                                onClick={onMigrate}
+                                className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
+                            >
+                                <Icons.ArrowRight />
+                                {t('migrate')}
+                            </button>
+                            {showCrossCluster && (
+                                <button
+                                    onClick={() => onCrossClusterMigrate(vm)}
+                                    className="flex items-center gap-2 px-3 py-2 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 rounded-lg text-sm text-cyan-400 transition-all"
+                                >
+                                    <Icons.Globe />
+                                    {t('crossClusterMigrate')}
+                                </button>
+                            )}
+                            <button
+                                onClick={onClone}
+                                className="flex items-center gap-2 px-3 py-2 bg-proxmox-dark hover:bg-proxmox-border border border-proxmox-border rounded-lg text-sm text-gray-300 transition-all"
+                            >
+                                <Icons.Copy />
+                                {t('clone')}
+                            </button>
+                            {vm.status === 'running' && (
+                                <>
+                                    {/* Force Reset - QEMU only (LXC doesn't support it) */}
+                                    {isQemu && (
+                                        <button
+                                            onClick={() => handleAction('reset')}
+                                            disabled={actionLoading?.[`${vm.vmid}-reset`]}
+                                            className="flex items-center gap-2 px-3 py-2 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 rounded-lg text-sm text-orange-400 transition-all disabled:opacity-50"
+                                        >
+                                            {actionLoading?.[`${vm.vmid}-reset`] ? <Icons.RotateCw className="animate-spin" /> : <Icons.Zap />}
+                                            {t('forceReset') || 'Force Reset'}
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={() => onForceStop(vm)}
+                                        className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-sm text-red-400 transition-all"
+                                    >
+                                        <Icons.XCircle />
+                                        {t('forceStop')}
+                                    </button>
+                                </>
+                            )}
+                            <button
+                                onClick={onDelete}
+                                className="flex items-center gap-2 px-3 py-2 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-lg text-sm text-red-400 transition-all"
+                            >
+                                <Icons.Trash />
+                                {t('delete')}
+                            </button>
+                            </>)}
+                        </div>
+                    </div>
+
+                    {/* Proxmox HA Section */}
+                    {pveHa && (
+                    <div className="px-6 pb-6">
+                        <div className="text-xs text-gray-500 mb-3">{t('proxmoxHa')}</div>
+                        <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className={`p-2 rounded-lg ${haEnabled ? 'bg-green-500/20' : 'bg-gray-500/20'}`}>
+                                        <Icons.Shield />
+                                    </div>
+                                    <div>
+                                        <div className="text-sm font-medium text-white">
+                                            {t('proxmoxHa')} {!haResources ? t('unknown') : haEnabled ? t('active') : t('haInactive').replace('Proxmox HA ', '')}
+                                        </div>
+                                        {haResources && (
+                                        <div className="text-xs text-gray-500">
+                                            {haEnabled 
+                                                ? t('haMonitorDesc').split('.')[0] 
+                                                : t('enableNativeHa')}
+                                        </div>
+                                        )}
+                                    </div>
+                                </div>
+                                {acts && (
+                                <button
+                                    onClick={toggleProxmoxHa}
+                                    disabled={haLoading || !haResources}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50 ${
+                                        haEnabled
+                                            ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30'
+                                            : 'bg-green-500/20 hover:bg-green-500/30 text-green-400 border border-green-500/30'
+                                    }`}
+                                >
+                                    {haLoading ? (
+                                        <Icons.RotateCw />
+                                    ) : haEnabled ? (
+                                        t('disable') + ' HA'
+                                    ) : (
+                                        t('haActivate')
+                                    )}
+                                </button>
+                                )}
+                            </div>
+                            {haEnabled && haResources && (
+                                <div className="mt-3 pt-3 border-t border-gray-700/50 grid grid-cols-2 gap-4 text-xs">
+                                    <div>
+                                        <span className="text-gray-500">Max. Restarts:</span>
+                                        <span className="ml-2 text-white">{haLimit(haResource?.max_restart, t('default'))}</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-gray-500">Max. Relocate:</span>
+                                        <span className="ml-2 text-white">{haLimit(haResource?.max_relocate, t('default'))}</span>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    )}
+
+                    {/* Timeline of this guest and its host */}
+                    <div className="px-6 pb-6" data-vm-timeline>
+                        <button type="button" onClick={() => setShowTimeline(v => !v)} data-vm-timeline-toggle
+                            className="flex items-center gap-1 text-xs text-gray-500 hover:text-white mb-3">
+                            {showTimeline ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('tlTab')}
+                        </button>
+                        {showTimeline && (
+                            <div className="p-4 bg-proxmox-dark/50 rounded-lg border border-proxmox-border">
+                                <TimelineView key={`${clusterId}:${vm.vmid}`} clusterId={clusterId} vmid={vm.vmid} authFetch={authFetch} t={t} compact />
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Tags */}
+                    {vm.tags && (
+                        <div className="px-6 pb-6">
+                            <div className="text-xs text-gray-500 mb-2">Tags</div>
+                            <div className="flex flex-wrap gap-2">
+                                {(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
+                                    <span key={tag} className="px-2 py-1 bg-proxmox-dark rounded text-xs text-gray-400">
+                                        {tag}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW: Feb 2026 - Corporate VM Detail View (experimental)
+        function CorporateVmDetailView({ vm, clusterId, clusterType = 'proxmox', clusterName, onAction, onOpenConsole, onOpenSpice, onOpenConfig, onBack, onMigrate, onClone, onForceStop, onDelete, onCrossClusterMigrate, showCrossCluster, actionLoading, onShowMetrics, addToast, backupStatus, backupFor, crNav, crOpen, crKind }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, haReadOnly, haStandby, haConsolesElsewhere } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // #625 v2 - on a standby: no power, console, SPICE, snapshot or HA changes, and no
+            // console preview either, since the grab runs on the node
+            // A forwarding standby changes things through the active again. Consoles and the
+            // preview stay off unless it serves users, the snapshot refresh (it runs lvs on
+            // the node) on every one
+            const acts = !haReadOnly;
+            const consoles = !haConsolesElsewhere;
+            const [activeDetailTab, setActiveDetailTab] = useState('summary');
+            // LW Oct 2026 - Monitor is a tab of Corporate Redesigned only; switched back to classic, show the summary
+            useEffect(() => {
+                if (!isCorpRedesigned && activeDetailTab === 'monitor') setActiveDetailTab('summary');
+            }, [isCorpRedesigned, activeDetailTab]);
+            const [showActionsMenu, setShowActionsMenu] = useState(false);
+            const [snapshots, setSnapshots] = useState([]);
+            const [efficientSnapshots, setEfficientSnapshots] = useState([]);
+            const [snapsLoading, setSnapsLoading] = useState(false);
+            // LW Nov 2026 - which snapshot read failed ({ std, eff }: a code, 0 for no answer), shown by the redesign
+            const [snapsFail, setSnapsFail] = useState(null);
+            const [showCreateSnap, setShowCreateSnap] = useState(false);
+            const [snapName, setSnapName] = useState('');
+            const [snapDesc, setSnapDesc] = useState('');
+            const [snapRam, setSnapRam] = useState(false);
+            // LW May 2026 — snapshot compare modal state
+            const [compareSnap, setCompareSnap] = useState(null);  // { a, b } or null
+
+            const isQemu = vm.type === 'qemu';
+            const displayName = vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`;
+            const isRunning = vm.status === 'running';
+
+            // NS Jun 2026 — console-tile preview. Pull one VNC frame off the running
+            // VM server-side (no SSH, no agent) and show it in place of the generic
+            // monitor icon. Falls back silently to the icon when the grab can't run
+            // (stopped, headless, behind a tunnel that's down, perm). Cached ~30s
+            // server-side so re-renders don't keep hitting vncproxy.
+            const shotKey = `${clusterId}:${vm.vmid}`;
+            const [consoleShot, setConsoleShot] = useState(() => {
+                const c = _consoleShotCache[shotKey];
+                return c ? c.url : null;
+            });
+            const [shotLoading, setShotLoading] = useState(false);
+            const [shotNonce, setShotNonce] = useState(0);  // bump = force fresh grab
+            useEffect(() => {
+                if (!isQemu || !isRunning || !consoles) { setConsoleShot(null); return; }
+                // reuse a recent frame on re-mount/poll instead of re-grabbing
+                const cached = _consoleShotCache[shotKey];
+                if (shotNonce === 0 && cached && (Date.now() - cached.ts) < SHOT_REUSE_MS) {
+                    setConsoleShot(cached.url);
+                    return;
+                }
+                let cancelled = false;
+                setShotLoading(true);
+                const q = `?n=${shotNonce}` + (shotNonce > 0 ? '&fresh=1' : '');
+                fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/screenshot${q}`,
+                      { headers: getAuthHeaders() })
+                    .then(r => (r && r.ok ? r.blob() : null))
+                    .then(blob => {
+                        if (cancelled) return;
+                        const next = (blob && blob.size) ? URL.createObjectURL(blob) : null;
+                        const prev = _consoleShotCache[shotKey];
+                        if (prev && prev.url && prev.url !== next) URL.revokeObjectURL(prev.url);  // drop the old frame
+                        if (next) _consoleShotCache[shotKey] = { url: next, ts: Date.now() };
+                        else delete _consoleShotCache[shotKey];
+                        setConsoleShot(next);
+                    })
+                    .catch(() => { if (!cancelled) setConsoleShot(_consoleShotCache[shotKey]?.url || null); })
+                    .finally(() => { if (!cancelled) setShotLoading(false); });
+                return () => { cancelled = true; };
+            }, [vm.vmid, vm.status, clusterId, shotNonce, consoles]);
+
+            // LW Apr 2026 (#250) — per-VM web link (browser-local; keyed by cluster:vmid)
+            const webLinkKey = `${clusterId}:${vm.vmid}`;
+            const loadVmLinks = () => {
+                try { return JSON.parse(localStorage.getItem('pegaprox-vm-weblinks') || '{}'); }
+                catch(_) { return {}; }
+            };
+            const [vmWebUrl, setVmWebUrl] = useState(() => (loadVmLinks()[webLinkKey] || ''));
+            // re-read when switching between VMs
+            useEffect(() => { setVmWebUrl(loadVmLinks()[webLinkKey] || ''); }, [webLinkKey]);
+            const saveVmWebUrl = (url) => {
+                const clean = (url || '').trim();
+                const all = loadVmLinks();
+                if (clean) all[webLinkKey] = clean; else delete all[webLinkKey];
+                try { localStorage.setItem('pegaprox-vm-weblinks', JSON.stringify(all)); } catch(_) {}
+                setVmWebUrl(clean);
+            };
+            const promptForVmWebUrl = () => {
+                const cur = vmWebUrl || '';
+                const next = window.prompt(t('setVmWebLinkPrompt') || `Web URL for ${displayName} (leave empty to remove):`, cur);
+                if (next === null) return;  // cancelled
+                let n = next.trim();
+                if (n && !/^https?:\/\//i.test(n)) n = 'http://' + n;  // allow bare host:port
+                saveVmWebUrl(n);
+                addToast?.(n ? (t('vmWebLinkSaved') || 'Web link saved') : (t('vmWebLinkCleared') || 'Web link removed'), 'success');
+            };
+            const openVmWebUrl = () => {
+                if (!vmWebUrl) { promptForVmWebUrl(); return; }
+                window.open(vmWebUrl, '_blank', 'noopener,noreferrer');
+            };
+
+            // Reuse same fetch pattern as VmDetailPanel
+            const authFetch = async (url, opts = {}) => {
+                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
+                catch(e) { console.error(e); return null; }
+            };
+
+            // LW Oct 2026 (#828) - every fetch and every VM switch moves the counter on; an
+            // answer only lands while it is still the newest one for this VM
+            const snapSeqRef = React.useRef(0);
+            const snapKey = `${clusterId}/${vm.vmid}`;
+            const snapKeyRef = React.useRef(snapKey);
+            snapKeyRef.current = snapKey;
+            const fetchSnapshots = async () => {
+                if (snapKeyRef.current !== snapKey) return;  // a create/delete that finished after the switch
+                const seq = ++snapSeqRef.current;
+                setSnapsLoading(true);
+                try {
+                    const base = `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}`;
+                    const [stdRes, effRes] = await Promise.all([
+                        authFetch(`${base}/snapshots`),
+                        authFetch(`${base}/efficient-snapshots${haStandby ? '' : '?refresh=true'}`)
+                    ]);
+                    const std = stdRes?.ok ? await stdRes.json() : undefined;
+                    // LW Nov 2026 - the efficient list needs vm.snapshot, the plain one vm.view: a 403 there
+                    // means a viewer is not offered it, not a read that failed
+                    const effDenied = effRes?.status === 403;
+                    const eff = effRes?.ok ? await effRes.json() : (effDenied ? [] : undefined);
+                    if (seq !== snapSeqRef.current) return;
+                    if (std !== undefined) setSnapshots(std);
+                    if (eff !== undefined) setEfficientSnapshots(eff);
+                    const fail = { std: stdRes?.ok ? null : (stdRes ? stdRes.status : 0), eff: effRes?.ok || effDenied ? null : (effRes ? effRes.status : 0) };
+                    setSnapsFail(fail.std !== null || fail.eff !== null ? fail : null);
+                } catch(e) { console.error('snapshots fetch:', e); if (seq === snapSeqRef.current) setSnapsFail({ std: 0, eff: null }); }
+                if (seq === snapSeqRef.current) setSnapsLoading(false);
+            };
+
+            // refetch when VM changes while snapshots tab is open
+            React.useEffect(() => {
+                setSnapshots([]); setEfficientSnapshots([]); setSnapsLoading(false); setSnapsFail(null);
+                if (activeDetailTab === 'snapshots') fetchSnapshots();
+                return () => { snapSeqRef.current++; };
+            }, [vm.vmid, clusterId]);
+
+            const handleCreateSnap = async () => {
+                if (!snapName.trim()) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots`, {
+                        method: 'POST', headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ snapname: snapName, description: snapDesc, vmstate: snapRam ? 1 : 0 })
+                    });
+                    if (r?.ok) { addToast?.(t('snapshotCreated') || 'Snapshot created'); setShowCreateSnap(false); setSnapName(''); setSnapDesc(''); setSnapRam(false); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('snapshotFailed')), 'error');
+                } catch { addToast?.(t('snapshotFailed'), 'error'); }
+            };
+
+            const handleDeleteSnap = async (name) => {
+                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
+            };
+
+            const handleRollbackSnap = async (name) => {
+                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${name}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
+            };
+
+            const handleDeleteEfficientSnap = async (id, name) => {
+                if (!confirm(`${t('deleteSnapshot') || 'Delete snapshot'} "${name}"?`)) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast?.(t('snapshotDeleted') || 'Snapshot deleted'); fetchSnapshots(); }
+                    else addToast?.(await PegaProxApiErrors.message(r, t('deleteFailed')), 'error');
+                } catch { addToast?.(t('deleteFailed'), 'error'); }
+            };
+
+            const handleRollbackEfficientSnap = async (id, name) => {
+                if (!confirm(`${t('rollback') || 'Rollback'} "${name}"?`)) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${id}/rollback`, { method: 'POST' });
+                    if (r?.ok) addToast?.(t('rollbackStarted') || 'Rollback started');
+                    else addToast?.(await PegaProxApiErrors.message(r, t('rollbackFailed')), 'error');
+                } catch { addToast?.(t('rollbackFailed'), 'error'); }
+            };
+
+            const formatBytes = b => {
+                if(!b) return '0 B';
+                const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(b) / Math.log(k));
+                return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+            };
+
+            const formatUptime = (uptime) => {
+                if(!uptime) return '-';
+                const days = Math.floor(uptime / 86400);
+                const hours = Math.floor((uptime % 86400) / 3600);
+                const mins = Math.floor((uptime % 3600) / 60);
+                if(days > 0) return `${days}d ${hours}h ${mins}m`;
+                if(hours > 0) return `${hours}h ${mins}m`;
+                return `${mins}m`;
+            };
+
+            const handleAction = async (action) => { await onAction(vm, action); };
+
+            // State for fetched data
+            const [haEnabled, setHaEnabled] = useState(false);
+            const [haLoading, setHaLoading] = useState(false);
+            const [haResources, setHaResources] = useState(null);  // null: not read (yet)
+            const [lockInfo, setLockInfo] = useState({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+            const [unlockLoading, setUnlockLoading] = useState(false);
+            const [showUnlockConfirm, setShowUnlockConfirm] = useState(false);
+            const [guestInfo, setGuestInfo] = useState(null);
+            const [vmHwInfo, setVmHwInfo] = useState(null);
+            const [metricsTimeframe, setMetricsTimeframe] = useState('hour');
+            const [metricsData, setMetricsData] = useState(null);
+            const [metricsLoading, setMetricsLoading] = useState(false);
+            // LW Oct 2026 - a failed read, so the redesign can tell it from a range without samples
+            const [metricsFailed, setMetricsFailed] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned: what came of the reads on open (the classic
+            // states keep their old fallbacks), each with the time it came back
+            const [lockRead, setLockRead] = useState(null);
+            const [agentRead, setAgentRead] = useState(null);
+            const [haRead, setHaRead] = useState(null);
+            const [haTick, setHaTick] = useState(0);
+            const [crConfig, setCrConfig] = useState(null);
+            // MK #334 — filesystem usage from qemu-agent get-fsinfo
+            const [fsInfo, setFsInfo] = useState(null);
+
+            // Close actions menu on outside click
+            useEffect(() => {
+                if (!showActionsMenu) return;
+                const close = () => setShowActionsMenu(false);
+                document.addEventListener('click', close);
+                return () => document.removeEventListener('click', close);
+            }, [showActionsMenu]);
+
+            // Fetch lock status
+            const fetchLockStatus = async (isStale) => {
+                // a read that failed (or read:false from the route) is "unknown", not "not locked"
+                let next = { locked: false, lock_reason: null, lock_description: null, unlock_command: null, unread: true };
+                let read = { state: 'unreachable' };
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/lock`);
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        next = { locked: data.locked || false, lock_reason: data.lock_reason || null, lock_description: data.lock_description || null, unlock_command: data.unlock_command || null, unread: data.read === false };
+                        // read:false or no unlock command: the route could not read the config
+                        read = { state: data.read !== false && (data.locked || (!data.note && data.unlock_command)) ? 'ok' : 'undetermined' };
+                    } else if (response) read = { state: response.status === 403 ? 'forbidden' : 'error', code: response.status };
+                } catch (error) { read = { state: 'error' }; }
+                // #828 - the lock of the VM shown before must not offer Unlock on this one
+                if (!isStale()) { setLockInfo(next); setLockRead({ ...read, at: Date.now() }); }
+            };
+            useEffect(() => {
+                let stale = false;
+                setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                setLockRead(null);
+                fetchLockStatus(() => stale);
+                return () => { stale = true; };
+            }, [vm.vmid, clusterId]);
+            // LW Nov 2026 - the redesigned summary asks again when the lock of the guest list changes; the
+            // line shown stays until the answer is in, an answer for another guest is dropped
+            const rereadLock = () => {
+                const key = `${clusterId}/${vm.vmid}`;
+                fetchLockStatus(() => snapKeyRef.current !== key);
+            };
+
+            // Unlock VM
+            const handleUnlock = async () => {
+                setUnlockLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, { method: 'POST' });
+                    if (response && response.ok) {
+                        if (addToast) addToast(t('vmUnlocked') || `VM ${vm.vmid} unlocked successfully`, 'success');
+                        setLockInfo({ locked: false, lock_reason: null, lock_description: null, unlock_command: null });
+                        setLockRead({ state: 'ok', at: Date.now() });
+                        setShowUnlockConfirm(false);
+                    } else {
+                        const err = await response.json();
+                        if (addToast) addToast(err.error || 'Unlock failed', 'error');
+                    }
+                } catch (error) { if (addToast) addToast('Unlock failed', 'error'); }
+                setUnlockLoading(false);
+            };
+
+            // Fetch guest agent info
+            useEffect(() => {
+                const gkey = `${clusterId}:${vm.vmid}`;
+                // #560 — also fetch for LXC (backend returns os/ip via config+pct, no agent)
+                if (!(isQemu || vm.type === 'lxc') || vm.status !== 'running') { delete _guestInfoCache[gkey]; setGuestInfo(null); setAgentRead(null); return; }
+                // LW Oct 2026 (#828) - this VM's own last-known info (or none) while it loads; an
+                // answer for the VM shown before still fills its cache, never this view
+                setGuestInfo(_guestInfoCache[gkey] || null);
+                setAgentRead({ state: 'loading' });
+                let stale = false;
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-info`)
+                    .then(r => {
+                        if (r && !r.ok && !stale) setAgentRead({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now() });
+                        return r && r.ok ? r.json() : null;
+                    })
+                    .then(data => {
+                        if (data && !stale) setAgentRead({ state: data.agent_running ? 'ok' : (data.is_lxc ? 'lxc' : 'down'), at: Date.now() });
+                        else if (!data && !stale) setAgentRead(a => (a && a.state !== 'loading' ? a : { state: 'unreachable', at: Date.now() }));
+                        // LXC has no guest agent → accept on is_lxc, not just agent_running
+                        if (data && (data.agent_running || data.is_lxc)) { _guestInfoCache[gkey] = data; if (!stale) setGuestInfo(data); }
+                        else if (!stale) setGuestInfo(_guestInfoCache[gkey] || null);  // keep last-known on transient miss, don't flip
+                    })
+                    .catch(() => { if (!stale) { setGuestInfo(_guestInfoCache[gkey] || null); setAgentRead({ state: 'error', at: Date.now() }); } });
+                return () => { stale = true; };
+            }, [vm.vmid, vm.status, clusterId]);
+
+            // MK #334 — fsinfo. Only polls when guest agent is alive to avoid hammering the
+            // proxmox API with 500s for VMs without an agent.
+            useEffect(() => {
+                setFsInfo(null);
+                // LW Oct 2026 - Corporate Redesigned draws the copy guest-info already carries
+                if (!isQemu || vm.status !== 'running' || !guestInfo || isCorpRedesigned) return;
+                let stale = false;
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/guest-fsinfo`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(d => { if (!stale) setFsInfo(d || null); })
+                    .catch(() => { if (!stale) setFsInfo(null); });
+                return () => { stale = true; };
+            }, [vm.vmid, vm.status, clusterId, !!guestInfo, isCorpRedesigned]);
+
+            // Fetch VM hardware config
+            // LW Sep 2026 (#813) - clear FIRST, and drop an answer that arrives
+            // after the user has moved on. The clear used to sit inside the isQemu guard,
+            // so it only ran for containers; switching between two VMs left the previous
+            // one's values on screen until the new request came back. Nobody noticed while
+            // the fields were machine types that read alike - a description is a sentence
+            // about a specific VM, and reading the wrong one is worse than reading none.
+            // LW Nov 2026 - read again when the configuration dialog closes or a vm_config frame names this
+            // guest; a re-read of the same guest keeps what is shown until its answer is in
+            const [cfgTick, setCfgTick] = useState(0);
+            const cfgShownRef = React.useRef('');
+            useEffect(() => {
+                const shown = `${clusterId}/${vm.node}/${vm.vmid}/${isCorpRedesigned ? 1 : 0}`;
+                const again = cfgShownRef.current === shown;
+                cfgShownRef.current = shown;
+                if (!again) {
+                    setVmHwInfo(null);
+                    setCrConfig(isCorpRedesigned ? { state: 'loading' } : null);
+                }
+                // LW Oct 2026 - Corporate Redesigned shows a container's hardware from its config too
+                if (!isQemu && !isCorpRedesigned) return;
+                let stale = false;
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`)
+                    .then(r => {
+                        if (r && !r.ok && !stale && isCorpRedesigned) setCrConfig({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now() });
+                        return r && r.ok ? r.json() : null;
+                    })
+                    .then(cfg => {
+                        if (stale) return;
+                        if (isCorpRedesigned) setCrConfig(c => (cfg && typeof cfg === 'object' ? { state: 'ok', body: cfg, at: Date.now() }
+                            : c && c.state !== 'loading' && c.state !== 'ok' ? c : { state: 'unreachable', at: Date.now() }));
+                        if (!isQemu) return;
+                        if (!cfg) { setVmHwInfo(null); return; }
+                        // LW Nov 2026 - XCP-ng sends its own fields and no raw (a 'networks' list, no machine or BIOS):
+                        // only what it has, and a field of the wrong shape never fails the read
+                        const pve = !!(cfg.raw && typeof cfg.raw === 'object');
+                        const raw = pve ? cfg.raw : cfg;
+                        let net = null;
+                        try {
+                            const nk = Object.keys(raw).find(k => /^net\d+$/.test(k) && typeof raw[k] === 'string');
+                            net = nk ? raw[nk].split(',')[0].split('=')[0] : null;
+                        } catch (_) { net = null; }
+                        setVmHwInfo({
+                            ...(pve ? {
+                                machine: raw.machine || 'i440fx', bios: raw.bios || 'seabios',
+                                cpu: raw.cpu || 'kvm64', scsihw: raw.scsihw || 'lsi',
+                                cores: raw.cores || 1, sockets: raw.sockets || 1,
+                                ostype: raw.ostype, agent: raw.agent,
+                            } : {}),
+                            // #813 - rides along in the same response, no extra request
+                            description: typeof raw.description === 'string' ? raw.description.trim() : '',
+                            net,
+                        });
+                    })
+                    .catch(() => { if (!stale) { setVmHwInfo(null); if (isCorpRedesigned) setCrConfig({ state: 'error', at: Date.now() }); } });
+                return () => { stale = true; };
+            }, [vm.vmid, vm.node, clusterId, isCorpRedesigned, cfgTick]);
+            useEffect(() => {
+                let timer = null;
+                const onCfg = (e) => {
+                    const d = (e && e.detail) || {};
+                    if (String(d.cluster_id) !== String(clusterId) || Number(d.vmid) !== Number(vm.vmid)) return;
+                    clearTimeout(timer);
+                    timer = setTimeout(() => setCfgTick(n => n + 1), 300);  // a burst of frames is one read
+                };
+                window.addEventListener('pegaprox-vm-config', onCfg);
+                window.addEventListener('pegaprox-vm-config-closed', onCfg);
+                return () => {
+                    clearTimeout(timer);
+                    window.removeEventListener('pegaprox-vm-config', onCfg);
+                    window.removeEventListener('pegaprox-vm-config-closed', onCfg);
+                };
+            }, [clusterId, vm.vmid]);
+
+            // Fetch HA status
+            // NS, Nov 2026: read again after a toggle too, so the card shows what PVE holds. Until a
+            // list arrives haResources stays null and the card says unknown, not disabled
+            const haSid = `${isQemu ? 'vm' : 'ct'}:${vm.vmid}`;
+            // #828 - every guest or cluster starts a new generation: an answer of the one before is dropped.
+            // LW Oct 2026 - haRead keeps what came of the read for the redesigned summary
+            const haGen = React.useRef(0);
+            const loadHa = () => {
+                const gen = haGen.current;
+                const isStale = () => gen !== haGen.current;
+                return authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`)
+                    .then(r => {
+                        if (r && !r.ok && !isStale()) setHaRead({ state: r.status === 403 ? 'forbidden' : 'error', code: r.status, at: Date.now(), cluster: clusterId });
+                        return r && r.ok ? r.json() : null;
+                    })
+                    .then(resources => {
+                        if (isStale()) return;
+                        if (Array.isArray(resources)) {
+                            setHaResources(resources);
+                            setHaEnabled(resources.some(r => r.sid === haSid));
+                            setHaRead({ state: 'ok', list: resources, at: Date.now(), cluster: clusterId });
+                        } else setHaRead(h => (h && h.state !== 'loading' && h.state !== 'ok' ? h : { state: 'unreachable', at: Date.now(), cluster: clusterId }));
+                    })
+                    .catch(() => { if (!isStale()) setHaRead({ state: 'error', at: Date.now(), cluster: clusterId }); });
+            };
+            // XCP-ng and ESXi have no Proxmox HA, their guests get no card and no read
+            const pveHa = (clusterType || 'proxmox') === 'proxmox';
+            useEffect(() => {
+                haGen.current++;
+                setHaResources(null);
+                setHaEnabled(false);
+                setHaRead({ state: 'loading', cluster: clusterId });
+                if (pveHa) loadHa();
+                return () => { haGen.current++; };
+            }, [vm.vmid, clusterId, pveHa]);
+            // a re-read after a change in the redesigned summary keeps the list on screen until it is in
+            useEffect(() => { if (haTick && pveHa) loadHa(); }, [haTick]);
+            const haResource = haResources ? haResources.find(r => r.sid === haSid) : null;
+
+            // NS: inline perf charts - only bother fetching when vm is actually up
+            const [metricsRefreshTick, setMetricsRefreshTick] = useState(0);
+            // LW Oct 2026 (#828) - only the newest request draws the charts, and another VM
+            // starts with empty ones instead of the previous VM's
+            const metricsSeqRef = React.useRef(0);
+            useEffect(() => { setMetricsData(null); setMetricsFailed(false); }, [vm.vmid, clusterId]);
+            const fetchMetrics = React.useCallback(() => {
+                const seq = ++metricsSeqRef.current;
+                if (!isRunning) { setMetricsLoading(false); return; }
+                setMetricsLoading(true);
+                setMetricsFailed(false);
+                authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${metricsTimeframe}`)
+                    .then(r => r?.ok ? r.json() : null)
+                    .then(d => { if (seq !== metricsSeqRef.current) return; setMetricsData(d); setMetricsFailed(!d); setMetricsLoading(false); })
+                    .catch(() => { if (seq === metricsSeqRef.current) { setMetricsFailed(true); setMetricsLoading(false); } });
+            }, [metricsTimeframe, vm.vmid, isRunning, clusterId]);
+
+            useEffect(() => {
+                fetchMetrics();
+                return () => { metricsSeqRef.current++; };
+            }, [fetchMetrics, metricsRefreshTick]);
+
+            // LW Nov 2026 - Corporate Redesigned draws the answers as crPfPrep (cr_perf.js) reads them: a
+            // time without snapshots of the stored history is a gap, not a straight line across it
+            const crMetrics = useMemo(() => (isCorpRedesigned ? crPfPrep(metricsData) : undefined), [isCorpRedesigned, metricsData]);
+            const crMetricsPrep = (d) => (isCorpRedesigned ? crPfPrep(d) : d);
+            // LW Oct 2026 - a range dragged on one chart zooms all six, with finer data where needed
+            const metricsZoom = useChartZoom({
+                preset: metricsTimeframe, loaded: isCorpRedesigned ? crMetrics : metricsData, resetKey: `${clusterId}/${vm.vmid}`,
+                loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/rrd/${tf}`)
+                    .then(r => r?.ok ? r.json() : null).then(crMetricsPrep),
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.vmid}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r?.ok ? r.json() : null).then(crMetricsPrep),
+            });
+            const maxMemGB = vm.maxmem ? vm.maxmem / (1024 * 1024 * 1024) : 0;
+            const metricsMem = metricsZoom.series('memory');
+            const memDataGB = React.useMemo(() => {
+                if (!metricsMem.data || !maxMemGB) return [];
+                return metricsMem.data.map(p => p === null ? null : (p / 100) * maxMemGB);
+            }, [metricsMem.data, maxMemGB]);
+
+            // Toggle HA
+            const toggleProxmoxHa = async () => {
+                setHaLoading(true);
+                try {
+                    const vmType = isQemu ? 'vm' : 'ct';
+                    if (haEnabled) {
+                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources/${vmType}:${vm.vmid}`, { method: 'DELETE' });
+                        if (response && response.ok) { setHaEnabled(false); loadHa(); }
+                    } else {
+                        // defaults for the new resource only; the card reads back what PVE stored
+                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ vmid: vm.vmid, type: vmType, max_restart: 3, max_relocate: 3 })
+                        });
+                        if (response && response.ok) { setHaEnabled(true); loadHa(); }
+                    }
+                } catch (error) { console.error('toggling HA:', error); }
+                finally { setHaLoading(false); }
+            };
+
+            const cpuPercent = vm.maxcpu ? ((vm.cpu || 0) * 100).toFixed(1) : 0;
+            const ramPercent = vm.maxmem ? ((vm.mem / vm.maxmem) * 100).toFixed(1) : 0;
+
+            // the buttons of the header, shared with the header of Corporate Redesigned
+            const vmToolbar = (
+                <>
+                    {acts && !isRunning && (
+                        <button onClick={() => handleAction('start')} disabled={actionLoading?.[`${vm.vmid}-start`]}>
+                            {actionLoading?.[`${vm.vmid}-start`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.PlayCircle className="w-3 h-3" style={{color: '#60b515'}} />} {t('start')}
+                        </button>
+                    )}
+                    {acts && isRunning && (
+                        <>
+                            <button onClick={() => handleAction('shutdown')} disabled={actionLoading?.[`${vm.vmid}-shutdown`]}>
+                                {actionLoading?.[`${vm.vmid}-shutdown`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.Power className="w-3 h-3" style={{color: '#f54f47'}} />} {t('shutdown')}
+                            </button>
+                            <button onClick={() => handleAction('reboot')} disabled={actionLoading?.[`${vm.vmid}-reboot`]}>
+                                {actionLoading?.[`${vm.vmid}-reboot`] ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : <Icons.RefreshCw className="w-3 h-3" style={{color: '#efc006'}} />} {t('reboot')}
+                            </button>
+                        </>
+                    )}
+                    {consoles && isQemu && isRunning && (
+                        <button onClick={() => onOpenConsole(vm)}>
+                            <Icons.Terminal className="w-3 h-3" /> {t('console')}
+                        </button>
+                    )}
+                    {!consoles && isRunning && <HaOnActiveLink vm={vm} clusterId={clusterId} button iconClass="w-3 h-3" />}
+                    {consoles && isQemu && isRunning && onOpenSpice && (
+                        <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'}>
+                            <Icons.ExternalLink className="w-3 h-3" /> {t('spiceConsole') || 'SPICE'}
+                        </button>
+                    )}
+                    <button onClick={() => onOpenConfig(vm)}>
+                        <Icons.Settings className="w-3 h-3" /> {t('configure')}
+                    </button>
+                    {/* Actions Dropdown */}
+                    <div className="relative">
+                        <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
+                            {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
+                        </button>
+                        {showActionsMenu && (
+                            <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
+                                {onShowMetrics && (
+                                    <button onClick={() => { onShowMetrics(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                        <Icons.BarChart className="w-3.5 h-3.5" /> {t('performanceMetrics')}
+                                    </button>
+                                )}
+                                {acts && (<>
+                                <button onClick={() => { onMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ArrowRight className="w-3.5 h-3.5" /> {t('migrate')}
+                                </button>
+                                {showCrossCluster && (
+                                    <button onClick={() => { onCrossClusterMigrate(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                        <Icons.Globe className="w-3.5 h-3.5" /> {t('crossClusterMigrate')}
+                                    </button>
+                                )}
+                                <button onClick={() => { onClone(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.Copy className="w-3.5 h-3.5" /> {t('clone')}
+                                </button>
+                                {isRunning && isQemu && (
+                                    <button onClick={() => { handleAction('reset'); setShowActionsMenu(false); }} disabled={actionLoading?.[`${vm.vmid}-reset`]} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#efc006'}}>
+                                        <Icons.Zap className="w-3.5 h-3.5" /> {t('forceReset') || 'Force Reset'}
+                                    </button>
+                                )}
+                                {isRunning && (
+                                    <button onClick={() => { onForceStop(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                        <Icons.XCircle className="w-3.5 h-3.5" /> {t('forceStop')}
+                                    </button>
+                                )}
+                                </>)}
+                                <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                                {/* LW Apr 2026 (#250) - user-configurable web URL for this VM */}
+                                <button onClick={() => { openVmWebUrl(); setShowActionsMenu(false); }}
+                                    className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                    {vmWebUrl ? (t('openVmWebUI') || 'Open Web UI') : (t('setVmWebLink') || 'Set Web URL…')}
+                                </button>
+                                {vmWebUrl && (
+                                    <button onClick={() => { promptForVmWebUrl(); setShowActionsMenu(false); }}
+                                        className="w-full text-left px-3 py-1.5 text-[11px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)', opacity: 0.7}}>
+                                        <span className="w-3.5 h-3.5" /> {t('editVmWebLink') || 'Edit Web URL…'}
+                                    </button>
+                                )}
+                                {acts && (<>
+                                <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                                <button onClick={() => { onDelete(vm); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                    <Icons.Trash className="w-3.5 h-3.5" /> {t('delete')}
+                                </button>
+                                </>)}
+                            </div>
+                        )}
+                    </div>
+                </>
+            );
+
+            return (
+                <div className="space-y-0">
+                    {/* Unlock Confirmation Modal */}
+                    {showUnlockConfirm && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border p-5">
+                                <h3 className="text-[14px] font-semibold text-white mb-3">{t('unlockVm') || 'Unlock VM'}</h3>
+                                <p className="text-[13px] text-gray-400 mb-2">{t('unlockVmConfirm') || `Are you sure you want to unlock ${displayName}?`}</p>
+                                {lockInfo.lock_description && <p className="text-[12px] mb-2" style={{color: '#efc006'}}>{lockInfo.lock_description}</p>}
+                                {lockInfo.unlock_command && <code className="block text-[11px] text-gray-500 bg-proxmox-dark p-2 mb-3 font-mono">{lockInfo.unlock_command}</code>}
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowUnlockConfirm(false)} className="px-3 py-1.5 text-[13px] text-gray-400 border border-proxmox-border hover:text-white">{t('cancel')}</button>
+                                    <button onClick={handleUnlock} disabled={unlockLoading} className="px-3 py-1.5 text-[13px] text-white border disabled:opacity-50" style={{background: '#efc006', borderColor: '#d4a905'}}>
+                                        {unlockLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : t('unlock') || 'Unlock'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Header Bar - Clarity dark theme */}
+                    {isCorpRedesigned ? (
+                        <CrObjectHeader kind={isQemu ? 'vm' : 'ct'} icon={isQemu ? <Icons.Monitor /> : <Icons.Box />} name={displayName}
+                            id={vm.vmid} onBack={onBack} status={<CrStateBadge state={vm.status} />}
+                            badges={(
+                                <>
+                                    {haEnabled && <CrBadge tone="info" dot={false}>HA</CrBadge>}
+                                    {lockInfo.locked && <CrBadge tone="warning">{t('locked')}</CrBadge>}
+                                </>
+                            )}
+                            meta={[
+                                { key: 'type', label: t('type'), value: isQemu ? 'QEMU/KVM' : 'LXC' },
+                                { key: 'node', label: t('node'), value: vm.node },
+                                { key: 'cluster', label: t('cluster'), value: clusterName },
+                                { key: 'os', label: t('guestOs'), value: guestInfo?.os_pretty_name || vmHwInfo?.ostype },
+                                { key: 'ip', label: t('ipAddress'), value: crVmIps(vm, guestInfo, clusterType).slice(0, 2).join(', '), mono: true },
+                                { key: 'cpus', label: t('crVcpus'), value: vm.maxcpu },
+                                { key: 'mem', label: t('memory'), value: vm.maxmem ? formatBytes(vm.maxmem) : null },
+                                { key: 'uptime', label: t('uptime'), value: isRunning ? crUptime(vm.uptime) : null },
+                            ]}
+                            actions={(
+                                <>
+                                    {/* a container's console sat in the classic tab strip */}
+                                    {consoles && !isQemu && isRunning && (
+                                        <button onClick={() => onOpenConsole(vm)}>
+                                            <Icons.Terminal className="w-3 h-3" /> {t('console')}
+                                        </button>
+                                    )}
+                                    {vmToolbar}
+                                </>
+                            )} />
+                    ) : (
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
+                        <div className="flex items-center gap-2">
+                            <button onClick={onBack} className="p-1 hover:text-white" style={{color: '#adbbc4'}} title={t('backToList')}>
+                                <Icons.ChevronLeft className="w-4 h-4" />
+                            </button>
+                            <Icons.Monitor className={`w-4 h-4 ${vm.type === 'lxc' ? 'text-cyan-400' : isRunning ? 'text-green-400' : ''}`} style={!vm.type === 'lxc' && !isRunning ? {color: '#728b9a'} : {}} />
+                            <span className="text-[14px] font-medium" style={{color: '#e9ecef'}}>{displayName}</span>
+                            <span className="text-[11px]" style={{color: '#728b9a'}}>({vm.vmid})</span>
+                            <span className={`corp-badge ${isRunning ? 'corp-badge-running' : 'corp-badge-stopped'}`}>
+                                {isRunning ? t('running') : t('stopped')}
+                            </span>
+                            {haEnabled && <span className="corp-badge corp-badge-ha">HA</span>}
+                            {lockInfo.locked && <span className="corp-badge corp-badge-locked flex items-center gap-1"><Icons.Lock className="w-2.5 h-2.5" />{t('locked')}</span>}
+                        </div>
+                        <div className="corp-toolbar flex items-center gap-1">
+                            {vmToolbar}
+                        </div>
+                    </div>
+                    )}
+
+                    {/* Tab Strip - Clarity style */}
+                    {isCorpRedesigned ? (
+                        <CrTabs id="guest" active={activeDetailTab} label={displayName}
+                            onChange={id => { setActiveDetailTab(id); if (id === 'snapshots') fetchSnapshots(); }}
+                            tabs={[
+                                { id: 'summary', label: t('summary'), icon: <Icons.Monitor /> },
+                                { id: 'monitor', label: t('monitor'), icon: <Icons.BarChart /> },
+                                { id: 'snapshots', label: t('snapshotsTab'), icon: <Icons.Clock /> },
+                                { id: 'timeline', label: t('tlTab'), icon: <Icons.Activity />, hook: { 'data-corp-vm-timeline': '' } },
+                            ]} />
+                    ) : (
+                    <div className="corp-tab-strip px-4">
+                        <button className={activeDetailTab === 'summary' ? 'active' : ''} onClick={() => setActiveDetailTab('summary')}>
+                            <Icons.Monitor className="w-3 h-3 inline mr-1" />{t('summary')}
+                        </button>
+                        <button className={activeDetailTab === 'snapshots' ? 'active' : ''}
+                            onClick={() => { setActiveDetailTab('snapshots'); fetchSnapshots(); }}>
+                            <Icons.Clock className="w-3 h-3 inline mr-1" />{t('snapshotsTab') || 'Snapshots'}
+                        </button>
+                        <button className={activeDetailTab === 'timeline' ? 'active' : ''} onClick={() => setActiveDetailTab('timeline')} data-corp-vm-timeline>
+                            <Icons.Activity className="w-3 h-3 inline mr-1" />{t('tlTab')}
+                        </button>
+                        <button onClick={() => onOpenConfig(vm)}>
+                            <Icons.Settings className="w-3 h-3 inline mr-1" />{t('configure')}
+                        </button>
+                        {/* LW: Feb 2026 - console tab for QEMU (VNC) and LXC (xterm.js) */}
+                        {consoles && isRunning && (
+                            <button onClick={() => onOpenConsole(vm)}>
+                                <Icons.Terminal className="w-3 h-3 inline mr-1" />{t('console')}
+                            </button>
+                        )}
+                    </div>
+                    )}
+
+                    {/* LW Oct 2026 - Corporate Redesigned: the summary from the same reads, drawn by CrVmSummary (cr_vm.js) */}
+                    {activeDetailTab === 'summary' && isCorpRedesigned && (
+                        <div className="p-4">
+                            <CrBoundary key={`${clusterId}:${vm.vmid}`} id="vm-summary">
+                            <CrVmSummary vm={vm} clusterId={clusterId} clusterName={clusterName} kind={clusterType || 'proxmox'} onLockChanged={rereadLock}
+                                isQemu={isQemu} isRunning={isRunning} acts={acts} consoles={consoles} authFetch={authFetch}
+                                guestInfo={guestInfo} agentRead={agentRead} config={crConfig}
+                                lockInfo={lockInfo} lockRead={lockRead} onUnlock={() => setShowUnlockConfirm(true)}
+                                haRead={haRead && haRead.cluster === clusterId ? haRead : { state: 'loading' }} onHaChanged={() => setHaTick(n => n + 1)}
+                                backupStatus={backupStatus} backupFor={backupFor}
+                                metrics={{ data: metricsData, loading: metricsLoading, failed: metricsFailed, range: metricsTimeframe,
+                                           onRange: setMetricsTimeframe, onRetry: () => setMetricsRefreshTick(x => x + 1) }}
+                                shot={{ url: consoleShot, loading: shotLoading, onRefresh: () => setShotNonce(n => n + 1) }}
+                                onOpenConsole={onOpenConsole} onOpenSpice={onOpenSpice} onOpenConfig={onOpenConfig}
+                                onMigrate={onMigrate} onTimeline={() => setActiveDetailTab('timeline')}
+                                nav={crNav} open={crOpen} />
+                            </CrBoundary>
+                        </div>
+                    )}
+                    {/* LW: Feb 2026 - summary tab, corporate layout */}
+                    {activeDetailTab === 'summary' && !isCorpRedesigned && (
+                        <div className="p-4 space-y-4">
+                            {/* console preview + vm info */}
+                            <div className="flex gap-5">
+                                {/* Left: Console Preview Area */}
+                                <div className="flex-shrink-0" style={{width: '280px'}}>
+                                    <div className="corp-console-tile relative flex items-center justify-center overflow-hidden" style={{height: '180px', background: consoleShot ? '#000' : 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
+                                        {consoleShot ? (
+                                            <React.Fragment>
+                                                <img src={consoleShot} alt={t('consolePreview') || 'Console preview'}
+                                                     onClick={() => onOpenConsole(vm)}
+                                                     title={t('launchWebConsole') || 'Launch Web Console'}
+                                                     style={{width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer'}} />
+                                                <button onClick={(e) => { e.stopPropagation(); setShotNonce(n => n + 1); }}
+                                                        title={t('refresh') || 'Refresh'} disabled={shotLoading}
+                                                        className="absolute top-1 right-1 p-1"
+                                                        style={{background: 'rgba(0,0,0,0.5)', color: '#fff', borderRadius: '3px', lineHeight: 0}}>
+                                                    <Icons.RefreshCw className={`w-3.5 h-3.5 ${shotLoading ? 'animate-spin' : ''}`} />
+                                                </button>
+                                            </React.Fragment>
+                                        ) : (
+                                            <div className="text-center">
+                                                {isQemu
+                                                    ? <Icons.Monitor className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                                    : <Icons.Box className="w-12 h-12 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                                }
+                                                <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                    {!isRunning ? (t('vmStopped') || 'VM is powered off')
+                                                        : !consoles ? t('running')
+                                                        : (shotLoading && isQemu ? (t('loadingPreview') || 'Loading preview…')
+                                                                                 : (t('consoleAvailable') || 'Console available'))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    {consoles && isRunning && (
+                                        <button onClick={() => onOpenConsole(vm)} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-accent)'}}>
+                                            <Icons.Terminal className="w-3.5 h-3.5" />
+                                            {t('launchWebConsole') || 'Launch Web Console'}
+                                        </button>
+                                    )}
+                                    {!consoles && isRunning && (
+                                        <HaOnActiveLink vm={vm} clusterId={clusterId} iconClass="w-3.5 h-3.5"
+                                            className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5"
+                                            style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-accent)'}} />
+                                    )}
+                                    {consoles && isRunning && isQemu && onOpenSpice && (
+                                        <button onClick={() => onOpenSpice(vm)} title={t('spiceConsoleHint') || 'Download a virt-viewer file (audio / USB / multi-monitor)'} className="w-full mt-1.5 py-1.5 text-[12px] font-medium uppercase tracking-wider flex items-center justify-center gap-1.5" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)'}}>
+                                            <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                            {t('spiceConsole') || 'SPICE'}
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Right: VM Properties + Quick Stats */}
+                                <div className="flex-1 min-w-0">
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            <tr><td>{t('guestOs') || 'Guest OS'}</td><td>{guestInfo?.os_pretty_name || vmHwInfo?.ostype || (isQemu ? 'QEMU Virtual Machine' : 'LXC Container')}</td></tr>
+                                            <tr><td>{t('type')}</td><td>{isQemu ? 'QEMU/KVM' : 'LXC'} - {vmHwInfo && vmHwInfo.machine ? `${vmHwInfo.machine} / ${vmHwInfo.bios === 'ovmf' ? 'UEFI' : 'SeaBIOS'}` : vm.vmid}</td></tr>
+                                            <tr><td>{t('qemuAgent') || 'QEMU Agent'}</td><td className="flex items-center gap-1.5">{isQemu && isRunning ? (guestInfo ? <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#60b515'}}></span> {t('running')}</> : <><span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: '#f54f47'}}></span> {t('notInstalled') || 'Not installed'}</>) : <span style={{color: '#728b9a'}}>-</span>}</td></tr>
+                                            <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{guestIps(guestInfo).join(', ') || '-'}</td></tr>
+                                            {guestInfo?.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
+                                            {vm.tags && <tr><td>Tags</td><td><div className="flex flex-wrap gap-1">{(Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';')).map(tag => (
+                                                <span key={tag} className="px-1.5 py-0.5 text-[11px]" style={{background: 'rgba(73, 175, 217, 0.12)', color: '#49afd9', border: '1px solid rgba(73, 175, 217, 0.25)'}}>{tag}</span>
+                                            ))}</div></td></tr>}
+                                            {/* #813 - operator-entered free text, rendered as text: React escapes it,
+                                                pre-wrap keeps the author's line breaks, break-word stops a pasted URL
+                                                from widening the whole grid. The Config editor keeps its Markdown. */}
+                                            {vmHwInfo?.description && <tr><td>{t('description') || 'Description'}</td>
+                                                <td style={{whiteSpace: 'pre-wrap', overflowWrap: 'break-word', maxWidth: 0}}>{vmHwInfo.description}</td></tr>}
+                                        </tbody>
+                                    </table>
+                                    {/* stats */}
+                                    <div className="mt-3 flex gap-4">
+                                        <div className="flex flex-col gap-1 min-w-[90px]">
+                                            <div className="flex items-center gap-1.5">
+                                                <div className="w-2 h-2 rounded-full" style={{background: 'var(--corp-metric-cpu)'}}></div>
+                                                <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('cpuUsage')}</span>
+                                                <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{cpuPercent}%</span>
+                                            </div>
+                                            {/* LW: usage bar under the value */}
+                                            <div className="corp-capacity-bar"><div style={{width: Math.min(cpuPercent, 100) + '%', background: cpuPercent >= 90 ? 'var(--corp-thresh-crit)' : cpuPercent >= 70 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)'}} /></div>
+                                        </div>
+                                        <div className="flex flex-col gap-1 min-w-[90px]">
+                                            <div className="flex items-center gap-1.5">
+                                                <div className="w-2 h-2 rounded-full" style={{background: 'var(--corp-metric-ram)'}}></div>
+                                                <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('ramUsage')}</span>
+                                                <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{formatBytes(vm.mem)}</span>
+                                            </div>
+                                            <div className="corp-capacity-bar"><div style={{width: Math.min(ramPercent, 100) + '%', background: ramPercent >= 90 ? 'var(--corp-thresh-crit)' : ramPercent >= 70 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)'}} /></div>
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                            <div className="w-2 h-2 rounded-full" style={{background: 'var(--corp-metric-disk)'}}></div>
+                                            <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('disk')}</span>
+                                            <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{vm.disk > 0 ? `${formatBytes(vm.disk)} / ${formatBytes(vm.maxdisk)}` : formatBytes(vm.maxdisk)}</span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                            <div className="w-2 h-2 rounded-full" style={{background: 'var(--corp-metric-net)'}}></div>
+                                            <span className="text-[12px]" style={{color: '#adbbc4'}}>{t('uptime')}</span>
+                                            <span className="text-[12px] font-medium" style={{color: '#e9ecef'}}>{formatUptime(vm.uptime)}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* warnings */}
+                            {lockInfo.locked && (
+                                <div className="flex items-center justify-between px-3 py-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
+                                    <div className="flex items-center gap-2">
+                                        <Icons.Lock className="w-4 h-4" style={{color: '#efc006'}} />
+                                        <span className="text-[13px]" style={{color: '#efc006'}}>{t('vmLocked') || 'This virtual machine is locked'}: {lockInfo.lock_reason || 'unknown'}</span>
+                                    </div>
+                                    {acts && (
+                                    <button onClick={() => setShowUnlockConfirm(true)} className="px-2 py-1 text-[12px] font-medium" style={{color: '#49afd9'}}>
+                                        {t('unlock') || 'Unlock'}
+                                    </button>
+                                    )}
+                                </div>
+                            )}
+                            {lockInfo.unread && (
+                                <div className="flex items-center gap-2 px-3 py-2" style={{background: 'rgba(114, 139, 154, 0.08)', borderLeft: '3px solid #728b9a'}}>
+                                    <Icons.Lock className="w-4 h-4 flex-shrink-0" style={{color: '#728b9a'}} />
+                                    <span className="text-[13px]" style={{color: '#adbbc4'}}>{t('lockStatus')}: {t('unknown')}</span>
+                                </div>
+                            )}
+                            {isQemu && isRunning && !guestInfo && (
+                                <div className="flex items-center gap-2 px-3 py-2" style={{background: 'rgba(239, 192, 6, 0.08)', borderLeft: '3px solid #efc006'}}>
+                                    <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" style={{color: '#efc006'}} />
+                                    <span className="text-[13px]" style={{color: '#efc006'}}>{t('guestAgentNotInstalled')}</span>
+                                    <a href="https://pve.proxmox.com/wiki/Qemu-guest-agent" target="_blank" rel="noopener noreferrer" className="text-[12px] ml-1" style={{color: '#49afd9'}}>{t('installGuestAgent') || 'Install QEMU Guest Agent...'}</a>
+                                </div>
+                            )}
+
+                            {/* MK #334 — Guest filesystem usage (qemu-agent). Rendered only when
+                                we actually got a list back, so VMs without agent stay uncluttered. */}
+                            {isQemu && isRunning && guestRows(fsInfo?.filesystems).length > 0 && (
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2 flex items-center gap-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <Icons.HardDrive className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestFilesystems') || 'Filesystem Usage'}</span>
+                                        <span className="text-[11px] ml-auto" style={{color: '#728b9a'}}>{guestRows(fsInfo.filesystems).length} {guestRows(fsInfo.filesystems).length === 1 ? 'mount' : 'mounts'}</span>
+                                    </div>
+                                    <div className="p-3 space-y-2">
+                                        {guestRows(fsInfo.filesystems).map((fs, i) => {
+                                            const pct = fs.used_pct == null ? 0 : fs.used_pct;
+                                            const barColor = pct > 90 ? 'var(--corp-thresh-crit)' : pct > 75 ? 'var(--corp-thresh-warn)' : 'var(--corp-thresh-ok)';
+                                            return (
+                                                <div key={i} className="flex items-center gap-2 text-[12px]">
+                                                    <span style={{color: '#adbbc4', minWidth: '140px', fontFamily: 'monospace'}} title={fs.name || ''}>{fs.mountpoint}</span>
+                                                    {fs.type && (
+                                                        <span className="text-[10px] px-1 py-0 rounded" style={{background: 'rgba(255,255,255,0.05)', color: '#728b9a'}}>{fs.type}</span>
+                                                    )}
+                                                    <div className="flex-1 flex items-center gap-2">
+                                                        <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
+                                                            <div className="h-full" style={{width: `${Math.min(pct, 100)}%`, background: barColor}}></div>
+                                                        </div>
+                                                        <span style={{color: '#e9ecef', minWidth: '45px', textAlign: 'right'}}>{fs.used_pct != null ? `${fs.used_pct}%` : '—'}</span>
+                                                    </div>
+                                                    <span className="text-[11px]" style={{color: '#728b9a', minWidth: '140px', textAlign: 'right', fontFamily: 'monospace'}}>
+                                                        {fs.used_bytes != null ? formatBytes(fs.used_bytes) : '—'} / {fs.total_bytes != null ? formatBytes(fs.total_bytes) : '—'}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* hardware + related */}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {/* Left: VM Hardware */}
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('vmHardware') || 'VM Hardware'}</span>
+                                    </div>
+                                    <div className="p-3 space-y-2">
+                                        {/* CPU */}
+                                        <div className="flex items-center gap-2 text-[12px]">
+                                            <Icons.Cpu className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#49afd9'}} />
+                                            <span style={{color: '#adbbc4', width: '60px'}}>CPU</span>
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
+                                                        <div className="h-full" style={{width: `${Math.min(cpuPercent, 100)}%`, background: '#49afd9'}}></div>
+                                                    </div>
+                                                    <span style={{color: '#e9ecef', minWidth: '35px'}}>{cpuPercent}%</span>
+                                                </div>
+                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{vm.maxcpu} {t('cores')} {vmHwInfo && vmHwInfo.cpu ? `• ${vmHwInfo.cpu}` : ''}</div>
+                                            </div>
+                                        </div>
+                                        {/* Memory */}
+                                        <div className="flex items-center gap-2 text-[12px]">
+                                            <Icons.MemoryStick className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#9b59b6'}} />
+                                            <span style={{color: '#adbbc4', width: '60px'}}>{t('memory') || 'Memory'}</span>
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2">
+                                                    <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
+                                                        <div className="h-full" style={{width: `${Math.min(ramPercent, 100)}%`, background: '#9b59b6'}}></div>
+                                                    </div>
+                                                    <span style={{color: '#e9ecef', minWidth: '35px'}}>{ramPercent}%</span>
+                                                </div>
+                                                <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{formatBytes(vm.mem)} / {formatBytes(vm.maxmem)}</div>
+                                            </div>
+                                        </div>
+                                        {/* Disk */}
+                                        {vm.maxdisk > 0 && (() => {
+                                            const hasDiskData = vm.disk > 0;
+                                            const diskPct = hasDiskData ? Math.round(vm.disk / vm.maxdisk * 100) : 0;
+                                            return (
+                                            <div className="flex items-center gap-2 text-[12px]">
+                                                <Icons.HardDrive className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#60b515'}} />
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('disk')}</span>
+                                                <div className="flex-1">
+                                                    {hasDiskData ? (<>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="flex-1 h-1.5 overflow-hidden" style={{background: 'var(--corp-bar-track)'}}>
+                                                            <div className="h-full" style={{width: `${Math.min(diskPct, 100)}%`, background: '#60b515'}}></div>
+                                                        </div>
+                                                        <span style={{color: '#e9ecef', minWidth: '35px'}}>{diskPct}%</span>
+                                                    </div>
+                                                    <div className="text-[11px] mt-0.5" style={{color: '#728b9a'}}>{formatBytes(vm.disk)} / {formatBytes(vm.maxdisk)}</div>
+                                                    </>) : (
+                                                    <span style={{color: '#e9ecef'}}>{formatBytes(vm.maxdisk)}</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            );
+                                        })()}
+                                        {/* Network */}
+                                        {vmHwInfo?.net && (
+                                            <div className="flex items-center gap-2 text-[12px]">
+                                                <Icons.Network className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#efc006'}} />
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('network') || 'Network'}</span>
+                                                <span style={{color: '#e9ecef'}}>{vmHwInfo.net}</span>
+                                            </div>
+                                        )}
+                                        {/* BIOS/Machine */}
+                                        {vmHwInfo && vmHwInfo.machine && (
+                                            <div className="flex items-center gap-2 text-[12px]">
+                                                <Icons.Settings className="w-3.5 h-3.5 flex-shrink-0" style={{color: '#728b9a'}} />
+                                                <span style={{color: '#adbbc4', width: '60px'}}>{t('biosType') || 'BIOS'}</span>
+                                                <span style={{color: '#e9ecef'}}>{vmHwInfo.bios === 'ovmf' ? 'UEFI (OVMF)' : 'SeaBIOS'} • {vmHwInfo.machine} • {vmHwInfo.scsihw}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Right: Related Objects + HA */}
+                                <div className="space-y-4">
+                                    {/* related objects */}
+                                    <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                        <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('relatedObjects') || 'Related Objects'}</span>
+                                        </div>
+                                        <table className="corp-property-grid">
+                                            <tbody>
+                                                <tr><td>{t('node')}</td><td className="flex items-center gap-1.5"><Icons.Server className="w-3 h-3" style={{color: '#49afd9'}} /> {vm.node}</td></tr>
+                                                <tr><td>{t('status')}</td><td className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background: isRunning ? '#60b515' : '#728b9a'}}></span> {isRunning ? t('running') : t('stopped')}</td></tr>
+                                                <tr><td>VMID</td><td>{vm.vmid}</td></tr>
+                                                <tr><td>{t('uptime')}</td><td>{formatUptime(vm.uptime)}</td></tr>
+                                                {vmHwInfo?.net && <tr><td>{t('network') || 'Network'}</td><td>{vmHwInfo.net}</td></tr>}
+                                            </tbody>
+                                        </table>
+                                    </div>
+
+                                    {/* Guest Agent Info (if available) */}
+                                    {isQemu && isRunning && guestInfo && (
+                                        <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                            <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                                <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('guestAgentInfo')}</span>
+                                            </div>
+                                            <table className="corp-property-grid">
+                                                <tbody>
+                                                    {guestInfo.hostname && <tr><td>{t('hostname')}</td><td>{guestInfo.hostname}</td></tr>}
+                                                    {guestInfo.os_pretty_name && <tr><td>{t('osVersion')}</td><td>{guestInfo.os_pretty_name}</td></tr>}
+                                                    {guestInfo.kernel_version && <tr><td>{t('kernel')}</td><td>{guestInfo.kernel_version}</td></tr>}
+                                                    {guestIps(guestInfo).length > 0 && (
+                                                        <tr><td>IP</td><td style={{fontFamily: 'monospace', fontSize: '11px'}}>{guestIps(guestInfo).join(', ')}</td></tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                            {/* MK + LW May 2026 — guest agent enrichment: real-FS fill, NIC detail,
+                                                logged-in users, clock drift. Hidden behind <details> so the summary
+                                                stays compact for users who don't care. */}
+                                            {(guestRows(guestInfo.filesystems).length > 0 ||
+                                              guestRows(guestInfo.interfaces).length > 0 ||
+                                              guestRows(guestInfo.users).length > 0 ||
+                                              guestInfo.guest_time_ns) && (
+                                                <details className="px-3 py-2" style={{borderTop: '1px solid var(--corp-border-medium)'}}>
+                                                    <summary className="text-[12px] cursor-pointer" style={{color: '#728b9a'}}>
+                                                        {t('guestDetail') || 'Guest detail'} — {t('filesystems') || 'Filesystems'}, {t('interfaces') || 'Interfaces'}, {t('users') || 'Users'}
+                                                    </summary>
+                                                    <div className="mt-2 space-y-2">
+                                                        {guestRows(guestInfo.filesystems).length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('filesystems') || 'Filesystems'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestRows(guestInfo.filesystems).map((fs, idx) => (
+                                                                            <tr key={fs.mountpoint || idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{fs.mountpoint}</td>
+                                                                                <td>
+                                                                                    {fs.used_bytes != null && fs.total_bytes != null
+                                                                                        ? `${(fs.used_bytes / 1024 / 1024 / 1024).toFixed(1)} / ${(fs.total_bytes / 1024 / 1024 / 1024).toFixed(1)} GB`
+                                                                                        : '-'}
+                                                                                    {fs.used_pct != null && (
+                                                                                        <span style={{color: fs.used_pct > 90 ? '#f54f47' : fs.used_pct > 75 ? '#efc006' : '#728b9a', marginLeft: '6px'}}>
+                                                                                            ({fs.used_pct}%)
+                                                                                        </span>
+                                                                                    )}
+                                                                                    <span style={{color: '#728b9a', marginLeft: '6px', fontFamily: 'monospace'}}>{fs.type}</span>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestRows(guestInfo.interfaces).length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('interfaces') || 'Interfaces'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestRows(guestInfo.interfaces).filter(n => n.name !== 'lo').map((nic, idx) => (
+                                                                            <tr key={nic.name || idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{nic.name}</td>
+                                                                                <td>
+                                                                                    {nic.mac && <span style={{color: '#728b9a', fontFamily: 'monospace'}}>{nic.mac}</span>}
+                                                                                    {guestRows(nic.ips).length > 0 && (
+                                                                                        <span style={{marginLeft: nic.mac ? '8px' : '0', fontFamily: 'monospace'}}>
+                                                                                            {guestRows(nic.ips).map(ip => `${ip.address}${ip.prefix ? '/' + ip.prefix : ''}`).join(', ')}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestRows(guestInfo.users).length > 0 && (
+                                                            <div>
+                                                                <div className="text-[11px] mb-1" style={{color: '#728b9a'}}>{t('loggedInUsers') || 'Logged-in users'}</div>
+                                                                <table className="corp-property-grid" style={{fontSize: '11px'}}>
+                                                                    <tbody>
+                                                                        {guestRows(guestInfo.users).map((u, idx) => (
+                                                                            <tr key={idx}>
+                                                                                <td style={{fontFamily: 'monospace'}}>{u.domain ? `${u.domain}\\${u.user}` : u.user}</td>
+                                                                                <td style={{color: '#728b9a'}}>{u.login_time ? new Date(u.login_time * 1000).toLocaleString() : '-'}</td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        )}
+                                                        {guestInfo.guest_time_ns && (
+                                                            <div className="text-[11px]" style={{color: '#728b9a'}}>
+                                                                {(() => {
+                                                                    const guestMs = guestInfo.guest_time_ns / 1e6;
+                                                                    const hostMs = Date.now();
+                                                                    const skewS = (guestMs - hostMs) / 1000;
+                                                                    const skewClr = Math.abs(skewS) > 60 ? '#f54f47' : Math.abs(skewS) > 5 ? '#efc006' : '#60b515';
+                                                                    return (<span>{t('clockSkew') || 'Clock skew'}: <span style={{color: skewClr, fontFamily: 'monospace'}}>{skewS >= 0 ? '+' : ''}{skewS.toFixed(1)}s</span></span>);
+                                                                })()}
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </details>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* HA config */}
+                                    {pveHa && (
+                                    <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                        <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                            <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{t('proxmoxHa') || 'Proxmox HA'}</span>
+                                            {acts && (
+                                            <button
+                                                onClick={toggleProxmoxHa}
+                                                disabled={haLoading || !haResources}
+                                                className="text-[11px] px-2 py-0.5 disabled:opacity-50"
+                                                style={haEnabled
+                                                    ? {color: '#f54f47', border: '1px solid rgba(245, 79, 71, 0.3)'}
+                                                    : {color: '#60b515', border: '1px solid rgba(96, 181, 21, 0.3)'}
+                                                }
+                                            >
+                                                {haLoading ? <Icons.RotateCw className="w-3 h-3 animate-spin" /> : haEnabled ? t('disable') : t('haActivate') || 'Enable'}
+                                            </button>
+                                            )}
+                                        </div>
+                                        <div className="px-3 py-2 flex items-center gap-2">
+                                            <Icons.Shield className="w-4 h-4" style={{color: haEnabled ? '#60b515' : '#728b9a'}} />
+                                            <div>
+                                                <div className="text-[12px]" style={{color: '#e9ecef'}}>{!haResources ? t('unknown') : haEnabled ? t('active') : t('disabled')}</div>
+                                                {haEnabled && haResources && <div className="text-[11px]" style={{color: '#728b9a'}}>Max Restart: {haLimit(haResource?.max_restart, t('default'))} | Max Relocate: {haLimit(haResource?.max_relocate, t('default'))}</div>}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* LW: Mar 2026 - inline perf charts, no more modal for corporate view */}
+                            {isRunning && !isCorpRedesigned && (
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2 flex items-center justify-between" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>
+                                            {t('performanceMetrics') || 'Performance Metrics'}
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <ChartZoomBar zoom={metricsZoom} />
+                                            <select
+                                                value={metricsTimeframe}
+                                                onChange={e => setMetricsTimeframe(e.target.value)}
+                                                className="text-[11px] px-2 py-0.5"
+                                                style={{background: 'var(--corp-input-bg)', border: '1px solid var(--corp-border-medium)', color: '#e9ecef'}}
+                                            >
+                                                <option value="hour">1 {t('hour')}</option>
+                                                <option value="day">1 {t('day')}</option>
+                                                <option value="week">1 {t('week')}</option>
+                                                <option value="month">1 {t('month')}</option>
+                                                <option value="year">1 {t('year')}</option>
+                                            </select>
+                                            <button
+                                                onClick={() => setMetricsRefreshTick(t => t + 1)}
+                                                disabled={metricsLoading}
+                                                className="p-0.5 rounded hover:bg-white/10 transition-colors disabled:opacity-40"
+                                                title={t('refresh') || 'Refresh'}
+                                            >
+                                                <Icons.RotateCw className={`w-3.5 h-3.5 ${metricsLoading ? 'animate-spin' : ''}`} style={{color: '#728b9a'}} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="p-3">
+                                        {metricsLoading ? (
+                                            <div className="flex items-center justify-center py-6">
+                                                <Icons.RotateCw className="w-4 h-4 animate-spin" style={{color: '#728b9a'}} />
+                                            </div>
+                                        ) : metricsData?.metrics ? (
+                                            <ChartZoomContext.Provider value={metricsZoom}>
+                                            <div className="space-y-3">
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart {...metricsZoom.series('cpu')}
+                                                        label="CPU" color="#49afd9" unit="%" />
+                                                    <LineChart data={memDataGB} timestamps={metricsMem.timestamps}
+                                                        label="Memory" color="#9b59b6" unit=" GB" yMin={0} yMax={maxMemGB}
+                                                        formatValue={v => v.toFixed(2)} />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart {...metricsZoom.series('disk_read')}
+                                                        label="Disk Read" color="#efc006" unit="/s" formatValue={formatBytes} />
+                                                    <LineChart {...metricsZoom.series('disk_write')}
+                                                        label="Disk Write" color="#f97316" unit="/s" formatValue={formatBytes} />
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <LineChart {...metricsZoom.series('net_in')}
+                                                        label="Network In" color="#49afd9" unit="/s" formatValue={formatBytes} />
+                                                    <LineChart {...metricsZoom.series('net_out')}
+                                                        label="Network Out" color="#8b5cf6" unit="/s" formatValue={formatBytes} />
+                                                </div>
+                                            </div>
+                                            </ChartZoomContext.Provider>
+                                        ) : (
+                                            <div className="text-center py-4 text-[12px]" style={{color: '#728b9a'}}>
+                                                {t('noDataAvailable') || 'No data available'}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* LW Oct 2026 - Corporate Redesigned: the charts of the summary on a tab of their own; LW Nov 2026 -
+                        with the figures, the data quality and the extra groups of cr_perf.js */}
+                    {isCorpRedesigned && activeDetailTab === 'monitor' && (
+                        <div className="p-4">
+                            <CrBoundary key={`${clusterId}:${vm.vmid}`} id="vm-perf">
+                                <CrGuestPerf vm={vm} clusterId={clusterId} kind={crKind} isRunning={isRunning} p={crMetrics}
+                                    loading={metricsLoading} failed={metricsFailed} range={metricsTimeframe} onRange={setMetricsTimeframe}
+                                    onReload={() => setMetricsRefreshTick(x => x + 1)} zoom={metricsZoom} authFetch={authFetch} />
+                            </CrBoundary>
+                        </div>
+                    )}
+
+                    {/* LW Oct 2026 - what happened to this guest and its host */}
+                    {activeDetailTab === 'timeline' && (
+                        <div className="p-4">
+                            <TimelineView key={`${clusterId}:${vm.vmid}`} clusterId={clusterId} vmid={vm.vmid} authFetch={authFetch} t={t} />
+                        </div>
+                    )}
+
+                    {/* NS: Mar 2026 - inline snapshots tab */}
+                    {activeDetailTab === 'snapshots' && (
+                        <div className="p-4 space-y-3">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="text-[13px] font-medium flex items-center gap-1.5" style={{color: '#e9ecef'}}>
+                                    <Icons.Clock className="w-4 h-4" />{t('snapshotsTab') || 'Snapshots'}
+                                    {snapshots.length + efficientSnapshots.length > 0 && (
+                                        <span className="text-[11px] font-normal" style={{color:'var(--corp-text-muted, #728b9a)'}}>
+                                            ({snapshots.filter(s => s.name !== 'current').length + efficientSnapshots.length})
+                                        </span>
+                                    )}
+                                </h3>
+                                {acts && (
+                                <button onClick={() => setShowCreateSnap(!showCreateSnap)}
+                                    className="corp-vm-btn corp-vm-btn-primary flex items-center gap-1.5">
+                                    <Icons.Plus className="w-3 h-3" />
+                                    {t('createSnapshot') || 'Take Snapshot'}
+                                </button>
+                                )}
+                            </div>
+
+                            {acts && showCreateSnap && (
+                                <div style={{background: 'var(--corp-surface-2, #1a2733)', border: '1px solid var(--corp-border-medium, #344955)', padding: '12px 14px'}}>
+                                    <div className="space-y-2">
+                                        <div>
+                                            <div className="corp-vm-section-title">{t('snapshotName') || 'Name'}</div>
+                                            <input type="text" value={snapName} onChange={e => setSnapName(e.target.value)}
+                                                placeholder="snap_2026..." />
+                                        </div>
+                                        <div>
+                                            <div className="corp-vm-section-title">{t('description') || 'Description'} <span style={{color:'var(--corp-text-muted)', fontWeight:400}}>({t('optional')})</span></div>
+                                            <input type="text" value={snapDesc} onChange={e => setSnapDesc(e.target.value)}
+                                                placeholder={t('snapshotDescription') || 'Optional description'} />
+                                        </div>
+                                        <div className="flex items-center justify-between pt-1">
+                                            {isQemu && isRunning ? (
+                                                <label className="flex items-center gap-2 text-[12px] cursor-pointer" style={{color:'var(--corp-text-secondary, #adbbc4)'}}>
+                                                    <input type="checkbox" checked={snapRam} onChange={e => setSnapRam(e.target.checked)} />
+                                                    {t('includeRam') || 'Include RAM state'}
+                                                </label>
+                                            ) : <span></span>}
+                                            <div className="flex gap-2 ml-auto">
+                                                <button onClick={() => setShowCreateSnap(false)}
+                                                    className="corp-vm-btn corp-vm-btn-ghost">
+                                                    {t('cancel')}
+                                                </button>
+                                                <button onClick={handleCreateSnap}
+                                                    className="corp-vm-btn corp-vm-btn-create">
+                                                    {t('create') || 'Create'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {(() => {
+                                // build tree from parent field
+                                const buildSnapTree = (snaps) => {
+                                    const map = {};
+                                    const roots = [];
+                                    snaps.forEach(s => { map[s.name] = { ...s, children: [] }; });
+                                    snaps.forEach(s => {
+                                        if (s.parent && map[s.parent]) map[s.parent].children.push(map[s.name]);
+                                        else roots.push(map[s.name]);
+                                    });
+                                    return roots;
+                                };
+
+                                const renderSnapNode = (node, depth) => (
+                                    <React.Fragment key={node.name}>
+                                        <div className="corp-snap-row flex items-center justify-between"
+                                            style={{marginLeft: depth * 20}}>
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                {depth > 0 && <span className="text-xs" style={{color: 'var(--corp-accent, #49afd9)', fontFamily: 'monospace'}}>└─</span>}
+                                                <div className="min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[13px] font-medium truncate" style={{color: '#e9ecef'}}>{node.name}</span>
+                                                        {!!node.vmstate && <span className="corp-snap-pill" style={{background:'rgba(73,175,217,0.12)', color:'var(--corp-accent, #49afd9)', borderColor:'rgba(73,175,217,0.30)'}}>RAM</span>}
+                                                        {node.disk_size > 0 && (
+                                                            <span className="text-[10.5px] px-1.5 py-0" style={{background: 'rgba(255,255,255,0.04)', color: 'var(--corp-text-muted, #728b9a)', border: '1px solid var(--corp-border-subtle)'}}>
+                                                                {(node.disk_size / (1024*1024*1024)).toFixed(1)} GB
+                                                                {!!node.vmstate && node.ram_size > 0 && ` + ${(node.ram_size / (1024*1024*1024)).toFixed(1)} GB RAM`}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-[11px] mt-0.5" style={{color: 'var(--corp-text-muted, #728b9a)'}}>
+                                                        {node.snaptime ? fmtDate(node.snaptime) : ''}
+                                                        {node.description && <span className="ml-2" style={{color: '#5a7a8a'}}>— {node.description}</span>}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-1 flex-shrink-0">
+                                                <button onClick={() => setCompareSnap({ a: 'current', b: node.name })}
+                                                    className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('compareSnapshot') || 'Compare with current'}>
+                                                    <Icons.ChevronRight className="w-3 h-3" style={{transform:'rotate(90deg)'}} />
+                                                    <span className="text-[11px]">{t('compare') || 'Compare'}</span>
+                                                </button>
+                                                {acts && (<>
+                                                <button onClick={() => handleRollbackSnap(node.name)}
+                                                    className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('rollback')}>
+                                                    <Icons.RotateCcw className="w-3 h-3" />
+                                                    <span className="text-[11px]">{t('rollback')}</span>
+                                                </button>
+                                                <button onClick={() => handleDeleteSnap(node.name)}
+                                                    className="corp-vm-btn corp-vm-btn-danger-ghost" title={t('delete')}>
+                                                    <Icons.Trash2 className="w-3 h-3" />
+                                                </button>
+                                                </>)}
+                                            </div>
+                                        </div>
+                                        {node.children.map(child => renderSnapNode(child, depth + 1))}
+                                    </React.Fragment>
+                                );
+
+                                if (snapsLoading) return <div className="corp-vm-modal-state"><div className="corp-vm-spinner"></div></div>;
+
+                                const stdSnaps = snapshots.filter(s => s.name !== 'current');
+                                const tree = buildSnapTree(stdSnaps);
+                                // LW Nov 2026 - the redesign says a snapshot read that failed, with Retry, never "no snapshots"
+                                const snapWhy = (code) => (code ? `HTTP ${code}` : t('crVmNoAnswer'));
+                                const snapFailNote = isCorpRedesigned && snapsFail ? (
+                                    <div className="cr-callout cr-callout-error" role="alert"
+                                        data-cr-vm-snaps-fail={[snapsFail.std !== null ? 'std' : '', snapsFail.eff !== null ? 'eff' : ''].filter(Boolean).join(' ')}>
+                                        <Icons.AlertCircle className="w-4 h-4" />
+                                        <div>
+                                            {snapsFail.std !== null && <p>{crFill(t('crVmSnapsFailed'), { why: snapWhy(snapsFail.std) })}</p>}
+                                            {snapsFail.eff !== null && <p>{crFill(t('crVmEffSnapsFailed'), { why: snapWhy(snapsFail.eff) })}</p>}
+                                        </div>
+                                        <button type="button" className="cr-btn cr-btn-xs" onClick={fetchSnapshots} data-cr-vm-snaps-retry="">{t('retry')}</button>
+                                    </div>
+                                ) : null;
+
+                                if (stdSnaps.length === 0 && efficientSnapshots.length === 0)
+                                    return snapFailNote || (
+                                        <div className="corp-empty-state">
+                                            <Icons.Clock style={{color: 'var(--corp-border-medium)'}} />
+                                            <div className="corp-empty-title">{t('noSnapshots') || 'No snapshots'}</div>
+                                            <div className="corp-empty-text">{t('noSnapshotsHint') || 'Take a snapshot to capture the current state.'}</div>
+                                        </div>
+                                    );
+
+                                return (<>
+                                    {snapFailNote}
+                                    {tree.map(root => renderSnapNode(root, 0))}
+
+                                    {efficientSnapshots.length > 0 && (<>
+                                        <div className="corp-vm-section-title mt-3" style={{color: 'var(--corp-accent, #49afd9)'}}>
+                                            Efficient Snapshots (LVM COW)
+                                        </div>
+                                        {efficientSnapshots.map(snap => (
+                                            <div key={snap.id} className="corp-snap-row flex items-center justify-between"
+                                                style={{borderColor:'rgba(73,175,217,0.30)'}}>
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[13px] font-medium" style={{color: '#e9ecef'}}>{snap.name}</span>
+                                                        <span className="corp-snap-pill" style={{background:'rgba(96,181,21,0.15)', color:'#60b515', borderColor:'rgba(96,181,21,0.30)'}}>COW</span>
+                                                        {snap.fs_frozen && <span className="corp-snap-pill" style={{background:'rgba(73,175,217,0.12)', color:'var(--corp-accent, #49afd9)', borderColor:'rgba(73,175,217,0.30)'}}>frozen</span>}
+                                                        {snap.total_snap_alloc_gb != null && (
+                                                            <span className="text-[10.5px] px-1.5 py-0" style={{background:'rgba(255,255,255,0.04)', color:'var(--corp-text-muted, #728b9a)', border:'1px solid var(--corp-border-subtle)'}}>
+                                                                {snap.total_snap_alloc_gb.toFixed(1)} GB
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                    <div className="text-[11px] mt-0.5" style={{color: 'var(--corp-text-muted, #728b9a)'}}>
+                                                        {snap.created ? new Date(snap.created).toLocaleString() : ''}
+                                                    </div>
+                                                </div>
+                                                <div className="flex gap-1">
+                                                    {acts && (<>
+                                                    <button onClick={() => handleRollbackEfficientSnap(snap.id, snap.name)}
+                                                        className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1" title={t('rollback')}>
+                                                        <Icons.RotateCcw className="w-3 h-3" />
+                                                        <span className="text-[11px]">{t('rollback')}</span>
+                                                    </button>
+                                                    <button onClick={() => handleDeleteEfficientSnap(snap.id, snap.name)}
+                                                        className="corp-vm-btn corp-vm-btn-danger-ghost" title={t('delete')}>
+                                                        <Icons.Trash2 className="w-3 h-3" />
+                                                    </button>
+                                                    </>)}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </>)}
+                                </>);
+                            })()}
+                        </div>
+                    )}
+
+                    {/* LW May 2026 — snapshot compare modal */}
+                    {compareSnap && (
+                        <SnapshotCompareModal
+                            vm={vm}
+                            clusterId={clusterId}
+                            snapshots={snapshots}
+                            initialA={compareSnap.a}
+                            initialB={compareSnap.b}
+                            onClose={() => setCompareSnap(null)}
+                            authFetch={authFetch}
+                            apiUrl={API_URL}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        // Proxmox Native HA Section for Settings
+        function ProxmoxHaSection({ clusterId }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            // LW Oct 2026 (#625) - taking a guest out of HA wants ha.config; ha.view only looks
+            const canEdit = !haReadOnly && (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('ha.config')));
+            const [resources, setResources] = useState([]);
+            const [loading, setLoading] = useState(true);
+            // a list that could not be read is not "no VMs with HA"
+            const [unread, setUnread] = useState(false);
+
+            // Local authFetch helper
+            const authFetch = async (url, options = {}) => {
+                try {
+                    return await fetch(url, {
+                        ...options,
+                        credentials: 'include',
+                        headers: { ...options.headers, ...getAuthHeaders() }
+                    });
+                } catch (err) {
+                    console.error('Auth fetch error:', err);
+                    return null;
+                }
+            };
+
+            useEffect(() => {
+                const fetchData = async () => {
+                    try {
+                        const response = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources`);
+                        const data = response && response.ok ? await response.json() : null;
+                        setUnread(!Array.isArray(data));
+                        setResources(Array.isArray(data) ? data : []);
+                    } catch (error) {
+                        console.error('fetching HA data:', error);
+                        setUnread(true);
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+                fetchData();
+            }, [clusterId]);
+
+            const removeFromHa = async (sid) => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/proxmox-ha/resources/${sid}`, {
+                        method: 'DELETE'
+                    });
+                    if(res && res.ok) {
+                        setResources(resources.filter(r => r.sid !== sid));
+                    }
+                } catch(e) {
+                    console.error('removing from HA:', e);
+                }
+            };
+
+            if(loading) {
+                return (
+                    <div className="flex items-center gap-2 text-gray-500 text-sm">
+                        <Icons.RotateCw />
+                        {t('loading')}
+                    </div>
+                );
+            }
+
+            if(unread) {
+                return (
+                    <div className="text-xs text-yellow-400 p-3 bg-proxmox-dark rounded-lg">{t('haResourcesUnread')}</div>
+                );
+            }
+
+            return (
+                <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                        <span className="text-sm text-gray-400">{resources.length} {t('vmsWithHa')}</span>
+                    </div>
+                    
+                    {resources.length === 0 ? (
+                        <div className="text-xs text-gray-600 p-3 bg-proxmox-dark rounded-lg">
+                            {t('noVmsWithHa')}
+                        </div>
+                    ) : (
+                        <div className="space-y-2 max-h-48 overflow-y-auto">
+                            {resources.map(resource => {
+                                const [type, vmid] = (resource.sid || '').split(':');
+                                return (
+                                    <div key={resource.sid} className="flex items-center justify-between p-2 bg-proxmox-dark rounded-lg text-sm">
+                                        <div className="flex items-center gap-2">
+                                            <span className={type === 'vm' ? 'text-blue-400' : 'text-purple-400'}>
+                                                {type === 'vm' ? 'VM' : 'CT'} {vmid}
+                                            </span>
+                                            <span className="text-xs text-gray-500">
+                                                Max Restart: {haLimit(resource.max_restart, t('default'))}
+                                            </span>
+                                        </div>
+                                        {canEdit && (
+                                            <button
+                                                onClick={() => removeFromHa(resource.sid)}
+                                                className="p-1 rounded hover:bg-red-500/20 text-gray-500 hover:text-red-400"
+                                                title={t('removeFromHa')}
+                                            >
+                                                <Icons.X />
+                                            </button>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Migrate Modal Component
+        // LW: This thing was a nightmare to debug. ISO detection finally works now!
+        // See also: CrossClusterMigrateModal below (similar logic)
+        // storages that keep a qcow2 file, which carries its snapshots along
+        const MIG_SNAP_FILE_STORAGES = ['dir', 'nfs', 'cifs', 'glusterfs', 'cephfs', 'btrfs'];
+
+        function MigrateModal({ vm, nodes, clusterId, onMigrate, onClose }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const [targetNode, setTargetNode] = useState('');
+            const [targetStorage, setTargetStorage] = useState('');
+            const [online, setOnline] = useState(true);
+            const [withLocalDisks, setWithLocalDisks] = useState(false);
+            const [forceConntrack, setForceConntrack] = useState(false);
+            const [loading, setLoading] = useState(false);
+            const [storages, setStorages] = useState([]);
+            const [loadingStorages, setLoadingStorages] = useState(false);
+            const [hasLocalDisks, setHasLocalDisks] = useState(false);
+            const [hasCdDvd, setHasCdDvd] = useState(false);
+            const [detectedIsos, setDetectedIsos] = useState([]);
+            const [bootOrderIssues, setBootOrderIssues] = useState([]);
+            // LW Oct 2026 - virtiofs shares ([{ key, dirid }]) and the cluster's directory mappings,
+            // null until read or when this account may not read them
+            const [virtiofs, setVirtiofs] = useState([]);
+            const [dirMappings, setDirMappings] = useState(null);
+
+            const availableNodes = nodes.filter(n => n !== vm.node);
+            const isContainer = vm.type === 'lxc';
+
+            // check if VM has local disks, CD/DVD, and boot order issues on mount
+            // NS: Now listens to SSE events for live updates
+            useEffect(() => {
+                if(!vm || !vm.node || !clusterId) return;
+                
+                const processVmConfig = (data) => {
+                    const config = data.raw || data;
+                    
+                    // Check all disk entries for local storage
+                    const diskKeys = Object.keys(config).filter(k => 
+                        k.match(/^(scsi|sata|virtio|ide|mp|rootfs)\d*$/)
+                    );
+                    const hasLocal = diskKeys.some(key => {
+                        const diskValue = config[key];
+                        if(typeof diskValue === 'string') {
+                            return diskValue.includes('shared=0') || 
+                                   diskValue.startsWith('local:') ||
+                                   diskValue.startsWith('local-lvm:') ||
+                                   diskValue.startsWith('local-zfs:');
+                        }
+                        return false;
+                    });
+                    setHasLocalDisks(hasLocal);
+                    if(hasLocal) {
+                        setWithLocalDisks(true);
+                    }
+                    
+                    // Check for CD/DVD drives with ISO mounted
+                    const cdDvdKeys = Object.keys(config).filter(k => 
+                        k.match(/^(ide|sata|scsi)\d*$/)
+                    );
+                    const foundIsos = [];
+                    cdDvdKeys.forEach(key => {
+                        const value = config[key];
+                        if(typeof value === 'string' && value.includes('media=cdrom')) {
+                            const isoMatch = value.match(/^([^,]+)/);
+                            if(isoMatch && isoMatch[1] && !isoMatch[1].includes('none')) {
+                                const isoPath = isoMatch[1];
+                                const isLocalStorage = isoPath.startsWith('local:') || 
+                                    isoPath.startsWith('local-lvm:') ||
+                                    isoPath.startsWith('local-zfs:');
+                                foundIsos.push({ device: key, iso: isoPath, isLocal: isLocalStorage });
+                            }
+                        }
+                    });
+                    setHasCdDvd(foundIsos.length > 0);
+                    setDetectedIsos(foundIsos);
+                    
+                    // Check boot order for non-existent disks
+                    const bootOrder = config.boot || '';
+                    const bootDevices = bootOrder.includes('order=') 
+                        ? bootOrder.split('order=')[1].split(';')[0].split(',')
+                        : [];
+                    const issues = [];
+                    bootDevices.forEach(device => {
+                        if(device && !config[device] && device !== 'net0') {
+                            issues.push(device);
+                        }
+                    });
+                    setBootOrderIssues(issues);
+
+                    // a VM with virtiofs does not migrate live (qemu-server check_local_resources), and
+                    // offline only to a node its directory mappings cover
+                    setVirtiofs(Object.keys(config).filter(k => /^virtiofs[0-9]$/.test(k) && config[k]).sort()
+                        .map(k => ({ key: k, dirid: parseVirtiofs(config[k]).dirid })));
+                };
+                
+                const checkVmConfig = async () => {
+                    try {
+                        const response = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                            credentials: 'include',
+                            headers: getAuthHeaders()
+                        });
+                        if(response && response.ok) {
+                            const data = await response.json();
+                            processVmConfig(data);
+                        }
+                    } catch (err) {
+                        console.error('checking VM config:', err);
+                    }
+                };
+                
+                checkVmConfig();
+                
+                // NS: Listen to SSE vm_config events for live updates
+                const handleVmConfigUpdate = (event) => {
+                    const { vmid: eventVmid, vm_type, config: newConfig, cluster_id } = event.detail;
+                    if (eventVmid === vm.vmid && vm_type === vm.type && cluster_id === clusterId) {
+                        console.log('SSE: Updating MigrateModal config for', vm.vmid);
+                        processVmConfig(newConfig);
+                    }
+                };
+                
+                window.addEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+                return () => window.removeEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+            }, [vm, clusterId]);
+
+            useEffect(() => {
+                if (!virtiofs.length || !clusterId) return;
+                let gone = false;
+                (async () => {
+                    try {
+                        const r = await fetch(`${API_URL}/clusters/${clusterId}/datacenter/mapping/dir`, { credentials: 'include', headers: getAuthHeaders() });
+                        const d = r && r.ok ? await r.json() : null;
+                        if (!gone) setDirMappings(d && d.supported !== false ? (d.mappings || []) : null);
+                    } catch (e) {
+                        if (!gone) setDirMappings(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [virtiofs.length, clusterId]);
+
+            const vfsRunning = virtiofs.length > 0 && vm.status === 'running';
+            const vfsMissing = targetNode && dirMappings
+                ? virtiofs.filter(v => !dirMappings.some(m => m.id === v.dirid && m.nodes.includes(targetNode)))
+                : [];
+
+            // LW Oct 2026 - snapshots on local disks, read once when the dialog opens: Proxmox
+            // moves no such disk while the VM runs (unless replication has it on the target),
+            // and offline only where both storages keep snapshots in the volume
+            const [snapCheck, setSnapCheck] = useState(null);
+            useEffect(() => {
+                if (!vm || !vm.node || !clusterId) return;
+                let gone = false;
+                (async () => {
+                    try {
+                        const r = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/migrate-check`, { credentials: 'include', headers: getAuthHeaders() });
+                        const d = r && r.ok ? await r.json() : null;
+                        if (!gone) setSnapCheck(d && d.supported !== false ? d : null);
+                    } catch (e) {
+                        if (!gone) setSnapCheck(null);
+                    }
+                })();
+                return () => { gone = true; };
+            }, [vm && vm.vmid, vm && vm.node, vm && vm.type, clusterId]);
+
+            const snapVols = snapCheck && snapCheck.snapshot_count > 0 ? (snapCheck.volumes || []) : [];
+            const snapLive = !isContainer && vm.status === 'running' && online;
+            const snapNotThere = snapLive
+                ? snapVols.filter(v => !(v.family === 'zfs' && targetNode && (snapCheck.replicated_to || []).includes(targetNode)))
+                : [];
+            const tgtStoreType = targetStorage ? ((storages.find(s => s.storage === targetStorage) || {}).type || '') : '';
+            const snapCarried = (v) => !!v.family && (!tgtStoreType || (v.family === 'zfs' ? tgtStoreType === 'zfspool'
+                : v.family === 'btrfs' ? tgtStoreType === 'btrfs' : MIG_SNAP_FILE_STORAGES.includes(tgtStoreType)));
+            const snapStuck = snapLive ? [] : snapVols.filter(v => !snapCarried(v));
+            const snapCopied = snapLive ? [] : snapVols.filter(snapCarried);
+            const snapDisks = (vols) => vols.map(v => `${v.key} (${v.storage}${v.type ? ', ' + v.type : ''})`).join(', ');
+
+            // Fetch storages when target node changes
+            useEffect(() => {
+                if(targetNode) {
+                    fetchStorages(targetNode);
+                }else{
+                    setStorages([]);
+                    setTargetStorage('');
+                }
+            }, [targetNode]);
+
+            const fetchStorages = async (node) => {
+                setLoadingStorages(true);
+                try {
+                    const response = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/storage`, { credentials: 'include', headers: getAuthHeaders()
+                    });
+                    if(response && response.ok) {
+                        const data = await response.json();
+                        // Filter storages that can hold VM/CT images
+                        const validStorages = data.filter(s => 
+                            s.content && (s.content.includes('images') || s.content.includes('rootdir'))
+                        );
+                        setStorages(validStorages);
+                    }
+                } catch (err) {
+                    console.error('fetching storages:', err);
+                }
+                setLoadingStorages(false);
+            };
+
+            const handleMigrate = async () => {
+                if(!targetNode) return;
+                setLoading(true);
+                
+                const options = {
+                    online,
+                    targetStorage: targetStorage || null,
+                    withLocalDisks,
+                    forceConntrack: isContainer ? forceConntrack : null
+                };
+                
+                await onMigrate(vm, targetNode, online, options);
+                setLoading(false);
+                onClose();
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('migrateVm')}</h3>
+                        <div className="space-y-4">
+                            <div className="p-3 bg-proxmox-dark rounded-lg">
+                                <div className="flex items-center gap-3">
+                                    {vm.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
+                                    <div>
+                                        <div className="font-medium text-white">{vm.name || `VM ${vm.vmid}`}</div>
+                                        <div className="text-xs text-gray-400">ID {vm.vmid} {t('on')} {vm.node}</div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* Migration Warnings */}
+                            {virtiofs.length > 0 && (
+                                <div className={`p-3 rounded-lg border ${vfsRunning ? 'bg-red-500/10 border-red-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}
+                                    data-mig-vfs={vfsRunning ? 'running' : 'stopped'}>
+                                    <div className="flex items-start gap-2">
+                                        <Icons.AlertTriangle />
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-medium text-sm ${vfsRunning ? 'text-red-400' : 'text-yellow-400'}`}>{t('migVfsTitle')}</p>
+                                            <p className="text-xs text-gray-300 mt-1">{t(vfsRunning ? 'migVfsLive' : 'migVfsOffline')}</p>
+                                            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                                                {virtiofs.map(v => (
+                                                    <code key={v.key} className="bg-proxmox-dark px-1 rounded text-gray-300">{v.key}: {v.dirid}</code>
+                                                ))}
+                                            </div>
+                                            {vfsMissing.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-vfs-missing>
+                                                    {t('migVfsMissing').replace(/\{node\}/g, () => targetNode).replace(/\{ids\}/g, () => vfsMissing.map(v => v.dirid).join(', '))}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {snapVols.length > 0 && (snapNotThere.length > 0 || snapStuck.length > 0 || snapCopied.length > 0) && (
+                                <div className={`p-3 rounded-lg border ${snapNotThere.length || snapStuck.length ? 'bg-red-500/10 border-red-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}
+                                    data-mig-snap={snapNotThere.length || snapStuck.length ? 'blocked' : 'copied'}>
+                                    <div className="flex items-start gap-2">
+                                        <Icons.AlertTriangle />
+                                        <div className="flex-1 min-w-0">
+                                            <p className={`font-medium text-sm ${snapNotThere.length || snapStuck.length ? 'text-red-400' : 'text-yellow-400'}`}>{t('migSnapTitle')}</p>
+                                            <p className="text-xs text-gray-300 mt-1">{t('migSnapIntro').replace(/\{count\}/g, () => String(snapCheck.snapshot_count))}</p>
+                                            <div className="mt-2 flex flex-wrap gap-2 text-xs" data-mig-snap-names>
+                                                {(snapCheck.snapshots || []).slice(-6).reverse().map(s => (
+                                                    <code key={s.name} className="bg-proxmox-dark px-1 rounded text-gray-300">{s.name}</code>
+                                                ))}
+                                                {snapCheck.snapshot_count > 6 && (
+                                                    <span className="text-gray-500">{t('migSnapMore').replace(/\{n\}/g, () => String(snapCheck.snapshot_count - 6))}</span>
+                                                )}
+                                            </div>
+                                            {snapNotThere.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-live>
+                                                    {t('migSnapLive').replace(/\{disks\}/g, () => snapDisks(snapNotThere))}
+                                                </p>
+                                            )}
+                                            {snapStuck.length > 0 && (
+                                                <p className="text-xs text-red-400 mt-2" data-mig-snap-stuck>
+                                                    {t('migSnapStuck').replace(/\{disks\}/g, () => snapDisks(snapStuck))}
+                                                </p>
+                                            )}
+                                            {snapCopied.length > 0 && (
+                                                <p className="text-xs text-gray-300 mt-2" data-mig-snap-copied>
+                                                    {t('migSnapCopied').replace(/\{disks\}/g, () => snapDisks(snapCopied))}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {(hasCdDvd || bootOrderIssues.length > 0) && (
+                                <div className="space-y-2">
+                                    {hasCdDvd && (
+                                        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                            <div className="flex items-start gap-2">
+                                                <span className="text-red-400 text-lg">💿</span>
+                                                <div className="flex-1">
+                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted') || 'ISO/CD-ROM Mounted'}</p>
+                                                    <p className="text-red-300/70 text-xs mt-1">
+                                                        {t('isoMigrationWarning') || 'Migration may fail if the ISO is not available on the target node. Eject the CD/DVD or ensure the ISO exists on shared storage.'}
+                                                    </p>
+                                                    {detectedIsos && detectedIsos.length > 0 && (
+                                                        <div className="mt-2 space-y-1">
+                                                            {detectedIsos.map((iso, idx) => (
+                                                                <div key={idx} className="flex items-center gap-2 text-xs flex-wrap">
+                                                                    <span className="text-gray-400">{iso.device}:</span>
+                                                                    <code className="text-red-300 bg-red-500/10 px-1 rounded break-all">{iso.iso}</code>
+                                                                    {iso.isLocal && (
+                                                                        <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
+                                                                            {t('localStorage') || 'Local'}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {bootOrderIssues.length > 0 && (
+                                        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-2">
+                                            <span className="text-yellow-400 text-lg">⚠️</span>
+                                            <div>
+                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
+                                                <p className="text-yellow-300/70 text-xs">
+                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                            
+                            {/* Target Node */}
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-2">{t('targetNode')}</label>
+                                <select
+                                    value={targetNode}
+                                    onChange={(e) => setTargetNode(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                >
+                                    <option value="">{t('selectNode')}...</option>
+                                    {availableNodes.map(node => (
+                                        <option key={node} value={node}>{node}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            
+                            {/* Target Storage */}
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-2">{t('targetStorage')}</label>
+                                <select
+                                    value={targetStorage}
+                                    onChange={(e) => setTargetStorage(e.target.value)}
+                                    disabled={!targetNode || loadingStorages}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50"
+                                >
+                                    <option value="">{t('sameAsSource')}</option>
+                                    {storages.map(storage => (
+                                        <option key={storage.storage} value={storage.storage}>
+                                            {storage.storage} ({storage.type}) - {Math.round((storage.avail || 0) / 1073741824)} GB {t('free')}
+                                        </option>
+                                    ))}
+                                </select>
+                                {loadingStorages && (
+                                    <p className="text-xs text-gray-500 mt-1">{t('loadingStorages')}...</p>
+                                )}
+                            </div>
+                            
+                            {/* Migration Options */}
+                            <div className="space-y-3 pt-2 border-t border-proxmox-border">
+                                <label className="flex items-center gap-3 text-sm text-gray-300 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={online}
+                                        onChange={(e) => setOnline(e.target.checked)}
+                                        className="w-4 h-4 rounded"
+                                    />
+                                    <div>
+                                        <span>{t('liveMigration')}</span>
+                                        {isContainer && (
+                                            <p className="text-xs text-yellow-500 mt-0.5">⚠️ {t('containerNoLiveMigration')}</p>
+                                        )}
+                                    </div>
+                                </label>
+                                
+                                {/* Local Disks Warning */}
+                                {hasLocalDisks && (
+                                    <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                        <p className="text-xs text-yellow-400">
+                                            ⚠️ {t('localDisksDetected') || 'This VM has local disks. Migration requires copying disk data.'}
+                                        </p>
+                                    </div>
+                                )}
+                                
+                                <label className="flex items-center gap-3 text-sm text-gray-300 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={withLocalDisks}
+                                        onChange={(e) => setWithLocalDisks(e.target.checked)}
+                                        className="w-4 h-4 rounded"
+                                    />
+                                    <div>
+                                        <span>{t('withLocalDisks')}</span>
+                                        <p className="text-xs text-gray-500">{t('withLocalDisksDesc')}</p>
+                                        {hasLocalDisks && <p className="text-xs text-yellow-400">{t('requiredForThisVm') || 'Required for this VM'}</p>}
+                                    </div>
+                                </label>
+                                
+                                {isContainer && (
+                                    <label className="flex items-center gap-3 text-sm text-gray-300 cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={forceConntrack}
+                                            onChange={(e) => setForceConntrack(e.target.checked)}
+                                            className="w-4 h-4 rounded"
+                                        />
+                                        <div>
+                                            <span>{t('forceConntrack')}</span>
+                                            <p className="text-xs text-gray-500">{t('forceConntrackDesc')}</p>
+                                        </div>
+                                    </label>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button
+                                onClick={handleMigrate}
+                                disabled={!targetNode || loading || vfsRunning || vfsMissing.length > 0}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                                {loading && <Icons.RotateCw />}
+                                {t('migrate')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Bulk Migrate Modal Component
+        // NS: For evacuating nodes before maintenance
+        // LW Oct 2026 (#952) - the migrations run on the server as a bulk run now: one at a
+        // time from a few guests on, a few at a time or all at once as picked here. The
+        // dialog only asks where to and how, the progress shows in BulkMigrateRuns
+        const MIG_RUN_PARALLEL_MAX = 5;
+        const migRunDefaultPlan = (count) => ({ mode: count > 3 ? 'sequential' : 'all', parallel: 2 });
+
+        function MigRunPlan({ plan, onChange }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const option = (mode, label, hint, extra) => (
+                <label key={mode} className="flex items-start gap-2 text-sm cursor-pointer" data-mig-mode={mode}>
+                    <input type="radio" name="mig-run-mode" checked={plan.mode === mode} className="mt-1"
+                        onChange={() => onChange({ ...plan, mode })} />
+                    <span className="flex-1 min-w-0">
+                        <span className="flex items-center gap-2 text-white">{label}{extra}</span>
+                        <span className="block text-xs text-gray-400">{hint}</span>
+                    </span>
+                </label>
+            );
+            return (
+                <div className="space-y-2" data-testid="mig-run-plan">
+                    <div className={isCorporate ? 'corp-vm-section-title' : 'block text-sm text-gray-400 mb-1'}>{t('migRunHow')}</div>
+                    {option('sequential', t('migRunOne'), t('migRunOneHint'))}
+                    {option('parallel', t('migRunSome'), guestBulkFill(t('migRunSomeHint'), { max: MIG_RUN_PARALLEL_MAX }),
+                        <input type="number" min="2" max={MIG_RUN_PARALLEL_MAX} value={plan.parallel} data-testid="mig-run-parallel"
+                            onChange={e => onChange({ mode: 'parallel', parallel: Math.max(2, Math.min(MIG_RUN_PARALLEL_MAX, parseInt(e.target.value, 10) || 2)) })}
+                            className={isCorporate ? '' : 'w-16 px-2 py-0.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm'}
+                            style={isCorporate ? { width: '64px' } : undefined} />)}
+                    {option('all', t('migRunAll'), t('migRunAllHint'))}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the Check step of the migrate dialogs: the server's preflight
+        // (core/preflight.py) per guest ready, with warnings or blocked, the planned steps and
+        // what an abort leaves behind. A block that may be overridden gets a tick box, and
+        // ticking one wants the confirmation below it before Start sends it.
+        const MIG_PF_GROUPS = [
+            ['blocked', 'migPfBlocked', 'text-red-400'],
+            ['warning', 'migPfWarning', 'text-yellow-400'],
+            ['ready', 'migPfReady', 'text-green-400'],
+        ];
+        const MIG_PF_REASON = { blocked: 'text-red-400', warning: 'text-yellow-400', info: 'text-gray-400' };
+
+        // what Start sends after a check that still holds: the guests that move, the blocks overridden
+        function migPfPlan(result, override, confirmed) {
+            const rows = (result && result.guests) || [];
+            const overridden = rows.filter(g => g.verdict === 'blocked' && g.overridable && override.has(g.vmid)).map(g => g.vmid);
+            const moving = new Set(rows.filter(g => g.verdict !== 'blocked' || (confirmed && overridden.includes(g.vmid))).map(g => g.vmid));
+            return { moving, overridden: confirmed ? overridden : [], needsConfirm: overridden.length > 0 && !confirmed };
+        }
+
+        async function migPfFetch(url, body, getAuthHeaders, fallback) {
+            try {
+                const res = await fetch(url, {
+                    method: 'POST', credentials: 'include', body: JSON.stringify(body),
+                    headers: { ...getAuthHeaders(), 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                });
+                if (res.ok) return { result: await res.json() };
+                return { error: await PegaProxApiErrors.message(res, fallback) };
+            } catch (e) {
+                return { error: fallback };
+            }
+        }
+
+        function MigPreflightView({ result, stale, override, onOverride, confirmed, onConfirm }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [stepsOpen, setStepsOpen] = useState(false);
+            if (!result) return null;
+            const rows = result.guests || [];
+            const totals = result.totals || {};
+            const boxCls = isCorporate ? 'p-2 space-y-2 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-2 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '260px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '260px' };
+            const aborts = [...new Set([...(result.abort || []),
+                ...rows.filter(g => g.verdict !== 'blocked' || override.has(g.vmid)).map(g => g.abort).filter(Boolean)])];
+            return (
+                <div className="space-y-2" data-testid="mig-pf" data-stale={stale ? '1' : '0'}>
+                    <div className="text-sm text-white" data-testid="mig-pf-totals">
+                        {guestBulkFill(t('migPfTotals'), { ready: totals.ready || 0, warning: totals.warning || 0, blocked: totals.blocked || 0 })}
+                    </div>
+                    {stale && (
+                        <div className="text-xs text-yellow-400 flex items-start gap-2" data-testid="mig-pf-stale">
+                            <Icons.AlertTriangle /><span>{t('migPfStale')}</span>
+                        </div>
+                    )}
+                    <div className={boxCls} style={boxStyle}>
+                        {MIG_PF_GROUPS.map(([level, key, color]) => {
+                            const group = rows.filter(g => g.verdict === level);
+                            if (!group.length) return null;
+                            return (
+                                <div key={level} data-pf-group={level} className="space-y-1">
+                                    <div className={`text-xs font-semibold ${color}`}>{t(key)} ({group.length})</div>
+                                    {group.map(g => (
+                                        <div key={g.vmid} data-pf-guest={g.vmid} className="text-sm">
+                                            <div className="flex items-center gap-2">
+                                                <span className="font-mono text-xs text-gray-400">{g.vmid}</span>
+                                                <span className="truncate flex-1 text-white">{g.name || '-'}</span>
+                                                <span className="text-xs text-gray-500">{g.node} → {g.to || '?'}</span>
+                                            </div>
+                                            {(g.reasons || []).map((r, i) => (
+                                                <div key={i} data-pf-reason={r.code} className={`text-xs pl-4 ${MIG_PF_REASON[r.level] || 'text-gray-400'}`}>{sayReason(t, 'pf_', r)}</div>
+                                            ))}
+                                            {level === 'blocked' && g.overridable && (
+                                                <label className="flex items-center gap-2 text-xs text-gray-300 pl-4">
+                                                    <input type="checkbox" checked={override.has(g.vmid)} data-pf-override={g.vmid}
+                                                        onChange={e => onOverride(g.vmid, e.target.checked)} />
+                                                    {t('migPfOverride')}
+                                                </label>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {(result.capacity || []).length > 0 && (
+                        <div className="text-xs text-gray-400" data-testid="mig-pf-capacity">
+                            <span>{t('migPfCapacity')}: </span>
+                            {result.capacity.map(c => (
+                                <span key={c.node} className="mr-3">
+                                    {c.node} {guestBulkFill(t('migPfMem'), { now: c.mem_pct_now, after: c.mem_pct_after })}
+                                    {c.cpu_pct_after != null ? `, ${guestBulkFill(t('migPfCpu'), { after: c.cpu_pct_after })}` : ''}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    {(result.unread || []).length > 0 && (
+                        <div className="text-xs text-gray-500" data-testid="mig-pf-unread">{guestBulkFill(t('migPfUnread'), { what: result.unread.join(', ') })}</div>
+                    )}
+                    {override.size > 0 && (
+                        <label className="flex items-start gap-2 text-xs text-yellow-400" data-testid="mig-pf-confirm">
+                            <input type="checkbox" checked={confirmed} onChange={e => onConfirm(e.target.checked)} />
+                            <span>{guestBulkFill(t('migPfOverrideConfirm'), { count: override.size })}</span>
+                        </label>
+                    )}
+                    <button type="button" onClick={() => setStepsOpen(o => !o)} data-testid="mig-pf-steps-toggle"
+                        className="flex items-center gap-1 text-xs text-gray-400 hover:text-white">
+                        {stepsOpen ? <Icons.ChevronDown /> : <Icons.ChevronRight />}{t('migPfSteps')}
+                    </button>
+                    {stepsOpen && (
+                        <div className="text-xs space-y-1" data-testid="mig-pf-steps">
+                            <ol className="space-y-1 pl-4 list-decimal text-gray-300">
+                                {(result.steps || []).map((s, i) => (
+                                    <li key={i} data-step={s.kind} className={s.kind === 'skip' ? 'text-gray-500' : ''}>{s.text}</li>
+                                ))}
+                            </ol>
+                            {aborts.length > 0 && (<>
+                                <div className="text-gray-400 font-semibold pt-1">{t('migPfAbort')}</div>
+                                {aborts.map((a, i) => <div key={i} className="text-gray-500" data-pf-abort>{a}</div>)}
+                            </>)}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // the state of the Check step in a dialog: the result of the options it was made with,
+        // and the blocks ticked to override
+        function useMigPreflight(key) {
+            const [pf, setPf] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const [override, setOverride] = useState(() => new Set());
+            const [confirmed, setConfirmed] = useState(false);
+            const current = pf && pf.key === key ? pf.result : null;
+            const run = async (fetcher) => {
+                setBusy(true);
+                setError('');
+                const got = await fetcher();
+                setBusy(false);
+                if (got.result) {
+                    setPf({ key, result: got.result });
+                    setOverride(new Set());
+                    setConfirmed(false);
+                } else {
+                    setError(got.error);
+                }
+            };
+            const tick = (vmid, on) => {
+                setOverride(prev => { const next = new Set(prev); if (on) next.add(vmid); else next.delete(vmid); return next; });
+                setConfirmed(false);
+            };
+            return { result: pf && pf.result, current, stale: !!pf && !current, busy, error, run,
+                     override, tick, confirmed, setConfirmed, plan: current ? migPfPlan(current, override, confirmed) : null };
+        }
+
+        function BulkMigrateModal({ vms, nodes, clusterId, onMigrate, onClose }) {
+            const { t } = useTranslation();  // MK: Fix missing translation hook
+            const { isCorporate } = useLayout();
+            const { getAuthHeaders, haReadOnly } = useAuth();
+            const [targetNode, setTargetNode] = useState('');
+            const [online, setOnline] = useState(true);
+            const [localDisks, setLocalDisks] = useState(false);
+            const [plan, setPlan] = useState(() => migRunDefaultPlan(vms.length));
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const check = useMigPreflight(JSON.stringify([targetNode, online, localDisks, plan.mode, plan.parallel]));
+
+            // Get all unique current nodes
+            const currentNodes = [...new Set(vms.map(v => v.node))];
+            const availableNodes = (nodes || []).filter(n => n !== 'error' && n !== 'offline')
+                .filter(n => !currentNodes.includes(n) || currentNodes.length > 1);
+
+            const runCheck = () => {
+                if (!targetNode || check.busy) return;
+                const body = { vms: vms.map(v => v.vmid), target: targetNode, online, with_local_disks: localDisks, mode: plan.mode };
+                if (plan.mode === 'parallel') body.parallel = plan.parallel;
+                check.run(() => migPfFetch(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/migration-preflight`, body,
+                    getAuthHeaders, t('migPfFailed')));
+            };
+
+            // after a check that still holds, Start sends the guests that move and the blocks overridden
+            const sending = check.plan ? vms.filter(v => check.plan.moving.has(v.vmid)) : vms;
+            const startBlocked = !!check.plan && (!sending.length || check.plan.needsConfirm);
+
+            const handleMigrate = async () => {
+                if (!targetNode || busy || startBlocked) return;
+                setBusy(true);
+                setError('');
+                const extra = check.plan && check.plan.overridden.length ? { override: check.plan.overridden } : {};
+                const res = await onMigrate({ clusterId, vms: sending, target: targetNode, online, withLocalDisks: localDisks, ...plan, ...extra });
+                setBusy(false);
+                if (res && res.ok) onClose();
+                else setError((res && res.error) || t('bulkMigrationFailed'));
+            };
+
+            const inputCls = isCorporate ? '' : 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
+            const labelCls = isCorporate ? 'corp-vm-section-title' : 'block text-sm text-gray-400 mb-1';
+            const boxCls = isCorporate ? 'p-2 space-y-1 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-1 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '180px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '180px' };
+
+            const footer = (<>
+                <button onClick={onClose} disabled={busy} className={guestBulkButton(isCorporate, 'ghost')}>{t('cancel')}</button>
+                <button onClick={runCheck} disabled={!targetNode || busy || check.busy} data-testid="bulk-migrate-check"
+                    className={guestBulkButton(isCorporate, 'ghost')}>
+                    {check.busy ? <span className="flex animate-spin"><Icons.RotateCw /></span> : <Icons.Shield />}
+                    {check.busy ? t('migPfChecking') : t('migPfCheck')}
+                </button>
+                {!haReadOnly && (
+                    <button onClick={handleMigrate} disabled={!targetNode || busy || startBlocked} data-testid="bulk-migrate-run"
+                        className={guestBulkButton(isCorporate, 'primary')}>
+                        {busy && <span className="flex animate-spin"><Icons.RotateCw /></span>}
+                        {guestBulkFill(t('migRunGo'), { count: sending.length })}
+                    </button>
+                )}
+            </>);
+
+            return (
+                <GuestBulkFrame testId="bulk-migrate-modal" icon={<Icons.ArrowRight />} closable={!busy} onClose={onClose}
+                    title={t('bulkMigration')} meta={`${vms.length} ${t('vmsSelected')}`} footer={footer}>
+                    <div className="space-y-4">
+                        <div className={boxCls} style={boxStyle}>
+                            {vms.map(vm => (
+                                <div key={vm.vmid} className="flex items-center gap-2 text-sm" data-guest={vm.vmid}>
+                                    <span className="font-mono text-xs text-gray-400">{vm.vmid}</span>
+                                    <span className="truncate flex-1 text-white">{vm.name || '-'}</span>
+                                    <span className="text-xs text-gray-500">{vm.node}</span>
+                                </div>
+                            ))}
+                        </div>
+                        <div>
+                            <div className={labelCls}>{t('targetNode')}</div>
+                            <select value={targetNode} onChange={(e) => setTargetNode(e.target.value)} className={inputCls} data-testid="bulk-migrate-target"
+                                style={isCorporate ? { width: '100%' } : undefined}>
+                                <option value="">{t('selectNode')}</option>
+                                {availableNodes.map(node => (
+                                    <option key={node} value={node}>{node}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                            <input type="checkbox" checked={online} onChange={(e) => setOnline(e.target.checked)} />
+                            {t('liveMigration')}
+                        </label>
+                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                            <input type="checkbox" checked={localDisks} onChange={(e) => setLocalDisks(e.target.checked)} data-testid="bulk-migrate-local" />
+                            {t('nodeGuestsLocalDisks')}
+                        </label>
+                        <MigRunPlan plan={plan} onChange={setPlan} />
+                        <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-run-server-note">
+                            <Icons.Info />
+                            <span>{t('migRunServerNote')}</span>
+                        </div>
+                        {check.result ? (
+                            <MigPreflightView result={check.result} stale={check.stale} override={check.override}
+                                onOverride={check.tick} confirmed={check.confirmed} onConfirm={check.setConfirmed} />
+                        ) : (
+                            <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-pf-hint">
+                                <Icons.Shield />
+                                <span>{t('migPfHint')}</span>
+                            </div>
+                        )}
+                        {check.plan && !sending.length && (
+                            <div className="text-sm text-red-400" data-testid="mig-pf-none">{t('migPfNoneMoves')}</div>
+                        )}
+                        {check.error && (
+                            <div className="text-sm text-red-400 flex items-start gap-2" data-testid="mig-pf-error">
+                                <Icons.AlertTriangle />
+                                <span className="break-all">{check.error}</span>
+                            </div>
+                        )}
+                        {error && (
+                            <div className="text-sm text-red-400 flex items-start gap-2" data-testid="bulk-migrate-error">
+                                <Icons.AlertTriangle />
+                                <span className="break-all">{error}</span>
+                            </div>
+                        )}
+                    </div>
+                </GuestBulkFrame>
+            );
+        }
+
+        // LW Oct 2026 - the bulk bar of the guest table acts through the per-guest routes the
+        // buttons of one row use, so the server still asks about each guest on its own and
+        // what it refuses is listed here guest by guest. A few requests at a time: a
+        // selection of 300 must not turn into 300 requests at once.
+        const GUEST_BULK_PARALLEL = 4;
+        const GUEST_BULK_POWER = ['start', 'shutdown', 'stop', 'reboot'];
+        const PVE_TAG_RE = /^[A-Za-z0-9_][A-Za-z0-9_+.\-]*$/;
+        const PVE_SNAPNAME_RE = /^[A-Za-z][A-Za-z0-9_\-]{0,39}$/;
+
+        const guestBulkFill = (s, vars) => String(s).replace(/\{(\w+)\}/g, (m, k) => (vars[k] != null ? vars[k] : m));
+
+        function guestBulkTags(guest) {
+            const raw = guest && guest.tags;
+            return (Array.isArray(raw) ? raw : String(raw || '').split(/[;,\s]+/))
+                .map(s => String(s).trim()).filter(Boolean);
+        }
+
+        // what Proxmox puts in an error body is JSON more often than not
+        function guestBulkError(text, fallback) {
+            if (!text) return fallback;
+            try {
+                const j = JSON.parse(String(text).replace(/\n/g, ' '));
+                const msg = j && (j.message || j.errors || j.error);
+                if (typeof msg === 'string' && msg.trim()) return msg.trim();
+                if (msg && typeof msg === 'object') return Object.entries(msg).map(([k, v]) => `${k}: ${v}`).join('; ');
+            } catch (_) { /* plain text */ }
+            return String(text).slice(0, 300);
+        }
+
+        // why a guest stays out of an action, '' when it takes part
+        function guestBulkSkip(action, guest, t) {
+            const running = guest.status === 'running';
+            if (action !== 'tags' && isGuestTemplate(guest)) return t('guestBulkSkipTemplate');
+            if (action === 'start' && running) return t('guestBulkSkipRunning');
+            if (['shutdown', 'stop', 'reboot'].includes(action) && !running) return t('guestBulkSkipStopped');
+            return '';
+        }
+
+        async function guestBulkRun(items, worker, onState) {
+            let next = 0;
+            const lane = async () => {
+                while (next < items.length) {
+                    const i = next++;
+                    onState(i, { state: 'busy' });
+                    let res;
+                    try { res = await worker(items[i]); }
+                    catch (e) { res = { state: 'failed', note: String((e && e.message) || e) }; }
+                    onState(i, res);
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(GUEST_BULK_PARALLEL, items.length) }, lane));
+        }
+
+        // the frame both bulk dialogs share, in the chrome of the layout
+        function GuestBulkFrame({ icon, title, meta, closable, onClose, footer, children, testId }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            if (isCorporate) {
+                return (
+                    <div className="corp-vm-modal-overlay" onClick={closable ? onClose : undefined}>
+                        <div className="corp-vm-modal" data-testid={testId} role="dialog" aria-modal="true"
+                            style={{ maxWidth: '640px', width: '100%', alignSelf: 'center', maxHeight: '90vh' }}
+                            onClick={e => e.stopPropagation()}>
+                            <div className="corp-vm-modal-header">
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    <span className="flex flex-shrink-0" style={{ color: 'var(--corp-accent, #49afd9)' }}>{icon}</span>
+                                    <div className="min-w-0">
+                                        <div className="corp-vm-modal-title truncate">{title}</div>
+                                        {meta && <div className="corp-vm-modal-meta">{meta}</div>}
+                                    </div>
+                                </div>
+                                {closable && (
+                                    <div className="corp-vm-modal-actions">
+                                        <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close')}><Icons.X /></button>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="corp-vm-modal-body">{children}</div>
+                            <div className="corp-vm-modal-footer"><div className="flex items-center gap-2 ml-auto">{footer}</div></div>
+                        </div>
+                    </div>
+                );
+            }
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80" onClick={closable ? onClose : undefined}>
+                    <div className="w-full max-w-lg max-h-[90vh] flex flex-col bg-proxmox-card border border-proxmox-border rounded-xl animate-scale-in"
+                        data-testid={testId} role="dialog" aria-modal="true" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center gap-3 p-5 border-b border-proxmox-border">
+                            <span className="flex flex-shrink-0 text-proxmox-orange">{icon}</span>
+                            <div className="min-w-0 flex-1">
+                                <h3 className="text-lg font-semibold text-white truncate">{title}</h3>
+                                {meta && <div className="text-xs text-gray-400">{meta}</div>}
+                            </div>
+                            {closable && <button onClick={onClose} className="p-1 text-gray-400 hover:text-white rounded" title={t('close')}><Icons.X /></button>}
+                        </div>
+                        <div className="p-5 space-y-4 overflow-y-auto">{children}</div>
+                        <div className="flex justify-end gap-3 p-4 border-t border-proxmox-border">{footer}</div>
+                    </div>
+                </div>
+            );
+        }
+
+        function guestBulkButton(isCorporate, kind) {
+            if (isCorporate) {
+                return kind === 'ghost' ? 'corp-vm-btn corp-vm-btn-ghost'
+                    : kind === 'danger' ? 'corp-vm-btn corp-vm-btn-danger-ghost' : 'corp-vm-btn corp-vm-btn-primary';
+            }
+            if (kind === 'ghost') return 'flex items-center gap-2 px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50';
+            return `flex items-center gap-2 px-4 py-2 rounded-lg text-white disabled:opacity-50 ${kind === 'danger' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`;
+        }
+
+        const GUEST_BULK_BADGE = {
+            wait: 'text-gray-400', busy: 'text-blue-400', started: 'text-green-400',
+            done: 'text-green-400', skipped: 'text-gray-400', failed: 'text-red-400',
+        };
+
+        // start, shutdown, stop, reboot, snapshot or tags on the guests picked in the table
+        function GuestBulkActionModal({ action, guests, authFetch, onClose, onFinished }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [phase, setPhase] = useState('form');
+            const [results, setResults] = useState([]);
+            const [snapname, setSnapname] = useState(`snap_${Date.now()}`);
+            const [description, setDescription] = useState('');
+            const [vmstate, setVmstate] = useState(false);
+            const [tagMode, setTagMode] = useState('add');
+            const [tagText, setTagText] = useState('');
+
+            const labels = { start: t('start'), shutdown: t('shutdown'), stop: t('forceStop'), reboot: t('reboot'), snapshot: t('snapshot'), tags: t('tags') };
+            const icons = { start: <Icons.PlayCircle />, shutdown: <Icons.Power />, stop: <Icons.XCircle />, reboot: <Icons.RefreshCw />, snapshot: <Icons.Camera />, tags: <Icons.Tag /> };
+            const left = guests.map(g => ({ g, why: guestBulkSkip(action, g, t) }));
+            const targets = left.filter(x => !x.why).map(x => x.g);
+            const skipped = left.filter(x => x.why);
+            const tagList = tagText.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+            const tagsBad = tagList.some(x => !PVE_TAG_RE.test(x));
+            const snapBad = !PVE_SNAPNAME_RE.test(snapname.trim());
+            const formBad = !targets.length || (action === 'snapshot' && snapBad) || (action === 'tags' && (!tagList.length || tagsBad));
+
+            const runOne = async (g) => {
+                const base = `${API_URL}/clusters/${encodeURIComponent(g._clusterId)}/vms/${encodeURIComponent(g.node)}/${g.type}/${g.vmid}`;
+                const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                let res;
+                if (GUEST_BULK_POWER.includes(action)) {
+                    // stop is the force stop of a single row, the same body
+                    res = await authFetch(`${base}/${action}`, action === 'stop' ? json('POST', { force: true }) : { method: 'POST' });
+                } else if (action === 'snapshot') {
+                    res = await authFetch(`${base}/snapshots`, json('POST', {
+                        snapname: snapname.trim(), description,
+                        vmstate: !!(vmstate && g.type === 'qemu' && g.status === 'running'),
+                    }));
+                } else {
+                    const have = guestBulkTags(g);
+                    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+                    const next = tagMode === 'add'
+                        ? have.concat(tagList.filter((x, i) => !have.some(h => same(h, x)) && tagList.findIndex(y => same(y, x)) === i))
+                        : have.filter(h => !tagList.some(x => same(h, x)));
+                    if (next.length === have.length && next.every((x, i) => x === have[i])) return { state: 'skipped', note: t('guestBulkTagsUnchanged') };
+                    res = await authFetch(`${base}/config`, json('PUT', next.length ? { tags: next.join(';') } : { delete: 'tags' }));
+                }
+                if (!res) return { state: 'failed', note: t('connectionError') };
+                if (res.ok) return { state: action === 'tags' ? 'done' : 'started' };
+                const body = await res.json().catch(() => null);
+                return { state: 'failed', note: guestBulkError(body && body.error, `${t('actionFailed')} (HTTP ${res.status})`) };
+            };
+
+            const run = async () => {
+                setPhase('run');
+                setResults(targets.map(() => ({ state: 'wait' })));
+                await guestBulkRun(targets, runOne, (i, r) => setResults(prev => { const n = prev.slice(); n[i] = r; return n; }));
+                setPhase('done');
+                if (onFinished) onFinished();
+            };
+
+            const stateText = (r) => r.state === 'busy' ? t('guestBulkBusy') : r.state === 'started' ? t('guestBulkStarted')
+                : r.state === 'done' ? t('guestBulkDone') : r.state === 'skipped' ? t('guestBulkLeftOut')
+                : r.state === 'failed' ? t('failed') : t('guestBulkWaiting');
+            const failed = results.filter(r => r.state === 'failed').length;
+            const ok = results.filter(r => r.state === 'started' || r.state === 'done').length;
+            const inputCls = isCorporate ? '' : 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
+            const labelCls = isCorporate ? 'corp-vm-section-title' : 'block text-sm text-gray-400 mb-1';
+            const boxCls = isCorporate ? 'p-2 space-y-1 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-1 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '240px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '240px' };
+
+            const guestRow = (g, right, note, key) => (
+                <div key={key} className="text-sm" data-guest={g.vmid}>
+                    <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs text-gray-400">{g.vmid}</span>
+                        <span className="truncate flex-1 text-white">{g.name || '-'}</span>
+                        <span className="text-xs text-gray-500 truncate">{g.node}</span>
+                        {right}
+                    </div>
+                    {note && <div className="text-xs text-red-400 pl-10 break-all">{note}</div>}
+                </div>
+            );
+
+            const footer = phase === 'form' ? (<>
+                <button onClick={onClose} className={guestBulkButton(isCorporate, 'ghost')}>{t('cancel')}</button>
+                <button onClick={run} disabled={formBad} data-testid="guest-bulk-run"
+                    className={guestBulkButton(isCorporate, action === 'stop' ? 'danger' : 'primary')}>
+                    {guestBulkFill(t('guestBulkRun'), { count: targets.length })}
+                </button>
+            </>) : (
+                <button onClick={onClose} disabled={phase === 'run'} data-testid="guest-bulk-close" className={guestBulkButton(isCorporate, 'ghost')}>
+                    {phase === 'run' && <span className="flex animate-spin"><Icons.RotateCw /></span>}
+                    {t('close')}
+                </button>
+            );
+
+            return (
+                <GuestBulkFrame testId="guest-bulk-modal" icon={icons[action]} closable={phase !== 'run'} onClose={onClose} footer={footer}
+                    title={guestBulkFill(t('guestBulkTitle'), { action: labels[action], count: guests.length })}
+                    meta={phase === 'done' ? guestBulkFill(t('guestBulkSummary'), { ok, failed, total: results.length }) : null}>
+                    <div className="space-y-4">
+                        {phase === 'form' && action === 'stop' && (
+                            <div className={isCorporate ? 'text-[13px] flex items-start gap-2' : 'p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-400 flex items-start gap-2'}
+                                style={isCorporate ? { color: '#f54f47' } : undefined}>
+                                <Icons.AlertTriangle />
+                                <span>{t('guestBulkStopWarning')}</span>
+                            </div>
+                        )}
+                        {phase === 'form' && action === 'snapshot' && (<>
+                            <div>
+                                <label className={labelCls}>{t('name')}</label>
+                                <input type="text" value={snapname} onChange={e => setSnapname(e.target.value)} className={inputCls} data-testid="guest-bulk-snapname" />
+                                {snapBad && <div className="text-xs mt-1 text-yellow-400">{t('guestBulkSnapnameRule')}</div>}
+                            </div>
+                            <div>
+                                <label className={labelCls}>{t('description')} ({t('optional')})</label>
+                                <input type="text" value={description} onChange={e => setDescription(e.target.value)} className={inputCls} placeholder={t('snapshotDescription')} />
+                            </div>
+                            <label className="flex items-start gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={vmstate} onChange={e => setVmstate(e.target.checked)} className="mt-0.5" data-testid="guest-bulk-vmstate" />
+                                <span>{t('saveRamState')}<span className="block text-xs text-gray-500">{t('guestBulkRamNote')}</span></span>
+                            </label>
+                        </>)}
+                        {phase === 'form' && action === 'tags' && (<>
+                            <div className="flex gap-2">
+                                {['add', 'remove'].map(m => (
+                                    <button key={m} onClick={() => setTagMode(m)} data-testid={`guest-bulk-tags-${m}`}
+                                        className={isCorporate
+                                            ? `corp-vm-btn ${tagMode === m ? 'corp-vm-btn-primary' : 'corp-vm-btn-ghost'}`
+                                            : `px-3 py-1.5 rounded-lg text-sm border ${tagMode === m ? 'bg-blue-600/20 border-blue-500 text-blue-400' : 'bg-proxmox-dark border-proxmox-border text-gray-400'}`}>
+                                        {m === 'add' ? t('guestBulkTagsAdd') : t('guestBulkTagsRemove')}
+                                    </button>
+                                ))}
+                            </div>
+                            <div>
+                                <label className={labelCls}>{t('guestBulkTagsLabel')}</label>
+                                <input type="text" value={tagText} onChange={e => setTagText(e.target.value)} className={inputCls} data-testid="guest-bulk-tagtext" placeholder="prod web" />
+                                {tagsBad && <div className="text-xs mt-1 text-yellow-400">{t('guestBulkTagsRule')}</div>}
+                            </div>
+                        </>)}
+                        {phase === 'form' ? (<>
+                            <div className={boxCls} style={boxStyle}>
+                                {targets.length === 0
+                                    ? <div className="text-sm text-gray-400">{t('guestBulkNothing')}</div>
+                                    : targets.map(g => guestRow(g, null, null, `t-${g._clusterId}-${g.vmid}`))}
+                            </div>
+                            {skipped.length > 0 && (
+                                <div>
+                                    <div className={labelCls}>{guestBulkFill(t('guestBulkSkipped'), { count: skipped.length })}</div>
+                                    <div className={boxCls} style={boxStyle} data-testid="guest-bulk-skipped">
+                                        {skipped.map(({ g, why }) => guestRow(g, <span className="text-xs text-gray-400">{why}</span>, null, `s-${g._clusterId}-${g.vmid}`))}
+                                    </div>
+                                </div>
+                            )}
+                        </>) : (
+                            <div className={boxCls} style={{ ...boxStyle, maxHeight: '360px' }} data-testid="guest-bulk-results">
+                                {targets.map((g, i) => {
+                                    const r = results[i] || { state: 'wait' };
+                                    return guestRow(g, <span className={`text-xs ${GUEST_BULK_BADGE[r.state] || ''}`} data-state={r.state}>{stateText(r)}{r.state === 'skipped' && r.note ? ` (${r.note})` : ''}</span>,
+                                        r.state === 'failed' ? r.note : null, `r-${g._clusterId}-${g.vmid}`);
+                                })}
+                            </div>
+                        )}
+                    </div>
+                </GuestBulkFrame>
+            );
+        }
+
+        // start or shut down all guests of one node, through the node endpoints of Proxmox
+        // (one task there instead of one request per guest here). Migrating them all is a
+        // bulk run on the server like the one of the table (#952): one guest after another
+        // and followed per guest, where Proxmox' migrateall hands an HA guest on and goes on
+        function NodeGuestsModal({ action, clusterId, node, guests, nodes, authFetch, onClose, onDone, onBulkMigrate }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const fits = (g) => action === 'startall' ? (!isGuestTemplate(g) && g.status !== 'running')
+                : action === 'stopall' ? g.status === 'running' : true;
+            const eligible = (guests || []).filter(fits).sort((a, b) => a.vmid - b.vmid);
+            const targets = (nodes || []).filter(n => n.name !== node && n.online);
+            const [picked, setPicked] = useState(() => new Set(eligible.map(g => g.vmid)));
+            const [target, setTarget] = useState(targets[0] ? targets[0].name : '');
+            const [plan, setPlan] = useState(() => migRunDefaultPlan(eligible.length));
+            const [localDisks, setLocalDisks] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+            const [result, setResult] = useState(null);
+
+            const titleKey = { startall: 'nodeGuestsTitleStart', stopall: 'nodeGuestsTitleStop', migrateall: 'nodeGuestsTitleMigrate' }[action];
+            const icon = action === 'startall' ? <Icons.PlayCircle /> : action === 'stopall' ? <Icons.Power /> : <Icons.ArrowRight />;
+            const chosen = eligible.filter(g => picked.has(g.vmid)).map(g => g.vmid);
+            const allOn = eligible.length > 0 && chosen.length === eligible.length;
+            const toggle = (vmid) => setPicked(prev => { const n = new Set(prev); if (n.has(vmid)) n.delete(vmid); else n.add(vmid); return n; });
+
+            const run = async () => {
+                setBusy(true);
+                setError('');
+                if (action === 'migrateall') {
+                    const res = await onBulkMigrate({ clusterId, vms: eligible.filter(g => picked.has(g.vmid)), target,
+                        online: true, withLocalDisks: localDisks, ...plan });
+                    setBusy(false);
+                    if (res && res.ok) onClose();
+                    else setError((res && res.error) || t('actionFailed'));
+                    return;
+                }
+                const body = { vms: chosen };
+                const res = await authFetch(`${API_URL}/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node)}/guests/${action}`,
+                    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                setBusy(false);
+                if (res && res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    setResult(data);
+                    if (onDone) onDone(data);
+                } else {
+                    setError(res ? await PegaProxApiErrors.message(res, t('actionFailed')) : t('connectionError'));
+                }
+            };
+
+            const inputCls = isCorporate ? '' : 'w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm';
+            const labelCls = isCorporate ? 'corp-vm-section-title' : 'block text-sm text-gray-400 mb-1';
+            const boxCls = isCorporate ? 'p-2 space-y-1 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-1 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '260px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '260px' };
+            const formBad = busy || !chosen.length || (action === 'migrateall' && !target);
+
+            const footer = result ? (
+                <button onClick={onClose} className={guestBulkButton(isCorporate, 'ghost')} data-testid="node-guests-close">{t('close')}</button>
+            ) : (<>
+                <button onClick={onClose} className={guestBulkButton(isCorporate, 'ghost')}>{t('cancel')}</button>
+                <button onClick={run} disabled={formBad} data-testid="node-guests-run"
+                    className={guestBulkButton(isCorporate, action === 'stopall' ? 'danger' : 'primary')}>
+                    {busy && <span className="flex animate-spin"><Icons.RotateCw /></span>}
+                    {guestBulkFill(t('guestBulkRun'), { count: chosen.length })}
+                </button>
+            </>);
+
+            return (
+                <GuestBulkFrame testId="node-guests-modal" icon={icon} closable={!busy} onClose={onClose} footer={footer}
+                    title={guestBulkFill(t(titleKey), { node })}>
+                    {result ? (
+                        <div className="space-y-3" data-testid="node-guests-result">
+                            <div className="flex items-start gap-2 text-sm text-green-400">
+                                <Icons.CheckCircle />
+                                <span>{guestBulkFill(t('nodeGuestsTaskStarted'), { node, count: (result.vms || []).length })}</span>
+                            </div>
+                            {(result.skipped || []).length > 0 && (
+                                <div>
+                                    <div className={labelCls}>{guestBulkFill(t('guestBulkSkipped'), { count: result.skipped.length })}</div>
+                                    <div className={boxCls} style={boxStyle}>
+                                        {result.skipped.map(s => (
+                                            <div key={s.vmid} className="flex items-center gap-2 text-sm">
+                                                <span className="font-mono text-xs text-gray-400">{s.vmid}</span>
+                                                <span className="flex-1 text-xs text-gray-400">{s.reason}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+                            {action === 'startall' && <div className="text-sm text-gray-400">{t('nodeGuestsStartNote')}</div>}
+                            {action === 'stopall' && <div className="text-sm text-gray-400">{t('nodeGuestsStopNote')}</div>}
+                            {action === 'migrateall' && (<>
+                                <div>
+                                    <label className={labelCls}>{t('targetNode')}</label>
+                                    <select value={target} onChange={e => setTarget(e.target.value)} className={inputCls} data-testid="node-guests-target">
+                                        {targets.length === 0 && <option value="">-</option>}
+                                        {targets.map(n => <option key={n.name} value={n.name}>{n.name}</option>)}
+                                    </select>
+                                </div>
+                                <label className="flex items-center gap-2 text-sm text-gray-300">
+                                    <input type="checkbox" checked={localDisks} onChange={e => setLocalDisks(e.target.checked)} />
+                                    {t('nodeGuestsLocalDisks')}
+                                </label>
+                                <MigRunPlan plan={plan} onChange={setPlan} />
+                                <div className="text-xs text-gray-400 flex items-start gap-2">
+                                    <Icons.Info />
+                                    <span>{t('migRunServerNote')}</span>
+                                </div>
+                            </>)}
+                            {eligible.length === 0 ? (
+                                <div className="text-sm text-gray-400">{t('nodeGuestsNone')}</div>
+                            ) : (
+                                <div>
+                                    <label className="flex items-center gap-2 text-sm text-gray-300 mb-2">
+                                        <input type="checkbox" checked={allOn} data-testid="node-guests-all"
+                                            onChange={() => setPicked(allOn ? new Set() : new Set(eligible.map(g => g.vmid)))} />
+                                        {guestBulkFill(t('nodeGuestsPicked'), { count: chosen.length, total: eligible.length })}
+                                    </label>
+                                    <div className={boxCls} style={boxStyle}>
+                                        {eligible.map(g => (
+                                            <label key={g.vmid} className="flex items-center gap-2 text-sm cursor-pointer" data-guest={g.vmid}>
+                                                <input type="checkbox" checked={picked.has(g.vmid)} onChange={() => toggle(g.vmid)} />
+                                                <span className="font-mono text-xs text-gray-400">{g.vmid}</span>
+                                                <span className="truncate flex-1 text-white">{g.name || '-'}</span>
+                                                <span className="text-xs text-gray-500">{g.type === 'lxc' ? 'CT' : 'VM'}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                            {error && (
+                                <div className="text-sm text-red-400 flex items-start gap-2" data-testid="node-guests-error">
+                                    <Icons.AlertTriangle />
+                                    <span className="break-all">{error}</span>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </GuestBulkFrame>
+            );
+        }
+
+        // LW Oct 2026 (#952) - the bulk migrations of the signed-in user, wherever they are
+        // in the app: a card per run in the stack of the toasts and its progress on a
+        // click. A run is the server's, so the list is back after a reload; it is read a
+        // few seconds apart while one of them runs and not at all otherwise
+        const MIG_RUN_LIST_MS = 4000;
+        const MIG_RUN_DETAIL_MS = 2500;
+        const MIG_RUN_DISMISSED = 'pegaprox-bulk-runs-dismissed';
+        const MIG_RUN_BADGE = { ...GUEST_BULK_BADGE, migrating: 'text-blue-400', cancelled: 'text-gray-400', unknown: 'text-yellow-400' };
+
+        const migRunCounts = (r) => {
+            const c = r.counts || {};
+            const open = (c.wait || 0) + (c.migrating || 0);
+            return { ok: (c.done || 0) + (c.started || 0), failed: c.failed || 0, total: r.total || 0, over: (r.total || 0) - open };
+        };
+
+        function BulkMigrateProgress({ runId, authFetch, canAct, onClose, onChanged }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [run, setRun] = useState(null);
+            const [gone, setGone] = useState(false);
+            const [asking, setAsking] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [error, setError] = useState('');
+
+            // an answer for the run shown before (another card clicked meanwhile) is dropped
+            const shown = useRef(runId);
+            shown.current = runId;
+
+            const load = useCallback(async () => {
+                try {
+                    const res = await authFetch(`${API_URL}/bulk-migrations/${encodeURIComponent(runId)}`);
+                    if (shown.current !== runId) return;
+                    if (res && res.status === 404) { setGone(true); return; }
+                    if (res && res.ok) {
+                        const data = await res.json();
+                        if (shown.current !== runId) return;
+                        setRun(data.run);
+                        setGone(false);
+                    }
+                } catch (e) { /* the next look tries again */ }
+            }, [authFetch, runId]);
+
+            useEffect(() => { setRun(null); setGone(false); setAsking(false); load(); }, [load]);
+            const running = !!run && run.state === 'running';
+            useEffect(() => {
+                if (!running) return undefined;
+                const id = setInterval(load, MIG_RUN_DETAIL_MS);
+                return () => clearInterval(id);
+            }, [running, load]);
+
+            const cancel = async () => {
+                setBusy(true);
+                setError('');
+                const res = await authFetch(`${API_URL}/bulk-migrations/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+                setBusy(false);
+                setAsking(false);
+                if (res && res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    if (data.run && shown.current === runId) setRun(data.run);
+                    if (onChanged) onChanged();
+                } else {
+                    setError(res ? await PegaProxApiErrors.message(res, t('actionFailed')) : t('connectionError'));
+                }
+            };
+
+            const stateText = (s) => ({
+                wait: t('guestBulkWaiting'), migrating: t('migRunMoving'), done: t('guestBulkDone'),
+                started: t('guestBulkStarted'), failed: t('failed'), skipped: t('guestBulkLeftOut'),
+                cancelled: t('migRunNotStarted'), unknown: t('migRunUnknown'),
+            })[s] || s;
+            const runText = (s) => ({ running: t('migRunStateRunning'), done: t('migRunStateDone'),
+                cancelled: t('migRunStateCancelled'), stopped: t('migRunStateStopped') })[s] || s;
+            const how = !run ? '' : run.mode === 'sequential' ? t('migRunOne')
+                : run.mode === 'parallel' ? `${t('migRunSome')} (${run.parallel})` : t('migRunAll');
+            const n = run ? migRunCounts(run) : null;
+            const boxCls = isCorporate ? 'p-2 space-y-1 overflow-y-auto' : 'p-3 bg-proxmox-dark rounded-lg space-y-1 overflow-y-auto';
+            const boxStyle = isCorporate ? { maxHeight: '360px', background: 'var(--corp-surface-2)', border: '1px solid var(--corp-border-medium)' } : { maxHeight: '360px' };
+
+            const footer = (<>
+                {running && run.may_cancel && canAct && (asking ? (<>
+                    <button onClick={() => setAsking(false)} disabled={busy} className={guestBulkButton(isCorporate, 'ghost')}>{t('migRunKeep')}</button>
+                    <button onClick={cancel} disabled={busy} data-testid="mig-run-cancel-yes" className={guestBulkButton(isCorporate, 'danger')}>
+                        {busy && <span className="flex animate-spin"><Icons.RotateCw /></span>}
+                        {t('migRunCancelYes')}
+                    </button>
+                </>) : (
+                    <button onClick={() => setAsking(true)} data-testid="mig-run-cancel" className={guestBulkButton(isCorporate, 'danger')}>{t('migRunCancel')}</button>
+                ))}
+                <button onClick={onClose} data-testid="mig-run-close" className={guestBulkButton(isCorporate, 'ghost')}>{t('close')}</button>
+            </>);
+
+            return (
+                <GuestBulkFrame testId="mig-run-modal" icon={<Icons.ArrowRight />} closable onClose={onClose} footer={footer}
+                    title={run ? guestBulkFill(t('migRunTitle'), { target: run.target }) : t('bulkMigration')}
+                    meta={run ? `${runText(run.state)} - ${how} - ${guestBulkFill(t('guestBulkSummary'), n)}` : null}>
+                    <div className="space-y-4">
+                        {gone && (
+                            <div className="text-sm text-yellow-400 flex items-start gap-2" data-testid="mig-run-gone">
+                                <Icons.AlertTriangle />
+                                <span>{t('migRunGone')}</span>
+                            </div>
+                        )}
+                        {run && (<>
+                            {running && (
+                                <div className="h-1.5 rounded-full bg-proxmox-dark overflow-hidden">
+                                    <div className="h-full bg-blue-500" style={{ width: `${n.total ? Math.round(n.over * 100 / n.total) : 0}%` }} />
+                                </div>
+                            )}
+                            {asking && <div className="text-sm text-yellow-400" data-testid="mig-run-cancel-ask">{t('migRunCancelAsk')}</div>}
+                            {run.cancelled_by && <div className="text-sm text-gray-400">{guestBulkFill(t('migRunCancelledBy'), { user: run.cancelled_by })}</div>}
+                            {run.state === 'stopped' && run.reason && (
+                                <div className="text-sm text-yellow-400 flex items-start gap-2"><Icons.AlertTriangle /><span>{run.reason}</span></div>
+                            )}
+                            <div className={boxCls} style={boxStyle} data-testid="mig-run-rows">
+                                {(run.rows || []).map(r => (
+                                    <div key={r.vmid} className="text-sm" data-guest={r.vmid}>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-mono text-xs text-gray-400">{r.vmid}</span>
+                                            <span className="truncate flex-1 text-white">{r.name || '-'}</span>
+                                            <span className="text-xs text-gray-500 truncate">{r.node}{r.to && r.to !== r.node ? ` > ${r.to}` : ''}</span>
+                                            <span className={`text-xs ${MIG_RUN_BADGE[r.state] || ''}`} data-state={r.state}>
+                                                {r.state === 'migrating' && <span className="inline-flex animate-spin mr-1"><Icons.RotateCw /></span>}
+                                                {stateText(r.state)}
+                                            </span>
+                                        </div>
+                                        {r.note && <div className={`text-xs pl-10 break-all ${r.state === 'failed' ? 'text-red-400' : 'text-gray-500'}`}>{r.note}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                            {run.mode === 'all' && <div className="text-xs text-gray-400">{t('migRunAllHint')}</div>}
+                        </>)}
+                        {!run && !gone && <div className="text-sm text-gray-400">{t('loading')}</div>}
+                        <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-run-server-note">
+                            <Icons.Info />
+                            <span>{t('migRunServerNote')}</span>
+                        </div>
+                        {error && (
+                            <div className="text-sm text-red-400 flex items-start gap-2" data-testid="mig-run-error">
+                                <Icons.AlertTriangle />
+                                <span className="break-all">{error}</span>
+                            </div>
+                        )}
+                    </div>
+                </GuestBulkFrame>
+            );
+        }
+
+        function BulkMigrateRuns({ authFetch, openId, onOpen, tick, canAct, onSettled }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [runs, setRuns] = useState([]);
+            const [lost, setLost] = useState({});
+            const [dismissed, setDismissed] = useState(() => {
+                try { return JSON.parse(localStorage.getItem(MIG_RUN_DISMISSED) || '[]') || []; } catch (e) { return []; }
+            });
+            const known = useRef({});
+            // the dashboard hands a new function every render; the list is read on its own beat
+            const settled = useRef(onSettled);
+            settled.current = onSettled;
+            // a look that was asked before the one already shown answers late: it would not
+            // know a run started in between and call it gone
+            const asked = useRef(0);
+            const shownLook = useRef(0);
+
+            const load = useCallback(async () => {
+                const look = ++asked.current;
+                try {
+                    const res = await authFetch(`${API_URL}/bulk-migrations`);
+                    if (!res || !res.ok) return;
+                    const data = await res.json();
+                    if (look < shownLook.current) return;
+                    shownLook.current = look;
+                    const mine = (data.runs || []).filter(r => r.mine);
+                    const ids = new Set(mine.map(r => r.id));
+                    // running at the last look and not listed now: gone with the process that ran it
+                    const gone = Object.values(known.current).filter(r => r.state === 'running' && !ids.has(r.id));
+                    if (gone.length) setLost(prev => { const next = { ...prev }; gone.forEach(r => { next[r.id] = { ...r, state: 'lost' }; }); return next; });
+                    mine.forEach(r => {
+                        const was = known.current[r.id];
+                        if (was && was.state === 'running' && r.state !== 'running' && settled.current) settled.current(r.cluster_id);
+                    });
+                    known.current = Object.fromEntries(mine.map(r => [r.id, r]));
+                    setRuns(mine);
+                } catch (e) { /* the next look tries again */ }
+            }, [authFetch]);
+
+            useEffect(() => { load(); }, [load, tick]);
+            const anyRunning = runs.some(r => r.state === 'running');
+            useEffect(() => {
+                if (!anyRunning) return undefined;
+                const id = setInterval(load, MIG_RUN_LIST_MS);
+                return () => clearInterval(id);
+            }, [anyRunning, load]);
+
+            const dismiss = (id) => {
+                const next = dismissed.filter(x => x !== id).concat(id).slice(-100);
+                setDismissed(next);
+                setLost(prev => { const n = { ...prev }; delete n[id]; return n; });
+                try { localStorage.setItem(MIG_RUN_DISMISSED, JSON.stringify(next)); } catch (e) { /* only this view forgets it */ }
+            };
+
+            const cards = runs.concat(Object.values(lost)).filter(r => r.state === 'running' || !dismissed.includes(r.id));
+            const cardStyle = isCorporate ? { width: '300px', background: 'var(--corp-surface, #1c2733)', border: '1px solid var(--corp-border, #29414e)', color: 'var(--corp-text, #e9ecef)' } : { width: '300px' };
+
+            return (<>
+                {cards.map(r => {
+                    const n = migRunCounts(r);
+                    const title = r.state === 'running' ? t('migRunTray') : r.state === 'lost' ? t('migRunTrayLost') : t('migRunTrayDone');
+                    return (
+                        <div key={r.id} role="button" tabIndex={0} data-testid="mig-run-card" data-run={r.id} data-state={r.state}
+                            onClick={() => onOpen(r.id)} onKeyDown={e => { if (e.key === 'Enter') onOpen(r.id); }}
+                            className={`flex items-start gap-3 px-4 py-3 rounded-lg border shadow-lg cursor-pointer ${isCorporate ? '' : 'bg-proxmox-card border-proxmox-border'}`}
+                            style={cardStyle}>
+                            <span className={`flex flex-shrink-0 mt-0.5 ${r.state === 'running' ? 'animate-spin text-blue-400' : n.failed || r.state === 'lost' ? 'text-yellow-400' : 'text-green-400'}`}>
+                                {r.state === 'running' ? <Icons.RotateCw /> : n.failed || r.state === 'lost' ? <Icons.AlertTriangle /> : <Icons.CheckCircle />}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                                <div className="text-sm font-medium text-white">{guestBulkFill(title, { target: r.target })}</div>
+                                <div className="text-xs text-gray-400">{guestBulkFill(t('guestBulkSummary'), n)}</div>
+                                {r.state === 'running' && (
+                                    <div className="h-1 mt-2 rounded-full bg-proxmox-dark overflow-hidden">
+                                        <div className="h-full bg-blue-500" style={{ width: `${n.total ? Math.round(n.over * 100 / n.total) : 0}%` }} />
+                                    </div>
+                                )}
+                            </div>
+                            {r.state !== 'running' && (
+                                <button onClick={e => { e.stopPropagation(); dismiss(r.id); }} title={t('migRunDismiss')} data-testid="mig-run-dismiss"
+                                    className="p-1 text-gray-400 hover:text-white rounded flex-shrink-0"><Icons.X /></button>
+                            )}
+                        </div>
+                    );
+                })}
+                {openId && (
+                    <BulkMigrateProgress runId={openId} authFetch={authFetch} canAct={canAct}
+                        onClose={() => onOpen(null)} onChanged={load} />
+                )}
+            </>);
+        }
+
+        // Cross-Cluster Migration Modal
+        // NS: The big one - SSH tunnel based migration between clusters
+        // Uses same ISO detection logic as MigrateModal (copy-paste, I know...)
+        function CrossClusterMigrateModal({ vm, sourceCluster, clusters, onMigrate, onClose }) {
+            const { getAuthHeaders, haReadOnly } = useAuth();
+            const { t } = useTranslation();
+            const [targetCluster, setTargetCluster] = useState('');
+            const [targetNode, setTargetNode] = useState('');
+            const [targetStorage, setTargetStorage] = useState('');
+            const [targetBridgeMap, setTargetBridgeMap] = useState({});  // {sourceBridge: targetBridge}
+            const [sourceNics, setSourceNics] = useState([]);  // [{id: 'net0', bridge: 'vmbr0'}, ...]
+            const [targetStorageMap, setTargetStorageMap] = useState({});  // {sourceStorage: targetStorage}
+            const [sourceDisks, setSourceDisks] = useState([]);  // [{id: 'scsi0', storage: 'local-lvm', size: '32G'}, ...]
+            const [targetVmid, setTargetVmid] = useState('');
+            const [online, setOnline] = useState(true);
+            const [forceOnline, setForceOnline] = useState(false);  // Force online migration for large disks
+            const [deleteSource, setDeleteSource] = useState(true);
+            const [loading, setLoading] = useState(false);
+            const [targetNodes, setTargetNodes] = useState([]);
+            const [targetStorages, setTargetStorages] = useState([]);
+            const [targetBridges, setTargetBridges] = useState([]);
+            const [loadingNodes, setLoadingNodes] = useState(false);
+            const [loadingResources, setLoadingResources] = useState(false);
+            const [hasCdDvd, setHasCdDvd] = useState(false);
+            const [detectedIsos, setDetectedIsos] = useState([]);
+            const [bootOrderIssues, setBootOrderIssues] = useState([]);
+            const [estimatedDiskGb, setEstimatedDiskGb] = useState(0);  // Track disk size for warnings
+            const [unusedEntries, setUnusedEntries] = useState([]);  // MK May 2026 (#414): detached-but-not-removed disks/ISOs
+
+            const availableClusters = clusters.filter(c => c.id !== sourceCluster?.id);
+            const isQemu = vm.type === 'qemu';
+            
+            // Local authFetch helper
+            // #594: target-cluster lookups hang if the destination cluster is slow/unreachable.
+            // honour options.timeout (ms) so the migrate dialog fails fast instead of spinning. -LW
+            const authFetch = async (url, options = {}) => {
+                const { timeout, ...rest } = options;
+                let ctrl, timer;
+                if (timeout) {
+                    ctrl = new AbortController();
+                    timer = setTimeout(() => ctrl.abort(), timeout);
+                }
+                try {
+                    const response = await fetch(url, {
+                        ...rest,
+                        credentials: 'include',
+                        signal: ctrl ? ctrl.signal : rest.signal,
+                        headers: {
+                            ...rest.headers,
+                            ...getAuthHeaders()
+                        }
+                    });
+                    return response;
+                } catch (err) {
+                    if (err.name !== 'AbortError') console.error('Auth fetch error:', err);
+                    return null;
+                } finally {
+                    if (timer) clearTimeout(timer);
+                }
+            };
+
+            // Check for CD/DVD and boot order issues
+            // NS: Now uses SSE events for live updates
+            useEffect(() => {
+                const processVmConfig = (config) => {
+                    // Check for CD/DVD drives with ISO mounted
+                    const cdDvdKeys = Object.keys(config).filter(k => 
+                        k.match(/^(ide|sata|scsi)\d*$/)
+                    );
+                    const foundIsos = [];
+                    cdDvdKeys.forEach(key => {
+                        const value = config[key];
+                        if(typeof value === 'string' && value.includes('media=cdrom')) {
+                            const isoMatch = value.match(/^([^,]+)/);
+                            if(isoMatch && isoMatch[1] && !isoMatch[1].includes('none')) {
+                                const isoPath = isoMatch[1];
+                                const isLocal = isoPath.startsWith('local:') || 
+                                               isoPath.startsWith('local-lvm:') ||
+                                               isoPath.startsWith('local-zfs:');
+                                foundIsos.push({ device: key, iso: isoPath, isLocal });
+                            }
+                        }
+                    });
+                    setHasCdDvd(foundIsos.length > 0);
+                    setDetectedIsos(foundIsos);
+                    
+                    // Check boot order for non-existent disks
+                    const bootOrder = config.boot || '';
+                    const bootDevices = bootOrder.includes('order=') 
+                        ? bootOrder.split('order=')[1].split(';')[0].split(',')
+                        : [];
+                    const issues = [];
+                    bootDevices.forEach(device => {
+                        if(device && !config[device] && device !== 'net0') {
+                            issues.push(device);
+                        }
+                    });
+                    setBootOrderIssues(issues);
+                    
+                    // Calculate total disk size for large VM warning
+                    let totalDiskGb = 0;
+                    Object.keys(config).forEach(key => {
+                        if(key.match(/^(scsi|virtio|sata|ide)\d+$/) && typeof config[key] === 'string') {
+                            const sizeMatch = config[key].match(/size=(\d+)([GMT])/);
+                            if(sizeMatch) {
+                                const sizeVal = parseInt(sizeMatch[1]);
+                                const sizeUnit = sizeMatch[2];
+                                if(sizeUnit === 'G') totalDiskGb += sizeVal;
+                                else if(sizeUnit === 'T') totalDiskGb += sizeVal * 1024;
+                                else if(sizeUnit === 'M') totalDiskGb += sizeVal / 1024;
+                            }
+                        }
+                    });
+                    setEstimatedDiskGb(totalDiskGb);
+
+                    // Parse disks for per-storage mapping
+                    const disks = [];
+                    Object.keys(config).sort().forEach(key => {
+                        if (!key.match(/^(scsi|virtio|ide|sata|efidisk|tpmstate|rootfs|mp)\d*$/)) return;
+                        const val = config[key];
+                        if (typeof val !== 'string' || !val.includes(':')) return;
+                        if (val.includes('media=cdrom') || val === 'none') return;
+                        const stor = val.split(':')[0];
+                        if (!stor || stor === 'none') return;
+                        const sizeMatch = val.match(/size=(\d+[GMT]?)/);
+                        disks.push({ id: key, storage: stor, size: sizeMatch ? sizeMatch[1] : '' });
+                    });
+                    setSourceDisks(disks);
+
+                    // MK May 2026 (#414 KowMangler): pick up `unused0`, `unused1`, ... entries.
+                    // PVE leaves a reference to the volume in the VM config even after a
+                    // "Detach" in the UI — the volume is just moved into the unused slot.
+                    // Cross-cluster migration then tries to migrate that reference too, and
+                    // if it points at local-only storage (e.g. an ISO on `local`) PVE bails
+                    // with the cryptic "storage 'local' does not support vm images" error.
+                    // Surface them up-front so the user can clean them in VM → Configure → Hardware.
+                    const unused = [];
+                    Object.keys(config).sort().forEach(key => {
+                        if (!key.match(/^unused\d+$/)) return;
+                        const val = config[key];
+                        if (typeof val !== 'string' || !val) return;
+                        const stor = val.includes(':') ? val.split(':')[0] : '';
+                        const localLooking = /^(local|local-lvm|local-zfs)$/.test(stor);
+                        unused.push({ id: key, value: val, storage: stor, isLocal: localLooking });
+                    });
+                    setUnusedEntries(unused);
+                    setTargetStorageMap(prev => {
+                        const m = {};
+                        disks.forEach(d => { m[d.storage] = prev[d.storage] || d.storage; });
+                        return m;
+                    });
+
+                    // Parse NICs for per-NIC bridge mapping
+                    const nics = [];
+                    Object.keys(config).sort().forEach(key => {
+                        if (!key.match(/^net\d+$/)) return;
+                        const val = config[key];
+                        if (typeof val !== 'string') return;
+                        const bridgeMatch = val.match(/bridge=([^,]+)/);
+                        if (bridgeMatch) {
+                            nics.push({ id: key, bridge: bridgeMatch[1] });
+                        }
+                    });
+                    setSourceNics(nics);
+                    // init bridge map: default to same bridge name
+                    setTargetBridgeMap(prev => {
+                        const m = {};
+                        nics.forEach(n => { m[n.bridge] = prev[n.bridge] || n.bridge; });
+                        return m;
+                    });
+                };
+                
+                const checkVmConfig = async () => {
+                    try {
+                        const response = await authFetch(`${API_URL}/clusters/${sourceCluster.id}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`);
+                        if(response && response.ok) {
+                            const data = await response.json();
+                            const config = data.raw || data;
+                            processVmConfig(config);
+                        }
+                    } catch (err) {
+                        console.error('checking VM config:', err);
+                    }
+                };
+                checkVmConfig();
+                
+                // NS: Listen to SSE vm_config events for live updates
+                const handleVmConfigUpdate = (event) => {
+                    const { vmid: eventVmid, vm_type, config: newConfig, cluster_id } = event.detail;
+                    if (eventVmid === vm.vmid && vm_type === vm.type && cluster_id === sourceCluster.id) {
+                        console.log('SSE: Updating CrossClusterMigrateModal for', vm.vmid);
+                        const config = newConfig.raw || newConfig;
+                        processVmConfig(config);
+                    }
+                };
+                
+                window.addEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+                return () => window.removeEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+            }, [vm, sourceCluster.id]);
+
+            // Load target cluster nodes when cluster selected
+            useEffect(() => {
+                if(targetCluster) {
+                    loadTargetNodes();
+                }else{
+                    setTargetNodes([]);
+                    setTargetNode('');
+                }
+            }, [targetCluster]);
+
+            // Load target node resources when node selected
+            useEffect(() => {
+                if(targetCluster && targetNode) {
+                    loadTargetResources();
+                }else{
+                    setTargetStorages([]);
+                    setTargetBridges([]);
+                }
+            }, [targetNode]);
+
+            const loadTargetNodes = async () => {
+                setLoadingNodes(true);
+                try {
+                    const nodesRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes`, { timeout: 12000 });
+                    if(nodesRes && nodesRes.ok) {
+                        const nodes = await nodesRes.json();
+                        setTargetNodes(nodes);
+                        // Auto-select first online node
+                        const onlineNode = nodes.find(n => n.status === 'online');
+                        if(onlineNode) {
+                            setTargetNode(onlineNode.node);
+                        }
+                    }
+                } catch (error) {
+                    console.error('to load target nodes:', error);
+                }
+                setLoadingNodes(false);
+            };
+
+            const loadTargetResources = async () => {
+                setLoadingResources(true);
+                try {
+                    // Get storage list for selected node
+                    const storageRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/storage`, { timeout: 12000 });
+                    if(storageRes && storageRes.ok) {
+                        const storages = await storageRes.json();
+                        setTargetStorages(storages);
+                        // update storage map: keep source name if exists on target, else first available
+                        const availStorNames = storages.map(s => s.storage);
+                        const storFallback = availStorNames[0] || 'local-lvm';
+                        setTargetStorageMap(prev => {
+                            const updated = {};
+                            Object.entries(prev).forEach(([src, tgt]) => {
+                                updated[src] = availStorNames.includes(src) ? src : (availStorNames.includes(tgt) ? tgt : storFallback);
+                            });
+                            return updated;
+                        });
+                        // keep single targetStorage for backward compat
+                        if (!targetStorage && storages.length) setTargetStorage(storages[0].storage);
+                    }
+
+                    // Get network list for selected node (including SDN VNets)
+                    const networkRes = await authFetch(`${API_URL}/clusters/${targetCluster}/nodes/${targetNode}/networks`, { timeout: 12000 });
+                    if(networkRes && networkRes.ok) {
+                        const networks = await networkRes.json();
+                        // NS May 2026 (#385): exclude OVS access ports — their ovs_bridge
+                        // field points to the parent OVSBridge; they're not bridges.
+                        const bridges = networks.filter(n => {
+                            if (n.type === 'OVSIntPort' || n.type === 'OVSPort' || n.type === 'OVSBond') return false;
+                            if (n.ovs_bridge) return false;
+                            return n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn';
+                        });
+                        setTargetBridges(bridges);
+                        // update bridge map defaults: keep source bridge if it exists on target, else first available
+                        const availNames = bridges.map(b => b.iface);
+                        const fallback = availNames[0] || 'vmbr0';
+                        setTargetBridgeMap(prev => {
+                            const updated = {};
+                            Object.entries(prev).forEach(([src, tgt]) => {
+                                updated[src] = availNames.includes(src) ? src : (availNames.includes(tgt) ? tgt : fallback);
+                            });
+                            return updated;
+                        });
+                    }
+                } catch (error) {
+                    console.error('to load target resources:', error);
+                }
+                setLoadingResources(false);
+            };
+
+            const buildPayload = () => {
+                const payload = {
+                    source_cluster: sourceCluster?.id,
+                    target_cluster: targetCluster,
+                    vmid: vm.vmid,
+                    vm_type: vm.type,
+                    source_node: vm.node,
+                    target_node: targetNode,
+                    target_storage: targetStorage,
+                    target_vmid: targetVmid ? parseInt(targetVmid) : null,
+                    online,
+                    force_online: forceOnline,
+                    delete_source: deleteSource
+                };
+                // per-storage mapping
+                if (Object.keys(targetStorageMap).length > 0) {
+                    payload.target_storage_map = targetStorageMap;
+                }
+                // per-NIC bridge mapping or single fallback
+                if (Object.keys(targetBridgeMap).length > 0) {
+                    payload.target_bridge_map = targetBridgeMap;
+                } else {
+                    payload.target_bridge = 'vmbr0';
+                }
+                return payload;
+            };
+            // LW Oct 2026 - the Check step, with the options Start would send
+            const check = useMigPreflight(JSON.stringify(buildPayload()));
+            const runCheck = () => {
+                if (!targetCluster || !targetNode || check.busy) return;
+                check.run(() => migPfFetch(`${API_URL}/cross-cluster-migrate/preflight`, buildPayload(),
+                    getAuthHeaders, t('migPfFailed')));
+            };
+            const startBlocked = !!check.plan && (!check.plan.moving.size || check.plan.needsConfirm);
+
+            const handleMigrate = async () => {
+                if (!targetCluster || !targetNode || startBlocked) return;
+                // need at least one storage selected (via map or single dropdown)
+                if (!Object.keys(targetStorageMap).length && !targetStorage) return;
+                setLoading(true);
+                const payload = buildPayload();
+                if (check.plan && check.plan.overridden.length) {
+                    payload.override = check.plan.overridden;
+                    payload.confirm_override = true;
+                }
+                await onMigrate(payload);
+                setLoading(false);
+                onClose();
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 overflow-y-auto">
+                    <div className="w-full max-w-xl bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden animate-scale-in my-8">
+                        <div className="px-6 py-4 border-b border-proxmox-border bg-gradient-to-r from-cyan-500/10 to-blue-500/10">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 rounded-lg bg-cyan-500/20">
+                                        <Icons.Globe />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-semibold text-white">{t('crossClusterMigration')}</h3>
+                                        <p className="text-sm text-gray-400">{t('crossClusterMigrateDesc')}</p>
+                                    </div>
+                                </div>
+                                <button onClick={onClose} className="p-2 hover:bg-proxmox-border rounded-lg text-gray-400 hover:text-white">
+                                    <Icons.X />
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
+                            {/* Source VM Info */}
+                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                <div className="text-xs text-gray-500 mb-2">{t('sourceVm')}</div>
+                                <div className="flex items-center gap-3">
+                                    <div className={`p-2 rounded-lg ${isQemu ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
+                                        {isQemu ? <Icons.VM /> : <Icons.Container />}
+                                    </div>
+                                    <div>
+                                        <div className="font-medium text-white">{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</div>
+                                        <div className="text-xs text-gray-400">
+                                            ID {vm.vmid} · {vm.node} · {clusterLabel(sourceCluster)}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Migration Warnings */}
+                            {(hasCdDvd || bootOrderIssues.length > 0 || unusedEntries.length > 0) && (
+                                <div className="space-y-2">
+                                    {hasCdDvd && (
+                                        <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                            <div className="flex items-start gap-2">
+                                                <span className="text-red-400 text-lg">💿</span>
+                                                <div className="flex-1">
+                                                    <p className="text-red-400 font-medium text-sm">{t('isoMounted') || 'ISO/CD-ROM Mounted'}</p>
+                                                    <p className="text-red-300/70 text-xs mt-1">
+                                                        {t('isoMigrationWarning') || 'Migration may fail if the ISO is not available on the target node. Eject the CD/DVD or ensure the ISO exists on shared storage.'}
+                                                    </p>
+                                                    {detectedIsos && detectedIsos.length > 0 && (
+                                                        <div className="mt-2 space-y-1">
+                                                            {detectedIsos.map((iso, idx) => (
+                                                                <div key={idx} className="flex items-center gap-2 text-xs flex-wrap">
+                                                                    <span className="text-gray-400">{iso.device}:</span>
+                                                                    <code className="text-red-300 bg-red-500/10 px-1 rounded break-all">{iso.iso}</code>
+                                                                    {iso.isLocal && (
+                                                                        <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
+                                                                            {t('localStorage') || 'Local'}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {bootOrderIssues.length > 0 && (
+                                        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg flex items-start gap-2">
+                                            <span className="text-yellow-400 text-lg">⚠️</span>
+                                            <div>
+                                                <p className="text-yellow-400 font-medium text-sm">{t('bootOrderIssue') || 'Boot Order Issue'}</p>
+                                                <p className="text-yellow-300/70 text-xs">
+                                                    {t('bootOrderWarning') || 'Boot order references non-existent disks'}: <code className="bg-yellow-500/10 px-1 rounded">{bootOrderIssues.join(', ')}</code>
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {/* MK May 2026 (#414 KowMangler): detached disks/ISOs that PVE still holds a reference to */}
+                                    {unusedEntries.length > 0 && (
+                                        <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                            <div className="flex items-start gap-2">
+                                                <span className="text-yellow-400 text-lg">📎</span>
+                                                <div className="flex-1">
+                                                    <p className="text-yellow-400 font-medium text-sm">{t('detachedDisksTitle') || 'Detached Disks/ISOs Still Referenced'}</p>
+                                                    <p className="text-yellow-300/70 text-xs mt-1">
+                                                        {t('detachedDisksWarning') || "PVE keeps detached volumes as 'unused*' references on the VM. Cross-cluster migration tries to move them too — if any sit on local-only storage it will fail with a cryptic 'storage does not support vm images' error. Clean them up in VM → Configure → Hardware → Unused Disks before starting."}
+                                                    </p>
+                                                    <div className="mt-2 space-y-1">
+                                                        {unusedEntries.map((u, idx) => (
+                                                            <div key={idx} className="flex items-center gap-2 text-xs flex-wrap">
+                                                                <span className="text-gray-400">{u.id}:</span>
+                                                                <code className="text-yellow-300 bg-yellow-500/10 px-1 rounded break-all">{u.value}</code>
+                                                                {u.isLocal && (
+                                                                    <span className="px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded text-[10px]">
+                                                                        {t('localStorage') || 'Local'}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Target Cluster */}
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-2">{t('targetCluster')}</label>
+                                <select
+                                    value={targetCluster}
+                                    onChange={(e) => setTargetCluster(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                >
+                                    <option value="">{t('selectCluster')}</option>
+                                    {availableClusters.map(c => (
+                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {targetCluster && (
+                                <>
+                                    {loadingNodes && targetNodes.length === 0 ? (
+                                        <div className="flex items-center justify-center py-4 text-gray-400">
+                                            <Icons.RotateCw />
+                                            <span className="ml-2">{t('loadingNodes')}</span>
+                                        </div>
+                                    ) : (
+                                        <>
+                                            {/* Target Node */}
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-2">{t('targetNode')}</label>
+                                                <select
+                                                    value={targetNode}
+                                                    onChange={(e) => setTargetNode(e.target.value)}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                >
+                                                    <option value="">{t('selectNode')}...</option>
+                                                    {targetNodes.map(n => (
+                                                        <option key={n.node} value={n.node}>
+                                                            {n.node} ({n.status}) - CPU: {n.cpu_percent?.toFixed(1)}% RAM: {n.mem_percent?.toFixed(1)}%
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+
+                                            {targetNode && (
+                                                <>
+                                                    {loadingResources ? (
+                                                        <div className="flex items-center justify-center py-4 text-gray-400">
+                                                            <Icons.RotateCw />
+                                                            <span className="ml-2">{t('loadingStorageNetwork')}</span>
+                                                        </div>
+                                                    ) : (
+                                                        <>
+                                                            {/* Storage Mapping - per disk */}
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('storageMappings') || 'Storage Mapping'}</label>
+                                                                {sourceDisks.length > 0 ? (
+                                                                    <div className="space-y-2">
+                                                                        {/* group by unique source storage */}
+                                                                        {[...new Set(sourceDisks.map(d => d.storage))].map(srcStor => {
+                                                                            const disksOnStor = sourceDisks.filter(d => d.storage === srcStor);
+                                                                            return (
+                                                                            <div key={srcStor} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-400 w-28 shrink-0 truncate" title={`${srcStor} (${disksOnStor.map(d => d.id).join(', ')})`}>
+                                                                                    {srcStor} <span className="text-gray-600">({disksOnStor.map(d => d.id).join(', ')})</span>
+                                                                                </span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={targetStorageMap[srcStor] || ''}
+                                                                                    onChange={(e) => { setTargetStorageMap(prev => ({...prev, [srcStor]: e.target.value})); setTargetStorage(e.target.value); }}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    <option value="">{t('selectStorage')}</option>
+                                                                                    {targetStorages.map(s => (
+                                                                                        <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                                                    ))}
+                                                                                </select>
+                                                                            </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                ) : (
+                                                                    <select
+                                                                        value={targetStorage}
+                                                                        onChange={(e) => setTargetStorage(e.target.value)}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                    >
+                                                                        <option value="">{t('selectStorage')}</option>
+                                                                        {targetStorages.map(s => (
+                                                                            <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                                        ))}
+                                                                    </select>
+                                                                )}
+                                                            </div>
+
+                                                            {/* Network Mapping - per NIC */}
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('networkMappings') || 'Network Mapping'}</label>
+                                                                {sourceNics.length > 0 ? (
+                                                                    <div className="space-y-2">
+                                                                        {sourceNics.map(nic => (
+                                                                            <div key={nic.id} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-500 w-16 shrink-0">{nic.id}</span>
+                                                                                <span className="text-xs text-gray-400 w-20 shrink-0 truncate" title={nic.bridge}>{nic.bridge}</span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={targetBridgeMap[nic.bridge] || 'vmbr0'}
+                                                                                    onChange={(e) => setTargetBridgeMap(prev => ({...prev, [nic.bridge]: e.target.value}))}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-dark border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    {targetBridges.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                                                                    {targetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                                        <optgroup label="Bridges">
+                                                                                            {targetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                    {targetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                                        <optgroup label="SDN VNets">
+                                                                                            {targetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                </select>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                ) : (
+                                                                    <select
+                                                                        value={Object.values(targetBridgeMap)[0] || 'vmbr0'}
+                                                                        onChange={(e) => setTargetBridgeMap({'vmbr0': e.target.value})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                    >
+                                                                        {targetBridges.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                                                        {targetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                            <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                )}
+                                                            </div>
+
+                                                            {/* Target VMID (optional) */}
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('newVmid')}</label>
+                                                                <input
+                                                                    type="number"
+                                                                    value={targetVmid}
+                                                                    onChange={(e) => setTargetVmid(e.target.value)}
+                                                                    placeholder={`${t('sameIdPlaceholder')} (${vm.vmid})`}
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                />
+                                                            </div>
+
+                                                            {/* Options */}
+                                                            <div className="space-y-2">
+                                                                {isQemu && (
+                                                                    <label className="flex items-center gap-3 text-sm text-gray-300">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={online}
+                                                                            onChange={(e) => setOnline(e.target.checked)}
+                                                                            className="w-4 h-4 rounded"
+                                                                        />
+                                                                        {t('liveMigrationOption')}
+                                                                    </label>
+                                                                )}
+                                                                <label className="flex items-center gap-3 text-sm text-gray-300">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={deleteSource}
+                                                                        onChange={(e) => setDeleteSource(e.target.checked)}
+                                                                        className="w-4 h-4 rounded"
+                                                                    />
+                                                                    {t('deleteSourceAfter')}
+                                                                </label>
+                                                            </div>
+                                                            
+                                                            {/* Large Disk Warning */}
+                                                            {estimatedDiskGb > 100 && online && isQemu && (
+                                                                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg space-y-2">
+                                                                    <div className="text-sm text-yellow-400">
+                                                                        ⚠️ <strong>{t('largeDiskWarning') || 'Large Disk Detected'}</strong> ({estimatedDiskGb.toFixed(0)} GB)
+                                                                    </div>
+                                                                    <div className="text-xs text-yellow-400/80">
+                                                                        {t('largeDiskExplanation') || 'Live migration for disks >100GB may fail with "401 Unauthorized" due to Proxmox WebSocket ticket timeout. The server will automatically use offline migration unless forced.'}
+                                                                    </div>
+                                                                    <label className="flex items-center gap-3 text-sm text-yellow-300 mt-2">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={forceOnline}
+                                                                            onChange={(e) => setForceOnline(e.target.checked)}
+                                                                            className="w-4 h-4 rounded"
+                                                                        />
+                                                                        {t('forceOnlineMigration') || 'Force online migration anyway (may fail)'}
+                                                                    </label>
+                                                                </div>
+                                                            )}
+                                                        </>
+                                                    )}
+                                                </>
+                                            )}
+                                        </>
+                                    )}
+                                </>
+                            )}
+
+                            {targetCluster && targetNode && (check.result ? (
+                                <MigPreflightView result={check.result} stale={check.stale} override={check.override}
+                                    onOverride={check.tick} confirmed={check.confirmed} onConfirm={check.setConfirmed} />
+                            ) : (
+                                <div className="text-xs text-gray-400 flex items-start gap-2" data-testid="mig-pf-hint">
+                                    <Icons.Shield />
+                                    <span>{t('migPfHint')}</span>
+                                </div>
+                            ))}
+                            {check.error && (
+                                <div className="text-sm text-red-400 flex items-start gap-2" data-testid="mig-pf-error">
+                                    <Icons.AlertTriangle />
+                                    <span className="break-all">{check.error}</span>
+                                </div>
+                            )}
+
+                            <div className="p-3 bg-green-500/10 border border-green-500/30 rounded-lg text-sm text-green-400">
+                                ✓ <strong>{t('autoTokenInfo').split('.')[0]}.</strong> {t('autoTokenInfo').split('.').slice(1).join('.')}
+                            </div>
+                            
+                            <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-400">
+                                💡 {t('clusterReachableInfo')}
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end gap-3 px-6 py-4 border-t border-proxmox-border bg-proxmox-dark">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
+                                {t('cancel')}
+                            </button>
+                            <button onClick={runCheck} disabled={!targetCluster || !targetNode || loading || check.busy}
+                                data-testid="xc-migrate-check"
+                                className="flex items-center gap-2 px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50">
+                                {check.busy ? <span className="flex animate-spin"><Icons.RotateCw /></span> : <Icons.Shield />}
+                                {check.busy ? t('migPfChecking') : t('migPfCheck')}
+                            </button>
+                            {!haReadOnly && (
+                                <button
+                                    onClick={handleMigrate}
+                                    disabled={!targetCluster || !targetNode || !targetStorage || loading || startBlocked}
+                                    data-testid="xc-migrate-run"
+                                    className="flex items-center gap-2 px-4 py-2 bg-cyan-600 rounded-lg text-white hover:bg-cyan-700 disabled:opacity-50"
+                                >
+                                    {loading && <Icons.RotateCw />}
+                                    <Icons.Globe />
+                                    {t('crossClusterMigrate')}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - which rule of the balancer moved a guest: label key and colours, for the
+        // list below and the balancer history in the cluster settings
+        const BAL_HIST_TRIGGERS = {
+            balance: ['balHistTriggerBalance', 'bg-blue-500/20 text-blue-400'],
+            predictive: ['balHistTriggerPredictive', 'bg-purple-500/20 text-purple-400'],
+            affinity: ['balHistTriggerAffinity', 'bg-orange-500/20 text-orange-400'],
+            pin: ['balHistTriggerPin', 'bg-cyan-500/20 text-cyan-400'],
+        };
+
+        // Migration History Component
+        // LW: Limited to 10 items by default (GitHub Issue - list was too long)
+        function MigrationHistory({ logs, maxItems = 10 }) {
+            const { t } = useTranslation();
+            
+            if (!logs || logs.length === 0) {
+                return (
+                    <div className="text-center py-8 text-gray-500">
+                        <Icons.Activity />
+                        <p className="mt-2">{t('noMigrationsYet')}</p>
+                    </div>
+                );
+            }
+            
+            // LW: Only show last 10 migrations (newest first)
+            const reversedLogs = logs.slice().reverse();
+            const displayLogs = reversedLogs.slice(0, maxItems);
+            const hiddenCount = reversedLogs.length - maxItems;
+
+            return (
+                <div className="space-y-4">
+                    <div className="relative space-y-4">
+                        <div className="timeline-line" />
+                        {displayLogs.map((log, idx) => (
+                            <div 
+                                key={idx} 
+                                className="relative pl-12 animate-slide-in"
+                                style={{ animationDelay: `${idx * 50}ms` }}
+                            >
+                                <div className={`absolute left-2 w-6 h-6 rounded-full flex items-center justify-center ${
+                                    log.success 
+                                        ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                }`}>
+                                    {log.success ? <Icons.Check /> : <Icons.X />}
+                                </div>
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="font-medium text-white">{log.vm}</span>
+                                        <div className="flex items-center gap-2">
+                                            {BAL_HIST_TRIGGERS[log.trigger] && (
+                                                <span className={`text-xs px-2 py-0.5 rounded ${BAL_HIST_TRIGGERS[log.trigger][1]}`} data-mig-trigger={log.trigger}>
+                                                    {t(BAL_HIST_TRIGGERS[log.trigger][0])}
+                                                </span>
+                                            )}
+                                            {log.dry_run && (
+                                                <span className="text-xs bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded border border-yellow-500/20">
+                                                    Dry Run
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-2 text-sm text-gray-400">
+                                        <span className="font-mono">{log.from_node}</span>
+                                        <Icons.ArrowRight />
+                                        <span className="font-mono">{log.to_node}</span>
+                                    </div>
+                                    <div className="mt-2 text-xs text-gray-500">
+                                        {new Date(log.timestamp).toLocaleString('de-DE')}
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    
+                    {/* LW: Show count of hidden older migrations */}
+                    {hiddenCount > 0 && (
+                        <div className="text-center py-2 text-xs text-gray-500">
+                            + {hiddenCount} {t('olderMigrations') || 'older migrations'}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // #621 (ccesario) — shared comparator for the "Top Resources" guest tables, used by
+        // both GroupOverview and AllClustersOverview. CPU/RAM sort numerically, name/cluster/
+        // node/status collate as strings. Returns a new array (does not mutate the input).
+        function sortTopGuests(list, by, dir) {
+            const gv = (g) => {
+                switch (by) {
+                    case 'name': return (g.name || `VM ${g.vmid}`).toLowerCase();
+                    case 'cluster': return (g.cluster_name || '').toLowerCase();
+                    case 'node': return (g.node || '').toLowerCase();
+                    case 'ram': return g.maxmem > 0 ? g.mem / g.maxmem : 0;
+                    case 'status': return g.status || '';
+                    case 'cpu':
+                    default: return g.cpu || 0;
+                }
+            };
+            return [...list].sort((a, b) => {
+                const av = gv(a), bv = gv(b);
+                const c = (typeof av === 'number' && typeof bv === 'number')
+                    ? av - bv
+                    : String(av).localeCompare(String(bv));
+                return dir === 'asc' ? c : -c;
+            });
+        }
+        // #621 — clickable-header state machine: re-clicking the active column flips the
+        // direction; switching column defaults numeric cols to desc (highest first), text asc.
+        function nextGuestSort(curBy, curDir, field) {
+            if (curBy === field) return { by: field, dir: curDir === 'asc' ? 'desc' : 'asc' };
+            return { by: field, dir: (field === 'cpu' || field === 'ram') ? 'desc' : 'asc' };
+        }
+
+        // #612 Phase 1 (MK Jul 2026) — Multi-Cluster EVPN: create + read one logical
+        // EVPN vNet that spans several same-ASN clusters. PVE has no cross-cluster SDN
+        // primitive, so this drives the new /api/multi-sdn/* orchestration layer.
+        function MultiClusterEvpnView({ clusters = [], authFetch, API_URL, addToast, canAdminSettings = false, canManage = false }) {
+            const { t } = useTranslation();
+            // the auto-reconcile switch saves through /settings/server, which no standby
+            // carries out, forwarding or not (#625)
+            const { haStandby } = useAuth();
+            const [vnets, setVnets] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [expanded, setExpanded] = useState(null);
+            const [showCreate, setShowCreate] = useState(false);
+            const [busy, setBusy] = useState(false);
+            const [plan, setPlan] = useState(null);           // validate/preview result
+            const blankForm = { name: '', alias: '', zone: '', controller: '', vni: '', asn: '', vrf_vxlan: '', peers: '', subnet: '', cluster_ids: [] };
+            const [form, setForm] = useState(blankForm);
+            const [showEdit, setShowEdit] = useState(null);   // #612 P2 — the vnet being edited
+            const [editForm, setEditForm] = useState({ alias: '', addSubnet: '', delSubnet: '' });
+            const [autoReconcile, setAutoReconcile] = useState(false); // #612 P2 — global drift auto-reconcile gate
+
+            const statusChip = (s) => {
+                const map = {
+                    applied: 'bg-green-500/20 text-green-400', in_sync: 'bg-green-500/20 text-green-400',
+                    partial: 'bg-yellow-500/20 text-yellow-400', drift: 'bg-yellow-500/20 text-yellow-400',
+                    pending: 'bg-yellow-500/20 text-yellow-400',
+                    failed: 'bg-red-500/20 text-red-400', offline: 'bg-red-500/20 text-red-400',
+                    missing: 'bg-red-500/20 text-red-400', not_found: 'bg-red-500/20 text-red-400',
+                    sdn_not_installed: 'bg-gray-500/20 text-gray-400', error: 'bg-red-500/20 text-red-400',
+                };
+                return map[s] || 'bg-gray-500/20 text-gray-400';
+            };
+            const clusterName = (cid) => clusterLabel(clusters.find(c => c.id === cid)) || cid;
+
+            const load = async () => {
+                setLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets`);
+                    if (r?.ok) setVnets(await r.json());
+                } catch (e) { /* silent */ }
+                finally { setLoading(false); }
+            };
+            const loadSetting = async () => {
+                if (!canAdminSettings) return; // /settings/server is admin.settings-gated
+                try {
+                    const r = await authFetch(`${API_URL}/settings/server`);
+                    if (r?.ok) { const s = await r.json(); setAutoReconcile(!!(s.multi_sdn_drift_reconcile ?? s?.settings?.multi_sdn_drift_reconcile)); }
+                } catch (e) { /* silent */ }
+            };
+            useEffect(() => { load(); loadSetting(); }, []);
+
+            const toggleMember = (cid) => setForm(f => ({ ...f, cluster_ids: f.cluster_ids.includes(cid) ? f.cluster_ids.filter(x => x !== cid) : [...f.cluster_ids, cid] }));
+
+            const buildBody = () => {
+                const body = {
+                    name: form.name.trim(), alias: form.alias.trim(), zone: form.zone.trim(),
+                    controller: form.controller.trim(), vni: parseInt(form.vni) || undefined,
+                    asn: parseInt(form.asn) || undefined,
+                    vrf_vxlan: form.vrf_vxlan ? parseInt(form.vrf_vxlan) : undefined,
+                    peers: form.peers.trim(), cluster_ids: form.cluster_ids,
+                };
+                if (form.subnet.trim()) body.subnets = [{ cidr: form.subnet.trim() }];
+                return body;
+            };
+
+            const validate = async () => {
+                setBusy(true); setPlan(null);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/validate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildBody()) });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) setPlan(data);
+                    else addToast('Error', data.error || 'Validation failed', 'error');
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            const create = async () => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(buildBody()) });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) {
+                        addToast(t('mcevpnCreated') || 'Cross-cluster EVPN vNet created', `${data.name} → ${data.status}`, 'success');
+                        setShowCreate(false); setForm(blankForm); setPlan(null); load();
+                    } else {
+                        const extra = data.conflicts ? ` (${data.conflicts.join('; ')})` : (data.status ? ` [${data.status}]` : '');
+                        addToast('Error', (data.error || 'Create failed') + extra, 'error');
+                    }
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            const reapply = async (vid) => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/apply`, { method: 'POST' });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) { addToast(t('mcevpnReapplied') || 'Re-applied', `${data.name} → ${data.status}`, 'success'); load(); }
+                    else addToast('Error', data.error || 'Re-apply failed', 'error');
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            const remove = async (vid, purge) => {
+                if (!window.confirm(purge ? (t('mcevpnPurgeConfirm') || 'Delete this vNet AND remove it from every member cluster?') : (t('mcevpnForgetConfirm') || 'Forget this record? (SDN objects stay on the clusters)'))) return;
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}${purge ? '?purge=1' : ''}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast(t('mcevpnDeleted') || 'Deleted', '', 'success'); load(); }
+                    else { const d = await r.json().catch(() => ({})); addToast('Error', d.error || 'Delete failed', 'error'); }
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            // #612 P2 — read-only drift scan (persists per-cluster drift, no writes)
+            const scan = async (vid) => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/scan`, { method: 'POST' });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) { addToast(t('mcevpnScanned') || 'Drift scan done', `${data.name} → ${data.status}`, 'info'); load(); }
+                    else addToast('Error', data.error || 'Scan failed', 'error');
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            // #612 P2 — re-assert the desired definition on drifted/missing members
+            const reconcile = async (vid) => {
+                if (!window.confirm(t('mcevpnReconcileConfirm') || 'Re-push the desired EVPN definition to every member (fixes drift, runs a cluster-wide SDN apply)?')) return;
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/reconcile`, { method: 'POST' });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) { addToast(t('mcevpnReconciled') || 'Reconciled', `${data.name} → ${data.status}`, 'success'); load(); }
+                    else addToast('Error', data.error || 'Reconcile failed', 'error');
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            const openEdit = (v) => { setEditForm({ alias: v.alias || '', addSubnet: '', delSubnet: '' }); setShowEdit(v); };
+            const submitEdit = async () => {
+                if (!showEdit) return;
+                const body = {};
+                if ((editForm.alias || '') !== (showEdit.alias || '')) body.alias = editForm.alias.trim();
+                if (editForm.addSubnet.trim()) body.add_subnets = [{ cidr: editForm.addSubnet.trim() }];
+                if (editForm.delSubnet.trim()) body.del_subnets = [editForm.delSubnet.trim()];
+                if (!('alias' in body) && !body.add_subnets && !body.del_subnets) { addToast('Error', t('mcevpnNothingToChange') || 'Nothing to change', 'error'); return; }
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${showEdit.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) { addToast(t('mcevpnEdited') || 'vNet updated', `${data.name} → ${data.status}`, 'success'); setShowEdit(null); load(); }
+                    else addToast('Error', data.error || 'Edit failed', 'error');
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            // #612 P2 — global auto-reconcile toggle (off = detect-only)
+            const saveAutoReconcile = async (val) => {
+                setAutoReconcile(val); // optimistic
+                try {
+                    const r = await authFetch(`${API_URL}/settings/server`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ multi_sdn_drift_reconcile: val }) });
+                    if (!r?.ok) { setAutoReconcile(!val); addToast('Error', t('mcevpnSettingFailed') || 'Failed to save setting', 'error'); }
+                } catch (e) { setAutoReconcile(!val); addToast('Error', e.message, 'error'); }
+            };
+
+            // #612 P3 — expand / shrink the span
+            const addMember = async (vid, cid) => {
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/members`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cluster_id: cid }) });
+                    const data = await r.json().catch(() => ({}));
+                    if (r?.ok) { addToast(t('mcevpnMemberAdded') || 'Cluster added to the span', `${clusterName(cid)} → ${data.status}`, 'success'); load(); }
+                    else { const extra = data.conflicts ? ` (${data.conflicts.join('; ')})` : ''; addToast('Error', (data.error || 'Add failed') + extra, 'error'); }
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+            const removeMember = async (vid, cid, purge) => {
+                if (!window.confirm(purge ? (t('mcevpnRemovePurgeConfirm') || 'Remove this cluster from the span AND delete the vNet from it?') : (t('mcevpnRemoveConfirm') || 'Remove this cluster from the span? (the vNet stays on the cluster)'))) return;
+                setBusy(true);
+                try {
+                    const r = await authFetch(`${API_URL}/multi-sdn/vnets/${vid}/members/${cid}${purge ? '?purge=1' : ''}`, { method: 'DELETE' });
+                    if (r?.ok) { addToast(t('mcevpnMemberRemoved') || 'Cluster removed from the span', '', 'success'); load(); }
+                    else { const d = await r.json().catch(() => ({})); addToast('Error', d.error || 'Remove failed', 'error'); }
+                } catch (e) { addToast('Error', e.message, 'error'); }
+                finally { setBusy(false); }
+            };
+
+            const evpnClusters = clusters; // any cluster could host an EVPN SDN; membership is user-chosen
+            const canCreate = form.name && form.zone && form.controller && form.vni && form.asn && form.cluster_ids.length >= 1;
+
+            return (
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-lg font-semibold text-white flex items-center gap-2"><Icons.Network className="w-5 h-5 text-cyan-400" />{t('mcevpnTitle') || 'Multi-Cluster EVPN'}</h2>
+                            <p className="text-xs text-gray-500 mt-0.5">{t('mcevpnSubtitle') || 'One logical EVPN vNet spanning several clusters that share a BGP ASN. The physical BGP-EVPN underlay must already peer.'}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {canAdminSettings && !haStandby && (
+                                <button onClick={() => saveAutoReconcile(!autoReconcile)} title={t('mcevpnAutoReconcileHint') || 'When on, the drift scanner re-pushes the desired config to drifted members automatically (cluster-wide SDN apply). Off = detect-only.'} className={`px-2.5 py-1.5 rounded-lg text-xs border flex items-center gap-1.5 ${autoReconcile ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-proxmox-dark text-gray-400 border-proxmox-border hover:text-white'}`}><Icons.RefreshCw className="w-3.5 h-3.5" />{t('mcevpnAutoReconcile') || 'Auto-reconcile'}: {autoReconcile ? (t('enabled') || 'on') : (t('disabled') || 'off')}</button>
+                            )}
+                            <button onClick={load} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white flex items-center gap-1.5"><Icons.RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />{t('refresh') || 'Refresh'}</button>
+                            {canManage && (
+                                <button onClick={() => { setShowCreate(true); setPlan(null); }} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 flex items-center gap-1.5"><Icons.Plus className="w-3.5 h-3.5" />{t('mcevpnCreate') || 'Create EVPN vNet'}</button>
+                            )}
+                        </div>
+                    </div>
+
+                    {clusters.length < 2 && (
+                        <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-xs text-yellow-300 flex items-start gap-2">
+                            <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                            <span>{t('mcevpnNeedTwo') || 'A cross-cluster EVPN vNet spans multiple clusters — add at least two connected clusters to make this useful. You can still define one, but it only makes sense across ≥2 members.'}</span>
+                        </div>
+                    )}
+
+                    {vnets.length === 0 && !loading ? (
+                        <div className="p-10 text-center text-gray-600 text-sm bg-proxmox-card border border-proxmox-border rounded-xl">
+                            {t('mcevpnEmpty') || 'No cross-cluster EVPN vNets yet. Create one to span an EVPN L2 domain across same-ASN clusters.'}
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            {vnets.map(v => (
+                                <div key={v.id} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                    <div className="p-4 flex items-center justify-between cursor-pointer hover:bg-proxmox-hover/30" onClick={() => setExpanded(expanded === v.id ? null : v.id)}>
+                                        <div className="flex items-center gap-3 min-w-0">
+                                            <Icons.Network className="w-4 h-4 text-cyan-400 flex-shrink-0" />
+                                            <div className="min-w-0">
+                                                <div className="text-sm font-medium text-white truncate">{v.name} {v.alias && <span className="text-gray-500 font-normal">— {v.alias}</span>}</div>
+                                                <div className="text-xs text-gray-500">zone {v.zone} · VNI {v.vni} · ASN {v.asn}{v.controller ? ` · ctl ${v.controller}` : ''}</div>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2 flex-shrink-0">
+                                            {(v.member_clusters || []).slice(0, 4).map(cid => (
+                                                <span key={cid} className="hidden sm:inline text-[11px] px-1.5 py-0.5 rounded bg-proxmox-dark text-gray-400 border border-proxmox-border">{clusterName(cid)}</span>
+                                            ))}
+                                            <span className={`px-2 py-0.5 rounded text-xs font-semibold ${statusChip(v.status)}`}>{v.status}</span>
+                                            <Icons.ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${expanded === v.id ? 'rotate-180' : ''}`} />
+                                        </div>
+                                    </div>
+                                    {expanded === v.id && (
+                                        <div className="border-t border-proxmox-border p-4 space-y-3">
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                {(v.member_clusters || []).map(cid => {
+                                                    const st = (v.per_cluster_status || {})[cid] || {};
+                                                    return (
+                                                        <div key={cid} className="flex items-center justify-between p-2 rounded-lg bg-proxmox-dark/40 border border-proxmox-border">
+                                                            <span className="text-sm text-gray-300">{clusterName(cid)}</span>
+                                                            <div className="flex items-center gap-2">
+                                                                {st.error ? <span className="text-[11px] text-red-400/80 max-w-[180px] truncate" title={st.error}>{st.error}</span>
+                                                                    : st.detail ? <span className="text-[11px] text-amber-400/80 max-w-[180px] truncate" title={st.detail}>{st.detail}</span> : null}
+                                                                <span className={`px-2 py-0.5 rounded text-xs font-semibold ${statusChip(st.status || 'unknown')}`}>{st.status || 'unknown'}</span>
+                                                                {canManage && (v.member_clusters || []).length > 1 && (
+                                                                    <>
+                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, false)} title={t('mcevpnRemoveMember') || 'Remove from span (leave the vNet on the cluster)'} className="text-gray-500 hover:text-white px-1 text-sm leading-none disabled:opacity-50">−</button>
+                                                                        <button disabled={busy} onClick={() => removeMember(v.id, cid, true)} title={t('mcevpnRemovePurge') || 'Remove from span + delete the vNet from this cluster'} className="text-red-400/70 hover:text-red-300 disabled:opacity-50"><Icons.Trash2 className="w-3.5 h-3.5" /></button>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                            {canManage && (() => {
+                                                const nonMembers = clusters.filter(c => !(v.member_clusters || []).includes(c.id));
+                                                return nonMembers.length > 0 ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-[11px] text-gray-500">{t('mcevpnAddMember') || 'Add cluster to span'}:</span>
+                                                        <select disabled={busy} value="" onChange={e => { if (e.target.value) addMember(v.id, e.target.value); }} className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-white text-xs">
+                                                            <option value="">{t('mcevpnPickCluster') || '— pick a cluster —'}</option>
+                                                            {nonMembers.map(c => <option key={c.id} value={c.id}>{clusterLabel(c)}</option>)}
+                                                        </select>
+                                                    </div>
+                                                ) : null;
+                                            })()}
+                                            {canManage ? (
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <button disabled={busy} onClick={() => scan(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnScan') || 'Scan for drift'}</button>
+                                                <button disabled={busy} onClick={() => openEdit(v)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnEdit') || 'Edit'}</button>
+                                                <button disabled={busy} onClick={() => reapply(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-cyan-500/15 text-cyan-300 hover:bg-cyan-500/25 border border-cyan-500/30 disabled:opacity-50">{t('mcevpnReapply') || 'Re-apply / retry'}</button>
+                                                <button disabled={busy} onClick={() => reconcile(v.id)} className="px-2.5 py-1.5 rounded-lg text-xs bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 disabled:opacity-50">{t('mcevpnReconcile') || 'Reconcile drift'}</button>
+                                                <button disabled={busy} onClick={() => remove(v.id, false)} className="px-2.5 py-1.5 rounded-lg text-xs bg-proxmox-dark text-gray-300 hover:text-white border border-proxmox-border disabled:opacity-50">{t('mcevpnForget') || 'Forget record'}</button>
+                                                <button disabled={busy} onClick={() => remove(v.id, true)} className="px-2.5 py-1.5 rounded-lg text-xs bg-red-500/10 text-red-300 hover:bg-red-500/20 border border-red-500/30 disabled:opacity-50">{t('mcevpnPurge') || 'Delete + purge from clusters'}</button>
+                                            </div>
+                                            ) : (
+                                                <div className="text-[11px] text-gray-600">{t('mcevpnReadOnly') || 'Read-only view — managing cross-cluster EVPN needs the SDN + settings permissions.'}</div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {showCreate && (
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowCreate(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between sticky top-0 bg-proxmox-card">
+                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnCreate') || 'Create EVPN vNet'}</h3>
+                                    <button onClick={() => setShowCreate(false)} className="text-gray-500 hover:text-white"><Icons.X className="w-5 h-5" /></button>
+                                </div>
+                                <div className="p-4 space-y-3">
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <label className="text-xs text-gray-400">{t('mcevpnVnetName') || 'vNet name'} <span className="text-gray-600">(≤8)</span>
+                                            <input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="evpn1" /></label>
+                                        <label className="text-xs text-gray-400">{t('alias') || 'Alias'}
+                                            <input value={form.alias} onChange={e => setForm({ ...form, alias: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="prod-span" /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnZone') || 'EVPN zone id'} <span className="text-gray-600">(≤8)</span>
+                                            <input value={form.zone} onChange={e => setForm({ ...form, zone: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="z1" /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnController') || 'EVPN controller id'}
+                                            <input value={form.controller} onChange={e => setForm({ ...form, controller: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="evpnctl" /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnVni') || 'VNI (vnet tag)'}
+                                            <input type="number" value={form.vni} onChange={e => setForm({ ...form, vni: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10010" /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnAsn') || 'BGP ASN (shared)'}
+                                            <input type="number" value={form.asn} onChange={e => setForm({ ...form, asn: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="65000" /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnVrf') || 'VRF-VXLAN / L3 VNI'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
+                                            <input type="number" value={form.vrf_vxlan} onChange={e => setForm({ ...form, vrf_vxlan: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder={t('mcevpnVrfDefault') || 'defaults to VNI'} /></label>
+                                        <label className="text-xs text-gray-400">{t('mcevpnSubnet') || 'Subnet CIDR'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
+                                            <input value={form.subnet} onChange={e => setForm({ ...form, subnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.9.0.0/24" /></label>
+                                    </div>
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnPeers') || 'EVPN controller peers (IPs, comma-separated)'} <span className="text-gray-600">({t('optional') || 'optional'})</span>
+                                        <input value={form.peers} onChange={e => setForm({ ...form, peers: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.0.0.1, 10.0.0.2" /></label>
+
+                                    <div>
+                                        <div className="text-xs text-gray-400 mb-1.5">{t('mcevpnMembers') || 'Member clusters (same ASN fabric)'}</div>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-40 overflow-y-auto">
+                                            {evpnClusters.map(c => (
+                                                <label key={c.id} className={`flex items-center gap-2 text-sm px-2 py-1.5 rounded-lg border cursor-pointer ${form.cluster_ids.includes(c.id) ? 'bg-cyan-500/10 border-cyan-500/40 text-cyan-200' : 'bg-proxmox-dark border-proxmox-border text-gray-300'}`}>
+                                                    <input type="checkbox" checked={form.cluster_ids.includes(c.id)} onChange={() => toggleMember(c.id)} className="rounded" />
+                                                    <span className="truncate">{clusterLabel(c)}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {plan && (
+                                        <div className={`p-3 rounded-lg border text-xs ${plan.ok ? 'bg-green-500/10 border-green-500/30' : 'bg-yellow-500/10 border-yellow-500/30'}`}>
+                                            <div className={`font-semibold mb-1.5 ${plan.ok ? 'text-green-400' : 'text-yellow-400'}`}>{plan.ok ? (t('mcevpnPreviewOk') || 'Pre-flight OK — every member is reachable and conflict-free.') : (t('mcevpnPreviewIssues') || 'Pre-flight found issues:')}</div>
+                                            {Object.entries(plan.plan || {}).map(([cid, p]) => (
+                                                <div key={cid} className="flex items-start justify-between gap-2 py-0.5">
+                                                    <span className="text-gray-300">{clusterName(cid)}</span>
+                                                    <span className="text-right">
+                                                        {!p.reachable ? <span className="text-red-400">{p.reason || 'unreachable'}</span>
+                                                            : p.sdn_installed === false ? <span className="text-red-400">SDN not installed</span>
+                                                            : p.error ? <span className="text-red-400 max-w-[220px] truncate inline-block align-bottom" title={p.error}>{p.error}</span>
+                                                            : (p.conflicts && p.conflicts.length) ? <span className="text-yellow-400">{p.conflicts.join('; ')}</span>
+                                                            : <span className="text-green-400">ok</span>}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="p-4 border-t border-proxmox-border flex items-center justify-between sticky bottom-0 bg-proxmox-card">
+                                    <button disabled={busy || !canCreate} onClick={validate} className="px-3 py-2 rounded-lg text-sm bg-proxmox-dark border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">{t('mcevpnPreview') || 'Validate / preview'}</button>
+                                    <div className="flex items-center gap-2">
+                                        <button onClick={() => setShowCreate(false)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
+                                        <button disabled={busy || !canCreate} onClick={create} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('mcevpnCreate') || 'Create EVPN vNet')}</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showEdit && (
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowEdit(null)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg" onClick={e => e.stopPropagation()}>
+                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                    <h3 className="font-semibold text-white flex items-center gap-2"><Icons.Network className="w-4 h-4 text-cyan-400" />{t('mcevpnEditTitle') || 'Edit EVPN vNet'} <span className="text-gray-500 font-normal">{showEdit.name}</span></h3>
+                                    <button onClick={() => setShowEdit(null)} className="text-gray-500 hover:text-white"><Icons.X className="w-5 h-5" /></button>
+                                </div>
+                                <div className="p-4 space-y-3">
+                                    <div className="text-[11px] text-gray-500">{t('mcevpnEditNote') || 'Structural fields (name / zone / VNI / ASN / controller) are immutable — delete and recreate to change them. Changes fan out to every member cluster and run a cluster-wide SDN apply.'}</div>
+                                    <label className="text-xs text-gray-400 block">{t('alias') || 'Alias'}
+                                        <input value={editForm.alias} onChange={e => setEditForm({ ...editForm, alias: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="prod-span" /></label>
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnAddSubnet') || 'Add subnet (CIDR)'}
+                                        <input value={editForm.addSubnet} onChange={e => setEditForm({ ...editForm, addSubnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.8.0.0/24" /></label>
+                                    <label className="text-xs text-gray-400 block">{t('mcevpnDelSubnet') || 'Remove subnet (CIDR)'}
+                                        <input value={editForm.delSubnet} onChange={e => setEditForm({ ...editForm, delSubnet: e.target.value })} className="mt-1 w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" placeholder="10.9.0.0/24" /></label>
+                                    {(showEdit.subnets && showEdit.subnets.length > 0) && (
+                                        <div className="text-[11px] text-gray-500">{t('mcevpnCurrentSubnets') || 'Current subnets'}: {showEdit.subnets.map(s => s.cidr).join(', ')}</div>
+                                    )}
+                                </div>
+                                <div className="p-4 border-t border-proxmox-border flex items-center justify-end gap-2">
+                                    <button onClick={() => setShowEdit(null)} className="px-3 py-2 rounded-lg text-sm text-gray-400 hover:text-white">{t('cancel') || 'Cancel'}</button>
+                                    <button disabled={busy} onClick={submitEdit} className="px-4 py-2 rounded-lg text-sm font-semibold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/40 disabled:opacity-50">{busy ? '…' : (t('save') || 'Save')}</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // MK: Group Overview - drills into a single cluster group
+        // basically a scoped-down version of AllClustersOverview w/ LB stuff
+        function GroupOverview({ group, clusters, allMetrics, clusterGroups = [], topGuests = [], onSelectCluster, onSelectVm, onOpenSettings, authFetch, API_URL }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            const [sortBy, setSortBy] = useState('name');
+            const [sortDir, setSortDir] = useState('asc');
+            const [guestSortBy, setGuestSortBy] = useState('cpu');    // #621 — Top Resources table sort (its own state, kept separate from the cluster table's sortBy)
+            const [guestSortDir, setGuestSortDir] = useState('desc'); // default: highest CPU first, so it stays "top" until the user re-sorts
+            const [cpuHistory, setCpuHistory] = useState({});
+            const [ramHistory, setRamHistory] = useState({});
+            const [lbHistory, setLbHistory] = useState([]);
+            const [groupStatus, setGroupStatus] = useState(null);
+
+            // NS: only clusters that belong to this group
+            const groupClusters = clusters.filter(c => c.group_id === group.id);
+
+            // sparkline history - same as AllClustersOverview
+            useEffect(() => {
+                groupClusters.forEach(cluster => {
+                    const status = allMetrics[cluster.id]?.data || {};
+                    const cpu = status.resources?.cpu?.percent || 0;
+                    const ram = status.resources?.memory?.percent || 0;
+
+                    setCpuHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), cpu]
+                    }));
+                    setRamHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), ram]
+                    }));
+                });
+            }, [allMetrics]);
+
+            // LW: fetch LB history + group status
+            useEffect(() => {
+                if (!group?.id) return;
+                (async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/cluster-groups/${group.id}/lb-history`);
+                        if (r?.ok) {
+                            const d = await r.json();
+                            setLbHistory(Array.isArray(d) ? d : []);
+                        }
+                    } catch (err) {
+                        console.error('Failed to fetch LB history:', err);
+                    }
+                })();
+                (async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/cluster-groups/${group.id}/status`);
+                        if (r?.ok) {
+                            const d = await r.json();
+                            setGroupStatus(d);
+                        }
+                    } catch (err) {
+                        console.error('Failed to fetch group status:', err);
+                    }
+                })();
+            }, [group?.id]);
+
+            // stats per cluster - same calc as AllClustersOverview
+            const clusterStats = groupClusters.map(cluster => {
+                const status = allMetrics[cluster.id]?.data || {};
+                const lastUpdate = allMetrics[cluster.id]?.lastUpdate;
+                const nodes = status.nodes || {};
+                const guests = status.guests || {};
+                const resources = status.resources || {};
+
+                const nodeCount = nodes.total || 0;
+                const onlineNodes = nodes.online || 0;
+                const offlineNodes = nodes.offline || 0;
+                const avgCpu = resources.cpu?.percent || 0;
+                const avgMem = resources.memory?.percent || 0;
+                const avgStorage = resources.storage?.percent || 0;
+
+                const vmsRunning = (guests.vms?.running || 0) + (guests.containers?.running || 0);
+                const vmsStopped = (guests.vms?.stopped || 0) + (guests.containers?.stopped || 0);
+                // NS #618-followup: prefer the explicit per-type totals (all guests incl.
+                // paused/templates) so this matches the cluster-detail count and can never
+                // render total < running; fall back to running+stopped for older backends.
+                const totalVms = (guests.vms?.total != null || guests.containers?.total != null)
+                    ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
+                    : (vmsRunning + vmsStopped);
+
+                // a status never read is no cluster at 0 %: no figures and no health for it
+                const hasMetrics = !!allMetrics[cluster.id]?.data;
+                // health score - weighted average of metrics
+                const healthScore = !cluster.connected ? 0 : !hasMetrics ? null
+                    : Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)));
+
+                const alerts = [];
+                if (!cluster.connected) alerts.push({ type: 'error', msg: 'Offline' });
+                if (offlineNodes > 0) alerts.push({ type: 'warning', msg: `${offlineNodes} node(s) offline` });
+                if (avgCpu > 90) alerts.push({ type: 'error', msg: 'CPU critical' });
+                else if (avgCpu > 80) alerts.push({ type: 'warning', msg: 'CPU high' });
+                if (avgMem > 90) alerts.push({ type: 'error', msg: 'RAM critical' });
+                else if (avgMem > 80) alerts.push({ type: 'warning', msg: 'RAM high' });
+                if (avgStorage > 90) alerts.push({ type: 'error', msg: 'Storage critical' });
+                else if (avgStorage > 80) alerts.push({ type: 'warning', msg: 'Storage high' });
+
+                return {
+                    ...cluster,
+                    nodeCount, onlineNodes, offlineNodes,
+                    avgCpu, avgMem, avgStorage,
+                    totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
+                    healthScore: healthScore == null ? null : Math.round(healthScore),
+                    hasMetrics,
+                    lastUpdate,
+                    alerts,
+                    cpuHistory: cpuHistory[cluster.id] || [],
+                    ramHistory: ramHistory[cluster.id] || []
+                };
+            });
+
+            // sorting
+            const sortedStats = [...clusterStats].sort((a, b) => {
+                let aVal, bVal;
+                switch (sortBy) {
+                    case 'health': aVal = a.healthScore; bVal = b.healthScore; break;
+                    case 'nodes': aVal = a.nodeCount; bVal = b.nodeCount; break;
+                    case 'vms': aVal = a.totalVms; bVal = b.totalVms; break;
+                    case 'cpu': aVal = a.avgCpu; bVal = b.avgCpu; break;
+                    case 'ram': aVal = a.avgMem; bVal = b.avgMem; break;
+                    default: aVal = (a.display_name || a.name).toLowerCase(); bVal = (b.display_name || b.name).toLowerCase();
+                }
+                if (typeof aVal === 'string') return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
+            });
+
+            // group totals
+            const withMetrics = clusterStats.filter(c => c.hasMetrics);
+            const totals = {
+                clusters: groupClusters.length,
+                connectedClusters: groupClusters.filter(c => c.connected).length,
+                totalNodes: clusterStats.reduce((acc, c) => acc + c.nodeCount, 0),
+                onlineNodes: clusterStats.reduce((acc, c) => acc + c.onlineNodes, 0),
+                totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
+                runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
+                stoppedVms: clusterStats.reduce((acc, c) => acc + c.stoppedVms, 0),
+                avgCpu: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgCpu, 0) / withMetrics.length : 0,
+                avgMem: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgMem, 0) / withMetrics.length : 0,
+                avgStorage: withMetrics.length > 0 ? withMetrics.reduce((acc, c) => acc + c.avgStorage, 0) / withMetrics.length : 0,
+                totalAlerts: clusterStats.reduce((acc, c) => acc + c.alerts.length, 0)
+            };
+
+            const lbEnabled = !!group.cross_cluster_lb_enabled;
+
+            // NS: sparkline - same as AllClustersOverview
+            const Sparkline = ({ data, color, height = 20, width = 60 }) => {
+                if (!data || data.length < 2) return <div style={{ width, height }} className="bg-proxmox-dark/50 rounded" />;
+                const max = Math.max(...data, 1);
+                const min = Math.min(...data, 0);
+                const range = max - min || 1;
+                const points = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * height}`).join(' ');
+                return (
+                    <svg width={width} height={height} className="overflow-visible">
+                        <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={points} />
+                        <circle cx={width} cy={height - ((data[data.length - 1] - min) / range) * height} r="2" fill={color} />
+                    </svg>
+                );
+            };
+
+            // circular progress gauge
+            const CircularProgress = ({ value, size = 60, strokeWidth = 6, color }) => {
+                const radius = (size - strokeWidth) / 2;
+                const circumference = radius * 2 * Math.PI;
+                const offset = circumference - (value / 100) * circumference;
+                return (
+                    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+                        <svg className="transform -rotate-90 overflow-visible" width={size} height={size}>
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeWidth={strokeWidth} className="text-gray-700" />
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} className="transition-all duration-500" />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center">
+                            <span className="text-xs font-bold text-white">{value.toFixed(0)}%</span>
+                        </div>
+                    </div>
+                );
+            };
+
+            const getHealthColor = (score) => {
+                if (score >= 80) return { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30', color: '#22c55e' };
+                if (score >= 60) return { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500/30', color: '#eab308' };
+                if (score >= 40) return { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30', color: '#f97316' };
+                return { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30', color: '#ef4444' };
+            };
+
+            const formatLastUpdate = (date) => {
+                if (!date) return '-';
+                const now = new Date();
+                const diff = Math.floor((now - new Date(date)) / 1000);
+                if (diff < 10) return t('justNow') || 'just now';
+                if (diff < 60) return (t('timeAgoSec') || '{n}s ago').replace('{n}', diff);
+                if (diff < 3600) return (t('timeAgoMin') || '{n}m ago').replace('{n}', Math.floor(diff / 60));
+                return new Date(date).toLocaleTimeString();
+            };
+
+            const SortButton = ({ field, label }) => (
+                <button
+                    onClick={() => { setSortBy(field); setSortDir(sortBy === field && sortDir === 'asc' ? 'desc' : 'asc'); }}
+                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${sortBy === field ? 'bg-proxmox-orange/20 text-proxmox-orange font-medium' : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'}`}
+                >
+                    {label} {sortBy === field && (sortDir === 'asc' ? '↑' : '↓')}
+                </button>
+            );
+
+            // MK: cluster card - clickable, same layout as the all-clusters one
+            const ClusterCard = ({ cluster }) => {
+                const healthColors = getHealthColor(cluster.healthScore);
+                const hasAlerts = cluster.alerts.length > 0;
+                const errorCount = cluster.alerts.filter(a => a.type === 'error').length;
+
+                return (
+                    <div
+                        onClick={() => onSelectCluster(cluster)}
+                        className="group relative bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden cursor-pointer hover:border-proxmox-orange/50 transition-all duration-300 hover:shadow-lg hover:shadow-proxmox-orange/10"
+                    >
+                        <div className={`h-1.5 ${cluster.connected ? 'bg-gradient-to-r from-green-500 via-emerald-500 to-green-500' : 'bg-gradient-to-r from-red-500 via-red-600 to-red-500'}`} />
+
+                        <div className="p-5">
+                            <div className="flex items-start justify-between mb-4">
+                                <div className="flex items-center gap-3">
+                                    <div className={`relative w-12 h-12 rounded-xl ${cluster.connected ? 'bg-gradient-to-br from-green-500/20 to-emerald-500/20' : 'bg-gradient-to-br from-red-500/20 to-red-600/20'} flex items-center justify-center`}>
+                                        <Icons.Server className={`w-6 h-6 ${cluster.connected ? 'text-green-400' : 'text-red-400'}`} />
+                                        {cluster.connected && <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-proxmox-card animate-pulse" />}
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white text-base group-hover:text-proxmox-orange transition-colors">
+                                            {cluster.display_name || cluster.name}
+                                        </h3>
+                                        <p className="text-xs text-gray-500">{cluster.host}</p>
+                                    </div>
+                                </div>
+
+                                <div className="flex items-center gap-2">
+                                    {hasAlerts && (
+                                        <div className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 ${errorCount > 0 ? 'bg-red-500/20 border border-red-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'}`}>
+                                            <Icons.AlertTriangle className={`w-3.5 h-3.5 ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`} />
+                                            <span className={`text-xs font-medium ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`}>{cluster.alerts.length}</span>
+                                        </div>
+                                    )}
+                                    {cluster.connected ? cluster.healthScore != null && (
+                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
+                                            <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
+                                        </div>
+                                    ) : (
+                                        <div className="px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/30">
+                                            <span className="text-xs font-semibold text-red-400">Offline</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {cluster.hasMetrics ? (
+                                <div className="grid grid-cols-5 gap-3">
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className={`text-xl font-bold ${cluster.onlineNodes === cluster.nodeCount ? 'text-green-400' : 'text-yellow-400'}`}>
+                                            {cluster.onlineNodes}/{cluster.nodeCount}
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('nodes')}</div>
+                                    </div>
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgCpu} size={44} strokeWidth={4} color={cluster.avgCpu > 80 ? '#ef4444' : cluster.avgCpu > 60 ? '#eab308' : '#22c55e'} />
+                                            <Sparkline data={cluster.cpuHistory} color={cluster.avgCpu > 80 ? '#ef4444' : '#22c55e'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">CPU</div>
+                                    </div>
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgMem} size={44} strokeWidth={4} color={cluster.avgMem > 80 ? '#ef4444' : cluster.avgMem > 60 ? '#eab308' : '#3b82f6'} />
+                                            <Sparkline data={cluster.ramHistory} color={cluster.avgMem > 80 ? '#ef4444' : '#3b82f6'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">RAM</div>
+                                    </div>
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex justify-center">
+                                            <CircularProgress value={cluster.avgStorage} size={44} strokeWidth={4} color={cluster.avgStorage > 80 ? '#ef4444' : cluster.avgStorage > 60 ? '#eab308' : '#8b5cf6'} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage') || 'Disk'}</div>
+                                    </div>
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="text-xl font-bold">
+                                            <span className="text-green-400">{cluster.runningVms}</span>
+                                            <span className="text-gray-500 text-sm">/{cluster.totalVms}</span>
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('vms')}</div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-center h-20 text-gray-500 text-sm">
+                                    <Icons.AlertTriangle className="w-4 h-4 mr-2" />
+                                    {t('noDataAvailable') || 'No data available'}
+                                </div>
+                            )}
+
+                            <div className="mt-4 pt-3 border-t border-proxmox-border/50 flex items-center justify-between">
+                                <span className="text-xs text-gray-500">
+                                    {t('updated') || 'Updated'}: {formatLastUpdate(cluster.lastUpdate)}
+                                </span>
+                                <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            // LW: Feb 2026 - Corporate variant for GroupOverview
+            if (isCorporate) {
+                const corpBarColor = (val) => val > 80 ? '#f54f47' : val > 60 ? '#efc006' : '#60b515';
+                const groupClusterIds = groupClusters.map(c => c.id);
+                const groupTopGuests = topGuests.filter(g => groupClusterIds.includes(g.cluster_id));
+                return (
+                    <div className="space-y-3">
+                        {/* Header */}
+                        <div className="flex items-center justify-between pb-2" style={{borderBottom: '1px solid var(--corp-border-medium)'}}>
+                            <div className="flex items-center gap-2">
+                                <Icons.Folder className="w-4 h-4" style={{color: group.color || '#E86F2D'}} />
+                                <h2 className="text-[15px] font-semibold" style={{color: 'var(--color-text)'}}>{group.name}</h2>
+                                <span className="text-[12px]" style={{color: 'var(--corp-text-muted)'}}>{groupClusters.length} {t('clusters')}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {totals.totalAlerts > 0 && (
+                                    <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
+                                        <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts}
+                                    </span>
+                                )}
+                                <button onClick={onOpenSettings} className="p-1" style={{color: 'var(--corp-text-muted)'}} title={t('settings')}>
+                                    <Icons.Settings className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* LB status compact */}
+                        {lbEnabled && (
+                            <div className="flex items-center gap-3 px-2 py-1.5 text-[12px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                                <Icons.Scale className="w-3.5 h-3.5" style={{color: 'var(--color-success)'}} />
+                                <span style={{color: 'var(--corp-text-secondary)'}}>{t('crossClusterLB') || 'Cross-Cluster LB'}: <span style={{color: 'var(--color-success)'}}>{t('enabled') || 'Enabled'}</span></span>
+                                {group.cross_cluster_dry_run && <span style={{color: 'var(--color-warning)'}}>({t('simulationMode') || 'Simulation'})</span>}
+                                <span style={{color: 'var(--corp-text-muted)'}}>Threshold: {group.cross_cluster_threshold || 30}%</span>
+                            </div>
+                        )}
+
+                        {/* Stats bar */}
+                        <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> / <b style={{color: 'var(--corp-text-muted)'}}>{totals.stoppedVms}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                        </div>
+
+                        {/* Cluster table */}
+                        <table className="corp-datagrid">
+                            <thead>
+                                <tr>
+                                    {[
+                                        { field: 'name', label: t('name') || 'Name' },
+                                        { field: null, label: t('status') || 'Status' },
+                                        { field: 'nodes', label: t('nodes') || 'Nodes' },
+                                        { field: 'vms', label: 'VMs' },
+                                        { field: 'cpu', label: 'CPU' },
+                                        { field: 'ram', label: 'RAM' },
+                                        { field: null, label: t('storage') || 'Storage' },
+                                        { field: 'health', label: t('health') || 'Health' },
+                                    ].map((col, i) => (
+                                        <th key={i}
+                                            className={col.field ? 'cursor-pointer hover:text-white' : ''}
+                                            onClick={col.field ? () => { setSortBy(col.field); setSortDir(sortBy === col.field && sortDir === 'asc' ? 'desc' : 'asc'); } : undefined}
+                                            style={{textAlign: 'left'}}
+                                        >
+                                            {col.label} {sortBy === col.field && <span className="sort-indicator">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedStats.map(cluster => {
+                                    const hc = getHealthColor(cluster.healthScore);
+                                    return (
+                                        <tr key={cluster.id} className="table-row-hover cursor-pointer" onClick={() => onSelectCluster(cluster)}>
+                                            <td style={{fontWeight: 500}}>{cluster.display_name || cluster.name}</td>
+                                            <td>
+                                                <span className="inline-flex items-center gap-1.5">
+                                                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? '#60b515' : '#f54f47'}} />
+                                                    <span style={{color: cluster.connected ? '#60b515' : '#f54f47', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
+                                                </span>
+                                            </td>
+                                            {cluster.hasMetrics ? (<>
+                                                <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
+                                                <td><span style={{color: '#60b515'}}>{cluster.runningVms}</span> / <span style={{color: '#728b9a'}}>{cluster.stoppedVms}</span></td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            </>) : (
+                                                <td colSpan={6} style={{color: 'var(--corp-text-muted)'}}>{t('noDataAvailable') || 'No data available'}</td>
+                                            )}
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+
+                        {/* Top Resources */}
+                        {groupTopGuests.length > 0 && (
+                            <div>
+                                <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                                    <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
+                                </div>
+                                <table className="corp-datagrid">
+                                    <thead><tr>
+                                        <th style={{width: '24px'}}></th>
+                                        {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU', align: 'right'}, {field: 'ram', label: 'RAM', align: 'right'}, {field: 'status', label: t('status')}].map(col => (
+                                            <th key={col.field} className="cursor-pointer" style={{textAlign: col.align || 'left'}}
+                                                onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
+                                                {col.label} {guestSortBy === col.field && <span className="sort-indicator">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
+                                            </th>
+                                        ))}
+                                    </tr></thead>
+                                    <tbody>
+                                        {sortTopGuests(groupTopGuests, guestSortBy, guestSortDir).slice(0, 10).map(guest => {
+                                            const cpuP = ((guest.cpu || 0) * 100).toFixed(1);
+                                            const memP = guest.maxmem > 0 ? ((guest.mem / guest.maxmem) * 100).toFixed(1) : 0;
+                                            const gc = clusters.find(c => c.id === guest.cluster_id);
+                                            return (
+                                                <tr key={`${guest.cluster_id}-${guest.vmid}`} className="table-row-hover cursor-pointer"
+                                                    onClick={() => { if (gc && onSelectVm) onSelectVm(gc, guest.vmid, guest.node, guest); }}>
+                                                    <td><Icons.Monitor className="w-3.5 h-3.5" style={{color: guest.type === 'qemu' ? '#49afd9' : '#a178d9'}} /></td>
+                                                    <td><span style={{fontWeight: 500}}>{guest.name || `VM ${guest.vmid}`}</span> <span style={{color: '#728b9a', fontSize: '11px'}}>#{guest.vmid}</span></td>
+                                                    <td>{guest.cluster_name}</td>
+                                                    <td style={{color: '#adbbc4'}}>{guest.node}</td>
+                                                    <td style={{textAlign: 'right'}}><span style={{color: corpBarColor(cpuP)}}>{cpuP}%</span></td>
+                                                    <td style={{textAlign: 'right'}}><span style={{color: corpBarColor(memP)}}>{memP}%</span></td>
+                                                    <td>
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: guest.status === 'running' ? '#60b515' : '#728b9a'}} />
+                                                            <span style={{color: guest.status === 'running' ? '#60b515' : '#728b9a', fontSize: '12px'}}>{guest.status === 'running' ? t('running') : t('stopped')}</span>
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {/* LB History */}
+                        {lbEnabled && lbHistory.length > 0 && (
+                            <div>
+                                <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                                    <Icons.Activity className="w-3.5 h-3.5" style={{color: '#a178d9'}} />
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('lbHistory') || 'LB History'}</span>
+                                </div>
+                                <table className="corp-datagrid">
+                                    <thead><tr><th>{t('time')}</th><th>{t('action')}</th><th>{t('details')}</th></tr></thead>
+                                    <tbody>
+                                        {lbHistory.slice(0, 10).map((entry, i) => (
+                                            <tr key={i} className="table-row-hover">
+                                                <td style={{color: '#728b9a'}}>{new Date(entry.timestamp).toLocaleString()}</td>
+                                                <td><span style={{color: entry.action === 'migrate' ? '#49afd9' : '#a178d9'}}>{entry.action}</span></td>
+                                                <td style={{color: '#adbbc4'}}>{entry.details || '-'}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {groupClusters.length === 0 && (
+                            <div className="py-8 text-center text-[13px]" style={{color: '#728b9a'}}>
+                                {t('noClustersInGroup') || 'No clusters in this group'}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // Modern layout (original)
+            return (
+                <div className="space-y-6">
+                    {/* Header */}
+                    <div className="relative overflow-hidden bg-gradient-to-r from-proxmox-card via-proxmox-dark to-proxmox-card border border-proxmox-border rounded-2xl p-6">
+                        <div className="absolute inset-0 bg-gradient-to-r from-proxmox-orange/5 via-transparent to-blue-500/5" />
+                        <div className="relative flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center gap-4">
+                                <div className="w-14 h-14 rounded-xl flex items-center justify-center shadow-lg" style={{ backgroundColor: (group.color || '#E86F2D') + '33' }}>
+                                    <Icons.Folder className="w-7 h-7" style={{ color: group.color || '#E86F2D' }} />
+                                </div>
+                                <div>
+                                    <h1 className="text-2xl font-bold text-white">{group.name}</h1>
+                                    {group.description && <p className="text-gray-400 text-sm">{group.description}</p>}
+                                    <p className="text-gray-500 text-xs mt-0.5">{groupClusters.length} {t('clusters')}</p>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                                {totals.totalAlerts > 0 && (
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                        <Icons.AlertTriangle className="w-4 h-4 text-red-400" />
+                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts') || 'Alerts'}</span>
+                                    </div>
+                                )}
+                                <button
+                                    onClick={onOpenSettings}
+                                    className="p-2 rounded-lg text-gray-400 hover:text-white hover:bg-proxmox-dark transition-colors"
+                                    title={t('settings') || 'Settings'}
+                                >
+                                    <Icons.Settings className="w-5 h-5" />
+                                </button>
+                                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full">
+                                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                    <span className="text-xs text-green-400 font-medium">Live</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* LW: Cross-Cluster LB status card - only show when enabled */}
+                    {lbEnabled && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-4">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-green-500/20 flex items-center justify-center">
+                                        <Icons.Scale className="w-5 h-5 text-green-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-semibold flex items-center gap-2">
+                                            {t('crossClusterLB') || 'Cross-Cluster Load Balancing'}
+                                            <span className="bg-green-500/10 text-green-400 px-2 py-0.5 rounded-full text-xs">{t('enabled') || 'Enabled'}</span>
+                                            {group.cross_cluster_dry_run && (
+                                                <span className="bg-yellow-500/10 text-yellow-400 px-2 py-0.5 rounded-full text-xs">{t('simulationMode') || 'Simulation Mode'}</span>
+                                            )}
+                                        </h3>
+                                        <div className="flex items-center gap-4 text-xs text-gray-500 mt-1">
+                                            <span>{t('threshold') || 'Threshold'}: {group.cross_cluster_threshold || 30}%</span>
+                                            <span>{t('interval') || 'Interval'}: {group.cross_cluster_interval || 600}s</span>
+                                            {groupStatus?.cross_cluster_lb?.last_run && (
+                                                <span>{t('lastRun') || 'Last run'}: {formatLastUpdate(groupStatus.cross_cluster_lb.last_run)}</span>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Stats Grid - same 7-column layout */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                        {[
+                            { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
+                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
+                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
+                            { icon: Icons.Square, value: totals.stoppedVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                        ].map((stat, i) => (
+                            <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
+                                <div className="flex items-center gap-3">
+                                    <div className={`w-10 h-10 rounded-lg bg-${stat.color}/20 flex items-center justify-center group-hover:scale-110 transition-transform`}>
+                                        <stat.icon className={`w-5 h-5 text-${stat.color}`} />
+                                    </div>
+                                    <div>
+                                        <div className={`text-xl font-bold ${stat.valueColor || 'text-white'}`}>{stat.value}</div>
+                                        <div className="text-xs text-gray-500">{stat.label}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+
+                        {/* circular gauges */}
+                        {[
+                            { value: totals.avgCpu, label: 'CPU', color: totals.avgCpu > 80 ? '#ef4444' : totals.avgCpu > 60 ? '#eab308' : '#22c55e' },
+                            { value: totals.avgMem, label: 'RAM', color: totals.avgMem > 80 ? '#ef4444' : totals.avgMem > 60 ? '#eab308' : '#3b82f6' },
+                            { value: totals.avgStorage, label: t('storage') || 'Disk', color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
+                        ].map((stat, i) => (
+                            <div key={i} className="bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-proxmox-border transition-all">
+                                <div className="flex items-center gap-3">
+                                    <CircularProgress value={stat.value || 0} size={44} strokeWidth={4} color={stat.color} />
+                                    <div>
+                                        <div className="text-sm font-bold text-white">{stat.label}</div>
+                                        <div className="text-xs text-gray-500">{t('average') || 'Avg'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Sort Controls */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm text-gray-500 mr-1">{t('sortBy') || 'Sort by'}:</span>
+                            <SortButton field="name" label={t('name') || 'Name'} />
+                            <SortButton field="health" label={t('health') || 'Health'} />
+                            <SortButton field="nodes" label={t('nodes') || 'Nodes'} />
+                            <SortButton field="vms" label="VMs" />
+                            <SortButton field="cpu" label="CPU" />
+                            <SortButton field="ram" label="RAM" />
+                        </div>
+                    </div>
+
+                    {/* Cluster Cards */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        {sortedStats.map(cluster => <ClusterCard key={cluster.id} cluster={cluster} />)}
+                    </div>
+
+                    {/* NS: Top Resources - filtered for this group */}
+                    {(() => {
+                        const groupClusterIds2 = groupClusters.map(c => c.id);
+                        const groupTopGuests2 = topGuests.filter(g => groupClusterIds2.includes(g.cluster_id));
+                        if (groupTopGuests2.length === 0) return null;
+                        return (
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                                            <Icons.Activity className="w-5 h-5 text-cyan-400" />
+                                        </div>
+                                        <div>
+                                            <h3 className="font-semibold text-white">{t('topResources') || 'Top Resources'}</h3>
+                                            <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
+                                        </div>
+                                    </div>
+                                    <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">Top 10</span>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                <th className="px-4 py-3 font-medium">{t('type')}</th>
+                                                {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                                    <th key={col.field} className="px-4 py-3 font-medium cursor-pointer hover:text-white select-none"
+                                                        onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
+                                                        {col.label}{guestSortBy === col.field && <span className="ml-1">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                                <th className="px-4 py-3 w-10"></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {sortTopGuests(groupTopGuests2, guestSortBy, guestSortDir).slice(0, 10).map((guest, idx) => {
+                                                const cpuPercent = ((guest.cpu || 0) * 100).toFixed(1);
+                                                const memPercent = guest.maxmem > 0 ? ((guest.mem / guest.maxmem) * 100).toFixed(1) : 0;
+                                                const isVM = guest.type === 'qemu';
+                                                const guestCluster = clusters.find(c => c.id === guest.cluster_id);
+                                                return (
+                                                    <tr
+                                                        key={`${guest.cluster_id}-${guest.vmid}`}
+                                                        className="hover:bg-proxmox-hover/50 transition-colors cursor-pointer group"
+                                                        onClick={() => { if (guestCluster && onSelectVm) onSelectVm(guestCluster, guest.vmid, guest.node, guest); }}
+                                                        title={t('clickToOpenVm') || 'Click to open VM'}
+                                                    >
+                                                        <td className="px-4 py-3">
+                                                            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isVM ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
+                                                                {isVM ? <Icons.Monitor className="w-4 h-4 text-blue-400" /> : <Icons.Layers className="w-4 h-4 text-purple-400" />}
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-4 py-3">
+                                                            <div className="font-medium text-white group-hover:text-proxmox-orange transition-colors">{guest.name || `VM ${guest.vmid}`}</div>
+                                                            <div className="text-xs text-gray-500">ID: {guest.vmid}</div>
+                                                        </td>
+                                                        <td className="px-4 py-3"><span className="text-sm text-gray-300">{guest.cluster_name}</span></td>
+                                                        <td className="px-4 py-3"><span className="text-sm text-gray-400">{guest.node}</span></td>
+                                                        <td className="px-4 py-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                    <div className={`h-full rounded-full ${cpuPercent > 80 ? 'bg-red-500' : cpuPercent > 60 ? 'bg-yellow-500' : 'bg-green-500'}`} style={{ width: `${Math.min(cpuPercent, 100)}%` }} />
+                                                                </div>
+                                                                <span className={`text-xs font-medium ${cpuPercent > 80 ? 'text-red-400' : cpuPercent > 60 ? 'text-yellow-400' : 'text-green-400'}`}>{cpuPercent}%</span>
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-4 py-3">
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                    <div className={`h-full rounded-full ${memPercent > 80 ? 'bg-red-500' : memPercent > 60 ? 'bg-yellow-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(memPercent, 100)}%` }} />
+                                                                </div>
+                                                                <span className="text-xs text-gray-400">{memPercent}%</span>
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-4 py-3">
+                                                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${guest.status === 'running' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                                                                <div className={`w-1.5 h-1.5 rounded-full ${guest.status === 'running' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                                                                {guest.status === 'running' ? t('running') : t('stopped')}
+                                                            </span>
+                                                        </td>
+                                                        <td className="px-4 py-3">
+                                                            <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {/* NS: LB History table - only show if cross-cluster LB is on */}
+                    {lbEnabled && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                            <div className="p-4 border-b border-proxmox-border flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center">
+                                    <Icons.Activity className="w-5 h-5 text-purple-400" />
+                                </div>
+                                <div>
+                                    <h3 className="font-semibold text-white">{t('lbHistory') || 'Load Balancing History'}</h3>
+                                    <p className="text-xs text-gray-500">{t('recentLbActions') || 'Recent cross-cluster LB actions'}</p>
+                                </div>
+                            </div>
+                            {lbHistory.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                <th className="px-4 py-3 font-medium">{t('time') || 'Time'}</th>
+                                                <th className="px-4 py-3 font-medium">{t('action') || 'Action'}</th>
+                                                <th className="px-4 py-3 font-medium">{t('details') || 'Details'}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {lbHistory.slice(0, 20).map((entry, idx) => (
+                                                <tr key={idx} className="hover:bg-proxmox-hover/50 transition-colors">
+                                                    <td className="px-4 py-3 text-sm text-gray-400">
+                                                        {new Date(entry.timestamp).toLocaleString()}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
+                                                            entry.action === 'migrate' ? 'bg-blue-500/20 text-blue-400'
+                                                            : entry.action === 'rebalance' ? 'bg-purple-500/20 text-purple-400'
+                                                            : 'bg-gray-500/20 text-gray-400'
+                                                        }`}>
+                                                            {entry.action}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-sm text-gray-300">{entry.details || '-'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <div className="p-8 text-center text-gray-500 text-sm">
+                                    <Icons.Clock className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                    {t('noLbEvents') || 'No cross-cluster LB events yet'}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Empty State */}
+                    {groupClusters.length === 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-12 text-center">
+                            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center">
+                                <Icons.Server className="w-8 h-8 text-proxmox-orange" />
+                            </div>
+                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersInGroup') || 'No clusters in this group'}</h3>
+                            <p className="text-gray-500 text-sm">{t('addClustersToGroup') || 'Assign clusters to this group to see them here'}</p>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the pending updates of every node and backup server in one table. The
+        // server answers from what each cluster's last update check left (GET /api/updates-overview)
+        // and asks no node; a row opens the update manager of its cluster, which runs the checks.
+        // Nothing here acts, so a standby shows it as it is.
+        function PendingUpdatesOverview({ clusters, onOpen }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const ROWS = 50;
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [query, setQuery] = useState('');
+            const [pendingOnly, setPendingOnly] = useState(() => recall('pegaprox-updates-overview-pending', '0') === '1');
+            const [open, setOpen] = useState(() => recall('pegaprox-updates-overview-open', '1') !== '0');
+            const [showAll, setShowAll] = useState(false);
+            const [sort, setSort] = useState({ by: 'count', dir: 'desc' });
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('node.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('node.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/updates-overview`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                    else setData(prev => prev || { failed: true });
+                } catch (e) {
+                    console.error('updates overview:', e);
+                    if (mine === seq.current) setData(prev => prev || { failed: true });
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey || !open) return;
+                load();
+                // a check made in another tab or by the schedule shows up within a few minutes
+                const timer = setInterval(load, 300000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey, open]);
+
+            if (!allowed || !clusterKey || (data && data.denied)) return null;
+
+            const label = (r) => {
+                const c = clusters.find(x => x.id === r.cluster_id);
+                return (c && (c.display_name || c.name)) || r.cluster_name;
+            };
+            const all = (data && data.hosts) || [];
+            const listed = (data && data.clusters) || [];
+            const needsLook = (h) => !h.ok || h.count > 0;
+            const q = query.trim().toLowerCase();
+            const rows = all.filter(h => !pendingOnly || needsLook(h))
+                .filter(h => !q || `${label(h)} ${h.name}`.toLowerCase().includes(q));
+            const keyOf = {
+                cluster: h => label(h).toLowerCase(), host: h => (h.name || '').toLowerCase(),
+                // a check that failed comes before any count: it is the one to look at
+                count: h => h.ok ? h.count : Number.MAX_SAFE_INTEGER, security: h => h.security ?? -1,
+                channel: h => h.channel || '', subscription: h => h.subscription || '', checked: h => h.checked_at || 0,
+            };
+            const pick = keyOf[sort.by] || keyOf.count;
+            const sorted = [...rows].sort((a, b) => {
+                const x = pick(a), y = pick(b);
+                const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+                return (sort.dir === 'asc' ? c : -c) || label(a).localeCompare(label(b)) || (a.name || '').localeCompare(b.name || '');
+            });
+            const shown = showAll ? sorted : sorted.slice(0, ROWS);
+            const pending = all.reduce((sum, h) => sum + (h.ok ? h.count : 0), 0);
+            const hostsWith = all.filter(h => h.ok && h.count > 0).length;
+            const failedHosts = all.filter(h => !h.ok).length;
+            const unchecked = listed.filter(c => c.state === 'unchecked');
+            const confined = listed.filter(c => c.state === 'confined');
+            const rolling = {};
+            listed.forEach(c => { if (c.rolling) rolling[c.cluster_id] = c.rolling; });
+            const toggle = () => { store('pegaprox-updates-overview-open', open ? '0' : '1'); setOpen(!open); };
+            const sortOn = (by) => setSort(s => s.by === by
+                ? { by, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+                : { by, dir: ['cluster', 'host', 'channel', 'subscription'].includes(by) ? 'asc' : 'desc' });
+            const channelText = { enterprise: t('allUpdatesEnterprise'), 'no-subscription': t('allUpdatesNoSubscription'),
+                test: t('allUpdatesTest'), mixed: t('allUpdatesMixed'), none: t('allUpdatesNoRepo') };
+            const subText = { active: t('allUpdatesSubActive'), notfound: t('allUpdatesSubNone'), new: t('allUpdatesSubNew'),
+                invalid: t('allUpdatesSubInvalid'), expired: t('allUpdatesSubExpired'), suspended: t('allUpdatesSubSuspended'),
+                unknown: t('allUpdatesSubUnknown') };
+            // apt cannot download from the enterprise repository without an active subscription
+            const repoNote = (h) => [
+                h.channel === 'enterprise' && h.subscription && h.subscription !== 'active' ? t('allUpdatesEnterpriseNoSub') : '',
+                h.repo_warnings > 0 ? t('allUpdatesRepoWarnings').replace('{n}', h.repo_warnings) : '',
+            ].filter(Boolean).join('\n');
+            const checkedText = (h) => h.checked_at ? new Date(h.checked_at * 1000).toLocaleString() : '-';
+            const rowKey = (h) => `${h.cluster_id}:${h.kind}:${h.kind === 'pbs' ? h.pbs_id : h.name}`;
+            const go = (cid) => { if (onOpen) onOpen(cid); };
+            const columns = [
+                { by: 'cluster', label: t('cluster') }, { by: 'host', label: t('allUpdatesHost') },
+                { by: 'count', label: t('allUpdatesPending') }, { by: 'security', label: t('allUpdatesSecurity') },
+                { by: 'channel', label: t('allUpdatesRepo') }, { by: 'subscription', label: t('allUpdatesSubscription') },
+                { by: 'checked', label: t('allUpdatesChecked') },
+            ];
+            const rollingText = (cid) => rolling[cid] === 'paused' ? t('allUpdatesRollingPaused') : t('allUpdatesRolling');
+
+            const filters = (
+                <div className="flex items-center gap-3 flex-wrap">
+                    <div className="relative">
+                        <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                        <input data-updates-overview-search value={query} onChange={e => setQuery(e.target.value)} placeholder={t('search')}
+                            style={{ paddingLeft: '1.75rem' }} className="pr-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg w-48" />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                        <input data-updates-overview-pending type="checkbox" checked={pendingOnly}
+                            onChange={e => { setPendingOnly(e.target.checked); store('pegaprox-updates-overview-pending', e.target.checked ? '1' : '0'); }} />
+                        {t('allUpdatesPendingOnly')}
+                    </label>
+                </div>
+            );
+            const footer = (
+                <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {unchecked.length > 0 && (
+                            <span data-updates-overview-unchecked className="text-amber-400">
+                                {t('allUpdatesUnchecked')}{' '}
+                                {unchecked.map((c, i) => (
+                                    <React.Fragment key={c.cluster_id}>
+                                        {i > 0 && ', '}
+                                        {onOpen ? (
+                                            <button type="button" data-updates-overview-open={c.cluster_id} onClick={() => go(c.cluster_id)}
+                                                title={t('allUpdatesOpen')} className="underline hover:text-proxmox-orange">{label(c)}</button>
+                                        ) : label(c)}
+                                    </React.Fragment>
+                                ))}
+                            </span>
+                        )}
+                        {confined.length > 0 && (
+                            <span data-updates-overview-unlisted className="text-amber-400">
+                                {t('allStorageNotListed')} {confined.map(c => `${label(c)} (${t('allStorageConfined')})`).join(', ')}
+                            </span>
+                        )}
+                    </div>
+                    {rows.length > ROWS && (
+                        <button type="button" data-updates-overview-more onClick={() => setShowAll(!showAll)} className="text-proxmox-orange hover:underline">
+                            {showAll ? t('showLess') : t('allStorageShowAll').replace('{n}', rows.length)}
+                        </button>
+                    )}
+                </div>
+            );
+            const waiting = !data && (
+                <div className="text-sm text-gray-500">{t('loading') || 'Loading...'}</div>
+            );
+            const empty = data && (data.failed ? (
+                <div data-updates-overview-failed className="text-sm text-amber-400">{t('allUpdatesReadFailed')}</div>
+            ) : rows.length === 0 && (
+                <div data-updates-overview-empty className="text-sm text-gray-400 flex items-center gap-2">
+                    {all.length === 0 ? t('allUpdatesEmpty')
+                        : !q && all.every(h => !needsLook(h)) ? <><span className="inline-flex text-green-400"><Icons.CheckCircle /></span> {t('allUpdatesUpToDate')}</>
+                        : t('allUpdatesNoMatch')}
+                </div>
+            ));
+            const refreshButton = (
+                <button type="button" onClick={() => load()} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('allStorageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+            const summary = data && !data.failed && (pending > 0 || failedHosts > 0) && (
+                <span data-updates-overview-summary className="inline-flex items-center gap-2">
+                    {pending > 0 && <span className={isCorporate ? '' : 'text-yellow-400'} style={isCorporate ? {color: '#efc006'} : undefined}>
+                        {t('allUpdatesSummary').replace('{n}', pending).replace('{h}', hostsWith)}</span>}
+                    {failedHosts > 0 && <span className={isCorporate ? '' : 'text-red-400'} style={isCorporate ? {color: '#f54f47'} : undefined}>
+                        {t('allUpdatesFailedHosts').replace('{n}', failedHosts)}</span>}
+                </span>
+            );
+
+            if (isCorporate) {
+                return (
+                    <div data-updates-overview>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <span className="inline-flex" style={{color: '#efc006'}}><Icons.Download /></span>
+                            <button type="button" data-updates-overview-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('allUpdatesTitle')}</button>
+                            {data && !data.failed && <span data-updates-overview-count className="text-[11px]" style={{color: '#728b9a'}}>{all.length}</span>}
+                            {summary && <span className="text-[11px]">{summary}</span>}
+                            <span className="flex-1" />
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {filters}
+                                {waiting}
+                                {empty}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-updates-overview-sort={col.by} className="cursor-pointer" style={{textAlign: 'left'}} onClick={() => sortOn(col.by)}>
+                                                        {col.label} {sort.by === col.by && <span className="sort-indicator">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {shown.map(h => {
+                                                const note = repoNote(h);
+                                                return (
+                                                    <tr key={rowKey(h)} data-updates-overview-row={rowKey(h)} className={onOpen ? 'table-row-hover cursor-pointer' : ''}
+                                                        title={onOpen ? t('allUpdatesOpen') : undefined} onClick={() => go(h.cluster_id)}>
+                                                        <td style={{fontWeight: 500}}>
+                                                            {label(h)}
+                                                            {rolling[h.cluster_id] && <>{' '}<span data-updates-overview-rolling className="ml-1 text-[11px]" style={{color: '#49afd9'}}>{rollingText(h.cluster_id)}</span></>}
+                                                        </td>
+                                                        <td style={{color: '#adbbc4'}}>
+                                                            {h.name}
+                                                            {h.kind === 'pbs' && <>{' '}<span className="ml-1 text-[10px] uppercase" style={{color: '#a178d9'}}>PBS</span></>}
+                                                        </td>
+                                                        <td>
+                                                            {!h.ok ? <span style={{color: '#f54f47'}}>{t('allUpdatesCheckFailed')}</span> : (
+                                                                <span style={{color: h.count > 0 ? '#efc006' : '#60b515', fontWeight: h.count > 0 ? 600 : 400}}>{h.count}</span>
+                                                            )}
+                                                            {h.kernel && <>{' '}<span data-updates-overview-kernel className="ml-1 text-[11px]" style={{color: '#49afd9'}} title={t('allUpdatesKernelHint')}>{t('allUpdatesKernel')}</span></>}
+                                                        </td>
+                                                        <td title={h.security == null ? t('allUpdatesSecurityUnknown') : undefined}>
+                                                            {h.security == null ? <span style={{color: '#728b9a'}}>-</span>
+                                                                : <span style={{color: h.security > 0 ? '#f54f47' : '#adbbc4'}}>{h.security}</span>}
+                                                        </td>
+                                                        <td>
+                                                            <span className="inline-flex items-center gap-1">
+                                                                {h.channel ? (channelText[h.channel] || h.channel) : '-'}
+                                                                {note && <span data-updates-overview-repo-note title={note} className="text-[11px] font-bold" style={{color: '#efc006'}}>(!)</span>}
+                                                            </span>
+                                                        </td>
+                                                        <td style={{color: h.subscription === 'active' ? '#60b515' : '#adbbc4'}}>{h.subscription ? (subText[h.subscription] || h.subscription) : '-'}</td>
+                                                        <td style={h.stale ? {color: '#efc006'} : {color: '#adbbc4'}} title={h.stale ? t('allUpdatesStale') : undefined}>{checkedText(h)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            return (
+                <div data-updates-overview className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-updates-overview-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center text-yellow-400">
+                                <Icons.Download />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('allUpdatesTitle')} {data && !data.failed && <span data-updates-overview-count className="text-sm font-normal text-gray-500">({all.length})</span>}
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('allUpdatesDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-2">
+                            {summary && <span className="text-xs font-medium">{summary}</span>}
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {filters}
+                            {waiting}
+                            {empty}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-updates-overview-sort={col.by} className="px-4 py-3 font-medium cursor-pointer hover:text-white" onClick={() => sortOn(col.by)}>
+                                                        {col.label}{sort.by === col.by && <span className="ml-1">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {shown.map(h => {
+                                                const note = repoNote(h);
+                                                return (
+                                                    <tr key={rowKey(h)} data-updates-overview-row={rowKey(h)} onClick={() => go(h.cluster_id)}
+                                                        title={onOpen ? t('allUpdatesOpen') : undefined}
+                                                        className={`hover:bg-proxmox-hover/50 transition-colors ${onOpen ? 'cursor-pointer' : ''}`}>
+                                                        <td className="px-4 py-2 text-sm text-gray-300">
+                                                            {label(h)}
+                                                            {rolling[h.cluster_id] && <div data-updates-overview-rolling className="text-[11px] text-blue-400">{rollingText(h.cluster_id)}</div>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm font-medium text-white">
+                                                            {h.name}
+                                                            {h.kind === 'pbs' && <>{' '}<span className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-purple-500/20 text-purple-400 uppercase">PBS</span></>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm">
+                                                            {!h.ok ? <span className="text-red-400">{t('allUpdatesCheckFailed')}</span> : (
+                                                                <span className={h.count > 0 ? 'font-semibold text-yellow-400' : 'text-green-400'}>{h.count}</span>
+                                                            )}
+                                                            {h.kernel && <>{' '}<span data-updates-overview-kernel title={t('allUpdatesKernelHint')} className="ml-1 px-1.5 py-0.5 text-[10px] rounded bg-blue-500/20 text-blue-400">{t('allUpdatesKernel')}</span></>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-sm" title={h.security == null ? t('allUpdatesSecurityUnknown') : undefined}>
+                                                            {h.security == null ? <span className="text-gray-500">-</span>
+                                                                : <span className={h.security > 0 ? 'font-semibold text-red-400' : 'text-gray-300'}>{h.security}</span>}
+                                                        </td>
+                                                        <td className="px-4 py-2 text-xs text-gray-400">
+                                                            <span className="inline-flex items-center gap-1">
+                                                                {h.channel ? (channelText[h.channel] || h.channel) : '-'}
+                                                                {note && <span data-updates-overview-repo-note title={note} className="inline-flex items-center justify-center w-4 h-4 rounded-full bg-yellow-500/20 text-yellow-400 text-[10px] font-bold">!</span>}
+                                                            </span>
+                                                        </td>
+                                                        <td className={`px-4 py-2 text-xs ${h.subscription === 'active' ? 'text-green-400' : 'text-gray-400'}`}>{h.subscription ? (subText[h.subscription] || h.subscription) : '-'}</td>
+                                                        <td className={`px-4 py-2 text-xs ${h.stale ? 'text-amber-400' : 'text-gray-400'}`} title={h.stale ? t('allUpdatesStale') : undefined}>{checkedText(h)}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the Ceph of every cluster in one panel: health and its checks, capacity,
+        // OSDs, placement groups, client I/O and monitors. One status read per cluster on the
+        // server (GET /api/ceph-overview), shared with the Ceph health alert. Shows only where a
+        // cluster has Ceph; a row opens the Ceph page of its cluster. Only reads.
+        function CephOverview({ clusters, onOpen }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [open, setOpen] = useState(() => recall('pegaprox-ceph-overview-open', '1') !== '0');
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('cluster.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('cluster.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/ceph-overview`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                    else setData(prev => prev || { failed: true });
+                } catch (e) {
+                    console.error('ceph overview:', e);
+                    if (mine === seq.current) setData(prev => prev || { failed: true });
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey || !open) return;
+                load();
+                // the server keeps a read for 30 s, the health alert reads at its own pace
+                const timer = setInterval(load, 60000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey, open]);
+
+            const rows = (data && data.ceph) || [];
+            const listed = (data && data.clusters) || [];
+            // gone silent after it answered: that one keeps the panel
+            const lost = listed.filter(c => c.state === 'unreadable' && c.had_ceph);
+            // no panel where no cluster has Ceph; a folded one stays where it was folded
+            const any = rows.length > 0 || lost.length > 0 || (data && data.failed);
+            if (!allowed || !clusterKey || (data && data.denied) || (open && !any)) return null;
+
+            const label = (r) => {
+                const c = clusters.find(x => x.id === r.cluster_id);
+                return (c && (c.display_name || c.name)) || r.cluster_name;
+            };
+            const unlisted = [...lost, ...listed.filter(c => c.state === 'confined' || (c.state === 'offline' && rows.length > 0))];
+            const stateText = { offline: t('allStorageOffline'), unreadable: t('allStorageUnreadable'), confined: t('allStorageConfined') };
+            const unhealthy = rows.filter(r => r.health !== 'HEALTH_OK').length;
+            const toggle = () => { store('pegaprox-ceph-overview-open', open ? '0' : '1'); setOpen(!open); };
+            const go = (cid) => { if (onOpen) onOpen(cid); };
+            const size = (b) => formatBytes(b || 0);
+            const level = (h) => h === 'HEALTH_OK' ? 'ok' : h === 'HEALTH_WARN' ? 'warn' : h === 'HEALTH_ERR' ? 'err' : 'none';
+            const fill = (p) => p == null ? 'none' : p >= 85 ? 'err' : p >= 75 ? 'warn' : 'ok';
+            const osdText = (r) => t('allCephOsdsValue').replace('{up}', r.osds.up).replace('{total}', r.osds.total).replace('{in}', r.osds.in);
+            const osdsShort = (r) => r.osds.up < r.osds.total || r.osds.in < r.osds.total;
+            const pgText = (r) => t('allCephPgsClean').replace('{clean}', r.pgs.clean).replace('{total}', r.pgs.total);
+            const otherPgs = (r) => r.pgs.states.filter(s => !s.state.split('+').includes('clean') || !s.state.split('+').includes('active'));
+            const monText = (r) => t('allCephMonsValue').replace('{quorum}', r.mons.quorum).replace('{total}', r.mons.total);
+            const ioLines = (r) => [
+                t('allCephRead').replace('{v}', size(r.io.read_bps)).replace('{n}', r.io.read_iops),
+                t('allCephWrite').replace('{v}', size(r.io.write_bps)).replace('{n}', r.io.write_iops),
+                r.io.recovery_bps > 0 ? t('allCephRecovery').replace('{v}', size(r.io.recovery_bps)) : '',
+            ].filter(Boolean);
+            const healthText = (r) => (r.health || '').replace('HEALTH_', '') || '?';
+            const columns = [t('cluster'), t('allCephHealth'), t('allCephCapacity'), t('allCephOsds'), t('allCephPgs'), t('allCephIo'), t('allCephMons')];
+
+            const footer = unlisted.length > 0 && (
+                <div data-ceph-overview-unlisted className="text-xs text-amber-400">
+                    {t('allStorageNotListed')} {unlisted.map(c => `${label(c)} (${stateText[c.state] || c.state})`).join(', ')}
+                </div>
+            );
+            const failed = data && data.failed && (
+                <div data-ceph-overview-failed className="text-sm text-amber-400">{t('allCephFailed')}</div>
+            );
+            const refreshButton = (
+                <button type="button" onClick={() => load()} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('allStorageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+            const headline = rows.length > 0 && (unhealthy > 0
+                ? <span data-ceph-overview-summary className={isCorporate ? '' : 'text-yellow-400'} style={isCorporate ? {color: '#efc006'} : undefined}>{t('allCephUnhealthy').replace('{n}', unhealthy)}</span>
+                : <span data-ceph-overview-summary className={isCorporate ? '' : 'text-green-400'} style={isCorporate ? {color: '#60b515'} : undefined}>{t('allCephHealthy')}</span>);
+
+            if (isCorporate) {
+                const color = { ok: '#60b515', warn: '#efc006', err: '#f54f47', none: '#728b9a' };
+                return (
+                    <div data-ceph-overview>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <Icons.HardDrive className="w-3.5 h-3.5" style={{color: '#a178d9'}} />
+                            <button type="button" data-ceph-overview-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('allCephTitle')}</button>
+                            {rows.length > 0 && <span data-ceph-overview-count className="text-[11px]" style={{color: '#728b9a'}}>{rows.length}</span>}
+                            {headline && <span className="text-[11px]">{headline}</span>}
+                            <span className="flex-1" />
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {failed}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>{columns.map(c => <th key={c} style={{textAlign: 'left'}}>{c}</th>)}</tr>
+                                        </thead>
+                                        <tbody>
+                                            {rows.map(r => (
+                                                <tr key={r.cluster_id} data-ceph-overview-row={r.cluster_id} data-health={r.health}
+                                                    className={onOpen ? 'table-row-hover cursor-pointer' : ''} title={onOpen ? t('allCephOpen') : undefined} onClick={() => go(r.cluster_id)}>
+                                                    <td style={{fontWeight: 500}}>{label(r)}</td>
+                                                    <td>
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: color[level(r.health)]}} />
+                                                            <span style={{color: color[level(r.health)], fontSize: '12px', fontWeight: 600}}>{healthText(r)}</span>
+                                                        </span>
+                                                        {r.checks.slice(0, 2).map(c => (
+                                                            <div key={c.name} data-ceph-overview-check={c.name} className="text-[11px]" style={{color: color[level(c.severity)]}} title={c.name}>{c.message || c.name}</div>
+                                                        ))}
+                                                        {(r.checks.length > 2 || r.checks_more > 0) && (
+                                                            <div className="text-[11px]" style={{color: '#728b9a'}} title={r.checks.slice(2).map(c => c.message || c.name).join('\n')}>
+                                                                {t('allCephMoreChecks').replace('{n}', r.checks.length - 2 + r.checks_more)}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td>
+                                                        {r.percent == null ? '-' : (
+                                                            <div className="flex items-center gap-1.5">
+                                                                <span style={{color: color[fill(r.percent)], minWidth: '40px'}}>{r.percent.toFixed(1)}%</span>
+                                                                <span className="inline-block" style={{width: '60px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                                    <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(r.percent, 100)}%`, background: color[fill(r.percent)]}} />
+                                                                </span>
+                                                            </div>
+                                                        )}
+                                                        <div className="text-[11px]" style={{color: '#728b9a'}}>{size(r.bytes.used)} / {size(r.bytes.total)}</div>
+                                                    </td>
+                                                    <td style={{color: osdsShort(r) ? '#efc006' : '#adbbc4'}}>{osdText(r)}</td>
+                                                    <td>
+                                                        <div style={{color: r.pgs.clean < r.pgs.total ? '#efc006' : '#adbbc4'}}>{pgText(r)}</div>
+                                                        {otherPgs(r).slice(0, 3).map(s => (
+                                                            <div key={s.state} className="text-[11px]" style={{color: '#728b9a'}}>{s.count} {s.state}</div>
+                                                        ))}
+                                                    </td>
+                                                    <td className="text-[12px]" style={{color: '#adbbc4'}}>
+                                                        {ioLines(r).map(line => <div key={line}>{line}</div>)}
+                                                    </td>
+                                                    <td style={{color: r.mons.quorum < r.mons.total ? '#efc006' : '#adbbc4'}}>{monText(r)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            const badge = { ok: 'bg-green-500/20 text-green-400', warn: 'bg-yellow-500/20 text-yellow-400', err: 'bg-red-500/20 text-red-400', none: 'bg-gray-500/20 text-gray-400' };
+            const text = { ok: 'text-green-400', warn: 'text-yellow-400', err: 'text-red-400', none: 'text-gray-400' };
+            const bar = { ok: 'bg-green-500', warn: 'bg-yellow-500', err: 'bg-red-500', none: 'bg-gray-500' };
+            return (
+                <div data-ceph-overview className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-ceph-overview-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center text-purple-400">
+                                <Icons.HardDrive className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('allCephTitle')} {rows.length > 0 && <span data-ceph-overview-count className="text-sm font-normal text-gray-500">({rows.length})</span>}
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('allCephDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-2">
+                            {headline && <span className="text-xs font-medium">{headline}</span>}
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {failed}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                {columns.map(c => <th key={c} className="px-4 py-3 font-medium">{c}</th>)}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {rows.map(r => (
+                                                <tr key={r.cluster_id} data-ceph-overview-row={r.cluster_id} data-health={r.health} onClick={() => go(r.cluster_id)}
+                                                    title={onOpen ? t('allCephOpen') : undefined}
+                                                    style={{ verticalAlign: 'top' }}
+                                                    className={`hover:bg-proxmox-hover/50 transition-colors ${onOpen ? 'cursor-pointer' : ''}`}>
+                                                    <td className="px-4 py-2 text-sm font-medium text-white">{label(r)}</td>
+                                                    <td className="px-4 py-2">
+                                                        <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${badge[level(r.health)]}`}>{healthText(r)}</span>
+                                                        {r.checks.slice(0, 2).map(c => (
+                                                            <div key={c.name} data-ceph-overview-check={c.name} className={`text-[11px] mt-0.5 ${text[level(c.severity)]}`} title={c.name}>{c.message || c.name}</div>
+                                                        ))}
+                                                        {(r.checks.length > 2 || r.checks_more > 0) && (
+                                                            <div className="text-[11px] text-gray-500" title={r.checks.slice(2).map(c => c.message || c.name).join('\n')}>
+                                                                {t('allCephMoreChecks').replace('{n}', r.checks.length - 2 + r.checks_more)}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-4 py-2">
+                                                        {r.percent == null ? <span className="text-gray-500">-</span> : (
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                    <div className={`h-full rounded-full ${bar[fill(r.percent)]}`} style={{ width: `${Math.min(r.percent, 100)}%` }} />
+                                                                </div>
+                                                                <span className={`text-xs font-medium ${text[fill(r.percent)]}`}>{r.percent.toFixed(1)}%</span>
+                                                            </div>
+                                                        )}
+                                                        <div className="text-[11px] text-gray-500 mt-0.5">{size(r.bytes.used)} / {size(r.bytes.total)}</div>
+                                                    </td>
+                                                    <td className={`px-4 py-2 text-sm ${osdsShort(r) ? 'text-yellow-400' : 'text-gray-300'}`}>{osdText(r)}</td>
+                                                    <td className="px-4 py-2 text-sm">
+                                                        <div className={r.pgs.clean < r.pgs.total ? 'text-yellow-400' : 'text-gray-300'}>{pgText(r)}</div>
+                                                        {otherPgs(r).slice(0, 3).map(s => (
+                                                            <div key={s.state} className="text-[11px] text-gray-500">{s.count} {s.state}</div>
+                                                        ))}
+                                                    </td>
+                                                    <td className="px-4 py-2 text-xs text-gray-400">
+                                                        {ioLines(r).map(line => <div key={line}>{line}</div>)}
+                                                    </td>
+                                                    <td className={`px-4 py-2 text-sm ${r.mons.quorum < r.mons.total ? 'text-yellow-400' : 'text-gray-300'}`}>{monText(r)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - every storage of every cluster in one table, fullest first. The server reads
+        // each cluster once (GET /api/storage-overview, shared with the health check), and only
+        // while the panel is open. Nothing here acts, so a standby shows it as it is.
+        function StorageOverview({ clusters }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const ROWS = 50;
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [query, setQuery] = useState('');
+            const [limit, setLimit] = useState(() => recall('pegaprox-storage-overview-threshold', '85'));
+            const [overOnly, setOverOnly] = useState(false);
+            const [open, setOpen] = useState(() => recall('pegaprox-storage-overview-open', '1') !== '0');
+            const [showAll, setShowAll] = useState(false);
+            const [sort, setSort] = useState({ by: 'percent', dir: 'desc' });
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('storage.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('storage.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async () => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/storage-overview`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;  // a newer read is on its way
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                    else setData(prev => prev || { failed: true });  // what was read stays shown
+                } catch (e) {
+                    console.error('storage overview:', e);
+                    if (mine === seq.current) setData(prev => prev || { failed: true });
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey || !open) return;
+                load();
+                // the server keeps a read for 30 s; a page left open looks again now and then
+                const timer = setInterval(load, 120000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey, open]);
+
+            if (!allowed || !clusterKey || (data && data.denied)) return null;
+
+            const parsed = parseInt(limit, 10);
+            const threshold = parsed >= 1 && parsed <= 100 ? parsed : 85;
+            const label = (s) => {
+                const c = clusters.find(x => x.id === s.cluster_id);
+                return (c && (c.display_name || c.name)) || s.cluster_name;
+            };
+            const all = (data && data.storages) || [];
+            const isOver = (s) => s.active && s.percent != null && s.percent >= threshold;
+            const over = all.filter(isOver).length;
+            const q = query.trim().toLowerCase();
+            const rows = all.filter(s => !overOnly || isOver(s))
+                .filter(s => !q || `${label(s)} ${s.node} ${s.storage} ${s.type} ${s.content}`.toLowerCase().includes(q));
+            const keyOf = {
+                cluster: s => label(s).toLowerCase(), node: s => (s.shared ? '' : s.node || '').toLowerCase(),
+                storage: s => (s.storage || '').toLowerCase(), type: s => s.type || '', shared: s => s.shared ? 1 : 0,
+                used: s => s.used ?? -1, total: s => s.total ?? -1, percent: s => s.percent ?? -1, status: s => s.active ? 1 : 0,
+            };
+            const pick = keyOf[sort.by] || keyOf.percent;
+            const sorted = [...rows].sort((a, b) => {
+                const x = pick(a), y = pick(b);
+                const c = typeof x === 'string' ? x.localeCompare(y) : x - y;
+                return (sort.dir === 'asc' ? c : -c) || label(a).localeCompare(label(b)) || (a.storage || '').localeCompare(b.storage || '');
+            });
+            const shown = showAll ? sorted : sorted.slice(0, ROWS);
+            const unlisted = ((data && data.clusters) || []).filter(c => c.state !== 'ok');
+            const stateText = { offline: t('allStorageOffline'), unreadable: t('allStorageUnreadable'), confined: t('allStorageConfined') };
+            const toggle = () => { store('pegaprox-storage-overview-open', open ? '0' : '1'); setOpen(!open); };
+            // text sorts A to Z first, figures the largest first
+            const sortOn = (by) => setSort(s => s.by === by
+                ? { by, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+                : { by, dir: ['cluster', 'node', 'storage', 'type'].includes(by) ? 'asc' : 'desc' });
+            const level = (s) => !s.active || s.percent == null ? 'none' : s.percent >= threshold ? 'over' : s.percent >= threshold - 10 ? 'near' : 'ok';
+            const columns = [
+                { by: 'cluster', label: t('cluster') }, { by: 'node', label: t('node') },
+                { by: 'storage', label: t('storage') }, { by: 'type', label: t('type') },
+                { by: 'shared', label: t('allStorageShared') }, { by: 'used', label: t('allStorageUsed') },
+                { by: 'total', label: t('allStorageTotal') }, { by: 'percent', label: t('allStorageUsage') },
+                { by: 'status', label: t('status') },
+            ];
+            const rowKey = (s) => `${s.cluster_id}:${s.shared ? '*' : s.node}:${s.storage}`;
+            const nodeText = (s) => s.shared
+                ? (s.nodes ? t('allStorageNodes').replace('{n}', s.nodes) : t('allStorageShared'))
+                : (s.node || '-');
+            const size = (b) => b == null ? '-' : formatBytes(b);
+            const statusText = (s) => s.active ? t('active') : t('allStorageInactive');
+            const partly = (s) => s.active && s.inactive_on && s.inactive_on.length > 0
+                ? t('allStorageInactiveOn').replace('{nodes}', s.inactive_on.join(', ')) : '';
+
+            const filters = (
+                <div className="flex items-center gap-3 flex-wrap">
+                    <div className="relative">
+                        <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                        <input data-storage-overview-search value={query} onChange={e => setQuery(e.target.value)} placeholder={t('search')}
+                            style={{ paddingLeft: '1.75rem' }} className="pr-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg w-48" />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                        {t('allStorageThreshold')}
+                        <input data-storage-overview-threshold type="number" min="1" max="100" value={limit}
+                            onChange={e => { setLimit(e.target.value); store('pegaprox-storage-overview-threshold', e.target.value); }}
+                            className="px-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg w-16" />
+                        %
+                    </label>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                        <input data-storage-overview-over type="checkbox" checked={overOnly} onChange={e => setOverOnly(e.target.checked)} />
+                        {t('allStorageOverOnly')}
+                    </label>
+                </div>
+            );
+            const footer = (
+                <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {unlisted.length > 0 && (
+                            <span data-storage-overview-unlisted className="text-amber-400">
+                                {t('allStorageNotListed')} {unlisted.map(c => `${label(c)} (${stateText[c.state] || c.state})`).join(', ')}
+                            </span>
+                        )}
+                    </div>
+                    {rows.length > ROWS && (
+                        <button type="button" data-storage-overview-more onClick={() => setShowAll(!showAll)} className="text-proxmox-orange hover:underline">
+                            {showAll ? t('showLess') : t('allStorageShowAll').replace('{n}', rows.length)}
+                        </button>
+                    )}
+                </div>
+            );
+            const pending = !data && (
+                <div className="text-sm text-gray-500">{t('loading') || 'Loading...'}</div>
+            );
+            const empty = data && (data.failed ? (
+                <div data-storage-overview-failed className="text-sm text-amber-400">{t('allStorageFailed')}</div>
+            ) : rows.length === 0 && (
+                <div data-storage-overview-empty className="text-sm text-gray-400">
+                    {all.length === 0 ? t('allStorageEmpty') : t('allStorageNoMatch')}
+                </div>
+            ));
+            const refreshButton = (
+                <button type="button" onClick={() => load()} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('allStorageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+            const aboveText = data && over > 0 ? t('allStorageAbove').replace('{n}', over).replace('{p}', threshold) : '';
+
+            if (isCorporate) {
+                const corpColor = { over: '#f54f47', near: '#efc006', ok: '#60b515', none: '#728b9a' };
+                return (
+                    <div data-storage-overview>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <Icons.HardDrive className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
+                            <button type="button" data-storage-overview-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('allStorageTitle')}</button>
+                            {data && !data.failed && <span data-storage-overview-count className="text-[11px]" style={{color: '#728b9a'}}>{all.length}</span>}
+                            {aboveText && <span data-storage-overview-above className="text-[11px]" style={{color: '#f54f47'}}>{aboveText}</span>}
+                            <span className="flex-1" />
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {filters}
+                                {pending}
+                                {empty}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-storage-overview-sort={col.by} className="cursor-pointer" style={{textAlign: 'left'}} onClick={() => sortOn(col.by)}>
+                                                        {col.label} {sort.by === col.by && <span className="sort-indicator">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {shown.map(s => {
+                                                const color = corpColor[level(s)];
+                                                // on the cells: the striped rows paint theirs over a row background
+                                                const hot = isOver(s) ? {background: 'rgba(245,79,71,0.08)'} : {};
+                                                return (
+                                                    <tr key={rowKey(s)} data-storage-overview-row={rowKey(s)} data-over={isOver(s) ? '1' : undefined}>
+                                                        <td style={{fontWeight: 500, ...hot, ...(isOver(s) ? {boxShadow: 'inset 3px 0 0 #f54f47'} : {})}}>{label(s)}</td>
+                                                        <td style={{color: '#adbbc4', ...hot}}>{nodeText(s)}</td>
+                                                        <td style={hot}>{s.storage}</td>
+                                                        <td style={{color: '#adbbc4', ...hot}}>{s.type || '-'}</td>
+                                                        <td style={hot}>{s.shared ? t('yes') : t('no')}</td>
+                                                        <td style={hot}>{size(s.used)}</td>
+                                                        <td style={hot}>{size(s.total)}</td>
+                                                        <td style={hot}>
+                                                            {s.percent == null ? '-' : (
+                                                                <div className="flex items-center gap-1.5">
+                                                                    <span style={{color, minWidth: '40px'}}>{s.percent.toFixed(1)}%</span>
+                                                                    <span className="inline-block" style={{width: '60px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                                        <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(s.percent, 100)}%`, background: color}} />
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td style={hot}>
+                                                            <span className="inline-flex items-center gap-1">
+                                                                <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: s.active ? '#60b515' : '#728b9a'}} />
+                                                                <span style={{color: s.active ? '#60b515' : '#728b9a', fontSize: '12px'}}>{statusText(s)}</span>
+                                                            </span>
+                                                            {partly(s) && <span className="ml-2 text-[11px]" style={{color: '#efc006'}}>{partly(s)}</span>}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            const modernColor = {
+                over: ['bg-red-500', 'text-red-400'], near: ['bg-yellow-500', 'text-yellow-400'],
+                ok: ['bg-green-500', 'text-green-400'], none: ['bg-gray-500', 'text-gray-500'],
+            };
+            return (
+                <div data-storage-overview className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-storage-overview-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                <Icons.HardDrive className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('allStorageTitle')} {data && !data.failed && <span data-storage-overview-count className="text-sm font-normal text-gray-500">({all.length})</span>}
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('allStorageDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-2">
+                            {aboveText && <span data-storage-overview-above className="text-xs font-medium text-red-400">{aboveText}</span>}
+                            {open && refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {filters}
+                            {pending}
+                            {empty}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                {columns.map(col => (
+                                                    <th key={col.by} data-storage-overview-sort={col.by} className="px-4 py-3 font-medium cursor-pointer hover:text-white" onClick={() => sortOn(col.by)}>
+                                                        {col.label}{sort.by === col.by && <span className="ml-1">{sort.dir === 'asc' ? '▲' : '▼'}</span>}
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {shown.map(s => {
+                                                const [bar, text] = modernColor[level(s)];
+                                                return (
+                                                    <tr key={rowKey(s)} data-storage-overview-row={rowKey(s)} data-over={isOver(s) ? '1' : undefined}
+                                                        className={`${isOver(s) ? 'bg-red-500/10' : ''} hover:bg-proxmox-hover/50 transition-colors`}>
+                                                        <td className="px-4 py-2 text-sm text-gray-300">{label(s)}</td>
+                                                        <td className="px-4 py-2 text-sm text-gray-400">{nodeText(s)}</td>
+                                                        <td className="px-4 py-2 text-sm font-medium text-white">{s.storage}</td>
+                                                        <td className="px-4 py-2 text-xs text-gray-400">{s.type || '-'}</td>
+                                                        <td className="px-4 py-2 text-xs text-gray-400">{s.shared ? t('yes') : t('no')}</td>
+                                                        <td className="px-4 py-2 text-sm text-gray-300">{size(s.used)}</td>
+                                                        <td className="px-4 py-2 text-sm text-gray-300">{size(s.total)}</td>
+                                                        <td className="px-4 py-2">
+                                                            {s.percent == null ? <span className="text-gray-500">-</span> : (
+                                                                <div className="flex items-center gap-2">
+                                                                    <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                        <div className={`h-full rounded-full ${bar}`} style={{ width: `${Math.min(s.percent, 100)}%` }} />
+                                                                    </div>
+                                                                    <span className={`text-xs font-medium ${text}`}>{s.percent.toFixed(1)}%</span>
+                                                                </div>
+                                                            )}
+                                                        </td>
+                                                        <td className="px-4 py-2">
+                                                            <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${s.active ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                                                                <span className={`w-1.5 h-1.5 rounded-full ${s.active ? 'bg-green-400' : 'bg-gray-400'}`} />
+                                                                {statusText(s)}
+                                                            </span>
+                                                            {partly(s) && <div className="text-[11px] text-amber-400 mt-0.5">{partly(s)}</div>}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the guests no backup job covers, every cluster in one list. One read per
+        // cluster on the server (GET /api/backup-coverage), shared with the alert of the same name.
+        // Only reads and links to the guest, so a standby shows it as it is.
+        function GuestsWithoutBackup({ clusters, onSelectVm }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, user, isAdmin, haReadOnly } = useAuth();
+            const { isCorporate } = useLayout();
+            const ROWS = 50;
+            const store = (key, value) => { try { localStorage.setItem(key, value); } catch (e) {} };
+            const recall = (key, fallback) => { try { const v = localStorage.getItem(key); return v === null ? fallback : v; } catch (e) { return fallback; } };
+            const [data, setData] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [query, setQuery] = useState('');
+            const [hideTags, setHideTags] = useState(() => recall('pegaprox-nobackup-hide', 'no-backup'));
+            const [open, setOpen] = useState(() => recall('pegaprox-nobackup-open', '1') !== '0');
+            const [showAll, setShowAll] = useState(false);
+            const seq = useRef(0);
+            const allowed = (!haReadOnly || haReadPermission('backup.view')) &&
+                (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes('backup.view')));
+            const clusterKey = clusters.map(c => c.id).join(',');
+
+            const load = async (refresh) => {
+                const mine = ++seq.current;
+                setLoading(true);
+                try {
+                    const r = await fetch(`${API_URL}/backup-coverage${refresh ? '?refresh=1' : ''}`, { headers: getAuthHeaders() });
+                    if (mine !== seq.current) return;  // a newer read is on its way
+                    if (r.ok) setData(await r.json());
+                    else if (r.status === 403) setData({ denied: true });
+                } catch (e) {
+                    console.error('backup coverage:', e);
+                } finally {
+                    if (mine === seq.current) setLoading(false);
+                }
+            };
+            useEffect(() => {
+                if (!allowed || !clusterKey) return;
+                load(false);
+                // a page left open sees a new job or a new guest within a few minutes
+                const timer = setInterval(() => load(false), 300000);
+                return () => clearInterval(timer);
+            }, [allowed, clusterKey]);
+
+            if (!allowed || !clusterKey || (data && data.denied)) return null;
+
+            const hidden = new Set(hideTags.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean));
+            const all = (data && data.guests) || [];
+            const isHidden = (g) => (g.tags || []).some(x => hidden.has(x));
+            const tagged = all.filter(isHidden).length;
+            const q = query.trim().toLowerCase();
+            const rows = all.filter(g => !isHidden(g))
+                .filter(g => !q || `${g.name} ${g.vmid} ${g.node} ${g.cluster_name}`.toLowerCase().includes(q));
+            const shown = showAll ? rows : rows.slice(0, ROWS);
+            const notChecked = ((data && data.clusters) || []).filter(c => c.state !== 'ok');
+            const stateText = { offline: t('backupCoverageOffline'), denied: t('backupCoverageDenied'), unreadable: t('backupCoverageUnreadable') };
+            const toggle = () => { store('pegaprox-nobackup-open', open ? '0' : '1'); setOpen(!open); };
+            const openGuest = (g) => {
+                const cl = clusters.find(c => c.id === g.cluster_id);
+                if (cl && onSelectVm) onSelectVm(cl, g.vmid, g.node, { vmid: g.vmid, node: g.node, type: g.type, name: g.name, status: g.status });
+            };
+            const isRunning = (g) => g.status === 'running';
+
+            const filters = (
+                <div className="flex items-center gap-2 flex-wrap">
+                    <div className="relative">
+                        <Icons.Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-gray-500" />
+                        <input data-backup-coverage-search value={query} onChange={e => setQuery(e.target.value)} placeholder={t('search')}
+                            style={{ paddingLeft: '1.75rem' }} className="pr-2 py-1 text-xs bg-proxmox-dark border border-proxmox-border rounded-lg w-48" />
+                    </div>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                        {t('backupCoverageHideTagged')}
+                        <input data-backup-coverage-hide value={hideTags} onChange={e => { setHideTags(e.target.value); store('pegaprox-nobackup-hide', e.target.value); }}
+                            placeholder="no-backup" className="px-2 py-1 text-xs font-mono bg-proxmox-dark border border-proxmox-border rounded-lg w-32" />
+                    </label>
+                </div>
+            );
+            const footer = (
+                <div className="flex items-center justify-between gap-3 flex-wrap text-xs text-gray-500">
+                    <div className="flex items-center gap-3 flex-wrap">
+                        {tagged > 0 && <span data-backup-coverage-tagged>{t('backupCoverageHidden').replace('{n}', tagged)}</span>}
+                        {notChecked.length > 0 && (
+                            <span data-backup-coverage-unchecked className="text-amber-400">
+                                {t('backupCoverageNotChecked')} {notChecked.map(c => `${c.cluster_name} (${stateText[c.state] || c.state})`).join(', ')}
+                            </span>
+                        )}
+                    </div>
+                    {rows.length > ROWS && (
+                        <button type="button" onClick={() => setShowAll(!showAll)} className="text-proxmox-orange hover:underline">
+                            {showAll ? t('showLess') : t('backupCoverageShowAll').replace('{n}', rows.length)}
+                        </button>
+                    )}
+                </div>
+            );
+            const empty = data && rows.length === 0 && (
+                <div data-backup-coverage-empty className="text-sm text-gray-400 flex items-center gap-2">
+                    <Icons.CheckCircle className="w-4 h-4 text-green-400" />
+                    {all.length === 0 ? t('backupCoverageAllCovered') : t('backupCoverageNoMatch')}
+                </div>
+            );
+            const refreshButton = (
+                <button type="button" onClick={() => load(true)} title={t('refresh')} disabled={loading}
+                    className="p-1.5 rounded text-gray-500 hover:text-proxmox-orange hover:bg-proxmox-hover disabled:opacity-50">
+                    <span className={`inline-flex ${loading ? 'animate-spin' : ''}`}><Icons.RefreshCw /></span>
+                </button>
+            );
+            const chevron = (
+                <button type="button" onClick={toggle} title={open ? t('collapse') : t('backupCoverageExpand')} className="p-1.5 rounded text-gray-500 hover:text-white hover:bg-proxmox-hover">
+                    <span className="inline-flex" style={{ transform: open ? 'none' : 'rotate(-90deg)' }}><Icons.ChevronDown /></span>
+                </button>
+            );
+
+            if (isCorporate) {
+                return (
+                    <div data-backup-coverage>
+                        <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                            <Icons.ArchiveX className="w-3.5 h-3.5" style={{color: '#efc006'}} />
+                            <button type="button" data-backup-coverage-fold onClick={toggle} className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('backupCoverageTitle')}</button>
+                            <span data-backup-coverage-count className="text-[11px]" style={{color: '#728b9a'}}>{data ? all.length - tagged : '...'}</span>
+                            <span className="flex-1" />
+                            {refreshButton}
+                            {chevron}
+                        </div>
+                        {open && (
+                            <div className="space-y-2 pt-2">
+                                {filters}
+                                {empty}
+                                {rows.length > 0 && (
+                                    <table className="corp-datagrid corp-datagrid-striped">
+                                        <thead>
+                                            <tr>
+                                                <th style={{width: '24px'}}></th>
+                                                <th style={{textAlign: 'left'}}>{t('name')}</th>
+                                                <th style={{textAlign: 'left'}}>{t('cluster')}</th>
+                                                <th style={{textAlign: 'left'}}>{t('node')}</th>
+                                                <th style={{textAlign: 'left'}}>{t('status')}</th>
+                                                <th style={{textAlign: 'left'}}>{t('tags')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {shown.map(g => (
+                                                <tr key={`${g.cluster_id}-${g.vmid}`} data-backup-coverage-row={`${g.cluster_id}:${g.vmid}`} className="table-row-hover cursor-pointer" onClick={() => openGuest(g)}>
+                                                    <td><Icons.Monitor className="w-3.5 h-3.5" style={{color: g.type === 'qemu' ? '#49afd9' : '#a178d9'}} /></td>
+                                                    <td>
+                                                        <span style={{fontWeight: 500}}>{g.name || `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}`}</span>
+                                                        <span style={{color: '#728b9a', fontSize: '11px', marginLeft: '6px'}}>#{g.vmid}</span>
+                                                        {g.template && <span className="ml-2 text-[10px] uppercase" style={{color: '#728b9a'}}>{t('template')}</span>}
+                                                    </td>
+                                                    <td>{g.cluster_name}</td>
+                                                    <td style={{color: '#adbbc4'}}>{g.node || '-'}</td>
+                                                    <td>
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: isRunning(g) ? '#60b515' : '#728b9a'}} />
+                                                            <span style={{color: isRunning(g) ? '#60b515' : '#728b9a', fontSize: '12px'}}>{isRunning(g) ? t('running') : t('stopped')}</span>
+                                                        </span>
+                                                    </td>
+                                                    <td style={{color: '#728b9a', fontSize: '12px'}}>{(g.tags || []).join(', ')}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                                {footer}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            return (
+                <div data-backup-coverage className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between gap-3 flex-wrap">
+                        <button type="button" data-backup-coverage-fold onClick={toggle} className="flex items-center gap-3 text-left">
+                            <div className="w-10 h-10 rounded-lg bg-yellow-500/20 flex items-center justify-center text-yellow-400">
+                                <Icons.ArchiveX className="w-5 h-5" />
+                            </div>
+                            <div>
+                                <h3 className="font-semibold text-white">
+                                    {t('backupCoverageTitle')} <span data-backup-coverage-count className="text-sm font-normal text-gray-500">({data ? all.length - tagged : '...'})</span>
+                                </h3>
+                                <p className="text-xs text-gray-500">{t('backupCoverageDesc')}</p>
+                            </div>
+                        </button>
+                        <div className="flex items-center gap-1">
+                            {refreshButton}
+                            {chevron}
+                        </div>
+                    </div>
+                    {open && (
+                        <div className="p-4 space-y-3">
+                            {filters}
+                            {empty}
+                            {rows.length > 0 && (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className="bg-proxmox-dark/50">
+                                            <tr className="text-left text-xs text-gray-400">
+                                                <th className="px-4 py-3 font-medium">{t('type')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('name')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('cluster')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('node')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('status')}</th>
+                                                <th className="px-4 py-3 font-medium">{t('tags')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-proxmox-border/50">
+                                            {shown.map(g => (
+                                                <tr key={`${g.cluster_id}-${g.vmid}`} data-backup-coverage-row={`${g.cluster_id}:${g.vmid}`}
+                                                    className="hover:bg-proxmox-hover/50 transition-colors cursor-pointer group" onClick={() => openGuest(g)}>
+                                                    <td className="px-4 py-2">
+                                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${g.type === 'qemu' ? 'bg-blue-500/20 text-blue-400' : 'bg-purple-500/20 text-purple-400'}`}>
+                                                            {g.type === 'qemu' ? <Icons.Monitor /> : <Icons.Layers />}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-2">
+                                                        <div className="font-medium text-white group-hover:text-proxmox-orange transition-colors">
+                                                            {g.name || `${g.type === 'lxc' ? 'CT' : 'VM'} ${g.vmid}`}
+                                                            {g.template && <span className="ml-2 px-1.5 py-0.5 text-[10px] rounded bg-proxmox-dark text-gray-400 uppercase">{t('template')}</span>}
+                                                        </div>
+                                                        <div className="text-xs text-gray-500">ID: {g.vmid}</div>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-sm text-gray-300">{g.cluster_name}</td>
+                                                    <td className="px-4 py-2 text-sm text-gray-400">{g.node || '-'}</td>
+                                                    <td className="px-4 py-2">
+                                                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${isRunning(g) ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'}`}>
+                                                            <span className={`w-1.5 h-1.5 rounded-full ${isRunning(g) ? 'bg-green-400' : 'bg-gray-400'}`} />
+                                                            {isRunning(g) ? t('running') : t('stopped')}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-2 text-xs text-gray-500">{(g.tags || []).join(', ')}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            {footer}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW: All Clusters Overview - GitHub Feature Request #16
+        // added a bunch of stuff here - storage, sparklines, sorting etc
+        function AllClustersOverview({ clusters, allMetrics, clusterGroups = [], topGuests = [], allClusterGuests = {}, pbsServers = [], onSelectCluster, onSelectVm, onOpenClusterTab, topologyOnly = false, onAutoInstall, addToast, onOpenGuests, onOpenTopology, recentEvents, canAudit, authFetch }) {
+            // #625: an empty list on a standby is no reason to offer adding a cluster there -
+            // say why it is empty instead: no sync yet, or its live view is off
+            const haInfo = (useAuth() || {}).ha || {};
+            const haStandby = haInfo.role === 'standby';
+            const { t } = useTranslation();
+            // a member that serves users is no standby to them
+            const haNoClusters = haInfo.live_view === false ? t('pgHaNoClustersLiveOff')
+                : haInfo.serving === true ? t('pgHaNoClustersServing') : t('pgHaNoClustersHere');
+            const { isCorporate, isCorpRedesigned } = useLayout();
+            const [sortBy, setSortBy] = useState('name');
+            const [sortDir, setSortDir] = useState('asc');
+            const [guestSortBy, setGuestSortBy] = useState('cpu');    // #621 — Top Resources table sort (separate from the cluster table)
+            const [guestSortDir, setGuestSortDir] = useState('desc');
+            const [cpuHistory, setCpuHistory] = useState({});
+            const [ramHistory, setRamHistory] = useState({});
+            // LW Oct 2026 - a row of the update and Ceph panels opens that place in its cluster
+            const openIn = (tab, section) => onOpenClusterTab ? (cid) => {
+                const cluster = clusters.find(c => c.id === cid);
+                if (cluster) onOpenClusterTab(cluster, tab, section);
+            } : null;
+
+            // sparkline history
+            useEffect(() => {
+                clusters.forEach(cluster => {
+                    const status = allMetrics[cluster.id]?.data || {};
+                    const cpu = status.resources?.cpu?.percent || 0;
+                    const ram = status.resources?.memory?.percent || 0;
+                    
+                    setCpuHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), cpu]
+                    }));
+                    setRamHistory(prev => ({
+                        ...prev,
+                        [cluster.id]: [...(prev[cluster.id] || []).slice(-9), ram]
+                    }));
+                });
+            }, [allMetrics]);
+            
+            // stats per cluster
+            const clusterStats = clusters.map(cluster => {
+                const status = allMetrics[cluster.id]?.data || {};
+                const lastUpdate = allMetrics[cluster.id]?.lastUpdate;
+                const nodes = status.nodes || {};
+                const guests = status.guests || {};
+                const resources = status.resources || {};
+                
+                const nodeCount = nodes.total || 0;
+                const onlineNodes = nodes.online || 0;
+                const offlineNodes = nodes.offline || 0;
+                const avgCpu = resources.cpu?.percent || 0;
+                const avgMem = resources.memory?.percent || 0;
+                const avgStorage = resources.storage?.percent || 0;
+                
+                const vmsRunning = (guests.vms?.running || 0) + (guests.containers?.running || 0);
+                const vmsStopped = (guests.vms?.stopped || 0) + (guests.containers?.stopped || 0);
+                // NS #618-followup: prefer the explicit per-type totals (all guests incl.
+                // paused/templates) so this matches the cluster-detail count and can never
+                // render total < running; fall back to running+stopped for older backends.
+                const totalVms = (guests.vms?.total != null || guests.containers?.total != null)
+                    ? ((guests.vms?.total || 0) + (guests.containers?.total || 0))
+                    : (vmsRunning + vmsStopped);
+                
+                // only a status that was read has figures; before that (or while every read
+                // is refused) the card says so instead of 0/0 and a green 100 %
+                const hasMetrics = !!allMetrics[cluster.id]?.data;
+                // health score calculation - cpu/ram/storage weighted
+                const healthScore = !cluster.connected ? 0 : !hasMetrics ? null
+                    : Math.max(0, 100 - (avgCpu * 0.3 + avgMem * 0.3 + avgStorage * 0.2 + (nodeCount > 0 ? (offlineNodes / nodeCount) * 100 * 0.2 : 0)));
+                
+                // Count alerts/warnings
+                const alerts = [];
+                if (!cluster.connected) alerts.push({ type: 'error', msg: 'Offline' });
+                if (offlineNodes > 0) alerts.push({ type: 'warning', msg: `${offlineNodes} node(s) offline` });
+                if (avgCpu > 90) alerts.push({ type: 'error', msg: 'CPU critical' });
+                else if (avgCpu > 80) alerts.push({ type: 'warning', msg: 'CPU high' });
+                if (avgMem > 90) alerts.push({ type: 'error', msg: 'RAM critical' });
+                else if (avgMem > 80) alerts.push({ type: 'warning', msg: 'RAM high' });
+                if (avgStorage > 90) alerts.push({ type: 'error', msg: 'Storage critical' });
+                else if (avgStorage > 80) alerts.push({ type: 'warning', msg: 'Storage high' });
+                
+                return {
+                    ...cluster,
+                    nodeCount, onlineNodes, offlineNodes,
+                    avgCpu, avgMem, avgStorage,
+                    totalVms, runningVms: vmsRunning, stoppedVms: vmsStopped,
+                    healthScore: healthScore == null ? null : Math.round(healthScore),
+                    hasMetrics,
+                    lastUpdate,
+                    alerts,
+                    cpuHistory: cpuHistory[cluster.id] || [],
+                    ramHistory: ramHistory[cluster.id] || []
+                };
+            });
+            
+            // sorting
+            const sortedStats = [...clusterStats].sort((a, b) => {
+                let aVal, bVal;
+                switch (sortBy) {
+                    case 'health': aVal = a.healthScore; bVal = b.healthScore; break;
+                    case 'nodes': aVal = a.nodeCount; bVal = b.nodeCount; break;
+                    case 'vms': aVal = a.totalVms; bVal = b.totalVms; break;
+                    case 'cpu': aVal = a.avgCpu; bVal = b.avgCpu; break;
+                    case 'ram': aVal = a.avgMem; bVal = b.avgMem; break;
+                    default: aVal = (a.display_name || a.name).toLowerCase(); bVal = (b.display_name || b.name).toLowerCase();
+                }
+                if (typeof aVal === 'string') return sortDir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+                return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
+            });
+            
+            // group by cluster group
+            const groupedClusters = {};
+            const ungroupedClusters = [];
+            sortedStats.forEach(cluster => {
+                const group = clusterGroups.find(g => g.id === cluster.group_id);
+                if (group) {
+                    if (!groupedClusters[group.id]) groupedClusters[group.id] = { group, clusters: [] };
+                    groupedClusters[group.id].clusters.push(cluster);
+                } else {
+                    ungroupedClusters.push(cluster);
+                }
+            });
+            
+            // totals for the header cards
+            const totals = {
+                clusters: clusters.length,
+                connectedClusters: clusters.filter(c => c.connected).length,
+                totalNodes: clusterStats.reduce((acc, c) => acc + c.nodeCount, 0),
+                onlineNodes: clusterStats.reduce((acc, c) => acc + c.onlineNodes, 0),
+                totalVms: clusterStats.reduce((acc, c) => acc + c.totalVms, 0),
+                runningVms: clusterStats.reduce((acc, c) => acc + c.runningVms, 0),
+                stoppedVms: clusterStats.reduce((acc, c) => acc + c.stoppedVms, 0),
+                avgCpu: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgCpu, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                avgMem: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgMem, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                avgStorage: clusterStats.filter(c => c.hasMetrics).length > 0 ? clusterStats.reduce((acc, c) => acc + c.avgStorage, 0) / clusterStats.filter(c => c.hasMetrics).length : 0,
+                totalAlerts: clusterStats.reduce((acc, c) => acc + c.alerts.length, 0)
+            };
+            
+            // NS: sparkline svg - kept it simple
+            const Sparkline = ({ data, color, height = 20, width = 60 }) => {
+                if (!data || data.length < 2) return <div style={{ width, height }} className="bg-proxmox-dark/50 rounded" />;
+                const max = Math.max(...data, 1);
+                const min = Math.min(...data, 0);
+                const range = max - min || 1;
+                const points = data.map((v, i) => `${(i / (data.length - 1)) * width},${height - ((v - min) / range) * height}`).join(' ');
+                return (
+                    <svg width={width} height={height} className="overflow-visible">
+                        <polyline fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={points} />
+                        <circle cx={width} cy={height - ((data[data.length - 1] - min) / range) * height} r="2" fill={color} />
+                    </svg>
+                );
+            };
+            
+            // circular progress - reusable
+            const CircularProgress = ({ value, size = 60, strokeWidth = 6, color }) => {
+                const radius = (size - strokeWidth) / 2;
+                const circumference = radius * 2 * Math.PI;
+                const offset = circumference - (value / 100) * circumference;
+                return (
+                    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+                        <svg className="transform -rotate-90 overflow-visible" width={size} height={size}>
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="currentColor" strokeWidth={strokeWidth} className="text-gray-700" />
+                            <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset} className="transition-all duration-500" />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center">
+                            <span className="text-xs font-bold text-white">{value.toFixed(0)}%</span>
+                        </div>
+                    </div>
+                );
+            };
+            
+            const getHealthColor = (score) => {
+                if (score >= 80) return { bg: 'bg-green-500/20', text: 'text-green-400', border: 'border-green-500/30', color: '#22c55e' };
+                if (score >= 60) return { bg: 'bg-yellow-500/20', text: 'text-yellow-400', border: 'border-yellow-500/30', color: '#eab308' };
+                if (score >= 40) return { bg: 'bg-orange-500/20', text: 'text-orange-400', border: 'border-orange-500/30', color: '#f97316' };
+                return { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/30', color: '#ef4444' };
+            };
+            
+            const formatLastUpdate = (date) => {
+                if (!date) return '-';
+                const now = new Date();
+                const diff = Math.floor((now - new Date(date)) / 1000);
+                if (diff < 10) return t('justNow') || 'just now';
+                if (diff < 60) return (t('timeAgoSec') || '{n}s ago').replace('{n}', diff);
+                if (diff < 3600) return (t('timeAgoMin') || '{n}m ago').replace('{n}', Math.floor(diff / 60));
+                return new Date(date).toLocaleTimeString();
+            };
+            
+            const SortButton = ({ field, label }) => (
+                <button
+                    onClick={() => { setSortBy(field); setSortDir(sortBy === field && sortDir === 'asc' ? 'desc' : 'asc'); }}
+                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${sortBy === field ? 'bg-proxmox-orange/20 text-proxmox-orange font-medium' : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'}`}
+                >
+                    {label} {sortBy === field && (sortDir === 'asc' ? '↑' : '↓')}
+                </button>
+            );
+            
+            // cluster card component
+            const ClusterCard = ({ cluster }) => {
+                const healthColors = getHealthColor(cluster.healthScore);
+                const hasAlerts = cluster.alerts.length > 0;
+                const errorCount = cluster.alerts.filter(a => a.type === 'error').length;
+                
+                return (
+                    <div
+                        onClick={() => onSelectCluster(cluster)}
+                        className="group relative bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden cursor-pointer hover:border-proxmox-orange/50 transition-all duration-300 hover:shadow-lg hover:shadow-proxmox-orange/10"
+                    >
+                        <div className={`h-1.5 ${cluster.connected ? 'bg-gradient-to-r from-green-500 via-emerald-500 to-green-500' : 'bg-gradient-to-r from-red-500 via-red-600 to-red-500'}`} />
+                        
+                        <div className="p-5">
+                            {/* Header */}
+                            <div className="flex items-start justify-between mb-4">
+                                <div className="flex items-center gap-3">
+                                    <div className={`relative w-12 h-12 rounded-xl ${cluster.connected ? 'bg-gradient-to-br from-green-500/20 to-emerald-500/20' : 'bg-gradient-to-br from-red-500/20 to-red-600/20'} flex items-center justify-center`}>
+                                        <Icons.Server className={`w-6 h-6 ${cluster.connected ? 'text-green-400' : 'text-red-400'}`} />
+                                        {cluster.connected && <div className="absolute -top-1 -right-1 w-3 h-3 bg-green-500 rounded-full border-2 border-proxmox-card animate-pulse" />}
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white text-base group-hover:text-proxmox-orange transition-colors">
+                                            {cluster.display_name || cluster.name}
+                                        </h3>
+                                        <p className="text-xs text-gray-500">{cluster.host}</p>
+                                    </div>
+                                </div>
+                                
+                                <div className="flex items-center gap-2">
+                                    {/* Alerts Badge */}
+                                    {hasAlerts && (
+                                        <div className="relative group/alerts">
+                                            <div className={`px-2.5 py-1 rounded-lg flex items-center gap-1.5 ${errorCount > 0 ? 'bg-red-500/20 border border-red-500/30' : 'bg-yellow-500/20 border border-yellow-500/30'}`}>
+                                                <Icons.AlertTriangle className={`w-3.5 h-3.5 ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`} />
+                                                <span className={`text-xs font-medium ${errorCount > 0 ? 'text-red-400' : 'text-yellow-400'}`}>{cluster.alerts.length}</span>
+                                            </div>
+                                            {/* tooltip */}
+                                            <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/alerts:block">
+                                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-2 shadow-xl min-w-[160px]">
+                                                    {cluster.alerts.map((alert, i) => (
+                                                        <div key={i} className={`text-xs py-0.5 ${alert.type === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>
+                                                            • {alert.msg}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    {/* Health Badge */}
+                                    {cluster.connected && cluster.healthScore != null && (
+                                        <div className={`px-2.5 py-1 rounded-lg ${healthColors.bg} ${healthColors.border} border`}>
+                                            <span className={`text-xs font-semibold ${healthColors.text}`}>{cluster.healthScore}%</span>
+                                        </div>
+                                    )}
+                                    {!cluster.connected && (
+                                        <div className="px-2.5 py-1 rounded-lg bg-red-500/20 border border-red-500/30">
+                                            <span className="text-xs font-semibold text-red-400">Offline</span>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            
+                            {/* Stats Grid */}
+                            {cluster.hasMetrics ? (
+                                <div className="grid grid-cols-5 gap-3">
+                                    {/* Nodes */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className={`text-xl font-bold ${cluster.onlineNodes === cluster.nodeCount ? 'text-green-400' : 'text-yellow-400'}`}>
+                                            {cluster.onlineNodes}/{cluster.nodeCount}
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('nodes')}</div>
+                                    </div>
+                                    
+                                    {/* CPU */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgCpu} size={44} strokeWidth={4} color={cluster.avgCpu > 80 ? '#ef4444' : cluster.avgCpu > 60 ? '#eab308' : '#22c55e'} />
+                                            <Sparkline data={cluster.cpuHistory} color={cluster.avgCpu > 80 ? '#ef4444' : '#22c55e'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">CPU</div>
+                                    </div>
+                                    
+                                    {/* RAM */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex flex-col items-center gap-1">
+                                            <CircularProgress value={cluster.avgMem} size={44} strokeWidth={4} color={cluster.avgMem > 80 ? '#ef4444' : cluster.avgMem > 60 ? '#eab308' : '#3b82f6'} />
+                                            <Sparkline data={cluster.ramHistory} color={cluster.avgMem > 80 ? '#ef4444' : '#3b82f6'} height={14} width={40} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">RAM</div>
+                                    </div>
+                                    
+                                    {/* Storage */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="flex justify-center">
+                                            <CircularProgress value={cluster.avgStorage} size={44} strokeWidth={4} color={cluster.avgStorage > 80 ? '#ef4444' : cluster.avgStorage > 60 ? '#eab308' : '#8b5cf6'} />
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('storage') || 'Disk'}</div>
+                                    </div>
+                                    
+                                    {/* VMs */}
+                                    <div className="text-center p-3 rounded-xl bg-proxmox-dark/50">
+                                        <div className="text-xl font-bold">
+                                            <span className="text-green-400">{cluster.runningVms}</span>
+                                            <span className="text-gray-500 text-sm">/{cluster.totalVms}</span>
+                                        </div>
+                                        <div className="text-[10px] text-gray-500 uppercase mt-1">{t('vms')}</div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="flex items-center justify-center h-20 text-gray-500 text-sm">
+                                    <Icons.AlertTriangle className="w-4 h-4 mr-2" />
+                                    {t('noDataAvailable') || 'No data available'}
+                                </div>
+                            )}
+                            
+                            {/* Footer */}
+                            <div className="mt-4 pt-3 border-t border-proxmox-border/50 flex items-center justify-between">
+                                <span className="text-xs text-gray-500">
+                                    {t('updated') || 'Updated'}: {formatLastUpdate(cluster.lastUpdate)}
+                                </span>
+                                <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+            
+            // LW Oct 2026 - Corporate Redesigned draws its own dashboard from the same figures
+            if (isCorpRedesigned && !topologyOnly) {
+                return (
+                    <CrDashboard clusters={clusters} allMetrics={allMetrics} clusterStats={clusterStats} clusterGroups={clusterGroups}
+                        allClusterGuests={allClusterGuests} recentEvents={recentEvents} canAudit={canAudit} authFetch={authFetch}
+                        onSelectCluster={onSelectCluster} onSelectVm={onSelectVm} onOpenClusterTab={onOpenClusterTab}
+                        onOpenGuests={onOpenGuests} onOpenTopology={onOpenTopology} addToast={addToast} onAutoInstall={haStandby ? undefined : onAutoInstall}
+                        openIn={openIn} emptyText={haStandby ? haNoClusters : t('noClustersConfigured')} />
+                );
+            }
+
+            // LW: Feb 2026 - Corporate variant for AllClustersOverview
+            if (isCorporate) {
+                const corpBarColor = (val) => val > 80 ? '#f54f47' : val > 60 ? '#efc006' : '#60b515';
+                return (
+                    <div className="space-y-3">
+                        {/* LW: Mar 2026 - content header strip */}
+                        <div className="corp-content-header">
+                            <div className="flex items-center gap-2">
+                                {topologyOnly
+                                    ? <Icons.Network className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
+                                    : <Icons.Grid className="w-4 h-4" style={{color: 'var(--corp-accent)'}} />
+                                }
+                                <span className="corp-header-title">{topologyOnly ? (t('topologyView') || 'Topology') : (t('inventoryOverview') || t('allClustersOverview') || 'Inventory Overview')}</span>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                {totals.totalAlerts > 0 && (
+                                    <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-error)'}}>
+                                        <Icons.AlertTriangle className="w-3.5 h-3.5" /> {totals.totalAlerts} {t('alerts') || 'alerts'}
+                                    </span>
+                                )}
+                                {!topologyOnly && clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests} className="corp-vm-btn corp-vm-btn-ghost">
+                                        <span className="flex"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
+                                {!topologyOnly && clusters.length > 0 && (
+                                    <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
+                                        className="corp-vm-btn corp-vm-btn-ghost disabled:opacity-50" />
+                                )}
+                            </div>
+                        </div>
+
+                        {/* stats bar */}
+                        {!topologyOnly && <div className="flex items-center gap-0 flex-wrap text-[13px] px-2 py-2" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('clusters')}: <b style={{color: 'var(--color-text)'}}>{totals.connectedClusters}/{totals.clusters}</b> online</span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('nodes')}: <b style={{color: 'var(--color-text)'}}>{totals.onlineNodes}/{totals.totalNodes}</b></span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>VMs: <b style={{color: 'var(--color-success)'}}>{totals.runningVms}</b> {t('running')?.toLowerCase()}, <b style={{color: 'var(--corp-text-muted)'}}>{totals.stoppedVms}</b> {t('stopped')?.toLowerCase()}</span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>CPU: <b style={{color: corpBarColor(totals.avgCpu)}}>{totals.avgCpu.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgCpu, 100)}%`, background: corpBarColor(totals.avgCpu)}} />
+                            </span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>RAM: <b style={{color: corpBarColor(totals.avgMem)}}>{totals.avgMem.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgMem, 100)}%`, background: corpBarColor(totals.avgMem)}} />
+                            </span>
+                            <span style={{color: 'var(--corp-divider)', margin: '0 8px'}}>|</span>
+                            <span style={{color: 'var(--corp-text-secondary)'}}>{t('storage') || 'Storage'}: <b style={{color: corpBarColor(totals.avgStorage)}}>{totals.avgStorage.toFixed(0)}%</b></span>
+                            <span className="inline-block mx-1" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative', verticalAlign: 'middle'}}>
+                                <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(totals.avgStorage, 100)}%`, background: corpBarColor(totals.avgStorage)}} />
+                            </span>
+                        </div>}
+
+                        {/* cluster table */}
+                        {!topologyOnly && <table className="corp-datagrid corp-datagrid-striped">
+                            <thead>
+                                <tr>
+                                    {[
+                                        { field: 'name', label: t('name') || 'Name' },
+                                        { field: null, label: t('status') || 'Status' },
+                                        { field: 'nodes', label: t('nodes') || 'Nodes' },
+                                        { field: 'vms', label: 'VMs' },
+                                        { field: 'cpu', label: 'CPU' },
+                                        { field: 'ram', label: 'RAM' },
+                                        { field: null, label: t('storage') || 'Storage' },
+                                        { field: 'health', label: t('health') || 'Health' },
+                                    ].map((col, i) => (
+                                        <th key={i}
+                                            className={col.field ? 'cursor-pointer hover:text-white' : ''}
+                                            onClick={col.field ? () => { setSortBy(col.field); setSortDir(sortBy === col.field && sortDir === 'asc' ? 'desc' : 'asc'); } : undefined}
+                                            style={{textAlign: 'left'}}
+                                        >
+                                            {col.label} {sortBy === col.field && <span className="sort-indicator">{sortDir === 'asc' ? '▲' : '▼'}</span>}
+                                        </th>
+                                    ))}
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {sortedStats.map(cluster => {
+                                    const hc = getHealthColor(cluster.healthScore);
+                                    return (
+                                        <tr key={cluster.id} className="table-row-hover cursor-pointer" onClick={() => onSelectCluster(cluster)}>
+                                            <td style={{fontWeight: 500}}>{cluster.display_name || cluster.name}</td>
+                                            <td>
+                                                <span className="inline-flex items-center gap-1.5">
+                                                    <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: cluster.connected ? 'var(--color-success)' : 'var(--color-error)'}} />
+                                                    <span style={{color: cluster.connected ? 'var(--color-success)' : 'var(--color-error)', fontSize: '12px'}}>{cluster.connected ? 'online' : 'offline'}</span>
+                                                </span>
+                                            </td>
+                                            {cluster.hasMetrics ? (<>
+                                                <td>{cluster.onlineNodes}/{cluster.nodeCount}</td>
+                                                <td>
+                                                    <span style={{color: 'var(--color-success)'}}>{cluster.runningVms}</span>
+                                                    <span style={{color: 'var(--corp-text-muted)'}}> / {cluster.stoppedVms}</span>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgCpu), minWidth: '28px'}}>{cluster.avgCpu.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgCpu, 100)}%`, background: corpBarColor(cluster.avgCpu)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgMem), minWidth: '28px'}}>{cluster.avgMem.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgMem, 100)}%`, background: corpBarColor(cluster.avgMem)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <span style={{color: corpBarColor(cluster.avgStorage), minWidth: '28px'}}>{cluster.avgStorage.toFixed(0)}%</span>
+                                                        <span className="inline-block" style={{width: '40px', height: '3px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                            <span style={{position: 'absolute', left: 0, top: 0, height: '3px', width: `${Math.min(cluster.avgStorage, 100)}%`, background: corpBarColor(cluster.avgStorage)}} />
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td><span style={{color: hc.color, fontWeight: 500}}>{cluster.healthScore}%</span></td>
+                                            </>) : (
+                                                <td colSpan={6} style={{color: 'var(--corp-text-muted)'}}>{t('noDataAvailable') || 'No data available'}</td>
+                                            )}
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>}
+
+                        {/* top resources */}
+                        {!topologyOnly && topGuests.length > 0 && (
+                            <div>
+                                <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-subtle)'}}>
+                                    <Icons.Activity className="w-3.5 h-3.5" style={{color: '#49afd9'}} />
+                                    <span className="text-[13px] font-semibold" style={{color: '#adbbc4'}}>{t('topResources') || 'Top Resources'}</span>
+                                    <span className="text-[11px]" style={{color: '#728b9a'}}>Top 10</span>
+                                </div>
+                                <table className="corp-datagrid corp-datagrid-striped">
+                                    <thead>
+                                        <tr>
+                                            <th style={{width: '24px'}}></th>
+                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                                <th key={col.field} className="cursor-pointer" style={{textAlign: 'left'}}
+                                                    onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
+                                                    {col.label} {guestSortBy === col.field && <span className="sort-indicator">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
+                                                </th>
+                                            ))}
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {sortTopGuests(topGuests, guestSortBy, guestSortDir).map((guest) => {
+                                            const cpuP = ((guest.cpu || 0) * 100).toFixed(1);
+                                            const memP = guest.maxmem > 0 ? ((guest.mem / guest.maxmem) * 100).toFixed(1) : 0;
+                                            const gc = clusters.find(c => c.id === guest.cluster_id);
+                                            return (
+                                                <tr key={`${guest.cluster_id}-${guest.vmid}`} className="table-row-hover cursor-pointer"
+                                                    onClick={() => { if (gc && onSelectVm) onSelectVm(gc, guest.vmid, guest.node, guest); }}>
+                                                    <td>
+                                                        <Icons.Monitor className="w-3.5 h-3.5" style={{color: guest.type === 'qemu' ? '#49afd9' : '#a178d9'}} />
+                                                    </td>
+                                                    <td>
+                                                        <span style={{fontWeight: 500}}>{guest.name || `VM ${guest.vmid}`}</span>
+                                                        <span style={{color: '#728b9a', fontSize: '11px', marginLeft: '6px'}}>#{guest.vmid}</span>
+                                                    </td>
+                                                    <td>{guest.cluster_name}</td>
+                                                    <td style={{color: '#adbbc4'}}>{guest.node}</td>
+                                                    <td>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <span style={{color: corpBarColor(cpuP), minWidth: '32px'}}>{cpuP}%</span>
+                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                                <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(cpuP, 100)}%`, background: corpBarColor(cpuP)}} />
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <span style={{color: corpBarColor(memP), minWidth: '32px'}}>{memP}%</span>
+                                                            <span className="inline-block" style={{width: '40px', height: '2px', background: 'var(--corp-divider)', position: 'relative'}}>
+                                                                <span style={{position: 'absolute', left: 0, top: 0, height: '2px', width: `${Math.min(memP, 100)}%`, background: corpBarColor(memP)}} />
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td>
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <span className="w-1.5 h-1.5 rounded-full inline-block" style={{background: guest.status === 'running' ? '#60b515' : '#728b9a'}} />
+                                                            <span style={{color: guest.status === 'running' ? '#60b515' : '#728b9a', fontSize: '12px'}}>{guest.status === 'running' ? t('running') : t('stopped')}</span>
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {!topologyOnly && clusters.length > 0 && <GuestsWithoutBackup clusters={clusters} onSelectVm={onSelectVm} />}
+
+                        {!topologyOnly && clusters.length > 0 && <StorageOverview clusters={clusters} />}
+
+                        {!topologyOnly && clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
+
+                        {!topologyOnly && clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
+
+                        {/* NS: Mar 2026 - Multi-cluster topology redesign (#142) */}
+                        {clusters.filter(c => c.connected).length > 0 && (() => {
+                            const fmtMem = (b) => { if (!b) return '0'; const gb = b/(1024*1024*1024); return gb >= 1 ? `${gb.toFixed(1)}G` : `${(b/(1024*1024)).toFixed(0)}M`; };
+                            const barColor = (v) => v > 80 ? '#f54f47' : v > 60 ? '#efc006' : '#60b515';
+                            // MK: mini bar kept for fallback, donuts are primary now
+                            const MiniBar = ({pct, color}) => (
+                                <div style={{width: '60px', height: '3px', background: 'var(--corp-bar-track)', borderRadius: '1.5px', flexShrink: 0}}>
+                                    <div style={{width: `${Math.min(pct, 100)}%`, height: '3px', background: color, borderRadius: '1.5px', transition: 'width 0.3s'}} />
+                                </div>
+                            );
+                            const MiniDonut = ({pct, color, sz}) => {
+                                const r = (sz - 3) / 2, c = r * 2 * Math.PI;
+                                const off = c - (Math.min(pct, 100) / 100) * c;
+                                return (
+                                    <svg width={sz} height={sz} style={{transform:'rotate(-90deg)', flexShrink:0}}>
+                                        <circle cx={sz/2} cy={sz/2} r={r} fill="none" className="corp-donut-track" strokeWidth={3} />
+                                        <circle cx={sz/2} cy={sz/2} r={r} fill="none" stroke={color} strokeWidth={3}
+                                            strokeLinecap="round" strokeDasharray={c} strokeDashoffset={off} className="corp-donut-fill" />
+                                    </svg>
+                                );
+                            };
+                            return (
+                            <div>
+                                <div className="flex items-center gap-2 py-1.5" style={{borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                    <Icons.Network className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
+                                    <span className="text-[13px] font-semibold" style={{color: 'var(--corp-text-secondary)'}}>{t('topologyView') || 'Topology'}</span>
+                                </div>
+                                <div className="mt-3 flex flex-wrap gap-5">
+                                    {clusters.filter(c => c.connected).map(cluster => {
+                                        const resources = allClusterGuests[cluster.id] || [];
+                                        const nodeMap = {};
+                                        resources.forEach(r => {
+                                            if (r.type !== 'qemu' && r.type !== 'lxc') return;
+                                            if (!nodeMap[r.node]) nodeMap[r.node] = { guests: [] };
+                                            nodeMap[r.node].guests.push(r);
+                                        });
+                                        const statusData = allMetrics[cluster.id]?.data || {};
+                                        const nodeEntries = Object.entries(nodeMap);
+                                        const clusterPbs = pbsServers.filter(p => p.linked_clusters?.includes(cluster.id) && p.status !== 'disconnected');
+                                        // LW: cluster-level avg stats for header donuts
+                                        const allGuests = Object.values(nodeMap).flatMap(n => n.guests);
+                                        const clAvgCpu = allGuests.length > 0 ? allGuests.reduce((s, g) => s + ((g.cpu || 0) * 100), 0) / allGuests.length : 0;
+                                        const clTotalMem = allGuests.reduce((s, g) => s + (g.mem || 0), 0);
+                                        const clTotalMaxMem = allGuests.reduce((s, g) => s + (g.maxmem || 0), 0);
+                                        const clMemPct = clTotalMaxMem > 0 ? (clTotalMem / clTotalMaxMem * 100) : 0;
+
+                                        return (
+                                            <div key={cluster.id} className="flex-1 min-w-[300px] max-w-[520px]" style={{
+                                                border: '1px solid var(--corp-border-medium)',
+                                                borderLeft: '3px solid var(--corp-accent)',
+                                                background: 'var(--corp-surface-0)',
+                                                boxShadow: 'var(--corp-shadow-sm)',
+                                                transition: 'box-shadow 0.15s, transform 0.15s'
+                                            }}
+                                            onMouseEnter={e => { e.currentTarget.style.boxShadow = 'var(--corp-shadow-md)'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
+                                            onMouseLeave={e => { e.currentTarget.style.boxShadow = 'var(--corp-shadow-sm)'; e.currentTarget.style.transform = 'none'; }}
+                                            >
+                                                {/* cluster header */}
+                                                <div
+                                                    className="flex items-center gap-2 px-3 py-2.5 cursor-pointer"
+                                                    style={{borderBottom: '1px solid var(--corp-border-medium)', background: 'var(--corp-header-bg)'}}
+                                                    onClick={() => onSelectCluster(cluster)}
+                                                >
+                                                    <span className="w-2 h-2 rounded-full topo-status-glow" style={{background: 'var(--color-success)'}} />
+                                                    <Icons.Server className="w-3.5 h-3.5" style={{color: 'var(--corp-accent)'}} />
+                                                    <span className="text-[13px] font-semibold" style={{color: 'var(--color-text)'}}>{cluster.display_name || cluster.name}</span>
+                                                    <div className="flex items-center gap-2 ml-auto">
+                                                        {allGuests.length > 0 && (
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="flex items-center gap-1">
+                                                                    <MiniDonut pct={clAvgCpu} color={barColor(clAvgCpu)} sz={24} />
+                                                                    <span className="text-[9px] font-medium" style={{color: barColor(clAvgCpu)}}>{clAvgCpu.toFixed(0)}%</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-1">
+                                                                    <MiniDonut pct={clMemPct} color={barColor(clMemPct)} sz={24} />
+                                                                    <span className="text-[9px] font-medium" style={{color: barColor(clMemPct)}}>{clMemPct.toFixed(0)}%</span>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                        <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>
+                                                            {nodeEntries.length}N &middot; {allGuests.length}G
+                                                        </span>
+                                                    </div>
+                                                </div>
+
+                                                {/* node cards */}
+                                                <div className="p-3 space-y-2.5">
+                                                    {nodeEntries.map(([nodeName, nd]) => {
+                                                        const isOnline = true; // connected cluster = reachable
+                                                        const runG = nd.guests.filter(g => g.status === 'running').length;
+                                                        const totalGuestCpu = nd.guests.reduce((s, g) => s + ((g.cpu || 0) * 100), 0);
+                                                        const totalGuestMem = nd.guests.reduce((s, g) => s + (g.mem || 0), 0);
+                                                        const totalGuestMaxMem = nd.guests.reduce((s, g) => s + (g.maxmem || 0), 0);
+                                                        const avgCpu = nd.guests.length > 0 ? totalGuestCpu / nd.guests.length : 0;
+                                                        const memPct = totalGuestMaxMem > 0 ? (totalGuestMem / totalGuestMaxMem * 100) : 0;
+
+                                                        return (
+                                                            <div key={nodeName} style={{
+                                                                background: 'var(--corp-surface-1)',
+                                                                border: '1px solid var(--corp-border-medium)',
+                                                                borderLeft: `3px solid ${isOnline ? 'var(--color-success)' : 'var(--color-error)'}`,
+                                                                boxShadow: 'var(--corp-shadow-sm)',
+                                                            }}>
+                                                                <div className="flex items-center gap-2 px-3 py-2" style={{borderBottom: nd.guests.length ? '1px solid var(--corp-border-medium)' : 'none'}}>
+                                                                    <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0${isOnline ? ' topo-status-glow' : ''}`} style={{background: isOnline ? '#60b515' : '#f54f47'}} />
+                                                                    <Icons.Server className="w-3 h-3 flex-shrink-0" style={{color: isOnline ? 'var(--corp-text-secondary)' : '#f54f47'}} />
+                                                                    <span className="text-[12px] font-medium" style={{color: isOnline ? 'var(--color-text)' : '#f54f47'}}>{nodeName}</span>
+                                                                    {!isOnline && <span className="text-[9px] font-bold px-1.5 py-0.5" style={{background: 'rgba(245,79,71,0.15)', color: '#f54f47'}}>OFFLINE</span>}
+                                                                    {isOnline && (
+                                                                        <div className="flex items-center gap-3 ml-auto">
+                                                                            <div className="flex items-center gap-1">
+                                                                                <MiniDonut pct={avgCpu} color={barColor(avgCpu)} sz={28} />
+                                                                                <span className="text-[10px] font-medium" style={{color: barColor(avgCpu)}}>{avgCpu.toFixed(0)}%</span>
+                                                                            </div>
+                                                                            <div className="flex items-center gap-1">
+                                                                                <MiniDonut pct={memPct} color={barColor(memPct)} sz={28} />
+                                                                                <span className="text-[10px] font-medium" style={{color: barColor(memPct)}}>{memPct.toFixed(0)}%</span>
+                                                                            </div>
+                                                                            <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>{runG}/{nd.guests.length}</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+
+                                                                {/* guest rows */}
+                                                                {nd.guests.length > 0 && (
+                                                                    <div className="py-1">
+                                                                        {nd.guests.sort((a,b) => (b.status === 'running' ? 1 : 0) - (a.status === 'running' ? 1 : 0) || a.vmid - b.vmid).map(g => (
+                                                                            <div key={g.vmid}
+                                                                                className="flex items-center gap-2 px-3 py-1 cursor-pointer"
+                                                                                style={{':hover': {background: 'rgba(255,255,255,0.03)'}}}
+                                                                                onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                                                                                onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                                                                                onClick={() => onSelectVm && onSelectVm(cluster, g.vmid, g.node, g)}
+                                                                            >
+                                                                                <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{background: g.status === 'running' ? '#60b515' : 'var(--corp-text-muted)'}} />
+                                                                                {g.type === 'qemu' ? <Icons.VM /> : <Icons.Container />}
+                                                                                <span className="text-[11px] truncate" style={{color: g.status === 'running' ? 'var(--color-text)' : 'var(--corp-text-muted)', maxWidth: '130px'}}>
+                                                                                    {g.name || `${g.type === 'qemu' ? 'VM' : 'CT'} ${g.vmid}`}
+                                                                                </span>
+                                                                                <span className="text-[10px]" style={{color: 'var(--corp-text-muted)'}}>{g.vmid}</span>
+                                                                                <span className="text-[9px] px-1 rounded" style={{
+                                                                                    background: g.type === 'qemu' ? 'rgba(73,175,217,0.12)' : 'rgba(161,120,217,0.12)',
+                                                                                    color: g.type === 'qemu' ? '#49afd9' : '#a178d9'
+                                                                                }}>{g.type === 'qemu' ? 'VM' : 'LXC'}</span>
+                                                                                {g.status === 'running' && (
+                                                                                    <span className="ml-auto text-[10px] flex-shrink-0" style={{color: 'var(--corp-text-muted)'}}>
+                                                                                        {((g.cpu || 0) * 100).toFixed(0)}% &middot; {fmtMem(g.mem)}
+                                                                                    </span>
+                                                                                )}
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+
+                                                    {nodeEntries.length === 0 && (
+                                                        <div className="px-2 py-3 text-center text-[11px]" style={{color: 'var(--corp-text-muted)'}}>
+                                                            {t('loading') || 'Loading...'}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* PBS section */}
+                                                {clusterPbs.length > 0 && (
+                                                    <div className="px-3 pb-2.5 pt-0.5">
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {clusterPbs.map(pbs => (
+                                                                <div key={pbs.id} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]" style={{
+                                                                    border: '1px dashed var(--color-success)',
+                                                                    borderRadius: '2px',
+                                                                    background: 'rgba(96,181,21,0.04)'
+                                                                }}>
+                                                                    <Icons.HardDrive className="w-3 h-3" style={{color: 'var(--color-success)'}} />
+                                                                    <span style={{color: 'var(--corp-text-secondary)'}}>{pbs.name || pbs.host}</span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            );
+                        })()}
+
+                        {clusters.length === 0 && (
+                            <div className="py-8 text-center text-[13px]" style={{color: '#728b9a'}}>
+                                <Icons.Server className="w-6 h-6 mx-auto mb-2" style={{color: 'var(--corp-border-medium)'}} />
+                                {haStandby ? haNoClusters : (t('noClustersConfigured') || 'No clusters configured')}
+                                {onAutoInstall && !haStandby && (
+                                    <div className="mt-2">
+                                        <button onClick={onAutoInstall} className="hover:underline" style={{color: 'var(--corp-accent)'}}>
+                                            {t('autoInstallFirstHost')}
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // Modern layout (original)
+            return (
+                <div className="space-y-6">
+                    {/* Header */}
+                    <div className="relative overflow-hidden bg-gradient-to-r from-proxmox-card via-proxmox-dark to-proxmox-card border border-proxmox-border rounded-2xl p-6">
+                        <div className="absolute inset-0 bg-gradient-to-r from-proxmox-orange/5 via-transparent to-blue-500/5" />
+                        <div className="relative flex items-center justify-between flex-wrap gap-4">
+                            <div className="flex items-center gap-4">
+                                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-proxmox-orange to-orange-600 flex items-center justify-center shadow-lg shadow-orange-500/20">
+                                    <Icons.Grid className="w-7 h-7 text-white" />
+                                </div>
+                                <div>
+                                    <h1 className="text-2xl font-bold text-white">{t('allClustersOverview') || 'All Clusters Overview'}</h1>
+                                    <p className="text-gray-400 text-sm">{t('multiClusterSummary') || 'Summary of all managed clusters'}</p>
+                                </div>
+                            </div>
+
+                            <div className="flex items-center gap-3">
+                                {clusters.length > 0 && onOpenGuests && (
+                                    <button type="button" data-all-guests-link onClick={onOpenGuests}
+                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors">
+                                        <span className="flex text-blue-400"><Icons.Monitor /></span>{t('allGuestsTitle')}
+                                    </button>
+                                )}
+                                {clusters.length > 0 && (
+                                    <InventoryCsvButton clusters={clusters} addToast={addToast} label={t('inventoryCsv')}
+                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-darker rounded-lg text-sm text-gray-200 hover:bg-proxmox-hover border border-proxmox-border transition-colors disabled:opacity-50" />
+                                )}
+
+                                {/* alerts */}
+                                {totals.totalAlerts > 0 && (
+                                    <div className="flex items-center gap-2 px-3 py-1.5 bg-red-500/10 border border-red-500/30 rounded-lg">
+                                        <Icons.AlertTriangle className="w-4 h-4 text-red-400" />
+                                        <span className="text-sm text-red-400 font-medium">{totals.totalAlerts} {t('alerts') || 'Alerts'}</span>
+                                    </div>
+                                )}
+
+                                {/* Live indicator */}
+                                <div className="flex items-center gap-2 px-3 py-1.5 bg-green-500/10 border border-green-500/30 rounded-full">
+                                    <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                    <span className="text-xs text-green-400 font-medium">Live</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Stats Grid */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+                        {[
+                            { icon: Icons.Server, value: `${totals.connectedClusters}/${totals.clusters}`, label: t('clusters'), color: 'proxmox-orange', hoverColor: 'proxmox-orange' },
+                            { icon: Icons.Cpu, value: `${totals.onlineNodes}/${totals.totalNodes}`, label: t('nodesOnline') || 'Nodes', color: 'blue-400', hoverColor: 'blue-500' },
+                            { icon: Icons.Play, value: totals.runningVms, label: t('vmsRunning') || 'Running', color: 'green-400', hoverColor: 'green-500', valueColor: 'text-green-400' },
+                            { icon: Icons.Square, value: totals.stoppedVms, label: t('vmsStopped') || 'Stopped', color: 'gray-400', hoverColor: 'gray-500' },
+                        ].map((stat, i) => (
+                            <div key={i} className={`bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-${stat.hoverColor}/30 transition-all group`}>
+                                <div className="flex items-center gap-3">
+                                    <div className={`w-10 h-10 rounded-lg bg-${stat.color}/20 flex items-center justify-center group-hover:scale-110 transition-transform`}>
+                                        <stat.icon className={`w-5 h-5 text-${stat.color}`} />
+                                    </div>
+                                    <div>
+                                        <div className={`text-xl font-bold ${stat.valueColor || 'text-white'}`}>{stat.value}</div>
+                                        <div className="text-xs text-gray-500">{stat.label}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+
+                        {/* circular gauges */}
+                        {[
+                            { value: totals.avgCpu, label: 'CPU', color: totals.avgCpu > 80 ? '#ef4444' : totals.avgCpu > 60 ? '#eab308' : '#22c55e' },
+                            { value: totals.avgMem, label: 'RAM', color: totals.avgMem > 80 ? '#ef4444' : totals.avgMem > 60 ? '#eab308' : '#3b82f6' },
+                            { value: totals.avgStorage, label: t('storage') || 'Disk', color: totals.avgStorage > 80 ? '#ef4444' : totals.avgStorage > 60 ? '#eab308' : '#8b5cf6' },
+                        ].map((stat, i) => (
+                            <div key={i} className="bg-gradient-to-br from-proxmox-card to-proxmox-dark border border-proxmox-border rounded-xl p-4 hover:border-proxmox-border transition-all">
+                                <div className="flex items-center gap-3">
+                                    <CircularProgress value={stat.value || 0} size={44} strokeWidth={4} color={stat.color} />
+                                    <div>
+                                        <div className="text-sm font-bold text-white">{stat.label}</div>
+                                        <div className="text-xs text-gray-500">{t('average') || 'Avg'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {/* Sort Controls */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm text-gray-500 mr-1">{t('sortBy') || 'Sort by'}:</span>
+                            <SortButton field="name" label={t('name') || 'Name'} />
+                            <SortButton field="health" label={t('health') || 'Health'} />
+                            <SortButton field="nodes" label={t('nodes') || 'Nodes'} />
+                            <SortButton field="vms" label="VMs" />
+                            <SortButton field="cpu" label="CPU" />
+                            <SortButton field="ram" label="RAM" />
+                        </div>
+                    </div>
+
+                    {/* Grouped Clusters */}
+                    {Object.values(groupedClusters).map(({ group, clusters: groupClusters }) => (
+                        <div key={group.id} className="space-y-4">
+                            <div className="flex items-center gap-3 px-1">
+                                <div className="w-4 h-4 rounded" style={{ backgroundColor: group.color || '#E86F2D' }} />
+                                <h3 className="text-base font-semibold text-white">{group.name}</h3>
+                                <span className="text-sm text-gray-500">({groupClusters.length} {t('clusters')})</span>
+                            </div>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {groupClusters.map(cluster => <ClusterCard key={cluster.id} cluster={cluster} />)}
+                            </div>
+                        </div>
+                    ))}
+
+                    {/* Ungrouped Clusters */}
+                    {ungroupedClusters.length > 0 && (
+                        <div className="space-y-4">
+                            {Object.keys(groupedClusters).length > 0 && (
+                                <div className="flex items-center gap-3 px-1">
+                                    <Icons.Folder className="w-4 h-4 text-gray-500" />
+                                    <h3 className="text-base font-semibold text-white">{t('ungrouped') || 'Ungrouped'}</h3>
+                                    <span className="text-sm text-gray-500">({ungroupedClusters.length})</span>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {ungroupedClusters.map(cluster => <ClusterCard key={cluster.id} cluster={cluster} />)}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* top vms table */}
+                    {topGuests.length > 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                            <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-10 h-10 rounded-lg bg-cyan-500/20 flex items-center justify-center">
+                                        <Icons.Activity className="w-5 h-5 text-cyan-400" />
+                                    </div>
+                                    <div>
+                                        <h3 className="font-semibold text-white">{t('topResources') || 'Top Resources'}</h3>
+                                        <p className="text-xs text-gray-500">{t('highestCpuUsage') || 'Highest CPU and RAM usage across all clusters'}</p>
+                                    </div>
+                                </div>
+                                <span className="text-xs text-gray-500 bg-proxmox-dark px-2 py-1 rounded">Top 10</span>
+                            </div>
+                            <div className="overflow-x-auto">
+                                <table className="w-full">
+                                    <thead className="bg-proxmox-dark/50">
+                                        <tr className="text-left text-xs text-gray-400">
+                                            <th className="px-4 py-3 font-medium">{t('type')}</th>
+                                            {[{field: 'name', label: t('name')}, {field: 'cluster', label: t('cluster')}, {field: 'node', label: t('node')}, {field: 'cpu', label: 'CPU'}, {field: 'ram', label: 'RAM'}, {field: 'status', label: t('status')}].map(col => (
+                                                <th key={col.field} className="px-4 py-3 font-medium cursor-pointer hover:text-white select-none"
+                                                    onClick={() => { const n = nextGuestSort(guestSortBy, guestSortDir, col.field); setGuestSortBy(n.by); setGuestSortDir(n.dir); }}>
+                                                    {col.label}{guestSortBy === col.field && <span className="ml-1">{guestSortDir === 'asc' ? '▲' : '▼'}</span>}
+                                                </th>
+                                            ))}
+                                            <th className="px-4 py-3 w-10"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-proxmox-border/50">
+                                        {sortTopGuests(topGuests, guestSortBy, guestSortDir).map((guest, idx) => {
+                                            const cpuPercent = ((guest.cpu || 0) * 100).toFixed(1);
+                                            const memPercent = guest.maxmem > 0 ? ((guest.mem / guest.maxmem) * 100).toFixed(1) : 0;
+                                            const isVM = guest.type === 'qemu';
+                                            const guestCluster = clusters.find(c => c.id === guest.cluster_id);
+
+                                            return (
+                                                <tr
+                                                    key={`${guest.cluster_id}-${guest.vmid}`}
+                                                    className="hover:bg-proxmox-hover/50 transition-colors cursor-pointer group"
+                                                    onClick={() => {
+                                                        if (guestCluster && onSelectVm) {
+                                                            onSelectVm(guestCluster, guest.vmid, guest.node, guest);
+                                                        }
+                                                    }}
+                                                    title={t('clickToOpenVm') || 'Click to open VM'}
+                                                >
+                                                    <td className="px-4 py-3">
+                                                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isVM ? 'bg-blue-500/20' : 'bg-purple-500/20'}`}>
+                                                            {isVM ? (
+                                                                <Icons.Monitor className="w-4 h-4 text-blue-400" />
+                                                            ) : (
+                                                                <Icons.Layers className="w-4 h-4 text-purple-400" />
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="font-medium text-white group-hover:text-proxmox-orange transition-colors">{guest.name || `VM ${guest.vmid}`}</div>
+                                                        <div className="text-xs text-gray-500">ID: {guest.vmid}</div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="text-sm text-gray-300">{guest.cluster_name}</span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="text-sm text-gray-400">{guest.node}</span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div
+                                                                    className={`h-full rounded-full transition-all ${cpuPercent > 80 ? 'bg-red-500' : cpuPercent > 60 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                                    style={{ width: `${Math.min(cpuPercent, 100)}%` }}
+                                                                />
+                                                            </div>
+                                                            <span className={`text-xs font-medium ${cpuPercent > 80 ? 'text-red-400' : cpuPercent > 60 ? 'text-yellow-400' : 'text-green-400'}`}>
+                                                                {cpuPercent}%
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex items-center gap-2">
+                                                            <div className="w-16 h-2 bg-proxmox-dark rounded-full overflow-hidden">
+                                                                <div
+                                                                    className={`h-full rounded-full transition-all ${memPercent > 80 ? 'bg-red-500' : memPercent > 60 ? 'bg-yellow-500' : 'bg-blue-500'}`}
+                                                                    style={{ width: `${Math.min(memPercent, 100)}%` }}
+                                                                />
+                                                            </div>
+                                                            <span className="text-xs text-gray-400">{memPercent}%</span>
+                                                        </div>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${
+                                                            guest.status === 'running' ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                                                        }`}>
+                                                            <div className={`w-1.5 h-1.5 rounded-full ${guest.status === 'running' ? 'bg-green-400' : 'bg-gray-400'}`} />
+                                                            {guest.status === 'running' ? t('running') : t('stopped')}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <Icons.ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-proxmox-orange transition-colors" />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+
+                    {clusters.length > 0 && <GuestsWithoutBackup clusters={clusters} onSelectVm={onSelectVm} />}
+
+                    {clusters.length > 0 && <StorageOverview clusters={clusters} />}
+
+                    {clusters.length > 0 && <CephOverview clusters={clusters} onOpen={openIn('datacenter', 'ceph')} />}
+
+                    {clusters.length > 0 && <PendingUpdatesOverview clusters={clusters} onOpen={openIn('settings', 'updates')} />}
+
+                    {/* Empty State */}
+                    {clusters.length === 0 && (
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-12 text-center">
+                            <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-proxmox-orange/20 to-orange-600/20 flex items-center justify-center">
+                                <Icons.Server className="w-8 h-8 text-proxmox-orange" />
+                            </div>
+                            <h3 className="text-lg font-semibold text-white mb-2">{t('noClustersConfigured') || 'No clusters configured'}</h3>
+                            <p className="text-gray-500 text-sm">{haStandby ? haNoClusters : (t('addClusterToStart') || 'Add a cluster to get started')}</p>
+                            {/* no PVE box yet? the dashboard only passes this to managers */}
+                            {onAutoInstall && !haStandby && (
+                                <button
+                                    onClick={onAutoInstall}
+                                    className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-proxmox-dark border border-proxmox-border hover:border-emerald-500/30 text-sm text-gray-300 hover:text-white transition-colors"
+                                >
+                                    <Icons.Disc className="w-4 h-4 text-emerald-400" />
+                                    {t('autoInstallFirstHost')}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // NS: Feb 2026 - Group Settings Modal
+        // settings + cross-cluster LB config for a specific group
+        function GroupSettingsModal({ group, groupClusters = [], authFetch, addToast, onClose, onSave }) {
+            const { t } = useTranslation();
+            const [activeTab, setActiveTab] = useState('general');
+            const [saving, setSaving] = useState(false);
+
+            // Storage/bridge intersection state for cross-cluster LB dropdowns
+            const [commonStorages, setCommonStorages] = useState([]);
+            const [commonBridges, setCommonBridges] = useState([]);
+            const [loadingResources, setLoadingResources] = useState(false);
+
+            // Excluded VMs state per cluster
+            const [excludedVMsByCluster, setExcludedVMsByCluster] = useState({});
+            const [allVMsByCluster, setAllVMsByCluster] = useState({});
+            const [loadingExcludedVMs, setLoadingExcludedVMs] = useState(false);
+            const [expandedClusters, setExpandedClusters] = useState({});
+
+            // Cross-cluster replication state
+            const [xReplJobs, setXReplJobs] = useState([]);
+            const [xReplLoading, setXReplLoading] = useState(false);
+            const [showCreateXRepl, setShowCreateXRepl] = useState(false);
+            const [xReplForm, setXReplForm] = useState({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
+            const [xReplSourceVMs, setXReplSourceVMs] = useState([]);
+            const [xReplLoadingVMs, setXReplLoadingVMs] = useState(false);
+            const [xReplTargetStorages, setXReplTargetStorages] = useState([]);
+            const [xReplTargetBridges, setXReplTargetBridges] = useState([]);
+            const [xReplLoadingResources, setXReplLoadingResources] = useState(false);
+
+            // NS: Mar 2026 - native Proxmox replication per cluster (#103)
+            const [nativeReplByCluster, setNativeReplByCluster] = useState({});
+            const [xclbRunning, setXclbRunning] = useState(false);
+
+            // form state - init from group data
+            // NS: field names must match DB column names exactly (cross_cluster_*)
+            const [form, setForm] = useState({
+                name: group.name || '',
+                description: group.description || '',
+                color: group.color || '#E86F2D',
+                // cross-cluster LB fields - column names from cluster_groups table
+                cross_cluster_lb_enabled: group.cross_cluster_lb_enabled || false,
+                cross_cluster_threshold: group.cross_cluster_threshold || 30,
+                cross_cluster_interval: group.cross_cluster_interval || 600,
+                cross_cluster_dry_run: group.cross_cluster_dry_run !== undefined ? group.cross_cluster_dry_run : true,
+                cross_cluster_target_storage: group.cross_cluster_target_storage || '',
+                cross_cluster_target_bridge: group.cross_cluster_target_bridge || 'vmbr0',
+                cross_cluster_max_migrations: group.cross_cluster_max_migrations || 1,
+                cross_cluster_include_containers: group.cross_cluster_include_containers || false,
+            });
+
+            const handleXclbBalanceNow = async () => {
+                if (xclbRunning) return;
+                setXclbRunning(true);
+                try {
+                    const res = await authFetch(`${API_URL}/cluster-groups/${group.id}/balance-now`, { method: 'POST' });
+                    if (res && res.ok) addToast(t('balanceNowStarted') || 'Cross-cluster balance check started');
+                    else {
+                        const data = res ? await res.json().catch(() => ({})) : {};
+                        addToast(data.error || 'Failed', 'error');
+                    }
+                } catch(e) { addToast('Balance check failed', 'error'); }
+                finally { setTimeout(() => setXclbRunning(false), 3000); }
+            };
+
+            // Fetch storage/bridge lists from ALL clusters in group, compute intersection
+            useEffect(() => {
+                if (activeTab !== 'lb' || !form.cross_cluster_lb_enabled || groupClusters.length === 0 || !authFetch) return;
+
+                let cancelled = false;
+
+                const fetchAllClusterResources = async () => {
+                    setLoadingResources(true);
+                    const allStorageSets = [];
+                    const allStorageInfo = {};
+                    const allBridgeSets = [];
+                    const allBridgeInfo = {};
+
+                    for (const cluster of groupClusters) {
+                        if (!cluster.connected) continue;
+                        try {
+                            const nodesRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes`);
+                            if (!nodesRes || !nodesRes.ok) continue;
+                            const nodes = await nodesRes.json();
+                            const onlineNode = nodes.find(n => n.status === 'online') || nodes[0];
+                            if (!onlineNode) continue;
+                            const nodeName = onlineNode.node;
+
+                            const storageRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${nodeName}/storage`);
+                            if (storageRes && storageRes.ok) {
+                                const storages = await storageRes.json();
+                                const names = new Set();
+                                storages.forEach(s => {
+                                    names.add(s.storage);
+                                    allStorageInfo[s.storage] = { storage: s.storage, type: s.type || 'unknown', content: s.content || '' };
+                                });
+                                allStorageSets.push(names);
+                            }
+
+                            const networkRes = await authFetch(`${API_URL}/clusters/${cluster.id}/nodes/${nodeName}/networks`);
+                            if (networkRes && networkRes.ok) {
+                                const networks = await networkRes.json();
+                                const names = new Set();
+                                networks.filter(n => {
+                                    // NS May 2026 (#385): same OVS port guard as the corporate bridge picker.
+                                    if (n.type === 'OVSIntPort' || n.type === 'OVSPort' || n.type === 'OVSBond') return false;
+                                    if (n.ovs_bridge) return false;
+                                    return n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn';
+                                }).forEach(b => {
+                                    names.add(b.iface);
+                                    allBridgeInfo[b.iface] = { iface: b.iface, type: b.type, source: b.source || 'local', comments: b.comments || '', zone: b.zone || '', alias: b.alias || '' };
+                                });
+                                allBridgeSets.push(names);
+                            }
+                        } catch (err) {
+                            console.error(`Failed to fetch resources for cluster ${cluster.id}:`, err);
+                        }
+                    }
+
+                    if (cancelled) return;
+
+                    if (allStorageSets.length > 0) {
+                        const intersection = [...allStorageSets[0]].filter(name => allStorageSets.every(set => set.has(name)));
+                        setCommonStorages(intersection.map(name => allStorageInfo[name]).filter(Boolean));
+                    } else {
+                        setCommonStorages([]);
+                    }
+
+                    if (allBridgeSets.length > 0) {
+                        const intersection = [...allBridgeSets[0]].filter(name => allBridgeSets.every(set => set.has(name)));
+                        setCommonBridges(intersection.map(name => allBridgeInfo[name]).filter(Boolean));
+                    } else {
+                        setCommonBridges([]);
+                    }
+
+                    setLoadingResources(false);
+                };
+
+                fetchAllClusterResources();
+                return () => { cancelled = true; };
+            }, [activeTab, form.cross_cluster_lb_enabled, groupClusters.length]);
+
+            // Fetch excluded VMs for all clusters in group
+            useEffect(() => {
+                if (activeTab !== 'lb' || !form.cross_cluster_lb_enabled || groupClusters.length === 0 || !authFetch) return;
+                let cancelled = false;
+                const fetchExcludedVMs = async () => {
+                    setLoadingExcludedVMs(true);
+                    const excluded = {};
+                    const allVMs = {};
+                    for (const cluster of groupClusters) {
+                        if (!cluster.connected) continue;
+                        try {
+                            const [exRes, vmRes] = await Promise.all([
+                                authFetch(`${API_URL}/clusters/${cluster.id}/excluded-vms`),
+                                authFetch(`${API_URL}/clusters/${cluster.id}/vms`)
+                            ]);
+                            if (!cancelled && exRes.ok) {
+                                const exData = await exRes.json();
+                                excluded[cluster.id] = exData.excluded_vms || [];
+                            }
+                            if (!cancelled && vmRes.ok) {
+                                const vmData = await vmRes.json();
+                                allVMs[cluster.id] = vmData.vms || vmData || [];
+                            }
+                        } catch (err) {
+                            console.error(`Error fetching excluded VMs for cluster ${cluster.id}:`, err);
+                        }
+                    }
+                    if (!cancelled) {
+                        setExcludedVMsByCluster(excluded);
+                        setAllVMsByCluster(allVMs);
+                        setLoadingExcludedVMs(false);
+                    }
+                };
+                fetchExcludedVMs();
+                return () => { cancelled = true; };
+            }, [activeTab, form.cross_cluster_lb_enabled, groupClusters.length]);
+
+            const excludeVM = async (clusterId, vmid, vmName) => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/excluded-vms/${vmid}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ reason: 'Excluded via cross-cluster LB settings' })
+                    });
+                    if (res.ok) {
+                        setExcludedVMsByCluster(prev => ({
+                            ...prev,
+                            [clusterId]: [...(prev[clusterId] || []), { vmid, name: vmName }]
+                        }));
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            const includeVM = async (clusterId, vmid) => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/excluded-vms/${vmid}`, {
+                        method: 'DELETE'
+                    });
+                    if (res.ok) {
+                        setExcludedVMsByCluster(prev => ({
+                            ...prev,
+                            [clusterId]: (prev[clusterId] || []).filter(v => v.vmid !== vmid)
+                        }));
+                    }
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+
+            // NS: Fetch cross-cluster replication jobs for this group
+            const groupClusterIds = groupClusters.map(c => c.id);
+            const fetchXReplJobs = async () => {
+                setXReplLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications`);
+                    if (res && res.ok) {
+                        const all = await res.json();
+                        setXReplJobs(all.filter(j => groupClusterIds.includes(j.source_cluster) || groupClusterIds.includes(j.target_cluster)));
+                    }
+                } catch (e) { console.error('xrepl fetch:', e); }
+                setXReplLoading(false);
+            };
+
+            useEffect(() => {
+                if (activeTab !== 'replication' || !authFetch) return;
+                fetchXReplJobs();
+                // NS: also fetch native Proxmox replication for each cluster in group
+                const fetchNative = async () => {
+                    const result = {};
+                    await Promise.all(groupClusters.map(async (c) => {
+                        try {
+                            const res = await authFetch(`${API_URL}/clusters/${c.id}/datacenter/replication`);
+                            if (res?.ok) {
+                                const jobs = await res.json();
+                                if (jobs.length > 0) result[c.id] = jobs;
+                            }
+                        } catch(e) {}
+                    }));
+                    setNativeReplByCluster(result);
+                };
+                fetchNative();
+            }, [activeTab]);
+
+            // NS: Fetch VMs when source cluster changes
+            useEffect(() => {
+                if (!xReplForm.source_cluster || !authFetch) return;
+                let cancelled = false;
+                const fetchVMs = async () => {
+                    setXReplLoadingVMs(true);
+                    setXReplSourceVMs([]);
+                    try {
+                        const res = await authFetch(`${API_URL}/clusters/${xReplForm.source_cluster}/vms`);
+                        if (!cancelled && res && res.ok) {
+                            const data = await res.json();
+                            setXReplSourceVMs(data.vms || data || []);
+                        }
+                    } catch (e) { console.error('xrepl source vms:', e); }
+                    if (!cancelled) setXReplLoadingVMs(false);
+                };
+                fetchVMs();
+                return () => { cancelled = true; };
+            }, [xReplForm.source_cluster]);
+
+            // NS: Fetch target cluster storages/bridges when target cluster changes
+            useEffect(() => {
+                if (!xReplForm.target_cluster || !authFetch) return;
+                let cancelled = false;
+                const fetchTargetResources = async () => {
+                    setXReplLoadingResources(true);
+                    setXReplTargetStorages([]);
+                    setXReplTargetBridges([]);
+                    try {
+                        const nodesRes = await authFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes`);
+                        if (!nodesRes || !nodesRes.ok || cancelled) return;
+                        const nodesData = await nodesRes.json();
+                        const onlineNode = (Array.isArray(nodesData) ? nodesData : nodesData.nodes || []).find(n => n.status === 'online');
+                        if (!onlineNode || cancelled) return;
+                        const nodeName = onlineNode.node || onlineNode.name;
+                        const [storRes, netRes] = await Promise.all([
+                            authFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes/${nodeName}/storage`),
+                            authFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes/${nodeName}/networks`)
+                        ]);
+                        if (cancelled) return;
+                        if (storRes && storRes.ok) {
+                            const storData = await storRes.json();
+                            setXReplTargetStorages((Array.isArray(storData) ? storData : storData.storages || [])
+                                .filter(s => s.content && (s.content.includes('images') || s.content.includes('rootdir'))));
+                        }
+                        if (netRes && netRes.ok) {
+                            const netData = await netRes.json();
+                            setXReplTargetBridges((Array.isArray(netData) ? netData : netData.networks || [])
+                                .filter(n => {
+                                    // NS May 2026 (#385): same OVS port guard.
+                                    if (n.type === 'OVSIntPort' || n.type === 'OVSPort' || n.type === 'OVSBond') return false;
+                                    if (n.ovs_bridge) return false;
+                                    return n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn';
+                                }));
+                        }
+                    } catch (err) { console.error('xrepl target resources:', err); }
+                    if (!cancelled) setXReplLoadingResources(false);
+                };
+                fetchTargetResources();
+                return () => { cancelled = true; };
+            }, [xReplForm.target_cluster]);
+
+            // NS: Cross-cluster replication handlers
+            // a double click must not make two jobs for one guest
+            const creatingXRepl = useRef(false);
+            const handleCreateXRepl = async () => {
+                if (creatingXRepl.current) return;
+                creatingXRepl.current = true;
+                try {
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            source_cluster: xReplForm.source_cluster,
+                            target_cluster: xReplForm.target_cluster,
+                            vmid: parseInt(xReplForm.vmid),
+                            vm_type: xReplForm.vm_type || 'qemu',
+                            target_storage: xReplForm.target_storage,
+                            target_bridge: xReplForm.target_bridge,
+                            schedule: xReplForm.schedule,
+                            retention: parseInt(xReplForm.retention) || 3,
+                            // #552 - optional pinned replica VMID
+                            target_vmid: xReplForm.target_vmid ? parseInt(xReplForm.target_vmid, 10) : null,
+                        })
+                    });
+                    if (res && res.ok) {
+                        if (addToast) addToast(t('xReplCreated') || 'Replication job created', 'success');
+                        setShowCreateXRepl(false);
+                        setXReplForm({ source_cluster: '', vmid: '', vm_type: 'qemu', target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
+                        await fetchXReplJobs();
+                    } else if (res) {
+                        const err = await res.json();
+                        if (addToast) addToast(err.error || t('xReplCreateFailed') || 'Failed to create replication job', 'error');
+                    }
+                } catch (e) {
+                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                } finally {
+                    creatingXRepl.current = false;
+                }
+            };
+
+            const handleDeleteXRepl = async (jobId) => {
+                if (!confirm(t('confirmDeleteXRepl') || 'Delete this replication job?')) return;
+                // #552 - second prompt: also tear down the replica VM on the target?
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
+                try {
+                    // MK #564 — send the choice explicitly so "keep replica" can't be
+                    // overridden by the job's stored delete_target flag (a failed teardown
+                    // would otherwise wedge the job as undeletable).
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}?delete_target=${alsoDeleteTarget ? '1' : '0'}`, { method: 'DELETE' });
+                    if (res && res.ok) {
+                        if (addToast) addToast(t('xReplDeleted') || 'Replication job deleted', 'success');
+                        await fetchXReplJobs();
+                    } else if (res) {
+                        const err = await res.json();
+                        if (addToast) addToast(err.error || t('xReplDeleteFailed') || 'Failed to delete', 'error');
+                    }
+                } catch (e) {
+                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                }
+            };
+
+            const handleRunXReplNow = async (jobId) => {
+                try {
+                    const res = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}/run`, { method: 'POST' });
+                    if (res && res.ok) {
+                        if (addToast) addToast(t('xReplStarted') || 'Replication started', 'success');
+                    } else if (res) {
+                        const err = await res.json();
+                        if (addToast) addToast(err.error || t('xReplStartFailed') || 'Failed to start', 'error');
+                    }
+                } catch (e) {
+                    if (addToast) addToast(t('connectionError') || 'Connection error', 'error');
+                }
+            };
+
+            const handleSave = async () => {
+                if (!form.name.trim()) return;
+                setSaving(true);
+                await onSave(form);
+                setSaving(false);
+            };
+
+            // MK: tab config
+            const tabs = [
+                { id: 'general', label: t('general') || 'General', icon: Icons.Settings },
+                { id: 'lb', label: t('crossClusterLB') || 'Cross-Cluster LB', icon: Icons.Scale },
+                { id: 'replication', label: t('crossClusterReplication') || 'Replication', icon: Icons.Globe },
+                { id: 'info', label: t('info') || 'Info', icon: Icons.Info },
+            ];
+
+            return (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+                        {/* Header */}
+                        <div className="flex items-center justify-between p-5 border-b border-proxmox-border">
+                            <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: (form.color || '#E86F2D') + '33' }}>
+                                    <Icons.Folder className="w-5 h-5" style={{ color: form.color || '#E86F2D' }} />
+                                </div>
+                                <div>
+                                    <h2 className="text-lg font-semibold text-white">{t('groupSettings') || 'Group Settings'}</h2>
+                                    <p className="text-xs text-gray-500">{group.name}</p>
+                                </div>
+                            </div>
+                            <button onClick={onClose} className="text-gray-400 hover:text-white transition-colors">
+                                <Icons.X />
+                            </button>
+                        </div>
+
+                        {/* Tabs */}
+                        <div className="flex border-b border-proxmox-border">
+                            {tabs.map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setActiveTab(tab.id)}
+                                    className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors whitespace-nowrap ${
+                                        activeTab === tab.id
+                                            ? 'text-proxmox-orange border-b-2 border-proxmox-orange bg-proxmox-dark/50'
+                                            : 'text-gray-400 hover:text-white hover:bg-proxmox-dark/30'
+                                    }`}
+                                >
+                                    <tab.icon className="w-4 h-4" />
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Tab Content */}
+                        <div className="p-5">
+                            {activeTab === 'general' && (
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('name') || 'Name'} *</label>
+                                        <input
+                                            value={form.name}
+                                            onChange={e => setForm(p => ({...p, name: e.target.value}))}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                            placeholder="Production Cluster Group"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('description') || 'Description'}</label>
+                                        <textarea
+                                            value={form.description}
+                                            onChange={e => setForm(p => ({...p, description: e.target.value}))}
+                                            rows={3}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange resize-none"
+                                            placeholder="Optional description for this group..."
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">{t('color') || 'Color'}</label>
+                                        <div className="flex items-center gap-3">
+                                            <input
+                                                type="color"
+                                                value={form.color}
+                                                onChange={e => setForm(p => ({...p, color: e.target.value}))}
+                                                className="w-10 h-10 rounded cursor-pointer border border-proxmox-border"
+                                            />
+                                            <input
+                                                type="text"
+                                                value={form.color}
+                                                onChange={e => setForm(p => ({...p, color: e.target.value}))}
+                                                className="w-28 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono focus:outline-none focus:border-proxmox-orange"
+                                                placeholder="#E86F2D"
+                                            />
+                                            {/* LW: quick presets */}
+                                            <div className="flex gap-1.5">
+                                                {['#E86F2D', '#3B82F6', '#22C55E', '#EAB308', '#8B5CF6', '#EC4899'].map(c => (
+                                                    <button
+                                                        key={c}
+                                                        onClick={() => setForm(p => ({...p, color: c}))}
+                                                        className={`w-6 h-6 rounded-full border-2 transition-all ${form.color === c ? 'border-white scale-110' : 'border-transparent hover:border-gray-500'}`}
+                                                        style={{ backgroundColor: c }}
+                                                    />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+
+                            {activeTab === 'lb' && (
+                                <div className="space-y-5">
+                                    {/* enable toggle */}
+                                    <div className="flex items-center justify-between p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                        <div>
+                                            <h4 className="text-sm font-medium text-white">{t('enableCrossClusterLB') || 'Enable Cross-Cluster Load Balancing'}</h4>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('lbDescription') || 'Automatically migrate VMs between clusters when resource thresholds are exceeded'}</p>
+                                        </div>
+                                        <label className="relative inline-flex items-center cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={form.cross_cluster_lb_enabled}
+                                                onChange={e => setForm(p => ({...p, cross_cluster_lb_enabled: e.target.checked}))}
+                                                className="sr-only peer"
+                                            />
+                                            <div className="w-11 h-6 bg-gray-600 peer-checked:bg-proxmox-orange rounded-full peer-focus:ring-2 peer-focus:ring-proxmox-orange/50 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+
+                                    {form.cross_cluster_lb_enabled && (
+                                        <div className="space-y-4">
+                                            {/* Balance now */}
+                                            <div className="flex justify-end">
+                                                <button
+                                                    onClick={handleXclbBalanceNow}
+                                                    disabled={xclbRunning}
+                                                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-proxmox-orange/20 text-proxmox-orange hover:bg-proxmox-orange/30 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                                >
+                                                    {xclbRunning
+                                                        ? React.createElement('span', {className: 'w-3.5 h-3.5 border-2 border-proxmox-orange/40 border-t-proxmox-orange rounded-full animate-spin'})
+                                                        : React.createElement(Icons.RefreshCw, {className: 'w-3.5 h-3.5'})
+                                                    }
+                                                    {t('balanceNow') || 'Balance Now'}
+                                                </button>
+                                            </div>
+                                            {/* Dry run toggle */}
+                                            <div className="flex items-center justify-between p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-lg">
+                                                <div className="flex items-center gap-2">
+                                                    <Icons.AlertTriangle className="w-4 h-4 text-yellow-400" />
+                                                    <div>
+                                                        <span className="text-sm text-yellow-300">{t('dryRunMode') || 'Dry Run / Simulation Mode'}</span>
+                                                        <p className="text-xs text-gray-500">{t('dryRunDesc') || 'Log what would happen without actually migrating'}</p>
+                                                    </div>
+                                                </div>
+                                                <label className="relative inline-flex items-center cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={form.cross_cluster_dry_run}
+                                                        onChange={e => setForm(p => ({...p, cross_cluster_dry_run: e.target.checked}))}
+                                                        className="sr-only peer"
+                                                    />
+                                                    <div className="w-11 h-6 bg-gray-600 peer-checked:bg-yellow-500 rounded-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full"></div>
+                                                </label>
+                                            </div>
+
+                                            <Slider
+                                                label={t('cpuThreshold') || 'CPU Threshold (%)'}
+                                                description={t('crossClusterThresholdDesc') || 'CPU threshold for cluster imbalance (10-80%)'}
+                                                value={form.cross_cluster_threshold}
+                                                onChange={v => setForm(p => ({...p, cross_cluster_threshold: v}))}
+                                                min={10}
+                                                max={80}
+                                            />
+
+                                            <Slider
+                                                label={t('checkInterval') || 'Check Interval'}
+                                                description={t('crossClusterIntervalDesc') || 'Time between check cycles'}
+                                                value={form.cross_cluster_interval}
+                                                onChange={v => setForm(p => ({...p, cross_cluster_interval: v}))}
+                                                min={300}
+                                                max={3600}
+                                                step={60}
+                                                unit="s"
+                                            />
+
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
+                                                    {loadingResources ? (
+                                                        <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                            <Icons.RefreshCw className="w-4 h-4 animate-spin" />
+                                                            {t('loadingCrossClusterResources') || 'Loading...'}
+                                                        </div>
+                                                    ) : commonStorages.length > 0 ? (
+                                                        <select
+                                                            value={form.cross_cluster_target_storage}
+                                                            onChange={e => setForm(p => ({...p, cross_cluster_target_storage: e.target.value}))}
+                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                        >
+                                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                            {commonStorages.map(s => (
+                                                                <option key={s.storage} value={s.storage}>
+                                                                    {s.storage} ({s.type})
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        <div className="text-xs text-yellow-400 py-2">
+                                                            <Icons.AlertTriangle className="w-3 h-3 inline mr-1" />
+                                                            {t('noCommonStorages') || 'No common storage found across all clusters'}
+                                                        </div>
+                                                    )}
+                                                    <p className="text-xs text-gray-600 mt-1">{t('commonStorageHint') || 'Only storages available on all clusters'}</p>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('targetBridge') || 'Target Bridge'}</label>
+                                                    {loadingResources ? (
+                                                        <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                            <Icons.RefreshCw className="w-4 h-4 animate-spin" />
+                                                            {t('loadingCrossClusterResources') || 'Loading...'}
+                                                        </div>
+                                                    ) : commonBridges.length > 0 ? (
+                                                        <select
+                                                            value={form.cross_cluster_target_bridge}
+                                                            onChange={e => setForm(p => ({...p, cross_cluster_target_bridge: e.target.value}))}
+                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                        >
+                                                            {commonBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                <optgroup label="Local Bridges">
+                                                                    {commonBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                        <option key={b.iface} value={b.iface}>
+                                                                            {b.iface}{b.comments ? ` - ${b.comments}` : ''}
+                                                                        </option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            )}
+                                                            {commonBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                <optgroup label="SDN VNets">
+                                                                    {commonBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                        <option key={b.iface} value={b.iface}>
+                                                                            {b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}
+                                                                        </option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            )}
+                                                        </select>
+                                                    ) : (
+                                                        <div className="text-xs text-yellow-400 py-2">
+                                                            <Icons.AlertTriangle className="w-3 h-3 inline mr-1" />
+                                                            {t('noCommonBridges') || 'No common bridge found across all clusters'}
+                                                        </div>
+                                                    )}
+                                                    <p className="text-xs text-gray-600 mt-1">{t('commonBridgeHint') || 'Only bridges available on all clusters'}</p>
+                                                </div>
+                                            </div>
+
+                                            <Slider
+                                                label={t('maxMigrations') || 'Max Migrations per Cycle'}
+                                                description={t('crossClusterMaxMigrationsDesc') || 'Max migrations per check cycle'}
+                                                value={form.cross_cluster_max_migrations}
+                                                onChange={v => setForm(p => ({...p, cross_cluster_max_migrations: v}))}
+                                                min={1}
+                                                max={5}
+                                                step={1}
+                                                unit=""
+                                            />
+
+                                            {/* Container Balancing Toggle */}
+                                            <div className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div>
+                                                    <span className="text-sm text-white">{t('includeContainers') || 'Include Containers'}</span>
+                                                    <p className="text-xs text-gray-500 mt-0.5">{t('includeContainersDesc') || 'Include containers (LXC) in cross-cluster balancing'}</p>
+                                                    {form.cross_cluster_include_containers && (
+                                                        <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
+                                                            <Icons.AlertTriangle className="w-3 h-3" />
+                                                            {t('containerMigrationWarning') || 'Containers are restarted during migration (downtime)'}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <label className="relative inline-flex items-center cursor-pointer ml-4">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={form.cross_cluster_include_containers}
+                                                        onChange={e => setForm(p => ({...p, cross_cluster_include_containers: e.target.checked}))}
+                                                        className="sr-only peer"
+                                                    />
+                                                    <div className="w-11 h-6 bg-gray-600 peer-checked:bg-proxmox-orange rounded-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:after:translate-x-full"></div>
+                                                </label>
+                                            </div>
+
+                                            {/* Excluded VMs per Cluster */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <h4 className="text-sm font-medium text-white mb-1">{t('excludedVMsCrossCluster') || 'Excluded VMs/Containers'}</h4>
+                                                <p className="text-xs text-gray-500 mb-3">{t('excludedVMsCrossClusterDesc') || 'VMs and containers excluded from automatic cross-cluster balancing'}</p>
+
+                                                {loadingExcludedVMs ? (
+                                                    <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                        <Icons.RefreshCw className="w-4 h-4 animate-spin" />
+                                                        {t('loading')}...
+                                                    </div>
+                                                ) : groupClusters.filter(c => c.connected).length === 0 ? (
+                                                    <div className="text-xs text-gray-600 py-2">{t('noExcludedVMsInGroup') || 'No VMs excluded'}</div>
+                                                ) : (
+                                                    <div className="space-y-2">
+                                                        {groupClusters.filter(c => c.connected).map(cluster => {
+                                                            const excluded = excludedVMsByCluster[cluster.id] || [];
+                                                            const allVMs = allVMsByCluster[cluster.id] || [];
+                                                            const excludedIds = excluded.map(v => v.vmid);
+                                                            const available = allVMs.filter(vm => !excludedIds.includes(vm.vmid));
+                                                            const isExpanded = expandedClusters[cluster.id];
+
+                                                            return (
+                                                                <div key={cluster.id} className="border border-proxmox-border rounded-lg overflow-hidden">
+                                                                    <button
+                                                                        onClick={() => setExpandedClusters(prev => ({...prev, [cluster.id]: !prev[cluster.id]}))}
+                                                                        className="w-full flex items-center justify-between p-2.5 bg-proxmox-dark/50 hover:bg-proxmox-dark text-left"
+                                                                    >
+                                                                        <div className="flex items-center gap-2">
+                                                                            <Icons.Server className="w-3.5 h-3.5 text-proxmox-orange" />
+                                                                            <span className="text-sm text-white">{clusterLabel(cluster)}</span>
+                                                                            {excluded.length > 0 && (
+                                                                                <span className="text-xs bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded">{excluded.length}</span>
+                                                                            )}
+                                                                        </div>
+                                                                        <Icons.ChevronDown className={`w-4 h-4 text-gray-500 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
+                                                                    </button>
+
+                                                                    {isExpanded && (
+                                                                        <div className="p-2.5 space-y-2 border-t border-proxmox-border">
+                                                                            {excluded.length > 0 ? (
+                                                                                <div className="space-y-1">
+                                                                                    {excluded.map(vm => (
+                                                                                        <div key={vm.vmid} className="flex items-center justify-between bg-proxmox-dark rounded px-2.5 py-1.5">
+                                                                                            <div className="flex items-center gap-2">
+                                                                                                <Icons.Monitor className="w-3.5 h-3.5 text-red-400" />
+                                                                                                <span className="text-sm">{vm.name || `VM ${vm.vmid}`}</span>
+                                                                                                <span className="text-xs text-gray-500">({vm.vmid})</span>
+                                                                                            </div>
+                                                                                            <button
+                                                                                                onClick={() => includeVM(cluster.id, vm.vmid)}
+                                                                                                className="text-xs text-green-400 hover:text-green-300"
+                                                                                            >
+                                                                                                {t('include') || 'Include'}
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    ))}
+                                                                                </div>
+                                                                            ) : (
+                                                                                <div className="text-xs text-gray-600 p-2">{t('noExcludedVMsInGroup') || 'No VMs excluded'}</div>
+                                                                            )}
+
+                                                                            {available.length > 0 && (
+                                                                                <div className="flex gap-2 mt-1">
+                                                                                    <select
+                                                                                        id={`xclb-exclude-${cluster.id}`}
+                                                                                        className="flex-1 bg-proxmox-dark border border-proxmox-border rounded px-2 py-1.5 text-sm"
+                                                                                        defaultValue=""
+                                                                                    >
+                                                                                        <option value="" disabled>{t('selectVMToExclude') || 'Select VM to exclude...'}</option>
+                                                                                        {available.map(vm => (
+                                                                                            <option key={vm.vmid} value={vm.vmid}>
+                                                                                                {vm.name || `VM ${vm.vmid}`} ({vm.vmid}) - {vm.node}
+                                                                                            </option>
+                                                                                        ))}
+                                                                                    </select>
+                                                                                    <button
+                                                                                        onClick={() => {
+                                                                                            const select = document.getElementById(`xclb-exclude-${cluster.id}`);
+                                                                                            const vmid = parseInt(select?.value);
+                                                                                            if (!vmid) return;
+                                                                                            const vm = available.find(v => v.vmid === vmid);
+                                                                                            excludeVM(cluster.id, vmid, vm?.name);
+                                                                                            select.value = '';
+                                                                                        }}
+                                                                                        className="px-2.5 py-1.5 bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 text-xs flex items-center gap-1"
+                                                                                    >
+                                                                                        <Icons.Ban className="w-3.5 h-3.5" />
+                                                                                        {t('exclude') || 'Exclude'}
+                                                                                    </button>
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {activeTab === 'replication' && (
+                                <div className="space-y-4">
+                                    {/* Header + Add button */}
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h4 className="text-sm font-medium text-white flex items-center gap-2">
+                                                <Icons.Globe className="w-4 h-4 text-proxmox-orange" />
+                                                {t('crossClusterReplication') || 'Cross-Cluster Replication'}
+                                            </h4>
+                                            <p className="text-xs text-gray-500 mt-0.5">{t('crossClusterReplicationDesc') || 'Replicate VM snapshots to another cluster (DR)'}</p>
+                                        </div>
+                                        {groupClusters.length >= 2 && (
+                                            <button
+                                                onClick={() => setShowCreateXRepl(true)}
+                                                className="flex items-center gap-1.5 px-3 py-1.5 bg-proxmox-orange/10 text-proxmox-orange rounded-lg text-xs hover:bg-proxmox-orange/20 transition-colors"
+                                            >
+                                                <Icons.Plus className="w-3.5 h-3.5" />
+                                                {t('addDrJob') || 'Add DR Job'}
+                                            </button>
+                                        )}
+                                    </div>
+
+                                    {groupClusters.length < 2 ? (
+                                        <div className="text-center py-8 text-gray-500 text-sm">
+                                            <Icons.AlertTriangle className="w-8 h-8 mx-auto mb-2 text-gray-600" />
+                                            {t('needTwoClusters') || 'At least 2 clusters needed for cross-cluster replication'}
+                                        </div>
+                                    ) : xReplLoading ? (
+                                        <div className="flex items-center justify-center gap-2 py-8 text-gray-500 text-sm">
+                                            <Icons.RefreshCw className="w-4 h-4 animate-spin" />
+                                            {t('loading')}...
+                                        </div>
+                                    ) : xReplJobs.length === 0 && !showCreateXRepl ? (
+                                        <div className="text-center py-8 text-gray-500 text-sm">
+                                            {t('noReplicationJobs') || 'No replication jobs configured'}
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {xReplJobs.map(job => {
+                                                const srcCluster = groupClusters.find(c => c.id === job.source_cluster);
+                                                const tgtCluster = groupClusters.find(c => c.id === job.target_cluster);
+                                                return (
+                                                    <div key={job.id} className="bg-proxmox-dark rounded-lg p-3 flex items-center justify-between border border-proxmox-border">
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className="flex items-center gap-2 flex-wrap">
+                                                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${job.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
+                                                                <span className="text-sm text-white truncate">{clusterLabel(srcCluster) || job.source_cluster}</span>
+                                                                <Icons.ArrowRight className="w-3.5 h-3.5 text-gray-500 flex-shrink-0" />
+                                                                <span className="text-sm text-white truncate">{clusterLabel(tgtCluster) || job.target_cluster}</span>
+                                                                <span className="text-xs bg-proxmox-dark px-1.5 py-0.5 rounded text-gray-400 border border-proxmox-border">
+                                                                    {job.vm_type === 'lxc' ? 'CT' : 'VM'} {job.vmid}
+                                                                </span>
+                                                            </div>
+                                                            <div className="text-xs text-gray-500 mt-1 flex items-center gap-2 flex-wrap">
+                                                                <span>{job.schedule}</span>
+                                                                <span>&middot;</span>
+                                                                <span>{job.target_storage || 'default'}</span>
+                                                                {job.last_run && (
+                                                                    <>
+                                                                        <span>&middot;</span>
+                                                                        <span>{t('lastRunPrefix') || 'Last'}: {new Date(job.last_run).toLocaleString()}</span>
+                                                                    </>
+                                                                )}
+                                                                {job.last_status && (
+                                                                    <span className={job.last_status === 'OK' ? 'text-green-400' : 'text-red-400'}>{job.last_status}</span>
+                                                                )}
+                                                                {job.last_error && <span className="text-red-400">{job.last_error}</span>}
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex gap-1 flex-shrink-0 ml-2">
+                                                            <button onClick={() => handleRunXReplNow(job.id)} className="p-1.5 rounded hover:bg-green-500/10 text-gray-400 hover:text-green-400" title={t('runNow') || 'Run now'}>
+                                                                <Icons.Play className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            <button onClick={() => handleDeleteXRepl(job.id)} className="p-1.5 rounded hover:bg-red-500/10 text-gray-400 hover:text-red-400" title={t('delete') || 'Delete'}>
+                                                                <Icons.Trash className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+
+                                    {/* Inline create form */}
+                                    {showCreateXRepl && groupClusters.length >= 2 && (
+                                        <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4">
+                                            <h5 className="text-sm font-medium text-white mb-3">{t('newCrossClusterReplication') || 'New Cross-Cluster Replication'}</h5>
+                                            <div className="grid grid-cols-2 gap-3">
+                                                {/* Source Cluster */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('sourceCluster') || 'Source Cluster'}</label>
+                                                    <select
+                                                        value={xReplForm.source_cluster}
+                                                        onChange={e => setXReplForm(f => ({ ...f, source_cluster: e.target.value, vmid: '', vm_type: 'qemu' }))}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    >
+                                                        <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                        {groupClusters.filter(c => c.connected).map(c => (
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+
+                                                {/* VM Selection */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">VM</label>
+                                                    {xReplLoadingVMs ? (
+                                                        <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                            {t('loading')}...
+                                                        </div>
+                                                    ) : xReplForm.source_cluster ? (
+                                                        <select
+                                                            value={xReplForm.vmid}
+                                                            onChange={e => {
+                                                                const vmid = e.target.value;
+                                                                const vm = xReplSourceVMs.find(v => String(v.vmid) === vmid);
+                                                                setXReplForm(f => ({ ...f, vmid, vm_type: vm?.type || 'qemu' }));
+                                                            }}
+                                                            className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                        >
+                                                            <option value="">{t('selectVM') || 'Select VM...'}</option>
+                                                            {xReplSourceVMs.map(vm => (
+                                                                <option key={vm.vmid} value={vm.vmid}>
+                                                                    {vm.name || `VM ${vm.vmid}`} ({vm.vmid}) - {vm.type === 'lxc' ? 'CT' : 'VM'}
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a source cluster first'}</div>
+                                                    )}
+                                                </div>
+
+                                                <XReplFeatureWarning
+                                                    authFetch={authFetch}
+                                                    sourceCluster={xReplForm.source_cluster}
+                                                    vmid={xReplForm.vmid}
+                                                    vmType={xReplForm.vm_type}
+                                                    node={xReplSourceVMs.find(v => String(v.vmid) === String(xReplForm.vmid))?.node}
+                                                />
+
+                                                {/* Target Cluster */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetCluster') || 'Target Cluster'}</label>
+                                                    <select
+                                                        value={xReplForm.target_cluster}
+                                                        onChange={e => setXReplForm(f => ({ ...f, target_cluster: e.target.value, target_storage: '', target_bridge: 'vmbr0' }))}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    >
+                                                        <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                        {groupClusters.filter(c => c.connected && c.id !== xReplForm.source_cluster).map(c => (
+                                                            <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+
+                                                {/* Target Storage */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetStorage') || 'Target Storage'}</label>
+                                                    {xReplLoadingResources ? (
+                                                        <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                            {t('loading')}...
+                                                        </div>
+                                                    ) : xReplForm.target_cluster ? (
+                                                        <select
+                                                            value={xReplForm.target_storage}
+                                                            onChange={e => setXReplForm(f => ({ ...f, target_storage: e.target.value }))}
+                                                            className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                        >
+                                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                            {xReplTargetStorages.map(s => (
+                                                                <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                            ))}
+                                                        </select>
+                                                    ) : (
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                    )}
+                                                </div>
+
+                                                {/* Target Bridge */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetBridge') || 'Target Bridge'}</label>
+                                                    {xReplLoadingResources ? (
+                                                        <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                            {t('loading')}...
+                                                        </div>
+                                                    ) : xReplForm.target_cluster ? (
+                                                        <select
+                                                            value={xReplForm.target_bridge}
+                                                            onChange={e => setXReplForm(f => ({ ...f, target_bridge: e.target.value }))}
+                                                            className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                        >
+                                                            {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                <optgroup label="Local Bridges">
+                                                                    {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                        <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            )}
+                                                            {xReplTargetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                <optgroup label="SDN VNets">
+                                                                    {xReplTargetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                        <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                    ))}
+                                                                </optgroup>
+                                                            )}
+                                                        </select>
+                                                    ) : (
+                                                        <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                    )}
+                                                </div>
+
+                                                {/* Target VMID (optional) - #552 */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                    <input
+                                                        type="number"
+                                                        min="100"
+                                                        value={xReplForm.target_vmid || ''}
+                                                        onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
+                                                        placeholder={t('autoNextId') || 'auto'}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    />
+                                                </div>
+
+                                                {/* Schedule */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('scheduleCron') || 'Schedule (Cron)'}</label>
+                                                    <input
+                                                        type="text"
+                                                        value={xReplForm.schedule}
+                                                        onChange={e => setXReplForm(f => ({ ...f, schedule: e.target.value }))}
+                                                        placeholder="0 */6 * * *"
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    />
+                                                </div>
+
+                                                {/* Retention */}
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('replicationRetention') || 'Retention'}</label>
+                                                    <input
+                                                        type="number"
+                                                        min="1"
+                                                        max="30"
+                                                        value={xReplForm.retention}
+                                                        onChange={e => setXReplForm(f => ({ ...f, retention: parseInt(e.target.value) || 1 }))}
+                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                    />
+                                                </div>
+                                            </div>
+                                            <div className="flex gap-2 mt-3">
+                                                <button
+                                                    onClick={handleCreateXRepl}
+                                                    disabled={!xReplForm.source_cluster || !xReplForm.vmid || !xReplForm.target_cluster}
+                                                    className="px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-sm hover:bg-proxmox-orange/90 transition-colors disabled:opacity-50"
+                                                >
+                                                    {t('create') || 'Create'}
+                                                </button>
+                                                <button
+                                                    onClick={() => setShowCreateXRepl(false)}
+                                                    className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border text-gray-300 rounded-lg text-sm hover:bg-proxmox-darker transition-colors"
+                                                >
+                                                    {t('cancel') || 'Cancel'}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* NS: Mar 2026 - native Proxmox replication per cluster (#103) */}
+                                    {Object.keys(nativeReplByCluster).length > 0 && (
+                                        <div className="mt-6">
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <Icons.RefreshCw className="w-4 h-4 text-purple-400" />
+                                                <h4 className="text-sm font-medium text-white">{t('nativeProxmoxReplication') || 'Native Proxmox Replication (ZFS)'}</h4>
+                                            </div>
+                                            <div className="space-y-3">
+                                                {Object.entries(nativeReplByCluster).map(([cid, jobs]) => {
+                                                    const cluster = groupClusters.find(c => c.id === cid);
+                                                    return (
+                                                        <div key={cid} className="bg-proxmox-dark rounded-lg border border-proxmox-border overflow-hidden">
+                                                            <div className="px-3 py-2 border-b border-proxmox-border bg-purple-500/5">
+                                                                <span className="text-xs font-medium text-purple-300">{clusterLabel(cluster) || cid}</span>
+                                                            </div>
+                                                            {jobs.map((job, idx) => {
+                                                                const hasErr = job.fail_count > 0 || job.error;
+                                                                const lastSync = job.last_sync ? new Date(job.last_sync * 1000).toLocaleString() : '-';
+                                                                return (
+                                                                    <div key={job.id || idx} className="px-3 py-2 flex items-center justify-between border-b border-proxmox-border/50 last:border-0">
+                                                                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                                                                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${job.disable ? 'bg-gray-500' : hasErr ? 'bg-red-500' : 'bg-green-500'}`} />
+                                                                            <span className="text-xs bg-proxmox-dark px-1.5 py-0.5 rounded text-gray-400 border border-proxmox-border">VM {job.guest}</span>
+                                                                            <span className="text-xs text-gray-500">{job.source || '?'}</span>
+                                                                            <Icons.ArrowRight className="w-3 h-3 text-gray-600 flex-shrink-0" />
+                                                                            <span className="text-xs text-gray-500">{job.target}</span>
+                                                                            <span className="text-xs text-gray-600 font-mono">{job.schedule}</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                                                                            <span className="text-xs text-gray-600">{lastSync}</span>
+                                                                            {job.duration != null && <span className="text-xs text-gray-600 font-mono">{job.duration.toFixed(1)}s</span>}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {activeTab === 'info' && (
+                                <div className="space-y-4">
+                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                        <h4 className="text-sm font-medium text-white mb-3">{t('groupInfo') || 'Group Information'}</h4>
+                                        <div className="space-y-2 text-sm">
+                                            <div className="flex justify-between">
+                                                <span className="text-gray-400">{t('groupId') || 'Group ID'}</span>
+                                                <span className="text-white font-mono text-xs">{group.id}</span>
+                                            </div>
+                                            <div className="flex justify-between">
+                                                <span className="text-gray-400">{t('created') || 'Created'}</span>
+                                                <span className="text-white">{group.created ? new Date(group.created).toLocaleString() : '-'}</span>
+                                            </div>
+                                            {group.tenant_id && (
+                                                <div className="flex justify-between">
+                                                    <span className="text-gray-400">{t('tenant') || 'Tenant'}</span>
+                                                    <span className="text-white">{group.tenant_id}</span>
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* LB info */}
+                                    {group.cross_cluster_lb_enabled && (
+                                        <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                            <h4 className="text-sm font-medium text-white mb-3">{t('lbStatus') || 'Load Balancing Status'}</h4>
+                                            <div className="space-y-2 text-sm">
+                                                <div className="flex justify-between">
+                                                    <span className="text-gray-400">{t('lastRun') || 'Last LB Run'}</span>
+                                                    <span className="text-white">{group.last_lb_run ? new Date(group.last_lb_run).toLocaleString() : t('neverRun') || 'Never run'}</span>
+                                                </div>
+                                                <div className="flex justify-between">
+                                                    <span className="text-gray-400">{t('mode') || 'Mode'}</span>
+                                                    <span className={group.cross_cluster_dry_run ? 'text-yellow-400' : 'text-green-400'}>
+                                                        {group.cross_cluster_dry_run ? t('simulation') || 'Simulation' : t('active') || 'Active'}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div className="p-4 bg-blue-500/5 border border-blue-500/20 rounded-lg">
+                                        <div className="flex items-start gap-3">
+                                            <Icons.Info className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
+                                            <div className="text-sm text-gray-400">
+                                                <p className="mb-2">{t('lbExplanation') || 'Cross-Cluster Load Balancing monitors CPU and RAM usage across all clusters in this group. When a cluster exceeds the configured threshold, VMs are automatically migrated to a less loaded cluster.'}</p>
+                                                <p>{t('lbDryRunExplanation') || 'Enable Dry Run mode first to review what actions would be taken before enabling live migrations.'}</p>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="flex items-center justify-end gap-3 p-5 border-t border-proxmox-border">
+                            <button
+                                onClick={onClose}
+                                className="px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors"
+                            >
+                                {t('cancel') || 'Cancel'}
+                            </button>
+                            <button
+                                onClick={handleSave}
+                                disabled={saving || !form.name.trim()}
+                                className="px-5 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 rounded-lg text-sm font-medium text-white transition-colors flex items-center gap-2"
+                            >
+                                {saving ? (
+                                    <><Icons.RefreshCw className="w-4 h-4 animate-spin" /> {t('saving') || 'Saving...'}</>
+                                ) : (
+                                    <><Icons.Save className="w-4 h-4" /> {t('save') || 'Save'}</>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the server reads a picked container's feature flags: those only root@pam
+        // may set stop every run of a cross-cluster job, so the dialog says it before Create (#457).
+        // Used by the group settings and the VM configuration dialog alike
+        function XReplFeatureWarning({ authFetch, sourceCluster, vmid, vmType, node }) {
+            const { t } = useTranslation();
+            const [warning, setWarning] = useState(null);
+            useEffect(() => {
+                setWarning(null);
+                if (!authFetch || vmType !== 'lxc' || !sourceCluster || !vmid) return;
+                let cancelled = false;
+                (async () => {
+                    try {
+                        const res = await authFetch(`${API_URL}/cross-cluster-replications/preflight`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ source_cluster: sourceCluster, vmid: parseInt(vmid, 10), vm_type: vmType, source_node: node || '' }),
+                        });
+                        if (cancelled || !res || !res.ok) return;
+                        const data = await res.json();
+                        const found = (data.warnings || []).find(w => w.code === 'LXC_ROOT_ONLY_FEATURES');
+                        if (!cancelled) setWarning(found || null);
+                    } catch (e) {
+                        console.error('xrepl preflight:', e);
+                    }
+                })();
+                return () => { cancelled = true; };
+            }, [sourceCluster, vmid, vmType, node]);
+            if (!warning) return null;
+            const args = warning.args || {};
+            return (
+                <div data-xrepl-features-warning="" className="col-span-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3">
+                    <div className="flex items-start gap-2">
+                        <Icons.AlertTriangle className="w-4 h-4 text-yellow-400 mt-0.5 flex-shrink-0" />
+                        <div className="text-xs text-yellow-300">
+                            {t('xReplRootOnlyFeatures').replace('{vmid}', () => String(args.vmid ?? vmid)).replace('{flags}', () => String(args.flags || ''))}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Cluster Health Widget
+        // NS Oct 2026 - the score is the load of the nodes, and it said 'excellent' with Ceph in
+        // HEALTH_ERR (#948). The Ceph factor of /health holds it down now and shows under it
+        function ClusterHealth({ metrics, isCorporate, clusterId, authFetch }) {
+            const { t } = useTranslation();
+            const { user } = useAuth();
+            const who = user?.username || '';
+            const [ceph, setCeph] = useState(null);
+            useEffect(() => {
+                setCeph(null);
+                if (!clusterId || !authFetch) return;
+                let cancelled = false;
+                const load = async () => {
+                    try {
+                        const data = await readClusterHealth(clusterId, authFetch, API_URL, who);
+                        if (!cancelled && data) setCeph((data.factors || []).find(f => f && f.key === 'ceph') || null);
+                    } catch (_) { /* keep the last one */ }
+                };
+                load();
+                const id = setInterval(load, 60000);
+                return () => { cancelled = true; clearInterval(id); };
+            }, [clusterId, authFetch, who]);
+
+            const nodes = Object.entries(metrics);
+            if (nodes.length === 0) return null;
+
+            const avgCpu = nodes.reduce((acc, [, m]) => acc + m.cpu_percent, 0) / nodes.length;
+            const avgMem = nodes.reduce((acc, [, m]) => acc + m.mem_percent, 0) / nodes.length;
+            const avgScore = nodes.reduce((acc, [, m]) => acc + m.score, 0) / nodes.length;
+            const onlineNodes = nodes.filter(([, m]) => m.status === 'online' && !m.maintenance_mode).length;
+            const maintenanceNodes = nodes.filter(([, m]) => m.maintenance_mode).length;
+
+            const loadScore = Math.max(0, 100 - (avgScore / 2));
+            const cephCap = ceph && typeof ceph.cap === 'number' ? ceph.cap : 100;
+            const healthScore = Math.min(loadScore, cephCap);
+            const cephLevel = ceph ? (ceph.severity || 'unknown') : null;
+            const cephText = ceph ? (ceph.status || t('unknown')) : '';
+            const cephNote = !ceph ? ''
+                : ceph.silent ? t('clusterHealthCephSilent').replace('{cap}', () => String(cephCap))
+                : cephCap < loadScore ? t('clusterHealthCephCap').replace('{cap}', () => String(cephCap)).replace('{status}', () => cephText)
+                : cephLevel === 'unknown' ? t('clusterHealthCephUnknown') : '';
+            const cephChecks = ceph && Array.isArray(ceph.checks) ? ceph.checks.join(', ') : '';
+            const cephColor = { ok: '#22c55e', warning: '#eab308', critical: '#ef4444' }[cephLevel] || '#9ca3af';
+            const corpCephColor = { ok: '#60b515', warning: '#efc006', critical: '#f54f47' }[cephLevel] || 'var(--corp-text-muted)';
+            const healthLabel = healthScore >= 80 ? t('excellent') : healthScore >= 60 ? t('good') : healthScore >= 40 ? t('warning') : t('critical');
+            const healthColor = healthScore >= 80 ? '#22c55e' : healthScore >= 60 ? '#84cc16' : healthScore >= 40 ? '#eab308' : '#ef4444';
+
+            // LW: Feb 2026 - corporate compact variant (Clarity dark theme)
+            const corpHealthColor = healthScore >= 80 ? '#60b515' : healthScore >= 60 ? '#60b515' : healthScore >= 40 ? '#efc006' : '#f54f47';
+            if (isCorporate) {
+                return (
+                    <div data-cluster-health="" className="p-3" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                        <h3 className="text-[11px] font-semibold uppercase tracking-wider mb-2" style={{color: 'var(--corp-text-muted)'}}>{t('clusterHealth')}</h3>
+                        <div className="flex items-center gap-4 flex-wrap">
+                            <div className="flex items-center gap-2">
+                                <div className="w-20 h-2 overflow-hidden" style={{background: 'var(--corp-bar-track)', borderRadius: '1px'}}>
+                                    <div className="h-full" style={{width: `${healthScore}%`, backgroundColor: corpHealthColor, borderRadius: '1px'}}></div>
+                                </div>
+                                <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{healthScore.toFixed(0)}</span>
+                                <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{healthLabel}</span>
+                            </div>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{t('nodesOnline')}: <span style={{color: 'var(--color-text)'}}>{onlineNodes}/{nodes.length}</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>CPU: <span style={{color: 'var(--color-text)'}}>{avgCpu.toFixed(1)}%</span></span>
+                            <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>RAM: <span style={{color: 'var(--color-text)'}}>{avgMem.toFixed(1)}%</span></span>
+                            {ceph && (
+                                <span data-cluster-health-ceph={ceph.status || 'unknown'} className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}} title={cephChecks}>
+                                    Ceph: <span style={{color: corpCephColor}}>{cephText}</span>
+                                </span>
+                            )}
+                            {cephNote && <span className="text-[11px]" style={{color: 'var(--corp-text-muted)'}}>{cephNote}</span>}
+                            {maintenanceNodes > 0 && (
+                                <span className="text-[12px] flex items-center gap-1" style={{color: 'var(--color-warning)'}}>
+                                    <Icons.Wrench className="w-3 h-3" /> {maintenanceNodes} {t('maintenance')}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div data-cluster-health="" className="bg-proxmox-card border border-proxmox-border rounded-xl p-5">
+                    <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-4">{t('clusterHealth')}</h3>
+
+                    <div className="flex items-center justify-center mb-6">
+                        <div className="relative">
+                            <svg viewBox="0 0 100 100" className="w-32 h-32">
+                                <circle cx="50" cy="50" r="45" fill="none" stroke="#30363D" strokeWidth="8" />
+                                <circle
+                                    cx="50"
+                                    cy="50"
+                                    r="45"
+                                    fill="none"
+                                    stroke={healthColor}
+                                    strokeWidth="8"
+                                    strokeLinecap="round"
+                                    strokeDasharray={`${healthScore * 2.83} 283`}
+                                    transform="rotate(-90 50 50)"
+                                    className="transition-all duration-1000"
+                                />
+                            </svg>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center">
+                                <span className="text-2xl font-bold text-white">{healthScore.toFixed(0)}</span>
+                                <span className="text-xs text-gray-400">{healthLabel}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                        <div className="text-center">
+                            <div className="text-2xl font-bold text-white">{onlineNodes}/{nodes.length}</div>
+                            <div className="text-xs text-gray-500">{t('nodesOnline')}</div>
+                        </div>
+                        <div className="text-center">
+                            <div className="text-2xl font-bold text-white">{avgScore.toFixed(0)}</div>
+                            <div className="text-xs text-gray-500">{t('avgScore')}</div>
+                        </div>
+                        <div className="text-center">
+                            <div className="text-2xl font-bold text-white">{avgCpu.toFixed(1)}%</div>
+                            <div className="text-xs text-gray-500">{t('avgCpu')}</div>
+                        </div>
+                        <div className="text-center">
+                            <div className="text-2xl font-bold text-white">{avgMem.toFixed(1)}%</div>
+                            <div className="text-xs text-gray-500">{t('avgRam')}</div>
+                        </div>
+                    </div>
+
+                    {ceph && (
+                        <div data-cluster-health-ceph={ceph.status || 'unknown'} className="mt-4 pt-4 border-t border-proxmox-border text-center">
+                            <div className="flex items-center justify-center gap-2">
+                                <Icons.HardDrive className="w-4 h-4" style={{color: cephColor}} />
+                                <span className="text-sm font-medium" style={{color: cephColor}}>Ceph {cephText}</span>
+                            </div>
+                            {cephChecks && <div className="text-xs text-gray-400 mt-1" style={{overflowWrap: 'anywhere'}}>{cephChecks}</div>}
+                            {cephNote && <div className="text-xs text-gray-500 mt-1">{cephNote}</div>}
+                        </div>
+                    )}
+
+                    {maintenanceNodes > 0 && (
+                        <div className="mt-4 pt-4 border-t border-proxmox-border">
+                            <div className="flex items-center justify-center gap-2 text-yellow-400">
+                                <Icons.Wrench />
+                                <span className="text-sm font-medium">{maintenanceNodes} Node(s) {t('maintenance')}</span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // Create Snapshot Modal - NS: Feb 2026 enhanced with efficient mode
+        function CreateSnapshotModal({ isQemu, onSubmit, onClose, loading, efficientInfo }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout(); // LW: corporate corporate chrome
+            const [snapname, setSnapname] = useState(`snap_${Date.now()}`);
+            const [description, setDescription] = useState('');
+            const [vmstate, setVmstate] = useState(false);
+            const [mode, setMode] = useState('standard');
+            const [snapSizeGb, setSnapSizeGb] = useState(efficientInfo?.recommended_snap_size_gb || 10);
+
+            const isEfficient = mode === 'efficient';
+            const canEfficient = efficientInfo?.eligible;
+
+            const nameValidationError = !snapname ? '' : (
+                !/^[a-zA-Z]/.test(snapname)
+                    ? (t('snapshotNameLetterWarning') || 'Snapshot name must start with a letter.')
+                    : (!/^[a-zA-Z0-9_-]+$/.test(snapname)
+                        ? (t('snapshotNameCharsWarning') || 'Snapshot name can only contain alphanumeric characters, underscores, and hyphens (no spaces or special characters).')
+                        : (snapname.length > 80
+                            ? (t('snapshotNameLengthWarning') || 'Snapshot name cannot exceed 80 characters.')
+                            : ''))
+            );
+
+            const handleSubmit = () => {
+                if (!snapname.trim() || nameValidationError) return;
+                onSubmit(snapname.trim(), description, vmstate, isEfficient ? { mode: 'efficient', snap_size_gb: snapSizeGb } : { mode: 'standard' });
+            };
+
+            // LW: corporate path — corporate modal chrome (matches ConfigModal/CreateVmModal)
+            if (isCorporate) {
+                return (
+                    <div className="corp-vm-modal-overlay" onClick={onClose}>
+                        <div
+                            className="corp-vm-modal"
+                            style={{maxWidth: canEfficient ? '640px' : '520px', width: '100%'}}
+                            onClick={e => e.stopPropagation()}
+                        >
+                            <div className="corp-vm-modal-header">
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    <Icons.Camera className="w-5 h-5" style={{color:'var(--corp-accent, #49afd9)'}} />
+                                    <div className="min-w-0">
+                                        <div className="corp-vm-modal-title truncate">{t('createSnapshot')}</div>
+                                        <div className="corp-vm-modal-meta">{isQemu ? 'QEMU' : 'LXC'}{canEfficient ? ' · efficient capable' : ''}</div>
+                                    </div>
+                                </div>
+                                <div className="corp-vm-modal-actions">
+                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="corp-vm-modal-body">
+                                <div className="space-y-4">
+                                    {canEfficient && (
+                                        <div>
+                                            <div className="corp-vm-section-title">{t('snapshotMode')}</div>
+                                            <div className="flex gap-2 mt-1">
+                                                <button
+                                                    onClick={() => setMode('standard')}
+                                                    className={`flex-1 px-3 py-2 text-[13px] border transition-colors ${
+                                                        !isEfficient
+                                                            ? 'text-white'
+                                                            : 'text-gray-400 hover:text-white'
+                                                    }`}
+                                                    style={!isEfficient
+                                                        ? {borderColor: 'var(--corp-accent, #49afd9)', background: 'rgba(73,175,217,0.10)', color: 'var(--corp-accent, #49afd9)'}
+                                                        : {borderColor: 'var(--corp-border-medium)', background: 'transparent'}}
+                                                >
+                                                    {t('normalMode')}
+                                                </button>
+                                                <button
+                                                    onClick={() => setMode('efficient')}
+                                                    className="flex-1 px-3 py-2 text-[13px] border transition-colors flex items-center justify-center gap-1"
+                                                    style={isEfficient
+                                                        ? {borderColor: '#60b515', background: 'rgba(96,181,21,0.10)', color: '#60b515'}
+                                                        : {borderColor: 'var(--corp-border-medium)', background: 'transparent', color: 'var(--corp-text-secondary)'}}
+                                                >
+                                                    <Icons.Zap className="w-3.5 h-3.5" />
+                                                    {t('efficientMode')}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {isEfficient && efficientInfo && (
+                                        <div className="p-3 space-y-3" style={{background:'var(--corp-surface-2)', border:'1px solid rgba(96,181,21,0.30)'}}>
+                                            <div className="text-[13px] font-medium flex items-center gap-1" style={{color:'#60b515'}}>
+                                                <Icons.Zap className="w-3.5 h-3.5" />
+                                                {t('spaceSavings')}: {efficientInfo.savings_percent}%
+                                            </div>
+                                            <div>
+                                                <div className="flex justify-between text-[11px] mb-1" style={{color:'var(--corp-text-secondary)'}}>
+                                                    <span>{t('normalSnapshotSize')}</span>
+                                                    <span>{efficientInfo.total_disk_size_gb?.toFixed(1)} GB</span>
+                                                </div>
+                                                <div className="w-full h-2 overflow-hidden" style={{background:'var(--corp-surface-3, #1f2c34)'}}>
+                                                    <div className="h-full" style={{width:'100%', background:'#f54f47'}}></div>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="flex justify-between text-[11px] mb-1" style={{color:'var(--corp-text-secondary)'}}>
+                                                    <span>{t('efficientSnapshotSize')}</span>
+                                                    <span>~{snapSizeGb?.toFixed(1)} GB</span>
+                                                </div>
+                                                <div className="w-full h-2 overflow-hidden" style={{background:'var(--corp-surface-3, #1f2c34)'}}>
+                                                    <div className="h-full" style={{width:`${Math.max(3,(snapSizeGb / efficientInfo.total_disk_size_gb) * 100)}%`, background:'#60b515'}}></div>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[11px] mb-1" style={{color:'var(--corp-text-secondary)'}}>
+                                                    {t('snapshotSizeGb')} ({t('recommended')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
+                                                </label>
+                                                <input
+                                                    type="number"
+                                                    value={snapSizeGb}
+                                                    onChange={(e) => setSnapSizeGb(parseFloat(e.target.value) || 1)}
+                                                    min="1"
+                                                    max={efficientInfo.vg_free_gb - 2}
+                                                    step="1"
+                                                />
+                                            </div>
+                                            <div className="text-[11px] flex items-center gap-1" style={{color: efficientInfo.has_guest_agent ? '#60b515' : '#efc006'}}>
+                                                {efficientInfo.has_guest_agent ? <Icons.CheckCircle className="w-3 h-3" /> : <Icons.AlertTriangle className="w-3 h-3" />}
+                                                {efficientInfo.has_guest_agent ? t('guestAgentDetected') : t('noGuestAgent')}
+                                            </div>
+                                            <div className="text-[11px] italic" style={{color:'var(--corp-text-muted, #728b9a)'}}>
+                                                {t('managedByPegaprox')}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    <div>
+                                        <div className="corp-vm-section-title">{t('name')}</div>
+                                        <input
+                                            type="text"
+                                            value={snapname}
+                                            onChange={(e) => setSnapname(e.target.value)}
+                                            placeholder="snapshot-name"
+                                        />
+                                        {nameValidationError && (
+                                            <div className="text-[11px] mt-1 flex items-center gap-1" style={{color: '#efc006'}}>
+                                                <Icons.AlertTriangle className="w-3 h-3" />
+                                                <span>{nameValidationError}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <div className="corp-vm-section-title">{t('description')} <span style={{color:'var(--corp-text-muted)', fontWeight:400}}>({t('optional')})</span></div>
+                                        <input
+                                            type="text"
+                                            value={description}
+                                            onChange={(e) => setDescription(e.target.value)}
+                                            placeholder={t('snapshotDescription')}
+                                        />
+                                    </div>
+                                    {isQemu && !isEfficient && (
+                                        <label className="flex items-center gap-2 text-[13px]" style={{color:'var(--corp-text-secondary)'}}>
+                                            <input
+                                                type="checkbox"
+                                                checked={vmstate}
+                                                onChange={(e) => setVmstate(e.target.checked)}
+                                            />
+                                            {t('saveRamState')}
+                                        </label>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="corp-vm-modal-footer">
+                                <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost">{t('cancel')}</button>
+                                <button
+                                    onClick={handleSubmit}
+                                    disabled={loading || !snapname.trim() || !!nameValidationError}
+                                    className="corp-vm-btn corp-vm-btn-create flex items-center gap-2"
+                                >
+                                    {loading && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
+                                    {isEfficient && <Icons.Zap className="w-3.5 h-3.5" />}
+                                    {t('create')}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className={`w-full ${canEfficient ? 'max-w-lg' : 'max-w-md'} bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in`}>
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('createSnapshot')}</h3>
+                        <div className="space-y-4">
+                            {/* Mode toggle - only show when efficient snapshots are available */}
+                            {canEfficient && (
+                                <div>
+                                    <label className="block text-sm text-gray-400 mb-2">{t('snapshotMode')}</label>
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => setMode('standard')}
+                                            className={`flex-1 px-3 py-2 rounded-lg text-sm border transition-colors ${
+                                                !isEfficient
+                                                    ? 'bg-blue-600/20 border-blue-500 text-blue-400'
+                                                    : 'bg-proxmox-dark border-proxmox-border text-gray-400 hover:border-gray-500'
+                                            }`}
+                                        >
+                                            {t('normalMode')}
+                                        </button>
+                                        <button
+                                            onClick={() => setMode('efficient')}
+                                            className={`flex-1 px-3 py-2 rounded-lg text-sm border transition-colors ${
+                                                isEfficient
+                                                    ? 'bg-green-600/20 border-green-500 text-green-400'
+                                                    : 'bg-proxmox-dark border-proxmox-border text-gray-400 hover:border-gray-500'
+                                            }`}
+                                        >
+                                            <span className="flex items-center justify-center gap-1">
+                                                <Icons.Zap />
+                                                {t('efficientMode')}
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Space savings visualization */}
+                            {isEfficient && efficientInfo && (
+                                <div className="p-3 bg-proxmox-dark rounded-lg border border-green-500/30 space-y-3">
+                                    <div className="text-sm font-medium text-green-400 flex items-center gap-1">
+                                        <Icons.Zap />
+                                        {t('spaceSavings')}: {efficientInfo.savings_percent}%
+                                    </div>
+                                    {/* Normal snapshot bar (red) */}
+                                    <div>
+                                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                                            <span>{t('normalSnapshotSize')}</span>
+                                            <span>{efficientInfo.total_disk_size_gb?.toFixed(1)} GB</span>
+                                        </div>
+                                        <div className="w-full h-3 bg-gray-700 rounded-full overflow-hidden">
+                                            <div className="h-full bg-red-500 rounded-full" style={{width: '100%'}}></div>
+                                        </div>
+                                    </div>
+                                    {/* Efficient snapshot bar (green) */}
+                                    <div>
+                                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                                            <span>{t('efficientSnapshotSize')}</span>
+                                            <span>~{snapSizeGb?.toFixed(1)} GB</span>
+                                        </div>
+                                        <div className="w-full h-3 bg-gray-700 rounded-full overflow-hidden">
+                                            <div className="h-full bg-green-500 rounded-full" style={{width: `${Math.max(3, (snapSizeGb / efficientInfo.total_disk_size_gb) * 100)}%`}}></div>
+                                        </div>
+                                    </div>
+                                    {/* Snapshot size input */}
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">
+                                            {t('snapshotSizeGb')} ({t('recommended')}: {efficientInfo.recommended_snap_size_gb?.toFixed(1)} GB)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={snapSizeGb}
+                                            onChange={(e) => setSnapSizeGb(parseFloat(e.target.value) || 1)}
+                                            min="1"
+                                            max={efficientInfo.vg_free_gb - 2}
+                                            step="1"
+                                            className="w-full px-3 py-1.5 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                        />
+                                    </div>
+                                    {/* Guest agent status */}
+                                    <div className={`text-xs flex items-center gap-1 ${efficientInfo.has_guest_agent ? 'text-green-400' : 'text-yellow-400'}`}>
+                                        {efficientInfo.has_guest_agent ? <Icons.CheckCircle /> : <Icons.AlertTriangle />}
+                                        {efficientInfo.has_guest_agent ? t('guestAgentDetected') : t('noGuestAgent')}
+                                    </div>
+                                    {/* Info text */}
+                                    <div className="text-xs text-gray-500 italic">
+                                        {t('managedByPegaprox')}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">{t('name')}</label>
+                                <input
+                                    type="text"
+                                    value={snapname}
+                                    onChange={(e) => setSnapname(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                    placeholder="snapshot-name"
+                                />
+                                {nameValidationError && (
+                                    <div className="text-xs mt-1 flex items-center gap-1 text-yellow-400">
+                                        <Icons.AlertTriangle className="w-3.5 h-3.5" />
+                                        <span>{nameValidationError}</span>
+                                    </div>
+                                )}
+                            </div>
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">{t('description')} ({t('optional')})</label>
+                                <input
+                                    type="text"
+                                    value={description}
+                                    onChange={(e) => setDescription(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                    placeholder={t('snapshotDescription')}
+                                />
+                            </div>
+                            {isQemu && !isEfficient && (
+                                <label className="flex items-center gap-2 text-sm text-gray-300">
+                                    <input
+                                        type="checkbox"
+                                        checked={vmstate}
+                                        onChange={(e) => setVmstate(e.target.checked)}
+                                        className="rounded"
+                                    />
+                                    {t('saveRamState')}
+                                </label>
+                            )}
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
+                                {t('cancel')}
+                            </button>
+                            <button
+                                onClick={handleSubmit}
+                                disabled={loading || !snapname.trim() || !!nameValidationError}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg text-white disabled:opacity-50 bg-green-600 hover:bg-green-700"
+                            >
+                                {loading && <Icons.RotateCw />}
+                                {isEfficient && <Icons.Zap />}
+                                {t('create')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Create Replication Modal
+        function CreateReplicationModal({ nodes, onSubmit, onClose, loading }) {
+            const { t } = useTranslation();
+            const [target, setTarget] = useState(nodes[0] || '');
+            const [schedule, setSchedule] = useState('*/15');
+            const [rate, setRate] = useState('');
+            const [comment, setComment] = useState('');
+
+            const scheduleOptions = [
+                { value: '*/5', label: t('every5min') },
+                { value: '*/15', label: t('every15min') },
+                { value: '*/30', label: t('every30min') },
+                { value: '0 *', label: t('hourly') },
+                { value: '0 */2', label: t('every2hours') },
+                { value: '0 */4', label: t('every4hours') },
+                { value: '0 */6', label: t('every6hours') },
+                { value: '0 */12', label: t('every12hours') },
+                { value: '0 0', label: t('daily') },
+            ];
+
+            const handleSubmit = () => {
+                if (!target) return;
+                onSubmit(target, schedule, rate ? parseInt(rate) : null, comment);
+            };
+
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('createReplicationJob')}</h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">{t('targetNode')}</label>
+                                <select
+                                    value={target}
+                                    onChange={(e) => setTarget(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                >
+                                    {nodes.map(n => <option key={n} value={n}>{n}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Schedule</label>
+                                <select
+                                    value={schedule}
+                                    onChange={(e) => setSchedule(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                >
+                                    {scheduleOptions.map(opt => (
+                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">{t('rateLimit')} ({t('optional')})</label>
+                                <input
+                                    type="number"
+                                    value={rate}
+                                    onChange={(e) => setRate(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                    placeholder={t('unlimited')}
+                                    min="1"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">{t('comment')} ({t('optional')})</label>
+                                <input
+                                    type="text"
+                                    value={comment}
+                                    onChange={(e) => setComment(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                    placeholder={t('commentPlaceholder')}
+                                />
+                            </div>
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">
+                                {t('cancel')}
+                            </button>
+                            <button
+                                onClick={handleSubmit}
+                                disabled={loading || !target}
+                                className="flex items-center gap-2 px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700 disabled:opacity-50"
+                            >
+                                {loading && <Icons.RotateCw />}
+                                {t('create')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Shared form components (defined outside ConfigModal to prevent re-creation)
+        // ns: could use a form library but this is fine for now
+        const ConfigInputField = ({ label, value, onChange, type = 'text', disabled = false, suffix = '', options = null, placeholder = '', needsRestart = false, t }) => (
+            <div>
+                <label className="block text-xs font-medium text-gray-400 mb-1">
+                    {label}
+                    {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
+                </label>
+                {options ? (
+                    <select
+                        value={value}
+                        onChange={e => onChange(e.target.value)}
+                        disabled={disabled}
+                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {options.map(opt => (
+                            <option key={typeof opt === 'string' ? opt : opt.value} value={typeof opt === 'string' ? opt : opt.value}>
+                                {typeof opt === 'string' ? opt : opt.label}
+                            </option>
+                        ))}
+                    </select>
+                ) : (
+                    <div className="relative">
+                        <input
+                            type={type}
+                            value={value}
+                            onChange={e => onChange(type === 'number' ? +e.target.value : e.target.value)}
+                            disabled={disabled}
+                            placeholder={placeholder}
+                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange disabled:opacity-50 disabled:cursor-not-allowed"
+                        />
+                        {suffix && (
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 text-sm">{suffix}</span>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+
+        // checkbox version
+        const ConfigCheckboxField = ({ label, checked, onChange, disabled = false, needsRestart = false, t }) => (
+            <label className="flex items-center gap-3 cursor-pointer">
+                <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={e => onChange(e.target.checked ? 1 : 0)}
+                    disabled={disabled}
+                    className="w-4 h-4 rounded border-proxmox-border bg-proxmox-dark text-proxmox-orange focus:ring-proxmox-orange"
+                />
+                <span className="text-sm text-gray-300">{label}</span>
+                {needsRestart && <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'RESTART'}</CrVcRestartBadge>}
+            </label>
+        );
+
+        // LW: Memory input with MB/GB unit selector - makes it easier to set RAM values
+        const MemoryInputField = ({ label, value, onChange, disabled = false, needsRestart = false, minMB = 128, stepMB = 128, t }) => {
+            // value is always in MB internally
+            const [unit, setUnit] = useState(value >= 1024 ? 'GB' : 'MB');
+            
+            const displayValue = unit === 'GB' ? (value / 1024) : value;
+            const step = unit === 'GB' ? 0.5 : stepMB;
+            const min = unit === 'GB' ? (minMB / 1024) : minMB;
+            
+            const handleValueChange = (newValue) => {
+                // Convert back to MB for storage
+                const mbValue = unit === 'GB' ? Math.round(newValue * 1024) : newValue;
+                onChange(mbValue);
+            };
+            
+            const handleUnitChange = (newUnit) => {
+                setUnit(newUnit);
+                // Value stays the same in MB, just display changes
+            };
+            
+            return (
+                <div>
+                    <label className="block text-xs font-medium text-gray-400 mb-1">
+                        {label}
+                        {needsRestart && <CrVcRestartBadge className="ml-2 text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t ? t('needsRestart') : 'NEEDS RESTART'}</CrVcRestartBadge>}
+                    </label>
+                    <div className="flex gap-2">
+                        <input
+                            type="number"
+                            value={displayValue}
+                            onChange={e => handleValueChange(parseFloat(e.target.value) || 0)}
+                            min={min}
+                            step={step}
+                            disabled={disabled}
+                            className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange disabled:opacity-50"
+                        />
+                        <select
+                            value={unit}
+                            onChange={e => handleUnitChange(e.target.value)}
+                            disabled={disabled}
+                            className="w-20 px-2 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                        >
+                            <option value="MB">MB</option>
+                            <option value="GB">GB</option>
+                        </select>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                        {unit === 'MB' ? `${(value / 1024).toFixed(1)} GB` : `${value} MB`}
+                    </p>
+                </div>
+            );
+        };

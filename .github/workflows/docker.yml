@@ -1,0 +1,251 @@
+name: Build Docker Image
+
+# MK: builds multi-arch image and pushes to ghcr.io
+# NS 2026-06-05 — only build on a released version tag (v*), NOT on every main
+# push. main moves constantly and we don't want a Docker image per commit; the
+# v* tag is pushed when a release is cut. workflow_dispatch stays as the manual
+# escape hatch (a dispatch from main still refreshes :latest via is_default_branch).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      copy_tag:
+        description: 'Skip the build and only copy this existing ghcr.io tag to Docker Hub (e.g. 1.4.0 or latest)'
+        type: string
+        default: ''
+
+# MK May 2026 — top-level permissions implicitly cascaded `packages: write`
+# into any future job added to this workflow. Aikido flagged it as overly
+# broad. Scope per-job instead so only build-and-push gets the GHCR write.
+permissions:
+  contents: read
+
+jobs:
+  build-and-push:
+    # a copy_tag run builds nothing, see the docker-hub job at the end
+    if: ${{ !inputs.copy_tag }}
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      base: ${{ steps.main.outputs.digest }}
+      final: ${{ steps.armtags.outputs.final }}
+    # MK May 2026 — minimum perms for the build:
+    #   contents: read   → actions/checkout@v4
+    #   packages: write  → docker/login-action@v3 + push to ghcr.io
+    # MK 2026-06-10 — dropped the gha layer cache (no-cache below) so every
+    # release rebuilds clean and `apt upgrade -y` always pulls the latest Debian
+    # security patches; the old cache had frozen a stale openssl into the image.
+    # That also makes the previous actions:write perm (cache export) unnecessary.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # NS 2026-05-30 — third-party actions pinned to commit SHA so a re-tag of
+      # the moving v4/v3/v5 reference (e.g. action repo compromise) can't smuggle
+      # malicious code into the release build. Comments after the SHA are the
+      # human-readable tag we resolved from at pin time; dependabot/renovate can
+      # bump these via PR.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # NS Oct 2026 (#982) - the two setup actions are pinned, but each pulls an image of its
+      # own (binfmt, buildkit) by a moving tag into a job that can push to GHCR. Pin those by
+      # digest as well; the tag in front of the digest is only for the reader.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          image: docker.io/tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/pegaprox/pegaprox
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # NS Oct 2026 - amd64 and arm64 go out first, under every tag. arm/v7 compiles about
+      # a dozen packages under emulation (50+ minutes) and used to hold the whole release
+      # image back, so it is built after this and added to the tags below.
+      - name: Build and push
+        id: main
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # MK 2026-06-10 — no cache: force a fresh build each release so the apt
+          # security upgrade re-runs and the published image never ships a stale
+          # openssl/libssl3 (Aikido CVE-2026-45447/7383 et al). Build is
+          # tag-triggered, so the full-rebuild cost is fine.
+          no-cache: true
+
+      # arm/v7 for 32-bit ARM hosts (a Raspberry Pi witness), pushed by digest only
+      - name: Build and push arm/v7
+        id: armv7
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          platforms: linux/arm/v7
+          outputs: type=image,name=ghcr.io/pegaprox/pegaprox,push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          no-cache: true
+
+      # A tag gets arm/v7 only while it still points at what this run pushed above, so a
+      # slow run cannot take back a latest that a newer release has moved on.
+      - name: Add arm/v7 to the tags
+        id: armtags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          BASE: ${{ steps.main.outputs.digest }}
+          ARM: ${{ steps.armv7.outputs.digest }}
+        run: |
+          set -euo pipefail
+          img=ghcr.io/pegaprox/pegaprox
+          # the platform images of an index, or the image itself; attestation entries left out
+          platforms() {
+            docker buildx imagetools inspect "$1" --raw \
+              | jq -r --arg self "${1##*@}" 'if .manifests then .manifests[] | select(.platform.os != "unknown") | .digest else $self end' \
+              | sort
+          }
+          base_p=$(platforms "$img@$BASE")
+          arm_p=$(platforms "$img@$ARM")
+          want=$(printf '%s\n%s\n' "$base_p" "$arm_p" | sort)
+          final=""
+          for tag in $TAGS; do
+            now=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+            if [ "$now" != "$BASE" ]; then
+              echo "$tag now points at $now, not at this run's $BASE - left as it is"
+              continue
+            fi
+            docker buildx imagetools create -t "$tag" "$img@$BASE" "$img@$ARM"
+            echo "$tag: amd64, arm64 and arm/v7"
+            # the index just written goes to the attest job, but only while the tag still
+            # holds this run's images and nothing else. Handed over right here, so a later
+            # tag failing the step does not cost this one its attestation
+            now=$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)
+            got=$(platforms "$img@$now")
+            if [ "$got" != "$want" ]; then
+              echo "$tag moved on to $now right away - not attested here"
+            elif [ -n "$final" ] && [ "$final" != "$now" ]; then
+              echo "::warning::$tag is $now, another tag of this run is $final - only $final is attested"
+            elif [ -z "$final" ]; then
+              final=$now
+              echo "final=$final" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  # NS Oct 2026 - signed build provenance (GitHub artifact attestations, logged with
+  # Sigstore) for the image indexes this run published. Anyone can check where an image
+  # came from with
+  #   gh attestation verify oci://ghcr.io/pegaprox/pegaprox:<version> -R PegaProx/project-pegaprox
+  # and Docker Hub serves the same digests, so docker.io/pegaprox/pegaprox checks the same
+  # way. Its own job, so the OIDC token that signs is never minted where the build runs.
+  # The amd64/arm64 index is attested as well: it is what the tags hold until arm/v7 is
+  # added, and for good on a tag that step never got to.
+  attest:
+    needs: build-and-push
+    if: ${{ !cancelled() && needs.build-and-push.outputs.base }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Attest the amd64/arm64 index
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/pegaprox/pegaprox
+          subject-digest: ${{ needs.build-and-push.outputs.base }}
+
+      - name: Attest the index with arm/v7
+        if: ${{ needs.build-and-push.outputs.final }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/pegaprox/pegaprox
+          subject-digest: ${{ needs.build-and-push.outputs.final }}
+
+  # NS Oct 2026 - Docker Hub (pegaprox/pegaprox) carries the same images as ghcr.io. Once the
+  # build above is done, its finished tags are copied over by digest, so a pull from either
+  # registry gets the identical manifest. Its own job, so the Docker Hub token is never in
+  # the job that runs the build. A manual run with copy_tag set skips the build and copies
+  # just that ghcr.io tag, for an older release or after a Docker Hub outage.
+  docker-hub:
+    needs: build-and-push
+    if: ${{ !cancelled() && (needs.build-and-push.result == 'success' || (needs.build-and-push.result == 'skipped' && inputs.copy_tag)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # reads the public ghcr.io package anonymously, writes only with the Docker Hub token
+    permissions: {}
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          # the account name is public; as a secret it would be masked out of every log line
+          # that says pegaprox
+          username: pegaprox
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy to Docker Hub
+        env:
+          COPY_TAG: ${{ inputs.copy_tag }}
+          TAGS: ${{ needs.build-and-push.outputs.tags }}
+          BASE: ${{ needs.build-and-push.outputs.base }}
+        run: |
+          set -euo pipefail
+          src=ghcr.io/pegaprox/pegaprox
+          dst=docker.io/pegaprox/pegaprox
+          # the platform images an index points at, or the image itself; the attestation
+          # entries next to them only follow their image
+          platforms() {
+            docker buildx imagetools inspect "$1" --raw \
+              | jq -r --arg self "${1##*@}" 'if .manifests then .manifests[] | select(.platform.os != "unknown") | .digest else $self end' \
+              | sort
+          }
+          if [ -n "$COPY_TAG" ]; then
+            if ! [[ $COPY_TAG =~ ^([0-9]+(\.[0-9]+){1,3}(-[0-9A-Za-z.]+)?|latest)$ ]]; then
+              echo "::error::copy_tag takes a release such as 1.4.0, or latest"
+              exit 1
+            fi
+            tags=$COPY_TAG
+          else
+            tags=$(for t in $TAGS; do echo "${t##*:}"; done)
+            mine=$(platforms "$src@$BASE")
+          fi
+          for t in $tags; do
+            now=$(docker buildx imagetools inspect "$src:$t" --format '{{json .Manifest}}' | jq -r .digest)
+            # as in the arm/v7 step: a tag a newer release has moved on is left alone. The
+            # lookup sits in its own assignment, a failed one inside <(...) would read as
+            # "moved on" and skip the tag with the job still green
+            if [ -z "$COPY_TAG" ]; then
+              theirs=$(platforms "$src@$now")
+              if [ -n "$(comm -23 <(echo "$mine") <(echo "$theirs"))" ]; then
+                echo "$t now points at $now, not at this run's build - not copied"
+                continue
+              fi
+            fi
+            docker buildx imagetools create -t "$dst:$t" "$src@$now"
+            got=$(docker buildx imagetools inspect "$dst:$t" --format '{{json .Manifest}}' | jq -r .digest)
+            if [ "$got" != "$now" ]; then
+              echo "::warning::$dst:$t is $got, ghcr.io has $now"
+            fi
+            echo "$dst:$t: $now"
+          done

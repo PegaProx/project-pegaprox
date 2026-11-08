@@ -1,0 +1,10 @@
+{
+    "id": "client_portal",
+    "name": "Client Portal",
+    "version": "1.0.0",
+    "author": "PegaProx Team",
+    "description": "Self-service portal for hosting customers. Clients see only their assigned VMs.",
+    "min_pegaprox": "0.9.4",
+    "has_frontend": true,
+    "frontend_route": "/portal"
+}

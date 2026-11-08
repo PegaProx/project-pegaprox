@@ -1,0 +1,49 @@
+Source: pegaprox
+Maintainer: Florian Paul Azim Hoberg <gyptazy@pegaprox.com>
+Homepage: https://pegaprox.com
+Section: web
+Priority: optional
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13)
+Rules-Requires-Root: no
+
+Package: pegaprox
+Architecture: all
+Depends: ${misc:Depends},
+         python3,
+         python3-dnspython,
+         python3-flask,
+         python3-flask-cors,
+         python3-flask-sock,
+         python3-flask-sockets,
+         python3-flask-compress,
+         python3-werkzeug,
+         python3-jwt,
+         python3-requests,
+         python3-requests-toolbelt,
+         python3-urllib3,
+         python3-cryptography,
+         python3-netifaces,
+         python3-openssl,
+         python3-argon2,
+         python3-paramiko,
+         python3-websockets,
+         python3-websocket,
+         python3-simple-websocket,
+         python3-wsproto,
+         python3-gevent,
+         python3-greenlet,
+         python3-gevent-websocket,
+         python3-pyotp,
+         python3-qrcode,
+         python3-pil,
+         python3-ldap3,
+         python3-pyvmomi,
+         python3-xenapi,
+         python3-defusedxml,
+         python3-sqlcipher3,
+         sqlcipher
+Description: Multi-Cluster Manager for Proxmox VE
+ PegaProx is a modern multi-cluster management platform for Proxmox VE.
+ It provides centralized cluster management, automation,
+ authentication integration, and real-time WebSocket-based operations.

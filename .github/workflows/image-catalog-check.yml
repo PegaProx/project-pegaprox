@@ -1,0 +1,43 @@
+name: Image catalog check
+
+# NS Oct 2026 - the cloud-init catalog (pegaprox/api/templates_lib.py) links straight to
+# distribution mirrors, and a release that reaches end of life simply vanishes from them:
+# Fedora 40 had been answering 404 long before anyone noticed. HEAD every image once a
+# week and whenever the catalog changes, and fail on a dead URL or an entry past its eol
+# date. The list is read from the source by the script, never copied in here.
+# Schedules run on the default branch, so the weekly run checks what was released; a
+# push or PR that touches the catalog is checked on its own branch.
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'   # Mondays 05:23 UTC
+  workflow_dispatch:
+  push:
+    paths:
+      - pegaprox/api/templates_lib.py
+      - scripts/check_image_catalog.py
+      - .github/workflows/image-catalog-check.yml
+  pull_request:
+    paths:
+      - pegaprox/api/templates_lib.py
+      - scripts/check_image_catalog.py
+      - .github/workflows/image-catalog-check.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-catalog-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false   # read-only job, nothing pushes
+      - name: HEAD every catalog image
+        # stdlib only: the script parses the catalog out of the source, no pip install needed
+        run: python3 scripts/check_image_catalog.py

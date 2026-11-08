@@ -1,0 +1,436 @@
+# PegaProx's own signed APT repository on GitHub Pages:
+#
+#   deb [signed-by=/etc/apt/keyrings/pegaprox.asc] https://apt.pegaprox.com trixie main
+#
+# NS Oct 2026 - from prototype to the real thing (packaging/apt/README.md has the whole
+# story). One job per privilege:
+#   build    no secret, read-only token. The pegaprox .deb from the source being released,
+#            python3-flask-sock and python3-xenapi from pinned wheels, then a smoke test:
+#            a repo of exactly these debs signed with a throwaway key, installed on plain
+#            trixie and booted.
+#   publish  holds the signing key and builds nothing. The pegaprox debs of the earlier
+#            releases (their provenance checked), this run's debs, signed dists/ + pool/.
+#   deploy   hands that to Pages, in the github-pages environment.
+#   attach   puts the new .deb on the release.
+#   attest   signs build provenance for the debs.
+# A published release runs all five; a pre-release gets its .deb and provenance but stays
+# out of the repo. A manual run from main republishes. A manual run from any other branch
+# is a dry run, build and smoke test only - that is how a change here is tried on Testing.
+name: apt repo
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Runs that publish queue behind each other, so a later one always sees the release asset
+# an earlier one attached. A dry run only waits for runs of its own branch.
+concurrency:
+  group: apt-repo-${{ (github.event_name == 'release' || github.ref == 'refs/heads/main') && 'publish' || github.ref }}
+  cancel-in-progress: false
+
+env:
+  # the 2026-10-05 build of debian:trixie; apt-get update inside brings today's packages
+  TRIXIE_IMAGE: docker.io/library/debian:trixie-20261005@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5
+  SITE_URL: https://apt.pegaprox.com
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      deb: ${{ steps.ver.outputs.deb }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Version
+        id: ver
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          upstream=$(python3 -I -c 'import json; print(json.load(open("version.json"))["version"])')
+          deb=$(bash packaging/apt/deb-version.sh "$upstream")
+          # a release ships what its tag says. A tag that is not version.json's version would
+          # put a package into the repo under a version it is not, for good
+          if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "v$upstream" ] && [ "$RELEASE_TAG" != "$upstream" ]; then
+            echo "::error::release $RELEASE_TAG, but version.json says $upstream"
+            exit 1
+          fi
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
+          echo "pegaprox $upstream is packaged as $deb"
+
+      - name: Changelog entry for this version
+        env:
+          UPSTREAM: ${{ steps.ver.outputs.upstream }}
+          DEB_VERSION: ${{ steps.ver.outputs.deb }}
+        run: |
+          set -euo pipefail
+          # dated with the commit, so building the same commit again gives the same entry
+          when=$(git log -1 --format=%ct)
+          {
+            printf 'pegaprox (%s) trixie; urgency=medium\n\n' "$DEB_VERSION"
+            printf '  * PegaProx %s, built from %s.\n\n' "$UPSTREAM" "$(git rev-parse --short=12 HEAD)"
+            printf ' -- PegaProx Team <apt@pegaprox.com>  %s\n\n' "$(LC_ALL=C TZ=UTC date -R -d "@$when")"
+            cat debian/changelog
+          } > "$RUNNER_TEMP/changelog"
+          mv "$RUNNER_TEMP/changelog" debian/changelog
+          head -n 6 debian/changelog
+
+      - name: Build the debs on trixie
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wheels" "$RUNNER_TEMP/debs"
+          # exactly the pinned wheels, and nothing they would pull in
+          python3 -m pip download --disable-pip-version-check --no-cache-dir --isolated \
+            --no-deps --require-hashes --only-binary=:all: --index-url https://pypi.org/simple \
+            -r packaging/apt/python-debs/requirements.txt -d "$RUNNER_TEMP/wheels"
+          # the script goes in as an argument, not on stdin: whatever reads stdin in there
+          # would read the rest of the script (#973)
+          docker run --rm \
+            -v "$PWD:/build/src" -v "$RUNNER_TEMP/wheels:/build/wheels:ro" -v "$RUNNER_TEMP/debs:/build/out" \
+            -w /build/src -e IDS="$(id -u):$(id -g)" -e DEBIAN_FRONTEND=noninteractive \
+            "$TRIXIE_IMAGE" bash -euo pipefail -c '
+              apt-get update -q
+              apt-get install -y -q --no-install-recommends build-essential debhelper python3
+              dpkg-buildpackage -b -us -uc
+              cp ../pegaprox_*_all.deb /build/out/
+              python3 -I packaging/apt/build-python-debs.py /build/wheels /build/out
+              chown -R "$IDS" /build/out /build/src
+            ' </dev/null
+
+      - name: Check the debs
+        env:
+          DEB_VERSION: ${{ steps.ver.outputs.deb }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/debs"
+          [ -f "pegaprox_${DEB_VERSION}_all.deb" ] || { echo "::error::no pegaprox_${DEB_VERSION}_all.deb"; ls -l; exit 1; }
+          for d in *.deb; do
+            echo "== $d"
+            dpkg-deb -f "$d" Package Version Architecture Depends
+            if dpkg-deb -c "$d" | grep -E '\.py[co]$|/__pycache__/'; then
+              echo "::error::$d ships compiled Python"
+              exit 1
+            fi
+          done
+          sha256sum ./*.deb
+
+      - name: Smoke test - install on plain trixie from a throwaway-signed repo and boot it
+        env:
+          DEB_VERSION: ${{ steps.ver.outputs.deb }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q apt-utils systemd-container
+          smoke=$RUNNER_TEMP/smoke
+          mkdir -p "$smoke/in"
+          cp packaging/apt/deb_imports.py "$smoke/in/"
+
+          # a key that lives for this step only; the real one never comes near this job
+          export GNUPGHOME=$smoke/gnupg
+          mkdir -m 700 "$GNUPGHOME"
+          gpg --batch --quiet --pinentry-mode loopback --passphrase '' \
+            --quick-gen-key 'PegaProx smoke test (throwaway) <smoke@invalid>' ed25519 sign 1d
+          fpr=$(gpg --list-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')
+          gpg --armor --export "$fpr" > "$smoke/in/key.asc"
+          bash packaging/apt/build-apt-repo.sh "$RUNNER_TEMP/debs" "$smoke/repo" "$fpr"
+          gpgconf --kill gpg-agent
+          rm -rf "$GNUPGHOME"
+
+          python3 -m http.server 8079 --bind 127.0.0.1 --directory "$smoke/repo" > "$smoke/http.log" 2>&1 &
+          http_pid=$!
+          trap 'kill "$http_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 20); do curl -fs -o /dev/null http://127.0.0.1:8079/dists/trixie/InRelease && break; sleep 1; done
+
+          docker run --name pegaprox-smoke --network host \
+            -v "$smoke/in/key.asc:/smoke/key.asc:ro" -v "$smoke/in/deb_imports.py:/smoke/deb_imports.py:ro" \
+            -v "$PWD/packaging/apt/smoke-install.sh:/smoke/install.sh:ro" \
+            "$TRIXIE_IMAGE" bash /smoke/install.sh "$DEB_VERSION" </dev/null
+
+          # boot the installed tree, the way release-images.yml smoke-tests the LXC template
+          root=$smoke/rootfs
+          sudo mkdir -p "$root"
+          docker export pegaprox-smoke | sudo tar -xp -C "$root"
+          docker rm pegaprox-smoke >/dev/null
+          sudo rm -f "$root/.dockerenv"
+          sudo systemd-nspawn -D "$root" --machine pegaprox-smoke --boot --bind-ro=/etc/resolv.conf 2>&1 \
+            | tee "$smoke/nspawn.log" > /dev/null &
+
+          ok=0
+          for _ in $(seq 1 36); do
+            if curl -kfsS -o "$smoke/answer.html" "https://127.0.0.1:5000/" 2>/dev/null \
+               || curl -fsS -o "$smoke/answer.html" "http://127.0.0.1:5000/" 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+
+          echo "----- pegaprox.service"
+          sudo journalctl -M pegaprox-smoke -u pegaprox.service --no-pager -n 150 || tail -n 60 "$smoke/nspawn.log"
+          echo "----- what PegaProx says about its database (no sqlcipher3 in Debian)"
+          timeout 60 sudo systemd-run -M pegaprox-smoke --wait --pipe --quiet -p User=pegaprox \
+            -p WorkingDirectory=/var/lib/pegaprox /usr/bin/pegaprox/pegaprox-wrapper --keystore-status || true
+          sudo machinectl poweroff pegaprox-smoke 2>/dev/null || true
+          for _ in $(seq 1 30); do sudo machinectl status pegaprox-smoke >/dev/null 2>&1 || break; sleep 1; done
+          sudo machinectl terminate pegaprox-smoke 2>/dev/null || true
+
+          [ "$ok" -eq 1 ] || { echo "::error::PegaProx did not answer on port 5000"; exit 1; }
+          grep -qi pegaprox "$smoke/answer.html" || { echo "::error::port 5000 answered, but not with PegaProx"; exit 1; }
+          echo "Smoke test passed: pegaprox $DEB_VERSION installs from trixie plus this repo and answers on 5000."
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apt-debs
+          path: ${{ runner.temp }}/debs/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Dry run
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: echo "::notice::dry run from $GITHUB_REF_NAME - built and smoke-tested, nothing published"
+
+  publish:
+    needs: build
+    # Only a published release (not a pre-release) or a manual run from main. The job runs
+    # the scripts of its checkout with the signing key, and a dispatch can come from any
+    # branch: keyed on the event as well as the ref, because a release's ref is a tag and
+    # tags can be moved.
+    if: >-
+      (github.event_name == 'release' && !github.event.release.prerelease)
+      || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # NS Oct 2026 - APT_GPG_PRIVATE_KEY is a secret of this environment, not of the repo,
+    # and the environment only deploys from main and v* tags. A workflow file pushed to
+    # any other branch therefore cannot read the key, whatever its own if: says.
+    environment: apt-signing
+    permissions:
+      contents: read       # release assets
+      attestations: read   # provenance of the earlier releases' debs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apt-debs
+          path: ${{ runner.temp }}/new
+
+      - name: Tools
+        run: command -v apt-ftparchive >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q apt-utils; }
+
+      # NS Oct 2026 - Pages caps a site at 1 GB and a pegaprox deb is about 10 MB, so the repo
+      # carries the newest earlier releases next to this one, ten versions in all. Every older
+      # deb stays downloadable from its GitHub release.
+      - name: The pegaprox debs of earlier releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ github.event.release.tag_name }}
+          KEEP_EARLIER: 9
+        run: |
+          set -euo pipefail
+          pool=$RUNNER_TEMP/pool
+          mkdir -p "$pool"
+          kept=0
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | select(.prerelease | not) | {tag: .tag_name, name: .assets[].name}
+                  | select(.name | test("^pegaprox_[0-9][0-9A-Za-z.+~]*_all\\.deb$")) | "\(.tag)\t\(.name)"' \
+            > "$RUNNER_TEMP/assets.tsv"
+          # the releases API lists the newest first
+          while IFS=$'\t' read -r tag name; do
+            [ "$tag" = "$CURRENT_TAG" ] && continue
+            if [ "$kept" -ge "$KEEP_EARLIER" ]; then
+              echo "$tag: $name stays on its release page only"
+              continue
+            fi
+            dl=$(mktemp -d "$RUNNER_TEMP/dl.XXXXXX")
+            gh release download "$tag" -R "$GITHUB_REPOSITORY" -p "$name" -D "$dl"
+            # Only what this workflow built for that very tag gets signed. Anyone who can
+            # write to the repo can add an asset to an old release; without this the next
+            # publish would sign it.
+            if ! gh attestation verify "$dl/$name" -R "$GITHUB_REPOSITORY" \
+                 --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/apt-repo.yml" \
+                 --source-ref "refs/tags/$tag" --deny-self-hosted-runners > /dev/null; then
+              echo "::warning::$tag: $name has no build provenance from apt-repo.yml for that tag - left out of the repo"
+              continue
+            fi
+            if [ "$(dpkg-deb -f "$dl/$name" Package)" != pegaprox ] || [ -e "$pool/$name" ]; then
+              echo "::warning::$tag: $name is not a pegaprox package or a second copy - left out"
+              continue
+            fi
+            mv "$dl/$name" "$pool/"
+            kept=$((kept + 1))
+            echo "$tag: $name"
+          done < "$RUNNER_TEMP/assets.tsv"
+
+      - name: This run's debs
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          pool=$RUNNER_TEMP/pool
+          for f in "$RUNNER_TEMP"/new/*.deb; do
+            name=$(basename "$f")
+            if [ -e "$pool/$name" ]; then
+              cmp -s "$f" "$pool/$name" && continue
+              # a version that is out keeps its bytes; on main that is the normal case, a
+              # release that collides with an earlier one is a version nobody bumped
+              if [ "$EVENT" = release ]; then
+                echo "::error::an earlier release already ships $name"
+                exit 1
+              fi
+              echo "::notice::$name is already released, the released file stays"
+              continue
+            fi
+            cp "$f" "$pool/"
+          done
+          ls -l "$pool"
+
+      - name: Import the signing key
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$APT_GPG_PRIVATE_KEY" ] || { echo "::error::secret APT_GPG_PRIVATE_KEY is not set"; exit 1; }
+          GNUPGHOME=$(mktemp -d "$RUNNER_TEMP/gnupg.XXXXXX")
+          export GNUPGHOME
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s\n' "$APT_GPG_PRIVATE_KEY" | gpg --batch --quiet --import
+          # the secret has to hold the key users pin with signed-by, and nothing else
+          want=$(gpg --show-keys --with-colons packaging/apt/pegaprox-archive-keyring.asc \
+                 | awk -F: '$1 == "fpr" && prev == "pub" { print $10 } { prev = $1 }')
+          have=$(gpg --list-secret-keys --with-colons \
+                 | awk -F: '$1 == "fpr" && prev == "sec" { print $10 } { prev = $1 }')
+          if ! [[ $want =~ ^[0-9A-F]{40}$ ]] || [ "$have" != "$want" ]; then
+            echo "::error::APT_GPG_PRIVATE_KEY holds '${have//$'\n'/ }', packaging/apt/pegaprox-archive-keyring.asc is '${want//$'\n'/ }'"
+            exit 1
+          fi
+          echo "APT_SIGN_KEY=$have" >> "$GITHUB_ENV"
+          echo "signing with $have"
+
+      - name: Sign the repository
+        run: |
+          set -euo pipefail
+          site=$RUNNER_TEMP/site
+          bash packaging/apt/build-apt-repo.sh "$RUNNER_TEMP/pool" "$site" "$APT_SIGN_KEY" \
+            packaging/apt/pegaprox-archive-keyring.asc
+          echo "${SITE_URL#https://}" > "$site/CNAME"
+          # what apt on a user's host does: both signatures against the committed key only
+          gpg --dearmor < packaging/apt/pegaprox-archive-keyring.asc > "$RUNNER_TEMP/pinned.gpg"
+          gpgv --keyring "$RUNNER_TEMP/pinned.gpg" "$site/dists/trixie/InRelease"
+          gpgv --keyring "$RUNNER_TEMP/pinned.gpg" "$site/dists/trixie/Release.gpg" "$site/dists/trixie/Release"
+          {
+            echo "### apt.pegaprox.com"
+            echo
+            echo '| package | version |'
+            echo '|---|---|'
+            awk -F': ' '$1 == "Package" { p = $2 } $1 == "Version" { print "| " p " | " $2 " |" }' \
+              "$site/dists/trixie/main/binary-all/Packages"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Forget the key
+        if: always()
+        run: |
+          if [ -n "${GNUPGHOME:-}" ]; then
+            gpgconf --kill gpg-agent || true
+            rm -rf "$GNUPGHOME"
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apt-site
+          path: ${{ runner.temp }}/site
+          if-no-files-found: error
+          retention-days: 7
+
+  # Pages gets the signed tree in a job of its own, so the key and the Pages/OIDC
+  # token never share a job. upload-pages-artifact is a composite action; v4.0.0 pins
+  # the upload-artifact it calls by commit (v3 still took it by tag). Check that again
+  # before bumping it.
+  deploy:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apt-site
+          path: site
+
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+  attach:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apt-debs
+          path: debs
+
+      - name: Put the .deb on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          DEB: pegaprox_${{ needs.build.outputs.deb }}_all.deb
+        run: |
+          set -euo pipefail
+          sum=$(sha256sum "debs/$DEB" | cut -d' ' -f1)
+          have=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+                 --jq '.assets[] | select(.name == env.DEB) | (.digest // "unknown")')
+          if [ -z "$have" ]; then
+            gh release upload "$TAG" "debs/$DEB" -R "$GITHUB_REPOSITORY"
+          elif [ "$have" = "sha256:$sum" ]; then
+            echo "$TAG already carries this $DEB"
+          else
+            # the attested file and the one people download must stay the same
+            echo "::error::$TAG already carries a different $DEB ($have), it is not replaced"
+            exit 1
+          fi
+
+  # Signed provenance (GitHub artifact attestations, Sigstore) for every deb of the release:
+  #   gh attestation verify pegaprox_<version>_all.deb -R PegaProx/project-pegaprox
+  # The publish job of later releases checks the pegaprox one the same way before it signs it.
+  attest:
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apt-debs
+          path: debs
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: debs/*.deb

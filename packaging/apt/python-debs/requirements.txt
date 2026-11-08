@@ -1,0 +1,9 @@
+# The two libraries pegaprox depends on that trixie does not package. apt-repo.yml fetches
+# exactly these wheels with `pip download --require-hashes --no-deps --only-binary=:all:`
+# and packaging/apt/build-python-debs.py turns each into an arch-all .deb for the repo.
+# A bump changes the version line AND the hash; take the hash from the wheel on PyPI and
+# leave a new upstream release two weeks before pulling it in.
+flask-sock==0.7.0 \
+    --hash=sha256:caac4d679392aaf010d02fabcf73d52019f5bdaf1c9c131ec5a428cb3491204a
+xenapi==26.20.0 \
+    --hash=sha256:552ecfb2840060afd5891f2f3ba8f176023fae0c19105e3f62c440ead01886f6

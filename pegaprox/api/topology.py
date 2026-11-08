@@ -1,0 +1,254 @@
+# -*- coding: utf-8 -*-
+"""
+Network Topology — MK May 2026.
+
+Aggregates Proxmox cluster network topology into a single graph payload the
+UI can render with plain SVG (no D3 / cytoscape dep). The frontend draws a
+hierarchical layout:
+
+    cluster
+       │
+    ┌──┴──┬──────┬──────┐
+   node1 node2  node3  ...
+    │
+   ┌┴────┬──────┬──────┐
+  bond0 vmbr0 vmbr1   ...      (NICs / bridges / bonds)
+    │
+   VM1  VM2  VM3                (qemu/lxc connected to that bridge)
+
+Returns:
+    {
+      'cluster': {id, name},
+      'nodes': [{id, kind, label, parent_id?, meta?}, ...],
+      'links': [{source, target, kind?}, ...],
+    }
+
+`kind`: cluster | node | bridge | bond | sdn_vnet | vm | ct
+"""
+import logging
+from flask import Blueprint, jsonify, request
+
+from pegaprox.globals import cluster_managers
+from pegaprox.utils.auth import require_auth
+from pegaprox.api.helpers import check_cluster_access, scope_vm_rows, caller_guest_nodes
+
+bp = Blueprint('topology', __name__)
+
+
+def _net_state_for_node(mgr, node):
+    """Return the per-node network list (bridges, bonds, eth, etc.)."""
+    try:
+        url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/network"
+        r = mgr._api_get(url)
+        if r and r.status_code == 200:
+            return r.json().get('data') or []
+    except Exception as e:
+        logging.debug(f"[topology] {node} network fetch failed: {e}")
+    return []
+
+
+def _vm_net_bridges(vm_cfg):
+    """Extract bridge names from a VM/CT config dict (net0..netN keys)."""
+    bridges = []
+    for k, v in (vm_cfg or {}).items():
+        if not k.startswith('net'): continue
+        try:
+            for part in str(v).split(','):
+                part = part.strip()
+                if part.startswith('bridge='):
+                    bridges.append(part.split('=', 1)[1])
+        except Exception:
+            continue
+    return bridges
+
+
+@bp.route('/api/clusters/<cluster_id>/topology', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def topology(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    # MK Nov 2026 - a confined caller gets the nodes their own guests run on, with their
+    # bridges, and the SDN vnets those guests are attached to. Decided before the per-node
+    # network reads, so such a caller fans out to their own nodes only
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[topology] cannot read the caller's guests on {cluster_id}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+
+    # NS Jul 2026 (pentest DoS) — building the topology fires one PVE /config roundtrip
+    # per guest (O(N) at 1000+ VMs) and is reachable by any cluster.view holder. The
+    # diagram changes slowly, so serve a 30s TTL cache to bound how often a low-priv
+    # caller can drive that N+1 (full coverage kept; only frequency bounded).
+    # sec (audit): the cache used to hold the FINISHED payload, which is caller-dependent
+    # (scope_vm_rows below) — one shared slot on a process-global manager, so whoever built it
+    # first decided what everyone saw for the next 30s. An admin's build handed the full guest
+    # inventory to the next pool-scoped caller; a scoped caller's build truncated the admin's
+    # diagram. Cache only the caller-INDEPENDENT half — the per-guest /config lookups that are
+    # the actual N+1 — and assemble the graph per request, after scoping.
+    import time as _t
+    _now = _t.monotonic()
+    _cfg_cache = getattr(mgr, '_topology_cfg_cache', None)
+    if not isinstance(_cfg_cache, dict) or (_now - getattr(mgr, '_topology_cfg_time', 0.0)) >= 30.0:
+        _cfg_cache = {}
+        mgr._topology_cfg_cache = _cfg_cache
+        mgr._topology_cfg_time = _now
+
+    nodes_out = []
+    links_out = []
+
+    cluster_label = getattr(getattr(mgr, 'config', None), 'name', cluster_id) or cluster_id
+    nodes_out.append({'id': f'cluster:{cluster_id}', 'kind': 'cluster',
+                      'label': cluster_label})
+
+    # ── PVE Nodes
+    try:
+        pve_nodes = list((mgr.nodes or {}).keys())
+    except Exception:
+        pve_nodes = []
+    if mine is not None:
+        pve_nodes = [n for n in pve_nodes if n in mine]
+
+    # ── per-node bridges/bonds
+    bridges_by_node = {}  # node -> list of {iface, type, ports?, vlan_aware?, address?}
+    for node in pve_nodes:
+        node_id = f'node:{node}'
+        node_meta = {}
+        try:
+            ndata = (mgr.nodes or {}).get(node) or {}
+            node_meta = {
+                'cpu_pct': round((ndata.get('cpu', 0) or 0) * 100, 1),
+                'maxcpu': ndata.get('maxcpu', 0),
+                'mem_pct': round((ndata.get('mem', 0) or 0) / max(ndata.get('maxmem', 1), 1) * 100, 1),
+                'status': ndata.get('status', 'unknown'),
+            }
+        except Exception:
+            pass
+        nodes_out.append({'id': node_id, 'kind': 'node', 'label': node,
+                          'parent_id': f'cluster:{cluster_id}', 'meta': node_meta})
+        links_out.append({'source': f'cluster:{cluster_id}', 'target': node_id, 'kind': 'tree'})
+
+        bridges = []
+        for nic in _net_state_for_node(mgr, node):
+            t = nic.get('type', '')
+            iface = nic.get('iface', '')
+            if not iface: continue
+            if t in ('bridge', 'bond', 'OVSBridge', 'OVSBond'):
+                bridges.append({
+                    'iface': iface,
+                    'type': t,
+                    'ports': (nic.get('bridge_ports') or nic.get('slaves') or '').split() if nic.get('bridge_ports') or nic.get('slaves') else [],
+                    'address': nic.get('address') or nic.get('cidr') or '',
+                    'vlan_aware': bool(nic.get('bridge_vlan_aware')),
+                })
+                br_id = f'br:{node}:{iface}'
+                nodes_out.append({'id': br_id, 'kind': 'bridge' if t.endswith('Bridge') or t == 'bridge' else 'bond',
+                                  'label': iface, 'parent_id': node_id, 'meta': {
+                                      'address': nic.get('address') or nic.get('cidr') or '',
+                                      'type': t, 'vlan_aware': bool(nic.get('bridge_vlan_aware')),
+                                      'ports': (nic.get('bridge_ports') or nic.get('slaves') or ''),
+                                  }})
+                links_out.append({'source': node_id, 'target': br_id, 'kind': 'has-iface'})
+        bridges_by_node[node] = bridges
+
+    # ── SDN VNets (cluster-wide, may attach to any node's vmbr)
+    held_vnets = {}     # a confined caller's: added once one of their guests is attached
+    try:
+        url = f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/sdn/vnets"
+        r = mgr._api_get(url)
+        if r and r.status_code == 200:
+            for v in (r.json().get('data') or []):
+                vnet = v.get('vnet') or v.get('name')
+                if not vnet: continue
+                vid = f'sdn:{vnet}'
+                entry = {'id': vid, 'kind': 'sdn_vnet', 'label': vnet,
+                         'parent_id': f'cluster:{cluster_id}', 'meta': {
+                             'zone': v.get('zone', ''),
+                             'tag': v.get('tag'),
+                             'alias': v.get('alias'),
+                         }}
+                if mine is not None:
+                    held_vnets[vid] = entry
+                    continue
+                nodes_out.append(entry)
+                links_out.append({'source': f'cluster:{cluster_id}', 'target': vid, 'kind': 'sdn'})
+    except Exception as e:
+        logging.debug(f"[topology] sdn fetch failed: {e}")
+
+    # MK Nov 2026 - the ids a guest link may point at. Looking each one up in nodes_out,
+    # which holds every guest by then, made the links O(guests x graph): 4 s of CPU on the
+    # hub at 10k guests on SDN vnets
+    link_targets = {n['id'] for n in nodes_out if n['kind'] in ('bridge', 'bond', 'sdn_vnet')}
+    link_targets.update(held_vnets)
+
+    # ── VMs / CTs grouped under their bridge
+    try:
+        # NS Jul 2026 (pentest DoS) — reuse the broadcast loop's cached snapshot
+        # (max_age) instead of a fresh cluster walk on every topology request.
+        resources = mgr.get_vm_resources(max_age=6) or []
+    except Exception:
+        resources = []
+    # #773 audit — the topology graph enumerates every VM/CT (id/name/status/tags); scope it to
+    # the caller so a pool-/ACL-scoped user sees only their VMs, not the whole cluster's guests.
+    resources = scope_vm_rows(cluster_id, resources)
+    for r in resources:
+        if r.get('type') not in ('qemu', 'lxc'): continue
+        node = r.get('node')
+        vmid = r.get('vmid')
+        if not node or vmid is None: continue
+        vm_kind = 'vm' if r.get('type') == 'qemu' else 'ct'
+        vm_id = f"{vm_kind}:{vmid}"
+        nodes_out.append({'id': vm_id, 'kind': vm_kind,
+                          'label': r.get('name') or str(vmid),
+                          'parent_id': f'node:{node}',
+                          'meta': {
+                              'vmid': vmid,
+                              'status': r.get('status'),
+                              'tags': r.get('tags') or '',
+                          }})
+
+        # fetch VM config to get net0/net1/... — cached per guest for the TTL above, so a
+        # second caller within the window costs no PVE roundtrips
+        _ck = (r['type'], vmid)
+        if _ck in _cfg_cache:
+            _brs = _cfg_cache[_ck]
+        else:
+            try:
+                cfg_url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{r['type']}/{vmid}/config"
+                cfg_resp = mgr._api_get(cfg_url)
+                cfg = cfg_resp.json().get('data') if cfg_resp and cfg_resp.status_code == 200 else {}
+            except Exception:
+                cfg = {}
+            _brs = list(_vm_net_bridges(cfg))
+            _cfg_cache[_ck] = _brs
+        for br_name in _brs:
+            # Try matching to a same-node bridge first; fall back to any node's
+            br_target = f'br:{node}:{br_name}'
+            if br_target not in link_targets:
+                # might be an SDN vnet
+                sdn_target = f'sdn:{br_name}'
+                if sdn_target in link_targets:
+                    br_target = sdn_target
+                else:
+                    # bridge wasn't seen — skip (could be on another node we didn't fully scan)
+                    continue
+            if br_target in held_vnets:
+                nodes_out.append(held_vnets.pop(br_target))
+                links_out.append({'source': f'cluster:{cluster_id}', 'target': br_target, 'kind': 'sdn'})
+            links_out.append({'source': vm_id, 'target': br_target, 'kind': 'attached'})
+
+    payload = {
+        'cluster': {'id': cluster_id, 'name': cluster_label},
+        'nodes': nodes_out,
+        'links': links_out,
+        'counts': {
+            'nodes': len(pve_nodes),
+            'bridges': sum(len(b) for b in bridges_by_node.values()),
+            'vms': len([r for r in resources if r.get('type') == 'qemu']),
+            'cts': len([r for r in resources if r.get('type') == 'lxc']),
+        },
+    }
+    return jsonify(payload)

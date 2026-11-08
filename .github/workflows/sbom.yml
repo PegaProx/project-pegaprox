@@ -1,0 +1,84 @@
+name: Release SBOM
+
+# NS Oct 2026 - a software bill of materials (CycloneDX 1.6 JSON) attached to every
+# published release, for those who build PegaProx into a product and have duties under
+# the Cyber Resilience Act. It lists the Python packages a fresh install of the release
+# resolves and the browser libraries the web UI loads (.github/scripts/release_sbom.py).
+# Public and informational: the same file for everyone, no support or warranty with it.
+# workflow_dispatch fills in a release published before this workflow existed; that bill
+# resolves the Python packages as of the day it runs, and says when.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.4.0)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    # contents: write only to attach the file to the release
+    permissions:
+      contents: write
+    steps:
+      - id: tag
+        name: Release tag
+        # the tag comes in through env, never as ${{ }} inside the script, and only a
+        # release-shaped tag goes on
+        env:
+          RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          T="${RELEASE_TAG_NAME:-$INPUT_TAG}"
+          # the whole value has to match: grep would pass a tag whose second line is
+          # another key=value for GITHUB_OUTPUT
+          re='^v?[0-9]+(\.[0-9]+){1,3}([-.][0-9A-Za-z.]+)?$'
+          if ! [[ "$T" =~ $re ]]; then
+            echo "Not a release tag: $T" >&2
+            exit 1
+          fi
+          echo "tag=$T" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install the release's Python dependencies and the SBOM tool
+        run: |
+          set -euo pipefail
+          python3 -m venv /tmp/rt
+          /tmp/rt/bin/pip install --disable-pip-version-check -q -r requirements.txt
+          python3 -m venv /tmp/tools
+          /tmp/tools/bin/pip install --disable-pip-version-check -q 'cyclonedx-bom==7.5.0'
+
+      - name: Build the bill
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          /tmp/tools/bin/cyclonedx-py environment --sv 1.6 --of JSON -o /tmp/py.cdx.json /tmp/rt/bin/python
+          python3 .github/scripts/release_sbom.py --python-bom /tmp/py.cdx.json --tag "$TAG" \
+            --root . --out "pegaprox-${TAG}.cdx.json"
+          /tmp/tools/bin/python - "pegaprox-${TAG}.cdx.json" <<'EOF'
+          import sys
+          from cyclonedx.schema import SchemaVersion
+          from cyclonedx.validation.json import JsonStrictValidator
+          err = JsonStrictValidator(SchemaVersion.V1_6).validate_str(open(sys.argv[1], encoding='utf-8').read())
+          if err is not None:
+              sys.exit(f'invalid CycloneDX: {err}')
+          print('valid CycloneDX 1.6')
+          EOF
+
+      - name: Attach it to the release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" "pegaprox-${TAG}.cdx.json" --clobber

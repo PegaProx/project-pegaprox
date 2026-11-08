@@ -1,0 +1,979 @@
+# -*- coding: utf-8 -*-
+"""
+Snapshot Scheduling — NS May 2026.
+
+Lightweight scheduler that fires `mgr.create_snapshot()` on a repeating
+schedule against a list of VMIDs or a tag, with retention pruning. This
+sits BETWEEN the existing one-shot snapshot endpoint (`/api/clusters/<id>
+/vms/.../snapshots POST`) and the heavyweight PBS backup system — perfect
+for "give me the last 24h of hourly snapshots on my prod DB without
+copying GBs to PBS every hour."
+
+Schedules:
+  - hourly:  every full hour
+  - daily:   once per day at schedule_at (HH:MM)
+  - weekly:  once per Sunday at schedule_at
+  - monthly: once per month on schedule_day at schedule_at   (#586)
+  - once:    a single run at run_once_at (ISO datetime), then never again   (#586)
+  - cron:    a 5-field cron expression in schedule_cron       (#586)
+
+Mode:
+  - prune_only: skip creating snapshots, only run retention pruning   (#586)
+
+Targets:
+  - vm:  comma-separated list of VMIDs
+  - tag: VMs whose Proxmox tag matches target_value (substring match)
+
+Retention:
+  - retention_count > 0: keep only the last N snapshots created BY THIS POLICY
+                         (named pegaprox-<policy-id>-<ts>)
+  - retention_days > 0:  also prune snapshots older than N days
+"""
+import json
+import time
+import uuid
+import logging
+import calendar
+import threading
+from datetime import datetime, timedelta
+from flask import Blueprint, jsonify, request
+
+from pegaprox.globals import cluster_managers
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
+from pegaprox.api.helpers import check_cluster_access, xapi_permission_missing
+from pegaprox.core.db import get_db
+from pegaprox.core import ha
+from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.models.permissions import ROLE_ADMIN
+
+bp = Blueprint('snapshot_schedule', __name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────
+
+def _current_user():
+    try:
+        u = request.session.get('user') if hasattr(request, 'session') else ''
+        if isinstance(u, dict): return u.get('username', '') or ''
+        return u or ''
+    except Exception:
+        return ''
+
+
+def _current_token_role():
+    """The role of the API token behind this request, '' for a signed-in session. NS Oct 2026 -
+    kept with the policy, so a scheduled run is judged as that token and not as its owner (#1073)"""
+    try:
+        s = request.session
+        return str(s.get('role') or '') if s.get('api_token') else ''
+    except Exception:
+        return ''
+
+
+def _row_to_policy(r):
+    return {
+        'id': r['id'],
+        'cluster_id': r['cluster_id'],
+        'name': r['name'],
+        'target_type': r['target_type'],
+        'target_value': r['target_value'],
+        'schedule': r['schedule'],
+        'schedule_at': r['schedule_at'] or '03:00',
+        'schedule_cron': (r['schedule_cron'] or '') if 'schedule_cron' in r.keys() else '',
+        'schedule_day': (r['schedule_day'] or 1) if 'schedule_day' in r.keys() else 1,
+        'run_once_at': (r['run_once_at'] or '') if 'run_once_at' in r.keys() else '',
+        'prune_only': bool(r['prune_only']) if 'prune_only' in r.keys() else False,
+        'retention_count': r['retention_count'] or 0,
+        'retention_days': r['retention_days'] or 0,
+        'include_ram': bool(r['include_ram']),
+        'enabled': bool(r['enabled']),
+        'last_run_at': r['last_run_at'],
+        'last_run_status': r['last_run_status'] or '',
+        'notes': r['notes'] or '',
+        'created_by': r['created_by'] or '',
+        'created_at': r['created_at'],
+    }
+
+
+class TargetResolutionFailed(Exception):
+    """The cluster could not say what this policy points at.
+
+    MK Sep 2026 - this used to be an empty target list, and both the create and the
+    update handler authorize a policy by walking its resolved targets: no targets
+    means nothing to deny, so a failed inventory fetch let a policy be pointed at VMs
+    the caller cannot touch without a single check running. The offline branch of the
+    update handler already fails closed for a scoped caller; this makes the
+    manager-is-here-but-did-not-answer case behave the same way.
+    """
+
+
+def _resolve_targets(mgr, policy):
+    """Return list of (node, vmid, vm_type) tuples that match the policy.
+
+    Raises TargetResolutionFailed when the inventory could not be read - an empty
+    list means "nothing matches", never "I could not look".
+    """
+    targets = []
+    try:
+        resources = mgr.get_vm_resources() or []
+    except Exception as e:
+        logging.warning(f"[snap-sched] get_vm_resources failed: {e}")
+        raise TargetResolutionFailed(str(e)) from e
+
+    if policy['target_type'] == 'vm':
+        wanted = {x.strip() for x in (policy['target_value'] or '').split(',') if x.strip()}
+        for r in resources:
+            vid = str(r.get('vmid', ''))
+            t = r.get('type')
+            n = r.get('node')
+            if t in ('qemu', 'lxc') and vid in wanted and n:
+                targets.append((n, int(vid), t))
+    elif policy['target_type'] == 'tag':
+        wanted_tag = (policy['target_value'] or '').strip().lower()
+        if not wanted_tag:
+            return targets
+        for r in resources:
+            tags_str = (r.get('tags') or '').lower()
+            tag_set = {t.strip() for t in tags_str.split(';') if t.strip()}
+            if r.get('type') in ('qemu', 'lxc') and wanted_tag in tag_set and r.get('node'):
+                targets.append((r['node'], int(r['vmid']), r['type']))
+    return targets
+
+
+# NS #586 — small self-contained cron matcher so we don't pull in croniter.
+# 5 fields: "min hour dom month dow". Supports *, lists (a,b), ranges (a-b),
+# and steps (*/n, a-b/n). dow: 0 or 7 = Sunday.
+def _cron_field(field, value, lo, hi):
+    field = field.strip()
+    if field == '*':
+        return True
+    for part in field.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        rng = part
+        if '/' in part:
+            rng, _, st = part.partition('/')
+            try:
+                step = int(st)
+            except ValueError:
+                continue
+            if step <= 0:
+                continue
+        if rng == '*':
+            start, end = lo, hi
+        elif '-' in rng:
+            a, _, b = rng.partition('-')
+            try:
+                start, end = int(a), int(b)
+            except ValueError:
+                continue
+        else:
+            try:
+                start = end = int(rng)
+            except ValueError:
+                continue
+        if start > end:
+            continue
+        if value < start or value > end:
+            continue
+        if (value - start) % step == 0:
+            return True
+    return False
+
+
+def _cron_match(expr, dt):
+    """True if dt matches the 5-field cron expr. A malformed expr never fires."""
+    if not expr:
+        return False
+    parts = expr.split()
+    if len(parts) != 5:
+        return False
+    mn, hr, dom, mon, dow = parts
+    cron_dow = (dt.weekday() + 1) % 7  # python Mon=0..Sun=6 -> cron Sun=0..Sat=6
+    if not _cron_field(mn, dt.minute, 0, 59):
+        return False
+    if not _cron_field(hr, dt.hour, 0, 23):
+        return False
+    if not _cron_field(mon, dt.month, 1, 12):
+        return False
+    dom_restricted = dom.strip() != '*'
+    dow_restricted = dow.strip() != '*'
+    dom_ok = _cron_field(dom, dt.day, 1, 31)
+    dow_ok = _cron_field(dow, cron_dow, 0, 7) or (cron_dow == 0 and _cron_field(dow, 7, 0, 7))
+    # standard cron rule: if both DOM and DOW are restricted, match either
+    if dom_restricted and dow_restricted:
+        return dom_ok or dow_ok
+    if dom_restricted:
+        return dom_ok
+    if dow_restricted:
+        return dow_ok
+    return True
+
+
+def _valid_cron(expr):
+    """Structural check for a 5-field cron expr (charset only — _cron_match does
+    the real evaluation, and a non-matching/garbage expr simply never fires)."""
+    parts = (expr or '').split()
+    if len(parts) != 5:
+        return False
+    allowed = set('0123456789*,/-')
+    return all(p and set(p) <= allowed for p in parts)
+
+
+def _is_due(policy, now=None):
+    """Check whether the policy should fire right now. Idempotent: also reads
+    last_run_at to avoid double-fires when the scheduler wakes during the
+    same minute."""
+    # the group's zone when this instance is in one, so a failover does not shift a
+    # schedule; datetime.now() on an instance of its own (#625)
+    now = now or ha.schedule_now()
+    last_run = policy['last_run_at']
+    last_dt = None
+    if last_run:
+        try:
+            last_dt = datetime.fromisoformat(last_run)
+        except Exception:
+            last_dt = None
+
+    sch = (policy['schedule'] or 'daily').lower()
+    if sch == 'hourly':
+        # fire at the top of each hour
+        if now.minute > 5: return False  # only within first 5 min of the hour
+        if last_dt and (now - last_dt).total_seconds() < 3000: return False  # 50 min guard
+        return True
+
+    # #586 — cron + once don't use schedule_at, so handle them before that gate
+    if sch == 'cron':
+        if not _cron_match(policy.get('schedule_cron') or '', now): return False
+        # loop ticks ~every 60s — guard a double-fire inside the same minute
+        if last_dt and (now - last_dt).total_seconds() < 55: return False
+        return True
+    if sch == 'once':
+        once_at = (policy.get('run_once_at') or '').strip()
+        if not once_at: return False
+        if last_dt is not None: return False  # already fired once → never again
+        try:
+            once_dt = datetime.fromisoformat(once_at)
+        except Exception:
+            return False
+        return now >= once_dt
+
+    # daily / weekly / monthly use schedule_at HH:MM
+    schedule_at = (policy['schedule_at'] or '03:00').strip()
+    try:
+        hh, mm = [int(x) for x in schedule_at.split(':', 1)]
+    except Exception:
+        hh, mm = 3, 0
+    if not (now.hour == hh and 0 <= now.minute - mm < 5):
+        return False
+    if sch == 'daily':
+        if last_dt and (now - last_dt).total_seconds() < 23 * 3600: return False
+        return True
+    if sch == 'weekly':
+        # fire on Sunday (weekday == 6)
+        if now.weekday() != 6: return False
+        if last_dt and (now - last_dt).total_seconds() < 6 * 24 * 3600: return False
+        return True
+    if sch == 'monthly':
+        # #586 — once per month on schedule_day (hour/minute already gated above).
+        # clamp to the month's length so day=31 still fires on Feb 28/29, Apr 30, etc.
+        # (otherwise "run on the 31st" silently skips ~5 months a year).
+        try:
+            day = int(policy.get('schedule_day') or 1)
+        except Exception:
+            day = 1
+        day = max(1, min(31, day))
+        dim = calendar.monthrange(now.year, now.month)[1]
+        if now.day != min(day, dim): return False
+        if last_dt and (now - last_dt).total_seconds() < 27 * 24 * 3600: return False
+        return True
+    return False
+
+
+def _snap_name(policy_id):
+    """Deterministic prefix so retention can find policy-owned snapshots."""
+    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+    safe = (policy_id or 'pol')[:12]
+    return f"pegaprox-{safe}-{ts}"
+
+
+def _prune(mgr, node, vmid, vm_type, policy):
+    """Delete snapshots owned by this policy beyond retention. Owned =
+    name starts with `pegaprox-<policy_id_prefix>-`."""
+    pruned = 0
+    # JB Nov 2026 - both off is no rule at all, not a rule that nothing stays: the edit form can save it, and
+    # the next run then took every snapshot of this policy, the one it had just made too
+    if policy['retention_count'] <= 0 and policy['retention_days'] <= 0:
+        return pruned
+    prefix = f"pegaprox-{policy['id'][:12]}-"
+    try:
+        snaps = mgr.list_snapshots(node, vmid, vm_type) if hasattr(mgr, 'list_snapshots') else []
+    except Exception:
+        snaps = []
+    if not snaps:
+        # fallback: list via direct API
+        try:
+            url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot"
+            resp = mgr._api_get(url)
+            if resp and resp.status_code == 200:
+                snaps = resp.json().get('data') or []
+        except Exception:
+            snaps = []
+
+    owned = []
+    for s in snaps:
+        name = s.get('name') or ''
+        if not name.startswith(prefix): continue
+        snap_t = s.get('snaptime', 0)
+        owned.append((snap_t, name))
+    owned.sort(reverse=True)  # newest first
+
+    keep_set = set()
+    if policy['retention_count'] > 0:
+        for _, name in owned[:policy['retention_count']]:
+            keep_set.add(name)
+    cutoff = 0
+    if policy['retention_days'] > 0:
+        cutoff = (datetime.now() - timedelta(days=policy['retention_days'])).timestamp()
+
+    for snap_t, name in owned:
+        if name in keep_set:
+            continue
+        if cutoff and snap_t >= cutoff:
+            keep_set.add(name)
+            continue
+        # delete this snapshot: not from a leader that lost its lease (#625)
+        if not ha.confirm_step(f'pruning {name} of {vmid}'):
+            break
+        try:
+            if hasattr(mgr, 'delete_snapshot'):
+                mgr.delete_snapshot(node, vmid, vm_type, name)
+            else:
+                url = f"https://{mgr.host}:{mgr.api_port}/api2/json/nodes/{node}/{vm_type}/{vmid}/snapshot/{name}"
+                mgr._api_delete(url)
+            pruned += 1
+        except Exception as e:
+            logging.warning(f"[snap-sched] prune delete failed for {name}: {e}")
+    return pruned
+
+
+def _execute_policy(policy_id, force=False):
+    """Run one policy. Persists a row in snapshot_runs. force=True runs even a
+    disabled policy (used by the manual 'run now' button — #586)."""
+    db = get_db()
+    c = db.conn.cursor()
+    c.execute('SELECT * FROM snapshot_policies WHERE id = ?', (policy_id,))
+    row = c.fetchone()
+    if not row:
+        return
+    policy = _row_to_policy(row)
+    if not policy['enabled'] and not force:
+        return
+
+    # #586 — a 'once' policy must fire exactly once. Stamp last_run_at up front so
+    # an early exit below (e.g. the cluster manager being temporarily gone) can't
+    # leave it un-stamped and have the 60s scheduler re-dispatch it every tick.
+    # The final UPDATE just refreshes last_run_at with the real finish time/status.
+    if policy['schedule'] == 'once':
+        try:
+            c.execute("UPDATE snapshot_policies SET last_run_at=? WHERE id=?",
+                      (ha.schedule_now().isoformat(), policy_id))
+            db.conn.commit()
+        except Exception:
+            pass
+
+    started_at = datetime.now().isoformat()
+    c.execute(
+        '''INSERT INTO snapshot_runs (policy_id, started_at, status)
+           VALUES (?, ?, 'running')''',
+        (policy_id, started_at)
+    )
+    run_id = c.lastrowid
+    db.conn.commit()
+
+    log_lines = []
+    created = 0
+    failed = 0
+    pruned_total = 0
+    skipped_authz = 0
+
+    mgr = cluster_managers.get(policy['cluster_id'])
+    if not mgr:
+        log_lines.append('cluster manager not found')
+        c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                     WHERE id=?''',
+                  (datetime.now().isoformat(), '\n'.join(log_lines), 'no manager', run_id))
+        db.conn.commit()
+        return
+
+    try:
+        targets = _resolve_targets(mgr, policy)
+    except TargetResolutionFailed as e:
+        # do not snapshot a guessed target set
+        log_lines.append(f'could not resolve targets: {e}')
+        c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?, summary=?
+                     WHERE id=?''',
+                  (datetime.now().isoformat(), '\n'.join(log_lines),
+                   'target resolution failed', run_id))
+        db.conn.commit()
+        return
+    log_lines.append(f"resolved {len(targets)} target VMs")
+
+    # MK Jun 2026 (sec-review): a tag/all-VMs policy must only snapshot VMs its creator
+    # can actually touch — otherwise a vm.snapshot holder could tag-target VMs they can't
+    # see. Resolve the creator once; legacy policies with no recorded creator keep running
+    # unfiltered (don't break existing automation), we just can't scope them.
+    policy_creator = None
+    creator_name = policy.get('created_by', '')
+    if creator_name:
+        try:
+            policy_creator = load_users().get(creator_name)
+            if policy_creator:
+                policy_creator['username'] = creator_name
+                _token_role = row['created_role'] if 'created_role' in row.keys() else ''
+                if _token_role:
+                    # NS Oct 2026 - written through an API token: the run is that token (#1073)
+                    from pegaprox.utils.auth import apply_token_role
+                    policy_creator = apply_token_role(policy_creator, _token_role)
+            else:
+                # MK Sep 2026 - this said "per-VM authz not applied" and then ran the
+                # policy over every resolved target. An off-boarded account's policy
+                # therefore kept snapshotting VMs its creator was never allowed to
+                # touch. require_auth() already fails closed on a deleted account; a
+                # policy acting in that account's name has to do the same.
+                log_lines.append(f"creator '{creator_name}' no longer exists - refusing to run "
+                                 f"this policy unscoped")
+                c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?,
+                             summary=? WHERE id=?''',
+                          (datetime.now().isoformat(), '\n'.join(log_lines),
+                           'policy creator no longer exists', run_id))
+                db.conn.commit()
+                return
+        except Exception as e:
+            log_lines.append(f"could not load the creator to scope this run: {e}")
+            c.execute('''UPDATE snapshot_runs SET status='failed', finished_at=?, log=?,
+                         summary=? WHERE id=?''',
+                      (datetime.now().isoformat(), '\n'.join(log_lines),
+                       'creator lookup failed', run_id))
+            db.conn.commit()
+            return
+    else:
+        log_lines.append('policy has no recorded creator — per-VM authz not applied (legacy policy)')
+
+    prune_only = bool(policy.get('prune_only'))
+    if prune_only:
+        log_lines.append('prune-only policy — not creating new snapshots, retention sweep only')
+    _xapi_missing = policy_creator and xapi_permission_missing(policy['cluster_id'], policy_creator,
+                                                                'vm.snapshot')
+    for node, vmid, vm_type in targets:
+        if _xapi_missing:
+            skipped_authz += 1
+            log_lines.append(f"  ⊘ {vm_type}/{vmid}@{node}: skipped (creator lacks {_xapi_missing})")
+            continue
+        if policy_creator and not user_can_access_vm(policy_creator, policy['cluster_id'], vmid, 'vm.snapshot', vm_type):
+            skipped_authz += 1
+            log_lines.append(f"  ⊘ {vm_type}/{vmid}@{node}: skipped (creator lacks vm.snapshot)")
+            continue
+        # #586 — prune-only: skip create, just sweep this policy's old snapshots
+        if prune_only:
+            try:
+                pruned = _prune(mgr, node, vmid, vm_type, policy)
+                if pruned:
+                    pruned_total += pruned
+                    log_lines.append(f"  ⌫ {vm_type}/{vmid}@{node}: pruned {pruned} old snapshot(s)")
+            except Exception as e:
+                log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: prune err: {e}")
+            continue
+        snap = _snap_name(policy['id'])
+        create_ok = False
+        if not ha.confirm_step(f"snapshot policy {policy['name']} on {vmid}"):
+            log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: not taken - this instance does not hold the lease")
+            break
+        try:
+            res = mgr.create_snapshot(node, vmid, vm_type, snap, f"PegaProx policy {policy['name']}", policy['include_ram'])
+            if res.get('success'):
+                # MK May 2026 (#436 aalandez): create_snapshot returns success as soon
+                # as PVE accepts the request and the task starts — NOT when it
+                # completes. While the create task runs, PVE holds the VM at
+                # `lock = snapshot`. If we issued the retention-delete immediately,
+                # it would hit "VM is locked (snapshot)" and fail. Block on the
+                # task UPID first so the lock has been released before _prune runs.
+                task_upid = res.get('task')
+                if task_upid and hasattr(mgr, '_wait_for_task'):
+                    try:
+                        finished_ok = mgr._wait_for_task(node, task_upid, timeout=600)
+                        if not finished_ok:
+                            log_lines.append(
+                                f"    ⚠ create task for {snap} did not finish OK — "
+                                f"prune may still race the lock; check task log"
+                            )
+                    except Exception as wait_err:
+                        log_lines.append(f"    wait-for-create-task failed (non-fatal): {wait_err}")
+                created += 1
+                create_ok = True
+                log_lines.append(f"  ✓ {vm_type}/{vmid}@{node} → {snap}")
+            else:
+                failed += 1
+                log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: {res.get('error', 'unknown')}")
+        except Exception as e:
+            failed += 1
+            log_lines.append(f"  ✗ {vm_type}/{vmid}@{node}: exception: {e}")
+            continue
+        # Only attempt prune when create actually succeeded — otherwise we
+        # might silently prune the wrong policy's snapshots if the VM is
+        # already locked from something else.
+        if not create_ok:
+            continue
+        try:
+            pruned = _prune(mgr, node, vmid, vm_type, policy)
+            if pruned:
+                pruned_total += pruned
+                log_lines.append(f"    pruned {pruned} old snapshot(s)")
+        except Exception as e:
+            log_lines.append(f"    prune err: {e}")
+
+    finished_at = datetime.now().isoformat()
+    status = 'completed' if failed == 0 else ('partial' if created > 0 else 'failed')
+    summary = f"{created} created · {failed} failed · {pruned_total} pruned · {skipped_authz} authz-skipped · {len(targets)} targets"
+
+    c.execute('''UPDATE snapshot_runs SET status=?, finished_at=?, log=?, summary=?,
+                 snapshots_created=?, snapshots_failed=?, snapshots_pruned=?
+                 WHERE id=?''',
+              (status, finished_at, '\n'.join(log_lines), summary,
+               created, failed, pruned_total, run_id))
+    # last_run_at is what _is_due counts from, on the same clock as its `now`
+    c.execute('''UPDATE snapshot_policies SET last_run_at=?, last_run_status=? WHERE id=?''',
+              (ha.schedule_now().isoformat() if ha.group_timezone() else finished_at,
+               status, policy['id']))
+    db.conn.commit()
+
+    try:
+        log_audit('system', 'snapshot.policy_run',
+                  f"policy '{policy['name']}': {summary}",
+                  cluster=mgr.config.name if hasattr(mgr, 'config') else policy['cluster_id'])
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Background scheduler
+# ──────────────────────────────────────────────────────────────────────────
+
+_scheduler_running = False
+_scheduler_lock = threading.Lock()
+
+
+def _scheduler_loop():
+    while _scheduler_running:
+        try:
+            db = get_db()
+            c = db.conn.cursor()
+            c.execute("SELECT * FROM snapshot_policies WHERE enabled = 1")
+            for row in c.fetchall():
+                p = _row_to_policy(row)
+                # a standby takes no snapshots, the policies run on the active instance
+                if _is_due(p) and ha.is_active():
+                    try:
+                        _execute_policy(p['id'])
+                    except Exception as e:
+                        logging.warning(f"[snap-sched] policy {p['id']} run failed: {e}")
+        except Exception as e:
+            logging.debug(f"[snap-sched] loop iter err: {e}")
+        # check every 60s
+        for _ in range(60):
+            if not _scheduler_running:
+                return
+            time.sleep(1)
+
+
+def start_scheduler():
+    global _scheduler_running
+    with _scheduler_lock:
+        if _scheduler_running:
+            return
+        _scheduler_running = True
+    t = threading.Thread(target=_scheduler_loop, daemon=True, name='snapshot-scheduler')
+    t.start()
+    logging.info("[snap-sched] scheduler thread started (60s tick)")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Endpoints
+# ──────────────────────────────────────────────────────────────────────────
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies', methods=['GET'])
+@require_auth(perms=['vm.snapshot'])
+def list_policies(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    try:
+        c = get_db().conn.cursor()
+        c.execute('SELECT * FROM snapshot_policies WHERE cluster_id=? ORDER BY created_at DESC', (cluster_id,))
+        _pols = [_row_to_policy(r) for r in c.fetchall()]
+        # sec (audit): a policy names the guests it snapshots, and every other route on this
+        # object is per-target gated — the listing was not, so a scoped caller read the whole
+        # cluster's policies. Same predicate the run-log route already uses.
+        from pegaprox.utils.auth import build_authz_user
+        from pegaprox.api.helpers import caller_is_scoped
+        if caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session),
+                            cluster_id):
+            _pols = [p for p in _pols if _policy_targets_authorized(cluster_id, p, 'vm.view')]
+        return jsonify({'policies': _pols})
+    except Exception:
+        logging.exception('snapshot policies list failed')
+        return jsonify({'error': 'internal error'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies', methods=['POST'])
+@require_auth(perms=['vm.snapshot'])
+def create_policy(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    body = request.get_json(silent=True) or {}
+    name = (body.get('name') or '').strip()[:80]
+    target_type = body.get('target_type') or 'tag'
+    target_value = (body.get('target_value') or '').strip()[:300]
+    schedule = body.get('schedule') or 'daily'
+    schedule_at = (body.get('schedule_at') or '03:00')[:5]
+    schedule_cron = (body.get('schedule_cron') or '').strip()[:120]
+    try:
+        schedule_day = max(1, min(31, int(body.get('schedule_day') or 1)))
+    except (TypeError, ValueError):
+        schedule_day = 1
+    run_once_at = (body.get('run_once_at') or '').strip()[:32]
+    prune_only = bool(body.get('prune_only'))
+    retention_count = max(0, int(body.get('retention_count') or 7))
+    retention_days = max(0, int(body.get('retention_days') or 0))
+    include_ram = bool(body.get('include_ram'))
+    enabled = bool(body.get('enabled', True))
+    notes = (body.get('notes') or '')[:500]
+
+    if not name or not target_value:
+        return jsonify({'error': 'name and target_value required'}), 400
+    if target_type not in ('vm', 'tag'):
+        return jsonify({'error': 'target_type must be vm or tag'}), 400
+    if schedule not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
+        return jsonify({'error': 'invalid schedule'}), 400
+    if schedule == 'cron' and not _valid_cron(schedule_cron):
+        return jsonify({'error': 'cron schedule needs a valid 5-field expression in schedule_cron'}), 400
+    if schedule == 'once':
+        try:
+            datetime.fromisoformat(run_once_at)
+        except Exception:
+            return jsonify({'error': 'once schedule needs run_once_at as an ISO datetime'}), 400
+
+    # MK: a creator can only point a policy at VMs they could snapshot by hand
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    _missing = xapi_permission_missing(cluster_id, creator, 'vm.snapshot')
+    if _missing:
+        return jsonify({'error': f'Permission denied: {_missing}'}), 403
+    try:
+        denied = [f"{t}/{v}@{n}" for n, v, t in _resolve_targets(mgr, {
+                      'target_type': target_type, 'target_value': target_value, 'cluster_id': cluster_id})
+                  if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    if denied:
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) creating a policy on {cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
+    pid = uuid.uuid4().hex[:12]
+    try:
+        c = get_db().conn.cursor()
+        c.execute('''INSERT INTO snapshot_policies
+            (id, cluster_id, name, target_type, target_value, schedule, schedule_at,
+             schedule_cron, schedule_day, run_once_at, prune_only,
+             retention_count, retention_days, include_ram, enabled, notes,
+             created_by, created_role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (pid, cluster_id, name, target_type, target_value, schedule, schedule_at,
+             schedule_cron, schedule_day, run_once_at, 1 if prune_only else 0,
+             retention_count, retention_days, 1 if include_ram else 0, 1 if enabled else 0,
+             notes, _current_user(), _current_token_role(), datetime.now().isoformat()))
+        get_db().conn.commit()
+        c.execute('SELECT * FROM snapshot_policies WHERE id=?', (pid,))
+        return jsonify({'policy': _row_to_policy(c.fetchone())})
+    except Exception:
+        logging.exception('create snapshot policy failed')
+        return jsonify({'error': 'internal error'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies/<pid>', methods=['PUT'])
+@require_auth(perms=['vm.snapshot'])
+def update_policy(cluster_id, pid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    body = request.get_json(silent=True) or {}
+
+    # sec (private disclosure Sep 2026 — audit): ALWAYS re-validate the caller against the policy's
+    # target VMs, not only when the body changes targeting — else a bare {"enabled":0} could edit a
+    # policy whose targets are out of scope. Effective target = new value if supplied, else the stored
+    # one. Resolve via the live manager when present; when the cluster is OFFLINE, authorize a direct-VM
+    # target by its vmid (no round-trip) and fail closed for a scoped caller on a tag target we can't
+    # expand — but NEVER 404 a non-targeting edit just because the manager is momentarily absent.
+    cc = get_db().conn.cursor()
+    cc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    row0 = cc.fetchone()
+    if not row0:
+        return jsonify({'error': 'not found'}), 404
+    cur = _row_to_policy(row0)
+    tt = body.get('target_type', cur['target_type'])
+    tv = body.get('target_value', cur['target_value'])
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    _missing = xapi_permission_missing(cluster_id, creator, 'vm.snapshot')
+    if _missing:
+        return jsonify({'error': f'Permission denied: {_missing}'}), 403
+    mgr = cluster_managers.get(cluster_id)
+    # NS Oct 2026 - a retarget answers for the guests the policy had as well as for the new
+    # ones, and the policy then runs as whoever retargeted it, not as its old creator (#1011)
+    retarget = (str(tt), str(tv)[:300]) != (cur['target_type'], cur['target_value'])
+    denied = []
+    _walk = [(tt, tv)] + ([(cur['target_type'], cur['target_value'])] if retarget else [])
+    for _i, (_tt, _tvv) in enumerate(_walk):
+        if mgr:
+            try:
+                _targets = _resolve_targets(mgr, {
+                    'target_type': _tt, 'target_value': _tvv, 'cluster_id': cluster_id})
+                denied += [f"{t}/{v}@{n}" for n, v, t in _targets
+                           if not user_can_access_vm(creator, cluster_id, v, 'vm.snapshot', t)]
+            except Exception as e:
+                return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+            # the stored target is walked last. A new target may match nothing yet, the
+            # stored one matching nothing does not make the policy the caller's
+            if not _targets and _i == len(_walk) - 1:
+                from pegaprox.api.helpers import caller_is_scoped
+                if caller_is_scoped(creator, cluster_id) and not _empty_policy_is_callers(creator, cluster_id, cur):
+                    denied.append('<no current target>')
+        else:
+            _tv = str(_tvv).strip()
+            if str(_tt).lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
+                denied += [] if user_can_access_vm(creator, cluster_id, int(_tv), 'vm.snapshot') else [_tv]
+            else:
+                from pegaprox.api.helpers import caller_is_scoped
+                denied += ['<unresolved: cluster offline>'] if caller_is_scoped(creator, cluster_id) else []
+    if denied:
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) updating policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
+    # #586 — validate the new schedule fields when present
+    if body.get('schedule') and body['schedule'] not in ('hourly', 'daily', 'weekly', 'monthly', 'once', 'cron'):
+        return jsonify({'error': 'invalid schedule'}), 400
+    if body.get('schedule_cron') and not _valid_cron(body['schedule_cron']):
+        return jsonify({'error': 'invalid cron expression'}), 400
+    if body.get('run_once_at'):
+        try:
+            datetime.fromisoformat(body['run_once_at'])
+        except Exception:
+            return jsonify({'error': 'run_once_at must be an ISO datetime'}), 400
+
+    fields = []; params = []
+    for k, t in (('name', str), ('target_type', str), ('target_value', str),
+                 ('schedule', str), ('schedule_at', str), ('schedule_cron', str),
+                 ('run_once_at', str), ('notes', str)):
+        if k in body:
+            fields.append(f'{k}=?')
+            params.append(str(body[k])[:300])
+    if 'schedule_day' in body:
+        try:
+            fields.append('schedule_day=?'); params.append(max(1, min(31, int(body['schedule_day']))))
+        except (TypeError, ValueError):
+            pass
+    if 'prune_only' in body:
+        fields.append('prune_only=?'); params.append(1 if body['prune_only'] else 0)
+    if 'retention_count' in body:
+        fields.append('retention_count=?'); params.append(int(body['retention_count']))
+    if 'retention_days' in body:
+        fields.append('retention_days=?'); params.append(int(body['retention_days']))
+    if 'include_ram' in body:
+        fields.append('include_ram=?'); params.append(1 if body['include_ram'] else 0)
+    if 'enabled' in body:
+        fields.append('enabled=?'); params.append(1 if body['enabled'] else 0)
+    if not fields:
+        return jsonify({'error': 'nothing to update'}), 400
+    if retarget:
+        fields += ['created_by=?', 'created_role=?']
+        params += [_current_user(), _current_token_role()]
+    params.extend([pid, cluster_id])
+    try:
+        c = get_db().conn.cursor()
+        c.execute(f"UPDATE snapshot_policies SET {','.join(fields)} WHERE id=? AND cluster_id=?", params)
+        get_db().conn.commit()
+        if c.rowcount == 0:
+            return jsonify({'error': 'not found'}), 404
+        c.execute('SELECT * FROM snapshot_policies WHERE id=?', (pid,))
+        return jsonify({'policy': _row_to_policy(c.fetchone())})
+    except Exception:
+        logging.exception('update snapshot policy failed')
+        return jsonify({'error': 'internal error'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies/<pid>', methods=['DELETE'])
+@require_auth(perms=['vm.snapshot'])
+def delete_policy(cluster_id, pid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    # sec-report 2026-08-17 (BOLA): the cluster gate above can pass via the VM-ACL
+    # fallback, so re-check the caller against the policy's targets before the
+    # DELETE — a scoped user must not remove retention policies protecting VMs
+    # outside their scope. Mirror update_policy's target re-validation.
+    dc = get_db().conn.cursor()
+    dc.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    prow = dc.fetchone()
+    if not prow:
+        return jsonify({'error': 'not found'}), 404
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    _pol = _row_to_policy(prow)
+    try:
+        _targets = _resolve_targets(mgr, _pol)
+        denied = [f"{t}/{v}@{n}" for n, v, t in _targets
+                  if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    from pegaprox.api.helpers import caller_is_scoped
+    if not _targets and caller_is_scoped(caller, cluster_id) and not _empty_policy_is_callers(caller, cluster_id, _pol):
+        denied = ['<no current target>']
+    if denied:
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) for policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
+    try:
+        c = get_db().conn.cursor()
+        c.execute('DELETE FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+        get_db().conn.commit()
+        if c.rowcount == 0:
+            return jsonify({'error': 'not found'}), 404
+        return jsonify({'ok': True})
+    except Exception:
+        logging.exception('delete snapshot policy failed')
+        return jsonify({'error': 'internal error'}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies/<pid>/run', methods=['POST'])
+@require_auth(perms=['vm.snapshot'])
+def run_policy_now(cluster_id, pid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # verify it exists + belongs to this cluster
+    c = get_db().conn.cursor()
+    c.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+    prow = c.fetchone()
+    if not prow:
+        return jsonify({'error': 'not found'}), 404
+
+    # sec-report 2026-08-17 (BOLA): _execute_policy gates each VM against the policy
+    # CREATOR's access, not the caller's — so a scoped user could force-run a policy
+    # covering VMs outside their grant. Re-check the CALLER against the policy targets
+    # here before dispatch (ACL-scope-wins), mirroring create/update_policy.
+    mgr = cluster_managers.get(cluster_id)
+    if not mgr:
+        return jsonify({'error': 'cluster manager not found'}), 404
+    caller = build_authz_user(request.session.get('user', ''), request.session)
+    _missing = xapi_permission_missing(cluster_id, caller, 'vm.snapshot')
+    if _missing:
+        return jsonify({'error': f'Permission denied: {_missing}'}), 403
+    _pol = _row_to_policy(prow)
+    try:
+        _targets = _resolve_targets(mgr, _pol)
+        denied = [f"{t}/{v}@{n}" for n, v, t in _targets
+                  if not user_can_access_vm(caller, cluster_id, v, 'vm.snapshot', t)]
+    except Exception as e:
+        return jsonify({'error': f'failed to resolve targets: {e}'}), 400
+    # a policy that matches nothing right now: same rule as for its run log
+    from pegaprox.api.helpers import caller_is_scoped
+    if not _targets and caller_is_scoped(caller, cluster_id) and not _empty_policy_is_callers(caller, cluster_id, _pol):
+        denied = ['<no current target>']
+    if denied:
+        # don't echo the specific out-of-scope VM identifiers back — that would disclose the
+        # existence/ids of VMs the caller has no access to (info leak). Log server-side only.
+        logging.warning(f"[SNAP-POLICY] {request.session.get('user','?')} denied on {len(denied)} out-of-scope target VM(s) for policy {pid}@{cluster_id}")
+        return jsonify({'error': "Permission denied: you lack vm.snapshot on some of this policy's target VMs"}), 403
+
+    # fire in a thread so the request returns fast. force=True so 'run now' works
+    # even on a disabled policy (#586 — run without having to enable the schedule).
+    t = threading.Thread(target=_execute_policy, args=(pid, True), daemon=True,
+                         name=f'snap-run-{pid}')
+    t.start()
+    return jsonify({'ok': True, 'message': 'policy run started'})
+
+
+def _empty_policy_is_callers(caller, cluster_id, policy, perm='vm.snapshot'):
+    """A policy whose targets resolve to nothing right now: may this scoped caller have it?
+
+    MK Oct 2026 - the walks over the resolved targets had nothing to deny on such a policy,
+    so a confined caller read the run log of a policy whose guests had left it, and could
+    edit, delete or run it. Now it is theirs when they made it, or when it names guests by
+    vmid and they may reach each of them. A tag no longer says which guests it had."""
+    owner = policy.get('created_by') or ''
+    if owner and owner == _current_user():
+        return True
+    if str(policy.get('target_type') or '').lower() not in ('vm', 'vmid'):
+        return False
+    ids = [x.strip() for x in str(policy.get('target_value') or '').split(',') if x.strip()]
+    return bool(ids) and all(i.isdigit() and user_can_access_vm(caller, cluster_id, int(i), perm)
+                             for i in ids)
+
+
+def _policy_targets_authorized(cluster_id, policy, perm='vm.snapshot'):
+    """sec (private disclosure Sep 2026 — audit): may the caller see/act on this policy's target
+    VMs? Admins and plain cluster-wide operators always may; a scoped caller must be able to reach
+    every target. snapshot_runs rows carry no vmid (the VM identities are in the free-text log and
+    summary), so the run history has to be gated on the POLICY, the way update/delete already are.
+    Offline cluster: a direct-VM target is authorized by its vmid, anything we cannot expand fails
+    closed for a scoped caller."""
+    from pegaprox.api.helpers import caller_is_scoped
+    creator = build_authz_user(request.session.get('user', ''), request.session)
+    if not caller_is_scoped(creator, cluster_id):
+        return True
+    mgr = cluster_managers.get(cluster_id)
+    if mgr:
+        try:
+            _targets = _resolve_targets(mgr, policy)
+            if not _targets:
+                return _empty_policy_is_callers(creator, cluster_id, policy, perm)
+            for _n, _v, _t in _targets:
+                if not user_can_access_vm(creator, cluster_id, _v, perm, _t):
+                    return False
+            return True
+        except Exception:
+            return False
+    _tv = str(policy.get('target_value') or '').strip()
+    if str(policy.get('target_type') or '').lower() in ('vm', 'vmid') and _tv.lstrip('-').isdigit():
+        return user_can_access_vm(creator, cluster_id, int(_tv), perm)
+    return False
+
+
+@bp.route('/api/clusters/<cluster_id>/snapshot-policies/<pid>/runs', methods=['GET'])
+@require_auth(perms=['vm.snapshot'])
+def list_runs(cluster_id, pid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    try:
+        c = get_db().conn.cursor()
+        c.execute('SELECT * FROM snapshot_policies WHERE id=? AND cluster_id=?', (pid, cluster_id))
+        _prow = c.fetchone()
+        if not _prow:
+            return jsonify({'error': 'not found'}), 404
+        if not _policy_targets_authorized(cluster_id, _row_to_policy(_prow)):
+            return jsonify({'error': "Permission denied: this policy's target VMs are outside your scope"}), 403
+        c.execute('''SELECT * FROM snapshot_runs WHERE policy_id=?
+                     ORDER BY started_at DESC LIMIT 50''', (pid,))
+        return jsonify({'runs': [dict(r) for r in c.fetchall()]})
+    except Exception:
+        logging.exception('list snapshot runs failed')
+        return jsonify({'error': 'internal error'}), 500

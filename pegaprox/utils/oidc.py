@@ -1,0 +1,1207 @@
+# -*- coding: utf-8 -*-
+"""
+PegaProx OIDC/OAuth2 Authentication - Layer 4
+"""
+
+import copy
+import json
+import logging
+import time
+import hashlib
+import base64
+import secrets
+import re
+import requests
+from datetime import datetime
+from urllib.parse import urlencode, urlparse, urlunparse
+
+# NS May 2026 — SSRF guard for admin-supplied OIDC URLs (discovery / token / userinfo).
+from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
+
+# auth_source values that mean "this row is owned by an OIDC-family IdP", i.e.
+# the ones whose oidc_sub is meaningful. 'local' and 'ldap' rows are excluded on
+# purpose -- they must never be adopted by an OIDC login.
+OIDC_AUTH_SOURCES = ('oidc', 'entra')
+
+
+# MK May 2026 (CodeAnt #500) — pre-validate the authority URL before composing the
+# discovery URL. The existing sanitize_outbound_url() catches the same family of
+# attacks one step later, but doing the urlparse here means we never even *build*
+# a string with a path-traversal sequence in it; we fail fast with a structured
+# error before any I/O. Defence in depth.
+def build_validated_discovery_url(authority: str) -> str:
+    """Build the `.well-known/openid-configuration` URL from the admin-supplied
+    authority. Raises ValueError on bad scheme / hostname / path-traversal.
+    """
+    if "/../" in authority or re.search(r"/%2e%2e/", authority, re.IGNORECASE):
+        raise ValueError("path-traversal sequence in authority URL")
+    parsed = urlparse(authority)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme {parsed.scheme!r}")
+    if not parsed.hostname:
+        raise ValueError("authority URL has no hostname")
+    new_path = parsed.path.rstrip('/') + "/.well-known/openid-configuration"
+    return urlunparse(parsed._replace(path=new_path))
+
+# MK Mar 2026 - PyJWT for proper signature verification
+try:
+    import jwt as pyjwt
+    from jwt import PyJWKClient
+    PYJWT_AVAILABLE = True
+except ImportError:
+    PYJWT_AVAILABLE = False
+    logging.warning("[OIDC] PyJWT not installed - JWT signature verification disabled")
+
+from pegaprox.core.db import get_db
+from pegaprox.globals import users_db
+from pegaprox.models.permissions import ROLE_VIEWER, ROLE_ADMIN, ROLE_USER
+
+# ============================================================================
+
+# NS: Feb 2026 - Microsoft cloud environment endpoint mapping
+# GCC High and DoD use separate sovereign cloud endpoints
+ENTRA_CLOUD_ENDPOINTS = {
+    'commercial': {
+        'login_base': 'login.microsoftonline.com',
+        'graph_base': 'graph.microsoft.com',
+    },
+    'gcc': {
+        # GCC uses the same commercial endpoints
+        'login_base': 'login.microsoftonline.com',
+        'graph_base': 'graph.microsoft.com',
+    },
+    'gcc_high': {
+        # US Government GCC High - sovereign cloud
+        'login_base': 'login.microsoftonline.us',
+        'graph_base': 'graph.microsoft.us',
+    },
+    'dod': {
+        # US Department of Defense - sovereign cloud
+        'login_base': 'login.microsoftonline.us',
+        'graph_base': 'dod-graph.microsoft.us',
+    },
+}
+
+# NS Oct 2026 (#1149) - the claims an admin may pick to name the account. unique_name is not
+# among them: AD FS fills it with DOMAIN\user, and the name filter would drop the backslash
+# and run domain and user together.
+OIDC_USERNAME_CLAIMS = ('preferred_username', 'email', 'upn')
+# what a picked claim may hold, after lower-casing; anything else refuses the sign-in
+_OIDC_NAME_CHARS = frozenset('abcdefghijklmnopqrstuvwxyz0123456789._-@+')
+
+
+def get_oidc_settings() -> dict:
+    """Load OIDC/Entra ID configuration from server settings
+
+    LW: Supports Microsoft Entra ID, Okta, Auth0, Keycloak, and any OIDC-compliant provider
+    """
+    from pegaprox.api.helpers import load_server_settings
+    settings = load_server_settings()  # MK: Must use load_server_settings() NOT get_server_settings() (that's the route handler!)
+    provider = settings.get('oidc_provider', 'entra')
+    
+    # NS: Entra needs User.Read + GroupMember.Read.All for Graph API
+    # Default scopes differ by provider
+    if provider == 'entra':
+        default_scopes = 'openid profile email User.Read GroupMember.Read.All'
+    else:
+        default_scopes = 'openid profile email'
+    
+    return {
+        'enabled': settings.get('oidc_enabled', False),
+        'provider': provider,
+        'cloud_environment': settings.get('oidc_cloud_environment', 'commercial'),  # NS: GCC High/DoD support
+        'client_id': settings.get('oidc_client_id', ''),
+        'client_secret': get_db()._decrypt(settings.get('oidc_client_secret', '')),  # MK: Encrypted
+        'tenant_id': settings.get('oidc_tenant_id', ''),  # Entra-specific (Azure AD tenant)
+        'authority': settings.get('oidc_authority', ''),    # Custom OIDC issuer URL
+        'scopes': settings.get('oidc_scopes', '') or default_scopes,  # NS: Use provider-specific default if not configured
+        'redirect_uri': settings.get('oidc_redirect_uri', ''),
+        # Group → role mapping
+        'admin_group_id': settings.get('oidc_admin_group_id', ''),
+        'user_group_id': settings.get('oidc_user_group_id', ''),
+        'viewer_group_id': settings.get('oidc_viewer_group_id', ''),
+        'default_role': settings.get('oidc_default_role', ROLE_VIEWER),
+        'auto_create_users': settings.get('oidc_auto_create_users', True),
+        # Custom group mappings (same format as LDAP)
+        'group_mappings': settings.get('oidc_group_mappings', []),
+        # Display
+        'button_text': settings.get('oidc_button_text', 'Sign in with Microsoft'),
+        # NS: allow disabling JWT sig verification for broken JWKS environments
+        'oidc_skip_jwt_verification': settings.get('oidc_skip_jwt_verification', False),
+        # NS Apr 2026 (#188) — let admins disable TLS verification for self-hosted
+        # Authentik / Keycloak with self-signed certs. Default OFF (secure).
+        'oidc_skip_ssl_verify': settings.get('oidc_skip_ssl_verify', False),
+        # MK May 2026 (#412) — opt-in: skip the SSRF guard's private-IP check
+        # for the OIDC discovery URL only. Metadata-IP blocklist (169.254.x.x
+        # etc.) still binds. See helpers.py default-block for rationale.
+        'oidc_allow_private_ip': settings.get('oidc_allow_private_ip', False),
+        # NS Oct 2026 (#1149) - the claim that names the account, '' = the old order
+        'username_claim': (settings.get('oidc_username_claim') or '')
+                          if settings.get('oidc_username_claim') in OIDC_USERNAME_CLAIMS else '',
+    }
+
+
+_oidc_discovery_cache = {}  # authority_url -> {'data': {...}, 'expires': timestamp}
+_jwks_clients = {}  # jwks_uri -> PyJWKClient instance (has its own cache)
+
+def get_oidc_endpoints(config: dict) -> dict:
+    """Build OIDC endpoint URLs based on provider
+    
+    NS: Entra uses tenant-specific URLs, generic OIDC uses discovery
+    Supports GCC High and DoD sovereign cloud endpoints
+    """
+    provider = config.get('provider', 'entra')
+    tenant_id = config.get('tenant_id', 'common')
+    
+    if provider == 'entra' and tenant_id:
+        # NS: Feb 2026 - Use cloud environment to determine base URLs
+        # GCC High/DoD use .us domains instead of .com
+        cloud_env = config.get('cloud_environment', 'commercial')
+        endpoints = ENTRA_CLOUD_ENDPOINTS.get(cloud_env, ENTRA_CLOUD_ENDPOINTS['commercial'])
+        login_base = endpoints['login_base']
+        graph_base = endpoints['graph_base']
+        
+        base = f"https://{login_base}/{tenant_id}/oauth2/v2.0"
+        return {
+            'authorization': f"{base}/authorize",
+            'token': f"{base}/token",
+            'jwks': f"https://{login_base}/{tenant_id}/discovery/v2.0/keys",
+            'userinfo': f"https://{graph_base}/oidc/userinfo",
+            'graph_me': f"https://{graph_base}/v1.0/me",
+            'graph_groups': f"https://{graph_base}/v1.0/me/memberOf",
+        }
+    else:
+        # Generic OIDC provider - try .well-known discovery first, fall back to authority URL
+        authority = config.get('authority', '').rstrip('/')
+
+        # NS: Feb 2026 — Try OpenID Connect Discovery (RFC 8414)
+        # This works for Keycloak, Okta, Auth0, Google, Authentik, and any standard OIDC provider.
+        # NS Apr 2026 (#188) — bumped timeout 5→15s; loud-log discovery failures so admins notice
+        # silent fallback (which builds wrong endpoints for Authentik because its issuer URL
+        # is per-application but its authorize endpoint is one path level up).
+        try:
+            discovery_url = build_validated_discovery_url(authority)
+        except ValueError as e:
+            logging.warning(f"[OIDC] authority URL rejected pre-validation: {e}")
+            return {
+                'authorization': '', 'token': '', 'jwks': '', 'userinfo': '',
+                'graph_me': '', 'graph_groups': '',
+                '_discovery_used': False,
+                '_error': 'invalid_authority_url',
+                '_error_detail': f"Authority/issuer URL is invalid ({e}). Fix the OIDC settings and retry.",
+            }
+        cache_entry = _oidc_discovery_cache.get(authority)
+        if cache_entry and cache_entry.get('expires', 0) > time.time():
+            disco = cache_entry['data']
+            return {
+                'authorization': disco.get('authorization_endpoint', f"{authority}/authorize"),
+                'token': disco.get('token_endpoint', f"{authority}/token"),
+                'jwks': disco.get('jwks_uri', f"{authority}/.well-known/jwks.json"),
+                'userinfo': disco.get('userinfo_endpoint', f"{authority}/userinfo"),
+                'graph_me': '',
+                'graph_groups': '',
+                '_discovery_used': True,
+            }
+
+        skip_ssl = bool(config.get('oidc_skip_ssl_verify', False))
+        allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
+        try:
+            try:
+                # MK May 2026 (#412): pass allow_private through so internal
+                # IdPs at 10.x / 192.168.x can be used when the operator
+                # explicitly opted in. Metadata blocklist still binds.
+                #
+                # MK Sep 2026 - the guard only CHECKED the host and then requests.get below
+                # resolved it a second time, which is the rebinding window senti-man reported
+                # against the shared guard (GHSA-hmcf-9q7f-vx35). Same treatment the webhook,
+                # SIEM and download paths already got: pin the address we vetted. For plain
+                # https this returns the URL untouched, because the certificate check already
+                # defeats a rebind - it only rewrites for the installs that turned
+                # oidc_skip_ssl_verify on, which are exactly the ones with nothing else
+                # catching it. allowed_schemes stays at the default https-only on purpose:
+                # the one thing NOT to do here is let discovery run over plain http, where
+                # whoever answers picks the authorization and token endpoints.
+                discovery_url = resolve_and_pin_url(
+                    discovery_url,
+                    allow_private=allow_private_ip,
+                    tls_verified=not skip_ssl)
+            except SsrfError as guard_err:
+                logging.warning(f"[OIDC] discovery_url rejected by SSRF guard: {guard_err}")
+                # MK May 2026 (#188 follow-up): never return None — callers
+                # crash with `'NoneType' object has no attribute 'get'`. Return
+                # a structured dict with an `_error` flag so the test endpoint
+                # can surface "your authority URL is malformed" instead of 500.
+                hint = ""
+                if not allow_private_ip and "private" in str(guard_err).lower():
+                    hint = (" If your IdP is on an internal network and this is "
+                            "intentional, enable `oidc_allow_private_ip` in OIDC "
+                            "settings — metadata IPs stay blocked regardless.")
+                return {
+                    'authorization': '', 'token': '', 'jwks': '', 'userinfo': '',
+                    'graph_me': '', 'graph_groups': '',
+                    '_discovery_used': False,
+                    '_error': 'ssrf_guard_rejected',
+                    '_error_detail': f"Discovery URL '{discovery_url}' rejected by URL safety guard: {guard_err}. "
+                                     f"Authority/issuer URL is probably empty, malformed, or pointing at a "
+                                     f"local/private address. Fix the OIDC settings and retry.{hint}",
+                }
+            # NS Sep 2026 - allow_redirects=False. The authority URL is validated hard
+            # before we get here (build_validated_discovery_url + sanitize_outbound_url),
+            # and then requests would happily follow a 302 to 169.254.169.254 or any
+            # internal host, with none of that validation applied to the second hop. We
+            # guard the front door and left the back one open. A discovery endpoint that
+            # redirects is unusual enough that refusing it is the right default; the log
+            # line names the target so an admin can point the setting at it directly.
+            resp = requests.get(discovery_url, timeout=15, verify=not skip_ssl,
+                                allow_redirects=False)
+            if resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308):
+                # CWE-117: Location comes from whatever answered the request, so it is
+                # remote-controlled and must not reach the log raw - same treatment the
+                # login path gives attacker-supplied usernames.
+                from pegaprox.utils.sanitization import sanitize_log_message as _sl
+                _loc = _sl(str(resp.headers.get('Location', '(no Location header)')))[:200]
+                logging.warning(
+                    f"[OIDC] discovery URL redirected to {_loc!r} - not following it. "
+                    f"Set the authority/issuer to the final URL instead.")
+                raise requests.RequestException('discovery redirect refused')
+            if resp.status_code == 200:
+                try:
+                    disco = resp.json()
+                except Exception as parse_err:
+                    logging.warning(
+                        f"[OIDC] Discovery URL {discovery_url} returned 200 but invalid JSON: {parse_err}. "
+                        f"Falling back to manual endpoints — this likely BREAKS Authentik / non-trivial issuers."
+                    )
+                    disco = None
+                if disco:
+                    _oidc_discovery_cache[authority] = {'data': disco, 'expires': time.time() + 3600}
+                    return {
+                        'authorization': disco.get('authorization_endpoint', f"{authority}/authorize"),
+                        'token': disco.get('token_endpoint', f"{authority}/token"),
+                        'jwks': disco.get('jwks_uri', f"{authority}/.well-known/jwks.json"),
+                        'userinfo': disco.get('userinfo_endpoint', f"{authority}/userinfo"),
+                        'graph_me': '',
+                        'graph_groups': '',
+                        '_discovery_used': True,
+                    }
+            else:
+                logging.warning(
+                    f"[OIDC] Discovery {discovery_url} returned HTTP {resp.status_code}. "
+                    f"Falling back to issuer-relative endpoints; check that the issuer URL is correct "
+                    f"(Authentik issuers usually end with /application/o/<app-slug>/). "
+                    f"Set oidc_skip_ssl_verify=true if your IdP uses a self-signed cert."
+                )
+        except requests.exceptions.SSLError as e:
+            logging.warning(
+                f"[OIDC] Discovery TLS error for {discovery_url}: {e}. "
+                f"Set oidc_skip_ssl_verify=true if your IdP uses a self-signed cert."
+            )
+        except Exception as e:
+            logging.warning(
+                f"[OIDC] Discovery failed for {discovery_url}: {e}. "
+                f"Authorization endpoint may be wrong for non-Microsoft providers (Authentik, etc.) — "
+                f"PegaProx will guess {authority}/authorize which is often a 404."
+            )
+
+        # Fallback: construct from authority URL directly
+        return {
+            'authorization': f"{authority}/authorize",
+            'token': f"{authority}/token",
+            'jwks': f"{authority}/.well-known/jwks.json",
+            'userinfo': f"{authority}/userinfo",
+            'graph_me': '',
+            'graph_groups': '',
+            '_discovery_used': False,
+        }
+
+
+def oidc_build_auth_url(config: dict, state: str) -> tuple:
+    """Build the OIDC authorization URL for redirect
+
+    MK: state parameter prevents CSRF - stored in session before redirect
+    Returns (url, nonce, code_verifier) tuple
+    """
+    endpoints = get_oidc_endpoints(config)
+
+    nonce = secrets.token_urlsafe(32)
+
+    # #188: PKCE (Proof Key for Code Exchange) - required by Authentik, optional for others
+    code_verifier = secrets.token_urlsafe(96)  # 128 chars
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode('ascii')).digest()
+    ).rstrip(b'=').decode('ascii')
+
+    params = {
+        'client_id': config['client_id'],
+        'response_type': 'code',
+        'redirect_uri': config['redirect_uri'],
+        'scope': config['scopes'],
+        'state': state,
+        'response_mode': 'query',
+        'nonce': nonce,
+        'code_challenge': code_challenge,
+        'code_challenge_method': 'S256',
+    }
+
+    # Entra-specific: request group claims
+    if config.get('provider') == 'entra':
+        params['scope'] = config['scopes']
+        if 'GroupMember.Read.All' not in params['scope']:
+            pass
+
+    query = '&'.join(f"{k}={requests.utils.quote(str(v))}" for k, v in params.items())
+    return f"{endpoints['authorization']}?{query}", nonce, code_verifier
+
+
+def oidc_exchange_code(config: dict, code: str, code_verifier: str = None) -> dict:
+    """Exchange authorization code for tokens
+
+    LW: Returns access_token, id_token, and optionally refresh_token
+    """
+    endpoints = get_oidc_endpoints(config)
+    allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
+
+    data = {
+        'client_id': config['client_id'],
+        'client_secret': config['client_secret'],
+        'code': code,
+        'redirect_uri': config['redirect_uri'],
+        'grant_type': 'authorization_code',
+    }
+
+    # NS: scope required by most providers (Authentik, Keycloak, Entra)
+    data['scope'] = config.get('scopes', 'openid profile email')
+
+    # #188: PKCE code_verifier — required by Authentik, optional for others
+    if code_verifier:
+        data['code_verifier'] = code_verifier
+
+    try:
+        try:
+            # MK May 2026 (#412 follow-up from @robertjakub): thread the
+            # allow_private flag into token sanitize too — discovery was fixed
+            # last release but token + userinfo still tripped the strict guard
+            sanitize_outbound_url(endpoints['token'], allow_private=allow_private_ip)
+        except SsrfError as guard_err:
+            logging.warning(f"[OIDC] token endpoint rejected by SSRF guard: {guard_err}")
+            if not allow_private_ip and "private" in str(guard_err).lower():
+                logging.warning(
+                    "[OIDC] If your IdP token endpoint sits on a private IP "
+                    "intentionally, enable `oidc_allow_private_ip` in OIDC "
+                    "settings (covers discovery + token + userinfo)."
+                )
+            return {'error': 'Token endpoint failed pre-flight URL validation'}
+        resp = requests.post(endpoints['token'], data=data, timeout=15)
+        if resp.status_code != 200:
+            logging.error(f"[OIDC] Token exchange failed: {resp.status_code} {resp.text[:300]}")
+            return {'error': f'Token exchange failed: {resp.status_code}'}
+        
+        token_data = resp.json()
+        if 'error' in token_data:
+            logging.error(f"[OIDC] Token error: {token_data.get('error_description', token_data['error'])}")
+            return {'error': token_data.get('error_description', token_data['error'])}
+        
+        return token_data
+    except Exception as e:
+        logging.error(f"[OIDC] Token exchange exception: {e}")
+        return {'error': str(e)}
+
+
+class _VerifiedClaims(dict):
+    """Claims of an ID token whose signature checked out against the IdP's JWKS.
+
+    MK Oct 2026 (#1141) - a type and not a key: the unverified decode below hands back
+    whatever JSON the token carries, so a key saying "verified" could come from the
+    token itself. Copying into a plain dict drops the mark, which is the safe way round.
+    """
+
+
+def oidc_id_token_verified(claims) -> bool:
+    """True when `claims` came out of the signature-checked path of oidc_decode_id_token."""
+    return isinstance(claims, _VerifiedClaims)
+
+
+def oidc_decode_id_token(id_token: str, expected_nonce: str = None,
+                         config: dict = None) -> dict:
+    """Decode and verify JWT ID token signature using JWKS
+
+    MK Mar 2026: Now verifies signature via JWKS endpoint (PyJWT).
+    Falls back to unsigned decode if PyJWT unavailable or JWKS fetch fails,
+    so existing deployments don't break during upgrade.
+    """
+    # NS Mar 2026 - try proper signature verification first
+    # can be disabled via settings for envs where JWKS is broken/unreachable
+    skip_verify = config.get('oidc_skip_jwt_verification', False) if config else False
+    if skip_verify:
+        logging.warning("[OIDC] JWT signature verification DISABLED by admin setting")
+    if PYJWT_AVAILABLE and config and not skip_verify:
+        try:
+            endpoints = get_oidc_endpoints(config)
+            jwks_uri = endpoints.get('jwks', '')
+
+            if jwks_uri:
+                # NS Jul 2026 (CodeAnt SSRF) — gate the JWKS URI before fetching keys from it.
+                # Return (fail closed) rather than raise: the outer except falls back to an
+                # UNVERIFIED decode, so a raise here would DOWNGRADE signature verification.
+                # allow_private=True keeps internal IdPs (RFC1918) working while cloud-metadata
+                # endpoints stay blocked (always) + control chars/bad schemes rejected.
+                from pegaprox.utils.url_security import sanitize_outbound_url, SsrfError, resolve_and_pin_url
+                try:
+                    sanitize_outbound_url(jwks_uri, allow_private=True)
+                except SsrfError as _se:
+                    logging.warning(f"[OIDC] jwks_uri rejected by SSRF guard: {_se}")
+                    return {'error': 'OIDC JWKS endpoint rejected by SSRF guard'}
+                if jwks_uri not in _jwks_clients:
+                    _jwks_clients[jwks_uri] = PyJWKClient(jwks_uri, cache_keys=True, lifespan=3600)
+
+                signing_key = _jwks_clients[jwks_uri].get_signing_key_from_jwt(id_token)
+
+                # NS May 2026 — audience list: client_id is always accepted,
+                # plus any additional audiences the admin configured. PVE 9.2's
+                # OIDC realm gained the same `audiences` field — mirroring it
+                # here lets us accept tokens issued for a logical audience
+                # (e.g. "pegaprox-prod") that maps to multiple deployments.
+                client_id = config.get('client_id')
+                extra_auds = config.get('oidc_audiences', '') or ''
+                if isinstance(extra_auds, str):
+                    extra_auds = [a.strip() for a in extra_auds.split(',') if a.strip()]
+                accepted = [client_id] + extra_auds if client_id else extra_auds or None
+
+                # #188: support more algorithms (Authentik uses RS256, but others exist)
+                # MK 2026-05-31 — `verify_iss=False` is INTENTIONAL, not a gap.
+                # Real-world IdPs (Authentik, Keycloak, Entra ID) return `iss`
+                # values that vary from the configured authority URL: trailing
+                # slash, host-vs-FQDN, http-vs-https on internal IdPs. The
+                # channel-binding is enforced at the JWKS layer instead —
+                # `signing_key.key` came from the JWKS endpoint at the
+                # operator-configured authority, so a token signed by someone
+                # else fails signature verification before any claim is read.
+                # `verify_aud=True` + `audience=accepted` still gates audience.
+                # Nonce check below covers replay. Flipping verify_iss to True
+                # breaks legitimate logins on the next IdP config tweak.
+                claims = pyjwt.decode(
+                    id_token,
+                    signing_key.key,
+                    algorithms=["RS256", "ES256", "PS256", "EdDSA"],
+                    audience=accepted,
+                    options={
+                        "verify_exp": True,
+                        "verify_aud": True,
+                        "verify_iss": False,  # see comment above — intentional
+                        "require": ["exp", "iat", "sub"],
+                    },
+                    leeway=300,  # 5 min clock skew
+                )
+
+                # #188: only validate nonce if token actually has one
+                # some providers (Authentik in certain configs) don't include nonce
+                if expected_nonce and claims.get('nonce') and claims['nonce'] != expected_nonce:
+                    logging.warning(f"[OIDC] Nonce mismatch after sig verification")
+                    return {'error': 'OIDC nonce mismatch - possible replay attack'}
+
+                return _VerifiedClaims(claims)
+
+        except Exception as e:
+            # MK: don't break login if JWKS is temporarily unreachable
+            logging.warning(f"[OIDC] JWKS verification failed ({type(e).__name__}: {e}), falling back to unverified decode")
+
+    # Fallback: decode without signature check (pre-PyJWT behavior)
+    try:
+        parts = id_token.split('.')
+        if len(parts) != 3:
+            return {'error': 'Invalid JWT format'}
+
+        payload = parts[1]
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += '=' * padding
+
+        decoded = base64.urlsafe_b64decode(payload)
+        claims = json.loads(decoded)
+
+        # LW Feb 2026 - validate expiry (5 min clock skew tolerance)
+        exp = claims.get('exp')
+        if exp and time.time() > exp + 300:
+            logging.warning(f"[OIDC] ID token expired: exp={exp}, now={time.time():.0f}")
+            return {'error': 'ID token has expired'}
+
+        # #188: only fail on nonce mismatch if token has a nonce claim
+        if expected_nonce and claims.get('nonce') and claims['nonce'] != expected_nonce:
+            logging.warning(f"[OIDC] Nonce mismatch: expected={expected_nonce[:8]}..., got={str(claims.get('nonce', ''))[:8]}...")
+            return {'error': 'OIDC nonce mismatch - possible replay attack'}
+
+        return claims
+    except Exception as e:
+        logging.error(f"[OIDC] JWT decode error: {e}")
+        return {'error': 'Failed to validate identity token'}
+
+
+def oidc_get_user_info(config: dict, access_token: str) -> dict:
+    """Fetch user profile from OIDC provider
+    
+    NS: For Entra, uses Microsoft Graph API for richer data
+    """
+    headers = {'Authorization': f'Bearer {access_token}'}
+    endpoints = get_oidc_endpoints(config)
+    
+    user_info = {}
+    
+    try:
+        if config.get('provider') == 'entra' and endpoints.get('graph_me'):
+            # LW: Microsoft Graph gives us more data than OIDC userinfo
+            resp = requests.get(endpoints['graph_me'], headers=headers, timeout=10)
+            if resp.status_code == 200:
+                graph_data = resp.json()
+                user_info = {
+                    'sub': graph_data.get('id', ''),
+                    'preferred_username': graph_data.get('userPrincipalName', ''),
+                    'upn': graph_data.get('userPrincipalName', ''),
+                    'name': graph_data.get('displayName', ''),
+                    'email': graph_data.get('mail') or graph_data.get('userPrincipalName', ''),
+                    'given_name': graph_data.get('givenName', ''),
+                    'family_name': graph_data.get('surname', ''),
+                    'job_title': graph_data.get('jobTitle', ''),
+                }
+            else:
+                logging.warning(f"[OIDC] Graph /me failed ({resp.status_code}), falling back to userinfo")
+        
+        # Fallback or generic OIDC: use standard userinfo endpoint
+        if not user_info and endpoints.get('userinfo'):
+            allow_private_ip = bool(config.get('oidc_allow_private_ip', False))
+            try:
+                sanitize_outbound_url(endpoints['userinfo'], allow_private=allow_private_ip)
+            except SsrfError as guard_err:
+                logging.warning(f"[OIDC] userinfo endpoint rejected by SSRF guard: {guard_err}")
+                return {'error': 'Userinfo endpoint failed pre-flight URL validation'}
+            resp = requests.get(endpoints['userinfo'], headers=headers, timeout=10)
+            if resp.status_code == 200:
+                user_info = resp.json()
+    except Exception as e:
+        logging.warning(f"[OIDC] User info fetch error: {e}")
+    
+    return user_info
+
+
+def oidc_name_from_id_token(user_info: dict, id_claims: dict) -> dict:
+    """user_info, with preferred_username and email from the ID token when it has neither.
+
+    MK Oct 2026 (#1141) - Entra falls back to the userinfo endpoint when Graph /me is
+    refused (no User.Read consent), and that answer has a sub but no name, so the account
+    came out as oidc_<sub>. The ID token of the same sign-in does carry preferred_username.
+    Only from a token whose signature was checked in this sign-in, never from the
+    unverified decode, and only for the same subject (OIDC Core 5.3.2).
+    """
+    if user_info.get('preferred_username') or user_info.get('email'):
+        return user_info
+    if not oidc_id_token_verified(id_claims):
+        return user_info
+    sub = user_info.get('sub')
+    if not sub or id_claims.get('sub') != sub:
+        return user_info
+    named = dict(user_info)
+    for claim in ('preferred_username', 'email'):
+        value = id_claims.get(claim)
+        if isinstance(value, str) and value:
+            named[claim] = value
+    return named
+
+
+def _claim_text(value):
+    # as it came: padding is the name check's to refuse, not something to strip away here
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _email_unverified(source):
+    flag = source.get('email_verified')
+    return flag is False or (isinstance(flag, str) and flag.strip().lower() == 'false')
+
+
+def oidc_username_claim_value(userinfo: dict, id_claims: dict, claim: str):
+    """The value of the username claim the admin picked, None when this sign-in has none.
+
+    NS Oct 2026 (#1149) - AD FS answers userinfo with the sub alone and puts its claims in
+    the tokens, so the claim is looked up in the userinfo answer first and then in the ID
+    token. The ID token only counts when its signature was checked in this sign-in and,
+    if userinfo answered, when it is about the same subject (as oidc_name_from_id_token).
+    `userinfo` is the endpoint's answer itself, never the ID token standing in for it.
+    """
+    if claim not in OIDC_USERNAME_CLAIMS:
+        return None
+    userinfo = userinfo if isinstance(userinfo, dict) else {}
+    value = _claim_text(userinfo.get(claim))
+    if value:
+        return None if claim == 'email' and _email_unverified(userinfo) else value
+    if not isinstance(id_claims, dict) or not oidc_id_token_verified(id_claims):
+        return None
+    if userinfo:
+        sub = userinfo.get('sub')
+        if not sub or id_claims.get('sub') != sub:
+            return None
+    if claim == 'email' and _email_unverified(id_claims):
+        return None
+    return _claim_text(id_claims.get(claim))
+
+
+def oidc_username_claim_refusal(userinfo: dict, id_claims: dict, claim: str) -> str:
+    """Why oidc_username_claim_value had no value, for the log: the user only sees that
+    the sign-in has no usable claim."""
+    userinfo = userinfo if isinstance(userinfo, dict) else {}
+    for source, label in ((userinfo, 'userinfo answer'), (id_claims or {}, 'ID token')):
+        if claim == 'email' and _claim_text(source.get('email')) and _email_unverified(source):
+            return f'the {label} marks the email as not verified'
+    if _claim_text((id_claims or {}).get(claim)) and not oidc_id_token_verified(id_claims):
+        return 'the ID token carries it, but its signature was not checked'
+    if userinfo and _claim_text((id_claims or {}).get(claim)) and \
+            userinfo.get('sub') != (id_claims or {}).get('sub'):
+        return 'the ID token carries it, but is about another subject than the userinfo answer'
+    return 'neither the userinfo answer nor the ID token carries it'
+
+
+def oidc_get_user_groups(config: dict, access_token: str) -> list:
+    """Fetch user's group memberships from OIDC provider.
+
+    Kept for callers (incl. plugins) that only want the list. Use
+    oidc_get_user_groups_ex() when the answer drives an authorization decision -
+    this one cannot tell you whether the list is complete.
+    """
+    groups, _complete = oidc_get_user_groups_ex(config, access_token)
+    return groups
+
+
+def oidc_get_user_groups_ex(config: dict, access_token: str):
+    """Fetch group memberships AND say whether the answer can be trusted.
+
+    Returns (groups, complete). `complete` is False when we could not establish the
+    full set - the Graph call failed, a page was lost mid-pagination, or the provider
+    is a generic one that puts groups in the ID token instead of here.
+
+    NS Sep 2026 - this split exists because the old function returned [] for three very
+    different situations: the user genuinely has no groups, the Graph call failed, and
+    "generic provider, ask the ID token". Provisioning then treated all three as "no
+    groups". That was survivable while permissions could only ever grow; it is not
+    survivable now that an empty mapping revokes, because one Graph hiccup would strip
+    every Entra user on their next login. A failure has to look different from an empty
+    answer, so callers can keep what they have and complain loudly instead.
+
+    Note the partial case specifically: Entra pages at 100 groups, and the old loop broke
+    out on a non-200 keeping whatever it had. Revoking against half a group list is worse
+    than not revoking at all.
+    """
+    if config.get('provider') != 'entra':
+        # Generic OIDC: groups live in the ID token claims, which the caller reads
+        # separately. Nothing fetched here, so nothing authoritative here either.
+        return [], False
+
+    endpoints = get_oidc_endpoints(config)
+    headers = {'Authorization': f'Bearer {access_token}'}
+    groups = []
+    # Start pessimistic. `complete` is what lets a caller REVOKE, so every way out of
+    # this function that is not a finished walk has to leave it False. Initialising it
+    # True was wrong for one specific reason: graph_groups is set to '' on five separate
+    # discovery/config fallback paths in get_oidc_endpoints, and with an empty URL the
+    # loop below never runs. That returned ([], True) - authoritative, zero groups - and
+    # would have stripped every Entra user's permissions on their next login whenever
+    # discovery had a bad morning.
+    complete = False
+
+    url = endpoints.get('graph_groups') or ''
+    if not url:
+        logging.warning("[OIDC] no Graph group endpoint resolved for this config "
+                        "(discovery fallback?) - group membership is unknown, so this "
+                        "login can grant but not revoke")
+        return groups, False
+
+    try:
+        # NS: Entra Graph API for group memberships
+        while url:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code != 200:
+                logging.warning(f"[OIDC] Group fetch failed: {resp.status_code}")
+                complete = False
+                break
+
+            data = resp.json()
+            for member in data.get('value', []):
+                if member.get('@odata.type') == '#microsoft.graph.group':
+                    groups.append({
+                        'id': member.get('id', ''),
+                        'name': member.get('displayName', ''),
+                    })
+
+            # LW: Handle pagination (Entra paginates at 100 groups)
+            url = data.get('@odata.nextLink')
+        else:
+            # while/else: only reached when the loop ran out of pages on its own, i.e.
+            # no break, no exception. That is the one path that saw the whole set.
+            complete = True
+
+        logging.info(f"[OIDC] Fetched {len(groups)} group memberships"
+                     f"{'' if complete else ' (INCOMPLETE - fetch failed part way)'}")
+    except Exception as e:
+        logging.warning(f"[OIDC] Group fetch error: {e}")
+        complete = False
+
+    return groups, complete
+
+
+def oidc_map_groups_to_role(config: dict, groups: list, id_token_claims: dict = None,
+                            groups_complete: bool = None) -> dict:
+    """Map OIDC groups to PegaProx role, tenant, and permissions
+
+    LW: Works with Entra group IDs and generic OIDC group claims
+    Returns: {'role': str, 'tenant': str, 'permissions': [], 'tenant_permissions': {},
+              'groups': [], '_authoritative': bool}
+
+    NS Sep 2026 - `_authoritative` says whether this mapping may be used to REVOKE, not
+    just to grant. It is true only when we know the full group set: either the Entra
+    fetch completed (groups_complete=True), or the validated ID token actually carried a
+    `groups` claim. A provider that sends no groups claim at all is indistinguishable
+    from a user who lost every group, so that case stays non-authoritative and
+    provisioning leaves existing grants alone.
+    """
+    result = {
+        'role': config.get('default_role', ROLE_VIEWER),
+        'tenant': '',
+        'permissions': [],
+        'tenant_permissions': {},
+        'groups': [],
+        '_authoritative': False,
+    }
+    if groups_complete:
+        result['_authoritative'] = True
+    elif id_token_claims is not None and 'groups' in id_token_claims:
+        # The ID token is signature-checked before it gets here, so a groups claim in it
+        # is as good a source as the Graph call - including when it is an empty list.
+        #
+        # Except when the provider says it truncated it. Entra stops embedding the full
+        # list once a user is in more groups than fit the token and emits _claim_names /
+        # _claim_sources pointing at Graph instead ("groups overage"). The claim is then
+        # present but partial, and deciding a revocation on a partial list is the thing
+        # this whole mechanism exists to avoid. Grant from it, never revoke.
+        _names = id_token_claims.get('_claim_names')
+        if isinstance(_names, dict) and 'groups' in _names:
+            logging.warning(
+                "[OIDC] the ID token signals a groups overage - the claim is truncated, "
+                "so this login can grant but not revoke. Give the app Graph group-read "
+                "permission if you need memberships to be authoritative.")
+        else:
+            result['_authoritative'] = True
+    
+    # Build list of group identifiers (IDs for Entra, names for generic)
+    group_ids = set()
+    group_names = set()
+    for g in groups:
+        if isinstance(g, dict):
+            # MK Oct 2026 (#962) - Graph sends "displayName": null for some groups, and
+            # .get(k, '') only covers a missing key; the .lower() on None was a 500 at login
+            gid = str(g.get('id') or '').strip().lower()
+            gname = str(g.get('name') or '').strip().lower()
+            if gid:
+                group_ids.add(gid)
+            if gname:
+                group_names.add(gname)
+        elif isinstance(g, str):
+            group_ids.add(g.lower())
+            group_names.add(g.lower())
+    
+    # NS: Also check ID token 'groups' claim (Entra can embed group IDs in token)
+    if id_token_claims:
+        for gid in id_token_claims.get('groups', []):
+            group_ids.add(str(gid).lower())
+
+    # MK Oct 2026 (#940) - the groups oidc_build_user_row stores on the user, which is what
+    # a pool grant on a group is matched against. Entra groups go in by object id only: the
+    # display name is the squattable identifier the name-match warning further down is
+    # about, and a pool grant must not be claimable by creating a group of the right name.
+    # A generic provider's groups claim is taken as the signed token carries it.
+    _claim = (id_token_claims or {}).get('groups') or []
+    if isinstance(_claim, str):
+        _claim = [_claim]
+    _seen = set()
+    for g in list(groups or []) + (list(_claim) if isinstance(_claim, (list, tuple)) else []):
+        v = g.get('id') if isinstance(g, dict) else g
+        if isinstance(v, int) and not isinstance(v, bool):
+            v = str(v)
+        if isinstance(v, str) and v.strip() and v.strip().lower() not in _seen:
+            _seen.add(v.strip().lower())
+            result['groups'].append(v.strip())
+
+    # MK: Built-in group mappings (admin > user > viewer priority)
+    admin_group = config.get('admin_group_id', '').strip().lower()
+    user_group = config.get('user_group_id', '').strip().lower()
+    viewer_group = config.get('viewer_group_id', '').strip().lower()
+    
+    # KG Aug 2026 — track whether result['role'] is still only oidc_default_role. A group
+    # that actually matched must always be able to replace the default, whatever its rank,
+    # otherwise a custom default_role silently swallows every mapping below.
+    role_from_default = True
+
+    if admin_group and (admin_group in group_ids or admin_group in group_names):
+        result['role'] = ROLE_ADMIN
+        role_from_default = False
+    elif user_group and (user_group in group_ids or user_group in group_names):
+        result['role'] = ROLE_USER
+        role_from_default = False
+    elif viewer_group and (viewer_group in group_ids or viewer_group in group_names):
+        result['role'] = ROLE_VIEWER
+        role_from_default = False
+
+    # LW: Custom group mappings — pick highest role when user matches multiple groups
+    # KG Aug 2026 — custom roles used to be dropped here without a trace: they are absent
+    # from _role_prio, so .get(role, 0) ranked them equal to viewer and the strict `>` never
+    # fired — while the log line below still reported the mapping as matched. Rank them
+    # between user and admin: an explicit mapping onto a custom (e.g. tenant-scoped) role
+    # should beat the coarse viewer/user defaults, but must never demote an admin-group hit.
+    _role_prio = {ROLE_VIEWER: 0, ROLE_USER: 1, ROLE_ADMIN: 3}
+    _CUSTOM_ROLE_PRIO = 2
+
+    def _role_rank(role):
+        return _role_prio.get(role, _CUSTOM_ROLE_PRIO)
+
+    # KG Aug 2026 — custom roles all share one rank, so when several of them match the
+    # first one in the list wins and the rest tie out. That is deterministic and mirrors
+    # how the mapping list reads top-down, but it IS order-dependent, so say so out loud
+    # instead of quietly picking one: defining a real precedence between custom roles
+    # would mean comparing their permission sets, which is a product decision, not
+    # something to smuggle into a bug fix.
+    matched_custom_roles = []
+
+    for mapping in config.get('group_mappings', []):
+        map_group = (mapping.get('group_id') or mapping.get('group_dn') or '').strip().lower()
+        _by_id = bool(map_group) and map_group in group_ids
+        _by_name = bool(map_group) and map_group in group_names
+        if _by_name and not _by_id:
+            # MK Sep 2026 - a group's display name is not a stable identifier. In an Entra
+            # tenant where users may create security groups (the default in plenty of them),
+            # anyone can make a group called whatever a mapping names and inherit the role it
+            # grants. The id cannot be squatted that way. Removing name matching outright
+            # would break every install that configured mappings by name - the field is even
+            # called group_dn, so it was meant to be used that way - so for now say so, loudly
+            # and per match, and leave the decision about a migration to a release.
+            logging.warning(
+                "[OIDC] group mapping '%s' matched on display NAME, not on group id, and "
+                "granted role '%s'. Display names are not unique and are not stable - anyone "
+                "who can create a group in the directory can claim this mapping. Re-point it "
+                "at the group's object id.",
+                map_group, mapping.get('role') or '(no role)')
+        if _by_id or _by_name:
+            if mapping.get('role') and mapping['role'] not in _role_prio:
+                matched_custom_roles.append(mapping['role'])
+            # The configured default stands for "no group matched" (that is how the setting
+            # is labelled in the UI), so a group that DID match may replace it — except when
+            # the default is admin: silently demoting a configured admin on a lower-privilege
+            # match would lock installs out of admin-only workflows.
+            if mapping.get('role') and (
+                    (role_from_default and result['role'] != ROLE_ADMIN)
+                    or _role_rank(mapping['role']) > _role_rank(result['role'])):
+                result['role'] = mapping['role']
+                role_from_default = False
+            if mapping.get('tenant'):
+                result['tenant'] = mapping['tenant']
+            if mapping.get('permissions'):
+                result['permissions'].extend(mapping['permissions'])
+            if mapping.get('tenant') and mapping.get('tenant_role'):
+                result['tenant_permissions'][mapping['tenant']] = {
+                    'role': mapping['tenant_role'],
+                    'extra': mapping.get('permissions', [])  # MK: Must be 'extra' to match get_user_permissions()
+                }
+            logging.info(f"[OIDC] Custom group mapping matched: {map_group} → role={mapping.get('role')}")
+
+    if len(matched_custom_roles) > 1:
+        logging.warning(
+            f"[OIDC] user matched {len(matched_custom_roles)} custom-role group mappings "
+            f"({', '.join(matched_custom_roles)}); applied '{result['role']}' — custom roles "
+            "share one precedence level, so the first match in the mapping list wins. "
+            "Reorder the mappings if a different role should take precedence."
+        )
+
+    return result
+
+
+def _oidc_fallback_username(sub, users: dict):
+    """The key for a sign-in whose claims carry no usable name, or None to refuse it.
+
+    MK Oct 2026 (#1141) - this was oidc_<first 12 chars of the sub>. It kept the case of
+    the sub, and the admin routes lower-case the name they are given, so such an account
+    could be neither edited nor deleted. And 12 characters of a sub are not the sub: two
+    subjects sharing a prefix derived one key, and the second login took the account over.
+
+    An OIDC account already bound to this sub keeps its key, whatever it looks like (the
+    old upper-case ones included) - it is the same identity, as in the adoption rule
+    below. Otherwise a lower-case hash of the sub, which is never adopted from someone
+    else: a row under that key that is not this subject's refuses the login.
+    """
+    if not isinstance(sub, str) or not sub:
+        logging.warning("[OIDC] sign-in without a name and without a sub claim - refused")
+        return None
+    # sorted: a standby has to arrive at the same key as the active, whatever row order
+    mine = [key for key in sorted(users)
+            if isinstance(users[key], dict)
+            and users[key].get('auth_source', 'local') in OIDC_AUTH_SOURCES
+            and users[key].get('oidc_sub') == sub]
+    if mine:
+        # a named account before an old fallback one: once the ID token names the user both
+        # carry the sub, and the named one is what an admin looks after now. A sign-in that
+        # loses the name again must not go back to the old one (disabled or not)
+        named = [key for key in mine if not _oidc_is_fallback_row(key, users[key])]
+        return (named or mine)[0]
+    key = _oidc_fallback_key(sub)
+    if key in users:
+        logging.warning(f"[OIDC] '{key}' belongs to another identity - this sign-in has no "
+                        f"name claim to tell them apart, refused")
+        return None
+    return key
+
+
+def _oidc_fallback_key(sub: str) -> str:
+    return 'oidc_' + hashlib.sha256(sub.encode('utf-8')).hexdigest()[:16]
+
+
+def _oidc_is_fallback_row(username: str, row: dict) -> bool:
+    """Whether `row` is the account a sign-in without a name made for its stored sub.
+
+    Its key is then no name an IdP gave anyone, only the sub spelled differently - the
+    hash, or oidc_<first 12 chars> from before #1141. A name claim that happens to spell
+    it is not that identity.
+    """
+    sub = row.get('oidc_sub')
+    if not isinstance(sub, str) or not sub:
+        return False
+    return username in (_oidc_fallback_key(sub), f"oidc_{sub[:12]}")
+
+
+def oidc_derive_username(user_info: dict, users: dict = None, name: str = None) -> str:
+    """Derive the local username key from OIDC claims.
+
+    LW: keep the full preferred_username including the domain. Truncating at
+    '@' collapsed bob@corp.com and bob@partner.com onto one account, so the
+    second one to log in inherited the first one's role and tenant.
+
+    `users` is the already-loaded users table. Callers in the login path have
+    one in hand; passing it avoids a second full-table read per login.
+
+    None when the claims carry no name and the fallback key cannot be this
+    identity's (see _oidc_fallback_username); the sign-in is refused then.
+
+    `name` is the value of the username claim the admin picked (#1149). It replaces the
+    claim order, and a name that filters down to nothing is None: no fallback key then.
+    """
+    from pegaprox.utils.auth import load_users
+
+    if name is not None:
+        # NS Oct 2026 (#1149) - the filter below drops or folds what it does not know (a
+        # dotted capital I, a zero-width space, an apostrophe), and lower() turns the Kelvin
+        # sign into a k, so two people at the IdP could come out as one name here. A picked
+        # claim is plain ASCII without padding and goes through whole, or not at all.
+        raw_username = name.lower() if name.isascii() and name == name.strip() else ''
+        if not raw_username or any(c not in _OIDC_NAME_CHARS for c in raw_username):
+            logging.warning("[OIDC] Sign-in refused: the picked username claim holds characters "
+                            "a PegaProx username cannot carry")
+            return None
+    else:
+        raw_username = (user_info.get('preferred_username')
+                        or user_info.get('email', ''))
+
+    # Char set matches sanitize_username()'s allowlist. '+' belongs here for the
+    # same reason '@' does: dropping it silently merges identities, so
+    # a+b@example.com would derive onto a real ab@example.com account.
+    username = ''.join(c for c in raw_username.lower()
+                       if c.isalnum() or c in '._-@+')
+    if not username and name is not None:
+        return None
+    if not username:
+        return _oidc_fallback_username(user_info.get('sub'),
+                                       users if users is not None else load_users())
+
+    # Back-compat: installs before this change stored the part before '@'.
+    # An existing account keeps its old key so it isn't orphaned -- but only if
+    # it is provably the SAME identity. Reusing 'bob' merely because a local
+    # part matches would re-open the very collision this function closed:
+    # bob@partner.com would land on the 'bob' row that bob@corp.com created and
+    # inherit its role and tenant. The stored oidc_sub is the IdP's stable,
+    # non-reassignable identifier for the subject, so require it to match the
+    # incoming one exactly. A sub is only unique within an issuer; installs that
+    # repoint at a different IdP have to rekey manually (no issuer is recorded
+    # on the user row to check against).
+    if '@' in username:
+        sub = user_info.get('sub', '')
+        legacy = username.split('@')[0]
+        if legacy and sub:
+            existing = (users if users is not None else load_users()).get(legacy)
+            if (existing
+                    and existing.get('auth_source', 'local') in OIDC_AUTH_SOURCES
+                    and existing.get('oidc_sub') == sub):
+                return legacy
+
+    return username
+
+
+def oidc_build_user_row(user_info: dict, role_mapping: dict, auth_source: str, users: dict,
+                        name: str = None, subjects=None):
+    """The row an OIDC sign-in would store for this user, without storing it.
+
+    `users` is the users table as loaded. Returns (username, row), or None where an
+    account of another identity source owns the name; the caller leaves it alone then.
+
+    MK Oct 2026 (#625) - split out of oidc_provision_user, as ldap_build_user_row was:
+    a standby asks what the identity provider says without writing it down, its users
+    table is the active's copy and the next sync puts that copy back.
+    """
+    # Derive username from OIDC claims
+    email = user_info.get('email') or user_info.get('preferred_username', '')
+    username = oidc_derive_username(user_info, users, name=name)
+    if username is None:
+        return None  # no name, and the fallback key is not this identity's (#1141)
+    if name is not None and not user_info.get('sub'):
+        logging.warning(f"[OIDC] Rejected login for '{username}' - the sign-in has no sub, "
+                        f"so the account cannot be tied to it")
+        return None
+
+    display_name = user_info.get('name') or user_info.get('given_name', '')
+    if not display_name:
+        display_name = username
+
+    if username in users:
+        # NS: SECURITY - Don't allow OIDC to overwrite a local-only user
+        # This prevents account takeover if someone creates an IdP account matching a local username
+        # NS Sep 2026 - this checked only 'local', while the comment on OIDC_AUTH_SOURCES
+        # says local AND ldap must never be adopted by an OIDC login. An LDAP row with a
+        # matching username fell straight through to the update path below and had its
+        # role and auth_source rewritten - the account takeover the local check was added
+        # to prevent, one directory over. Reject anything this login does not own.
+        existing_source = users[username].get('auth_source', 'local')
+        if existing_source not in OIDC_AUTH_SOURCES:
+            logging.warning(f"[OIDC] Rejected login for '{username}' - a {existing_source} "
+                            f"account of that name exists and cannot be taken over by OIDC")
+            return None  # Caller should handle None return
+        # MK Oct 2026 (#1141) - a fallback key is lower case now, so a name claim can spell
+        # one ("oidc_" + 16 hex). That row is its sub's, not whoever picks it as a username.
+        if (_oidc_is_fallback_row(username, users[username])
+                and users[username].get('oidc_sub') != user_info.get('sub')):
+            logging.warning(f"[OIDC] Rejected login for '{username}' - that account was made "
+                            f"for another subject's sign-in without a name")
+            return None
+        # NS Oct 2026 (#1149) - with a claim the admin picked, the account stays with the
+        # subject it was made for. Claims like email can be changed or handed on at some
+        # identity providers, and the update below would give the row and its role to
+        # whoever carries the value now.
+        # `subjects` are the ids this one sign-in goes by: with Entra the Graph id when /me
+        # answered and the token's sub and oid, so a Graph hiccup does not lock anyone out.
+        # A row with no subject stored is not taken either: an admin binds or deletes it.
+        bound = users[username].get('oidc_sub')
+        if name is not None:
+            own = {s for s in (set(subjects or ()) | {user_info.get('sub')}) if s}
+            if not bound or bound not in own:
+                logging.warning(f"[OIDC] Rejected login for '{username}' - the account "
+                                + ("has no identity provider subject stored; an admin can "
+                                   "delete it to let the sign-in create it again" if not bound else
+                                   "belongs to another subject of the identity provider; an "
+                                   "admin can delete it if that person is gone"))
+                return None
+
+        # Update existing OIDC user - on a copy, so the table the caller handed in
+        # stays what it was
+        user = copy.deepcopy(users[username])
+        user['display_name'] = display_name
+        user['email'] = email
+        user['auth_source'] = auth_source
+        user['oidc_sub'] = user_info.get('sub', '')
+        user['last_oidc_sync'] = datetime.now().isoformat()
+
+        # NS Sep 2026 - this block used to be grant-only. `permissions` was a union with
+        # what was already there, `tenant_permissions` was a dict .update(), and `role`
+        # fell back to the stored one - all three guarded by `if role_mapping.get(...)`,
+        # so an empty mapping did not even enter them. The effect: taking a user out of a
+        # group in the IdP revoked nothing here. Someone who left the company kept every
+        # permission they had until an admin noticed by hand, which is the opposite of
+        # what wiring PegaProx to an IdP is for.
+        #
+        # The IdP is now authoritative - but only when we actually know the full group
+        # set (see oidc_map_groups_to_role). On a failed or partial Graph fetch, or a
+        # provider that sends no groups claim, we keep what is stored and say so at
+        # WARNING level. Revoking on a network hiccup would turn a privilege bug into an
+        # outage, and half a group list is worse to decide on than none.
+        #
+        # tenant_id is deliberately NOT cleared when unmapped: admins also set it by hand,
+        # and dropping someone out of their tenant is a different decision from taking a
+        # permission away. Assign when mapped, leave alone otherwise - as before.
+        if role_mapping.get('_authoritative'):
+            user['role'] = role_mapping.get('role', ROLE_VIEWER)
+            user['permissions'] = list(role_mapping.get('permissions') or [])
+            user['tenant_permissions'] = dict(role_mapping.get('tenant_permissions') or {})
+            if role_mapping.get('tenant'):
+                user['tenant_id'] = role_mapping['tenant']  # NS: Must be tenant_id
+            # the full set (#940), so a group the IdP dropped stops granting pool
+            # access with this sign-in
+            user['groups'] = list(role_mapping.get('groups') or [])
+        else:
+            logging.warning(
+                f"[OIDC] group set for '{username}' is not authoritative (fetch failed, "
+                f"partial, or provider sends no groups claim) - keeping the stored role "
+                f"and permissions. Nothing was revoked this login.")
+            # Still honour anything the mapping DID produce, so a working grant path is
+            # not broken by an unrelated fetch problem. NOT the role, though: the mapping
+            # always carries one (default_role when nothing matched), so applying it here
+            # would demote an admin on a failed fetch - the same outage this branch exists
+            # to prevent, one field over. Permissions and tenant only appear when a group
+            # actually matched, so those are safe to add.
+            if role_mapping.get('tenant'):
+                user['tenant_id'] = role_mapping['tenant']
+            if role_mapping.get('permissions'):
+                user['permissions'] = list(set((user.get('permissions') or [])
+                                               + role_mapping['permissions']))
+            if role_mapping.get('tenant_permissions'):
+                if 'tenant_permissions' not in user:
+                    user['tenant_permissions'] = {}
+                user['tenant_permissions'].update(role_mapping['tenant_permissions'])
+            # groups the same way as the permissions: add what this login saw, drop nothing.
+            # The stored ones by username - the users table a caller hands in leaves them out.
+            _held = get_db().get_user_directory_groups(username)
+            _have = {g.lower() for g in _held if isinstance(g, str)}
+            user['groups'] = _held + [g for g in (role_mapping.get('groups') or [])
+                                      if isinstance(g, str) and g.lower() not in _have]
+    else:
+        # Create new user
+        user = {
+            'role': role_mapping.get('role', ROLE_VIEWER),
+            'enabled': True,
+            'display_name': display_name,
+            'email': email,
+            'password_hash': '',  # No local password for OIDC users
+            'password_salt': '',
+            'permissions': role_mapping.get('permissions', []),
+            'tenant_id': role_mapping.get('tenant', ''),  # NS: Must be tenant_id
+            'tenant_permissions': role_mapping.get('tenant_permissions', {}),
+            'theme': '',
+            'language': '',
+            'auth_source': auth_source,
+            'oidc_sub': user_info.get('sub', ''),
+            'last_oidc_sync': datetime.now().isoformat(),
+            'created_at': datetime.now().isoformat(),
+            'groups': list(role_mapping.get('groups') or []),
+        }
+    return username, user
+
+
+def oidc_provision_user(user_info: dict, role_mapping: dict, auth_source: str = 'oidc',
+                        name: str = None, subjects=None) -> dict:
+    from pegaprox.utils.auth import load_users, save_users
+    """Create or update local user from OIDC authentication
+    
+    NS: JIT provisioning - same pattern as LDAP but for OIDC providers
+    MK: username derived from email or preferred_username
+    """
+    users = load_users()
+    built = oidc_build_user_row(user_info, role_mapping, auth_source, users, name=name,
+                                subjects=subjects)
+    if built is None:
+        return None  # Caller should handle None return
+    username, user = built
+    if username in users:
+        logging.info(f"[OIDC] Updated user '{username}' (role={user['role']}, source={auth_source})")
+    else:
+        logging.info(f"[OIDC] Provisioned new user '{username}' (role={role_mapping.get('role', ROLE_VIEWER)}, source={auth_source})")
+    users[username] = user
+    
+    save_users(users)
+    return {**users[username], 'username': username}

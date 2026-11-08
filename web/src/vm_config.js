@@ -1,0 +1,8865 @@
+        // ═══════════════════════════════════════════════
+        // PegaProx - VM Configuration
+        // ConfigModal, disk/network/ISO management
+        // ═══════════════════════════════════════════════
+        // VM/Container Config Modal
+        // LW: This is the big one - handles all VM/CT configuration
+        // Tabs: General, Hardware (disks/NICs), Options, Snapshots, Replication
+        // Sep 2025: Major refactor to support both QEMU and LXC properly
+
+        // IP Set entries sub-component for VM Firewall
+        function IpsetEntries({ clusterId, vm, ipsetName, authFetch, onRefresh, t, addToast }) {
+            const [entries, setEntries] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [newCidr, setNewCidr] = useState('');
+
+            useEffect(() => {
+                loadEntries();
+            }, [ipsetName]);
+
+            const loadEntries = async () => {
+                setLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipsetName}`);
+                    if (res?.ok) setEntries(await res.json());
+                } catch (e) {}
+                setLoading(false);
+            };
+
+            return (
+                <div className="p-4">
+                    {loading ? (
+                        <div className="flex justify-center py-4">
+                            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-proxmox-orange"></div>
+                        </div>
+                    ) : (
+                        <>
+                            <div className="flex gap-2 mb-3">
+                                <input
+                                    type="text"
+                                    value={newCidr}
+                                    onChange={e => setNewCidr(e.target.value)}
+                                    placeholder="e.g. 10.0.0.0/24"
+                                    className="flex-1 bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm"
+                                    onKeyDown={async (e) => {
+                                        if (e.key === 'Enter' && newCidr) {
+                                            try {
+                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipsetName}`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ cidr: newCidr })
+                                                });
+                                                if (res?.ok) {
+                                                    loadEntries(); setNewCidr('');
+                                                } else {
+                                                    const err = await res.json().catch(() => ({}));
+                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                }
+                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                        }
+                                    }}
+                                />
+                                <button
+                                    onClick={async () => {
+                                        if (!newCidr) return;
+                                        try {
+                                            const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipsetName}`, {
+                                                method: 'POST',
+                                                headers: { 'Content-Type': 'application/json' },
+                                                body: JSON.stringify({ cidr: newCidr })
+                                            });
+                                            if (res?.ok) {
+                                                loadEntries(); setNewCidr('');
+                                            } else {
+                                                const err = await res.json().catch(() => ({}));
+                                                addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                            }
+                                        } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                    }}
+                                    className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                >
+                                    {t('add')}
+                                </button>
+                            </div>
+                            {entries.length === 0 ? (
+                                <div className="text-center text-gray-500 py-4 text-sm">Empty set</div>
+                            ) : (
+                                <div className="space-y-1">
+                                    {entries.map((entry, idx) => (
+                                        <div key={idx} className="flex justify-between items-center p-2 bg-proxmox-dark rounded-lg">
+                                            <span className="font-mono text-sm">{entry.cidr}</span>
+                                            <div className="flex items-center gap-2">
+                                                {entry.comment && <span className="text-gray-500 text-xs">{entry.comment}</span>}
+                                                <button
+                                                    onClick={async () => {
+                                                        try {
+                                                            const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipsetName}/${encodeURIComponent(entry.cidr)}`, { method: 'DELETE' });
+                                                            if (res?.ok) {
+                                                                loadEntries();
+                                                            } else {
+                                                                const err = await res.json().catch(() => ({}));
+                                                                addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                            }
+                                                        } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                    }}
+                                                    className="p-1 hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                >
+                                                    <Icons.Trash className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - the feature flags of a container after creation. It saves on its own
+        // (not through the modal's Save): Proxmox keeps every flag but nesting for root@pam,
+        // every flag of a privileged container too, and the server knows whether this
+        // cluster connection is root@pam (an API token never is).
+        const LXC_FEATURE_ROWS = [
+            { key: 'nesting', label: 'ctFeatNesting', hint: 'ctFeatNestingHint' },
+            { key: 'keyctl', label: 'ctFeatKeyctl', hint: 'ctFeatKeyctlHint' },
+            { key: 'fuse', label: 'ctFeatFuse', hint: 'ctFeatFuseHint' },
+            { key: 'mknod', label: 'ctFeatMknod', hint: 'ctFeatMknodHint' },
+            { key: 'nfs', label: 'ctFeatNfs', hint: 'ctFeatNfsHint' },
+            { key: 'cifs', label: 'ctFeatCifs', hint: 'ctFeatCifsHint' },
+        ];
+
+        function lxcFeatureFlags(f) {
+            const m = (f && f.mount) || {};
+            return { nesting: !!f?.nesting, keyctl: !!f?.keyctl, fuse: !!f?.fuse, mknod: !!f?.mknod, nfs: !!m.nfs, cifs: !!m.cifs };
+        }
+
+        // why this connection cannot make a root@pam change, from the server's access.reason
+        function pveRootReasonText(t, reason) {
+            if (reason === 'token') return t('pveRootToken');
+            if (reason === 'no_password') return t('pveRootNoPassword');
+            return t('pveRootOtherUser');
+        }
+
+        function LxcFeaturesCard({ vm, clusterId, authFetch, addToast, t, haReadOnly }) {
+            const [state, setState] = useState(null);
+            const [edit, setEdit] = useState(null);
+            const [loadError, setLoadError] = useState('');
+            const [saving, setSaving] = useState(false);
+            const base = `${API_URL}/clusters/${clusterId}/vms/${vm.node}/lxc/${vm.vmid}/features`;
+
+            const load = async () => {
+                setLoadError('');
+                try {
+                    const r = await authFetch(base);
+                    if (r && r.ok) {
+                        const d = await r.json();
+                        setState(d);
+                        setEdit(lxcFeatureFlags(d.features));
+                        return;
+                    }
+                    const e = r ? await r.json().catch(() => ({})) : {};
+                    setLoadError(e.error || t('ctFeaturesLoadFailed'));
+                } catch (e) {
+                    setLoadError(t('ctFeaturesLoadFailed'));
+                }
+            };
+            useEffect(() => { load(); }, [vm.vmid, vm.node, clusterId]);
+
+            const header = (
+                <div className="flex items-center justify-between mb-1">
+                    <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                        <Icons.Layers className="w-4 h-4" />
+                        {t('ctFeatures')}
+                    </label>
+                    {vm.status === 'running' && (
+                        <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</span>
+                    )}
+                </div>
+            );
+
+            if (loadError || !state || !edit) {
+                return (
+                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border" data-ct-features="">
+                        {header}
+                        {loadError ? (
+                            <div className="flex items-center justify-between gap-3 text-xs text-red-400">
+                                <span>{loadError}</span>
+                                <button type="button" onClick={load} className="px-2 py-1 rounded bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white">{t('retry')}</button>
+                            </div>
+                        ) : (
+                            <div className="flex justify-center py-3">
+                                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-proxmox-orange"></div>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            const shown = lxcFeatureFlags(state.features);
+            const running = lxcFeatureFlags(state.current);
+            const unprivileged = !!state.unprivileged;
+            const access = state.access || {};
+            const changed = Object.keys(edit).filter(k => edit[k] !== shown[k]);
+            // Proxmox compares what runs now with what is sent, value by value
+            const vsRunning = Object.keys(edit).filter(k => edit[k] !== running[k]);
+            const needsRoot = changed.length > 0 && vsRunning.length > 0 && (!unprivileged || vsRunning.some(k => k !== 'nesting'));
+            const blocked = needsRoot && !access.root;
+            const rowLocked = (key) => !access.root && (!unprivileged || key !== 'nesting');
+
+            const apply = async () => {
+                const body = {};
+                changed.forEach(k => {
+                    if (k === 'nfs' || k === 'cifs') body.mount = { ...(body.mount || {}), [k]: edit[k] };
+                    else body[k] = edit[k];
+                });
+                setSaving(true);
+                try {
+                    const r = await authFetch(base, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) {
+                        addToast(d.pending ? t('ctFeaturesSavedRestart') : t('ctFeaturesSaved'), 'success');
+                        await load();
+                    } else if (d.code === 'PVE_ROOT_REQUIRED') {
+                        addToast(pveRootReasonText(t, d.reason), 'error');
+                    } else {
+                        addToast(d.error || t('saveFailed'), 'error');
+                    }
+                } catch (e) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSaving(false);
+            };
+
+            return (
+                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border" data-ct-features="">
+                    {header}
+                    <p className="text-xs text-gray-500 mb-3">{t('ctFeaturesHint')}</p>
+                    <div className="grid grid-cols-2 gap-3">
+                        {LXC_FEATURE_ROWS.map(row => {
+                            const locked = rowLocked(row.key);
+                            // keyctl is for unprivileged containers, as in the Proxmox UI
+                            const privOnly = row.key === 'keyctl' && !unprivileged && !edit.keyctl;
+                            return (
+                                <label key={row.key} className={`flex items-start gap-2 ${locked || privOnly ? 'opacity-60' : 'cursor-pointer'}`} data-ct-feature={row.key}>
+                                    <input
+                                        type="checkbox"
+                                        checked={edit[row.key]}
+                                        disabled={locked || privOnly || saving}
+                                        onChange={e => setEdit(prev => ({ ...prev, [row.key]: e.target.checked }))}
+                                        className="w-4 h-4 mt-0.5 rounded border-proxmox-border bg-proxmox-card text-proxmox-orange focus:ring-proxmox-orange"
+                                    />
+                                    <span className="min-w-0">
+                                        <span className="text-sm text-gray-300 flex items-center gap-1.5">
+                                            {t(row.label)}
+                                            {locked && <span className="text-[10px] px-1.5 py-0.5 bg-yellow-500/20 text-yellow-400 rounded font-medium" title={t('ctFeaturesRootOnly')}>root@pam</span>}
+                                        </span>
+                                        <span className="block text-xs text-gray-500">{privOnly ? t('ctFeatUnprivilegedOnly') : t(row.hint)}</span>
+                                    </span>
+                                </label>
+                            );
+                        })}
+                    </div>
+                    {state.kept?.length > 0 && (
+                        <p className="mt-3 text-xs text-gray-500">{t('ctFeaturesKept')} <code className="font-mono text-gray-400">{state.kept.join(', ')}</code></p>
+                    )}
+                    {state.pending && (
+                        <div className="mt-3 text-xs text-yellow-400 flex items-center gap-2" data-ct-features-pending="">
+                            <Icons.Clock className="w-3.5 h-3.5" />
+                            {t('ctFeaturesPending')}
+                        </div>
+                    )}
+                    {!access.root && (
+                        <div className="mt-3 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-xs text-yellow-300 flex items-start gap-2" data-ct-features-root={access.reason || ''}>
+                            <Icons.Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>
+                                {unprivileged ? t('ctFeaturesRootRule') : t('ctFeaturesRootPrivileged')}{' '}
+                                {pveRootReasonText(t, access.reason)}
+                            </span>
+                        </div>
+                    )}
+                    {needsRoot && access.fresh_ticket && (
+                        <p className="mt-3 text-xs text-gray-500 flex items-center gap-2"><Icons.Info className="w-3.5 h-3.5" />{t('pveRootViaLogin')}</p>
+                    )}
+                    {!haReadOnly && (
+                        <div className="mt-4 flex items-center justify-end gap-2">
+                            {changed.length > 0 && (
+                                <button type="button" onClick={() => setEdit(shown)} disabled={saving}
+                                    className="px-3 py-1.5 rounded-lg text-sm bg-proxmox-card border border-proxmox-border text-gray-300 hover:text-white disabled:opacity-50">
+                                    {t('revert')}
+                                </button>
+                            )}
+                            <button type="button" onClick={apply} disabled={!changed.length || saving || blocked}
+                                className="px-3 py-1.5 rounded-lg text-sm bg-proxmox-orange text-white hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                                data-ct-features-apply="">
+                                {saving ? t('saving') : t('ctFeaturesApply')}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // one cluster resource mapping to pick in the passthrough dialog: what
+        // it is, the nodes it has a device on (a VM with it starts and migrates only there),
+        // and what Proxmox found wrong with it on this VM's node
+        function PassthroughMappingPicker({ kind, info, value, onChange, node, t }) {
+            if (!info || info.loading) {
+                return (
+                    <div className="flex justify-center py-3">
+                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-proxmox-orange"></div>
+                    </div>
+                );
+            }
+            if (info.error) return <div className="text-xs text-red-400">{info.error}</div>;
+            const list = info.mappings || [];
+            if (!list.length) {
+                return <div className="text-xs text-gray-500" data-pt-no-mappings="">{t(kind === 'pci' ? 'ptNoPciMappings' : 'ptNoUsbMappings')}</div>;
+            }
+            const picked = list.find(m => m.id === value);
+            return (
+                <div className="space-y-2">
+                    <select
+                        value={value}
+                        onChange={e => onChange(e.target.value)}
+                        className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                        data-pt-mapping-select={kind}
+                    >
+                        <option value="">-- {t('ptSelectMapping')} --</option>
+                        {list.map(m => (
+                            <option key={m.id} value={m.id}>
+                                {m.id}{m.description ? ` - ${m.description}` : ''}{m.on_node === false ? ` (${t('ptNotOnThisNode')})` : ''}
+                            </option>
+                        ))}
+                    </select>
+                    {picked && (
+                        <div className="p-3 bg-proxmox-dark rounded text-sm space-y-1" data-pt-mapping-detail={picked.id}>
+                            <div className="text-gray-400">{t('ptMappingNodes')}: <span className="text-white">{picked.nodes.length ? picked.nodes.join(', ') : '-'}</span></div>
+                            {picked.entries.filter(e => e.node === node).map((e, i) => (
+                                <div key={i} className="text-gray-400">{node}: <span className="font-mono text-white">{e.path || e.id}</span></div>
+                            ))}
+                            {picked.on_node === false && (
+                                <div className="text-xs text-yellow-400" data-pt-mapping-off-node="">{t('ptMappingNotHere').replace(/\{node\}/g, () => node)}</div>
+                            )}
+                            {(picked.checks || []).map((c, i) => (
+                                <div key={i} className={`text-xs ${c.severity === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>{c.message}</div>
+                            ))}
+                        </div>
+                    )}
+                    <p className="text-xs text-gray-500">{t('ptMappingNodesHint')}</p>
+                </div>
+            );
+        }
+
+        // the choice between a mapped device (first) and a raw one, and why raw is shut
+        function PassthroughModeSwitch({ mode, setMode, t }) {
+            const modes = [['mapping', 'ptModeMapped'], ['raw', 'ptModeRaw']];
+            return (
+                <div className="flex gap-1 p-1 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                    {modes.map(([id, label]) => (
+                        <button key={id} type="button" onClick={() => setMode(id)} data-pt-mode={id}
+                            className={`flex-1 px-3 py-1.5 rounded text-sm transition-colors ${mode === id ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white'}`}>
+                            {t(label)}
+                        </button>
+                    ))}
+                </div>
+            );
+        }
+
+        function PassthroughRawNote({ info, t }) {
+            const access = info?.access;
+            if (!access) return null;
+            if (!access.root) {
+                return (
+                    <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-xs text-yellow-300 flex items-start gap-2" data-pt-raw-refused={access.reason || ''}>
+                        <Icons.Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{t('ptRawRootOnly')} {pveRootReasonText(t, access.reason)}</span>
+                    </div>
+                );
+            }
+            if (access.fresh_ticket) {
+                return <p className="text-xs text-gray-500 flex items-center gap-2"><Icons.Info className="w-3.5 h-3.5" />{t('pveRootViaLogin')}</p>;
+            }
+            return null;
+        }
+
+        // LW Oct 2026 - the VirtIO RNG of a VM. PVE keeps it as rng0 =
+        // "[source=]<file>[,max_bytes=N][,period=N]" and fills in 1024 bytes per 1000 ms when
+        // the numbers are left out. The server checks the same rules before PVE sees the value.
+        const RNG_SOURCES = ['/dev/urandom', '/dev/random', '/dev/hwrng'];
+        const RNG_MAX_BYTES_TOP = '9223372036854775807';
+
+        function parseRng(value) {
+            const out = { source: '', max_bytes: '', period: '' };
+            String(value || '').split(',').forEach(part => {
+                if (!part.trim()) return;
+                const eq = part.indexOf('=');
+                if (eq < 0) out.source = part;
+                else if (Object.prototype.hasOwnProperty.call(out, part.slice(0, eq))) out[part.slice(0, eq)] = part.slice(eq + 1);
+            });
+            return out;
+        }
+
+        const rngDigits = (v) => String(v ?? '').replace(/^0+(?=[0-9])/, '');
+
+        // '' when the form is fine, else the key of what is wrong with it
+        function rngProblem(form) {
+            if (!RNG_SOURCES.includes(form.source)) return 'rngBadSource';
+            const bytes = rngDigits(form.max_bytes);
+            if (!/^[0-9]{1,19}$/.test(bytes) || (bytes.length === 19 && bytes > RNG_MAX_BYTES_TOP)) return 'rngBadMaxBytes';
+            if (bytes === '0') return '';
+            const period = rngDigits(form.period);
+            if (!/^[0-9]{1,10}$/.test(period) || Number(period) < 1 || Number(period) > 4294967295) return 'rngBadPeriod';
+            return '';
+        }
+
+        // without a limit QEMU never gets the period, so it is left out
+        function rngValue(form) {
+            const bytes = rngDigits(form.max_bytes);
+            const parts = [`source=${form.source}`, `max_bytes=${bytes}`];
+            if (bytes !== '0') parts.push(`period=${rngDigits(form.period)}`);
+            return parts.join(',');
+        }
+
+        function VirtioRngCard({ value, running, onAdd, onEdit, onRemove, t }) {
+            const cur = value ? parseRng(value) : null;
+            const limit = cur && (rngDigits(cur.max_bytes) === '0'
+                ? t('rngNoLimit')
+                : t('rngLimitText').replace('{bytes}', () => rngDigits(cur.max_bytes) || '1024').replace('{ms}', () => rngDigits(cur.period) || '1000'));
+            return (
+                <div className="mt-6 pt-6 border-t border-proxmox-border" data-rng-card>
+                    <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                        <span className="text-purple-400"><Icons.Dice /></span>
+                        {t('rngTitle')}
+                        {running && (
+                            <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-0.5 rounded">{t('changesAfterRestart')}</span>
+                        )}
+                    </h3>
+                    {cur ? (
+                        <div className="p-3 bg-proxmox-dark rounded-lg" data-rng-device>
+                            <div className="flex items-center justify-between gap-4">
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <span className="text-xs text-gray-500 font-mono">rng0</span>
+                                    <span className="text-sm font-mono text-gray-300 truncate" data-rng-shown-source>{cur.source || value}</span>
+                                    <span className="text-xs text-gray-500 truncate" data-rng-shown-limit>{limit}</span>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0">
+                                    <button onClick={onEdit} data-rng-edit title={t('edit')}
+                                        className="text-xs px-2 py-1 text-gray-400 hover:text-white hover:bg-proxmox-hover rounded">
+                                        <Icons.Edit />
+                                    </button>
+                                    <button onClick={onRemove} data-rng-remove title={t('remove')}
+                                        className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded">
+                                        <Icons.Trash className="w-3.5 h-3.5" />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                            <div className="flex items-center justify-between gap-4">
+                                <span className="text-sm text-gray-500">{t('rngNone')}</span>
+                                <button onClick={onAdd} data-rng-add
+                                    className="shrink-0 text-xs px-3 py-1.5 bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 flex items-center gap-1">
+                                    <Icons.Plus className="w-3 h-3" />
+                                    {t('rngAdd')}
+                                </button>
+                            </div>
+                            <p className="text-xs text-gray-600 mt-2">{t('rngHint')}</p>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function VirtioRngDialog({ value, onSave, onClose, t }) {
+            const [form, setForm] = useState(() => {
+                const cur = parseRng(value);
+                return {
+                    source: value ? cur.source : '/dev/urandom',
+                    max_bytes: cur.max_bytes !== '' ? cur.max_bytes : '1024',
+                    period: cur.period !== '' ? cur.period : '1000',
+                };
+            });
+            const [busy, setBusy] = useState(false);
+            const problem = rngProblem(form);
+            const unlimited = rngDigits(form.max_bytes) === '0';
+            const set = (key) => (e) => setForm(prev => ({ ...prev, [key]: e.target.value }));
+            const save = async () => {
+                if (problem || busy) return;
+                setBusy(true);
+                if (!(await onSave(rngValue(form)))) setBusy(false);
+            };
+            const warning = form.source === '/dev/random' ? 'rngWarnRandom' : form.source === '/dev/hwrng' ? 'rngWarnHwrng' : '';
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60" data-rng-dialog={value ? 'edit' : 'add'}>
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span className="text-purple-400"><Icons.Dice /></span>
+                            {value ? t('rngEdit') : t('rngAdd')}
+                        </h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('rngSource')}</label>
+                                <select value={form.source} onChange={set('source')} data-rng-source
+                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white">
+                                    {!RNG_SOURCES.includes(form.source) && <option value={form.source}>{form.source || '-'}</option>}
+                                    {RNG_SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+                                </select>
+                                {warning && (
+                                    <p className="text-xs text-yellow-400 mt-2 flex items-start gap-1" data-rng-warning={form.source.slice(5)}>
+                                        <span className="shrink-0 mt-0.5"><Icons.AlertTriangle /></span>
+                                        <span>{t(warning)}</span>
+                                    </p>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rngMaxBytes')}</label>
+                                    <input type="number" min="0" step="1" value={form.max_bytes} onChange={set('max_bytes')} data-rng-max-bytes
+                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('rngPeriod')}</label>
+                                    <input type="number" min="1" step="1" value={unlimited ? '' : form.period} onChange={set('period')} data-rng-period
+                                        disabled={unlimited} placeholder={unlimited ? t('rngNoLimit') : ''}
+                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white disabled:opacity-50" />
+                                </div>
+                            </div>
+                            <p className="text-xs text-gray-500">{t('rngLimitHint')}</p>
+                            {unlimited && (
+                                <p className="text-xs text-yellow-400 flex items-start gap-1" data-rng-warning="unlimited">
+                                    <span className="shrink-0 mt-0.5"><Icons.AlertTriangle /></span>
+                                    <span>{t('rngWarnUnlimited')}</span>
+                                </p>
+                            )}
+                            {problem && <p className="text-xs text-red-400" data-rng-problem={problem}>{t(problem)}</p>}
+                            <div className="flex gap-2 justify-end pt-4">
+                                <button onClick={onClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                <button onClick={save} disabled={!!problem || busy} data-rng-save
+                                    className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50">
+                                    {busy ? t('saving') : (value ? t('save') : t('add'))}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 - virtiofs, a directory of the host shared with the VM (PVE 8.4+). PVE keeps
+        // it as virtiofs0..9 = "[dirid=]<mapping>[,cache=..][,direct-io=1][,expose-acl=1][,expose-xattr=1]",
+        // the directory itself is a directory mapping of the cluster (Datacenter, Resource Mappings).
+        // The server checks the same rules before PVE sees the value.
+        const VFS_SLOTS = 10;
+        const VFS_CACHE = ['auto', 'always', 'metadata', 'never'];
+        const VFS_FLAGS = ['direct-io', 'expose-xattr', 'expose-acl'];
+        const VFS_FLAG_LABELS = { 'direct-io': 'vfsDirectIo', 'expose-xattr': 'vfsXattr', 'expose-acl': 'vfsAcl' };
+        const vfsOn = (v) => /^(1|on|yes|true)$/i.test(String(v ?? ''));
+        const vfsWindows = (ostype) => /^(wxp|w2k|w2k3|w2k8|wvista|win[0-9]+)$/.test(String(ostype || ''));
+
+        function parseVirtiofs(value) {
+            const out = { dirid: '', cache: '', 'direct-io': false, 'expose-xattr': false, 'expose-acl': false };
+            String(value || '').split(',').forEach(part => {
+                if (!part.trim()) return;
+                const eq = part.indexOf('=');
+                if (eq < 0) { out.dirid = part; return; }
+                const key = part.slice(0, eq), val = part.slice(eq + 1);
+                if (key === 'dirid') out.dirid = val;
+                else if (key === 'cache') out.cache = val;
+                else if (VFS_FLAGS.includes(key)) out[key] = vfsOn(val);
+            });
+            return out;
+        }
+
+        // the virtiofs keys a raw config holds, in slot order
+        const vfsKeys = (raw) => Array.from({ length: VFS_SLOTS }, (_, i) => `virtiofs${i}`).filter(k => raw && raw[k]);
+
+        // auto is PVE's default and the flags default to off, so neither is written out; the
+        // order is the one the server sends on
+        function virtiofsValue(form) {
+            const parts = [form.dirid];
+            if (form.cache && form.cache !== 'auto') parts.push(`cache=${form.cache}`);
+            ['direct-io', 'expose-acl', 'expose-xattr'].forEach(f => { if (form[f]) parts.push(`${f}=1`); });
+            return parts.join(',');
+        }
+
+        // '' when the form is fine, else the key of what is wrong with it
+        function vfsProblem(form, ostype) {
+            if (!/^[A-Za-z][A-Za-z0-9_-]{1,63}$/.test(form.dirid || '')) return 'vfsPickMapping';
+            if (form.cache && !VFS_CACHE.includes(form.cache)) return 'vfsBadCache';
+            if (form['expose-acl'] && vfsWindows(ostype)) return 'vfsAclWindows';
+            return '';
+        }
+
+        function vfsOptionsText(p) {
+            return [`cache=${p.cache || 'auto'}`, ...VFS_FLAGS.filter(f => p[f])].join(', ');
+        }
+
+        function VirtiofsCard({ raw, running, info, node, onAdd, onEdit, onRemove, t }) {
+            const keys = vfsKeys(raw);
+            const loaded = info && !info.loading && !info.error && info.supported !== false;
+            const mappings = (info && info.mappings) || [];
+            return (
+                <div className="mt-6 pt-6 border-t border-proxmox-border" data-vfs-card>
+                    <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                        <span className="text-emerald-400"><Icons.FolderOpen /></span>
+                        {t('vfsTitle')}
+                        {running && (
+                            <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-0.5 rounded">{t('changesAfterRestart')}</span>
+                        )}
+                        <button onClick={onAdd} data-vfs-add disabled={keys.length >= VFS_SLOTS}
+                            title={keys.length >= VFS_SLOTS ? t('vfsAllSlots') : undefined}
+                            className="ml-auto shrink-0 text-xs px-3 py-1.5 bg-emerald-500/20 text-emerald-400 rounded hover:bg-emerald-500/30 flex items-center gap-1 disabled:opacity-50">
+                            <Icons.Plus className="w-3 h-3" />
+                            {t('vfsAdd')}
+                        </button>
+                    </h3>
+                    {keys.length ? (
+                        <div className="space-y-2">
+                            {keys.map(key => {
+                                const p = parseVirtiofs(raw[key]);
+                                const m = mappings.find(x => x.id === p.dirid);
+                                const here = m ? m.entries.filter(e => e.node === node) : [];
+                                return (
+                                    <div key={key} className="p-3 bg-proxmox-dark rounded-lg" data-vfs-device={key}>
+                                        <div className="flex items-center justify-between gap-4">
+                                            <div className="flex items-center gap-2 min-w-0">
+                                                <span className="text-xs text-gray-500 font-mono">{key}</span>
+                                                <span className="text-sm font-mono text-gray-300 truncate" data-vfs-shown-dirid>{p.dirid || raw[key]}</span>
+                                                <span className="text-xs text-gray-500 truncate" data-vfs-shown-options>{vfsOptionsText(p)}</span>
+                                            </div>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <button onClick={() => onEdit(key)} data-vfs-edit={key} title={t('edit')}
+                                                    className="text-xs px-2 py-1 text-gray-400 hover:text-white hover:bg-proxmox-hover rounded">
+                                                    <Icons.Edit />
+                                                </button>
+                                                <button onClick={() => onRemove(key, p.dirid)} data-vfs-remove={key} title={t('remove')}
+                                                    className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded">
+                                                    <Icons.Trash className="w-3.5 h-3.5" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        {here.map((e, i) => (
+                                            <div key={i} className="text-xs text-gray-500 mt-1" data-vfs-shown-path>{e.node}: <span className="font-mono text-gray-300">{e.path}</span></div>
+                                        ))}
+                                        {loaded && !m && (
+                                            <div className="text-xs text-yellow-400 mt-1" data-vfs-gone>{t('vfsGone').replace(/\{id\}/g, () => p.dirid)}</div>
+                                        )}
+                                        {m && !here.length && (
+                                            <div className="text-xs text-yellow-400 mt-1" data-vfs-off-node>{t('vfsNotHere').replace(/\{node\}/g, () => node)}</div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    ) : (
+                        <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                            <span className="text-sm text-gray-500">{t('vfsNone')}</span>
+                        </div>
+                    )}
+                    <ul className="text-xs text-gray-500 mt-2 space-y-1" data-vfs-hints>
+                        <li>{t('vfsHintDriver')}</li>
+                        <li>{t('vfsHintMigration')}</li>
+                    </ul>
+                </div>
+            );
+        }
+
+        function VirtiofsDialog({ slot, value, info, node, ostype, others, onSave, onClose, t }) {
+            const [form, setForm] = useState(() => {
+                const p = parseVirtiofs(value);
+                return { ...p, cache: p.cache || 'auto' };
+            });
+            const [busy, setBusy] = useState(false);
+            const loading = !info || info.loading;
+            const unsupported = info && info.supported === false;
+            const list = (info && info.mappings) || [];
+            const picked = list.find(m => m.id === form.dirid);
+            const here = picked ? picked.entries.filter(e => e.node === node) : [];
+            const problem = unsupported ? 'vfsUnsupported' : vfsProblem(form, ostype);
+            const twice = Object.entries(others || {}).find(([k, v]) => k !== slot && parseVirtiofs(v).dirid === form.dirid);
+            const flip = (flag) => (e) => {
+                const on = e.target.checked;
+                // ACLs need the extended attributes, virtiofsd turns them on with them
+                setForm(prev => ({ ...prev, [flag]: on, ...(flag === 'expose-acl' && on ? { 'expose-xattr': true } : {}) }));
+            };
+            const save = async () => {
+                if (problem || busy || loading) return;
+                setBusy(true);
+                if (!(await onSave(slot, virtiofsValue(form)))) setBusy(false);
+            };
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60" data-vfs-dialog={value ? 'edit' : 'add'}>
+                    <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6 max-h-[90vh] overflow-y-auto">
+                        <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                            <span className="text-emerald-400"><Icons.FolderOpen /></span>
+                            {value ? t('vfsEdit') : t('vfsAdd')}
+                            <span className="text-xs text-gray-500 font-mono">{slot}</span>
+                        </h3>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('vfsMapping')}</label>
+                                {loading ? (
+                                    <div className="flex justify-center py-3">
+                                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-proxmox-orange"></div>
+                                    </div>
+                                ) : info.error ? (
+                                    <div className="text-xs text-red-400">{info.error}</div>
+                                ) : unsupported ? (
+                                    <div className="text-xs text-yellow-400" data-vfs-unsupported>{t('vfsUnsupported')}</div>
+                                ) : (
+                                    <>
+                                        {list.length || form.dirid ? (
+                                            <select value={form.dirid} onChange={e => setForm(prev => ({ ...prev, dirid: e.target.value }))} data-vfs-mapping
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white">
+                                                <option value="">-- {t('vfsPickMapping')} --</option>
+                                                {form.dirid && !picked && <option value={form.dirid}>{form.dirid}</option>}
+                                                {list.map(m => (
+                                                    <option key={m.id} value={m.id}>
+                                                        {m.id}{m.description ? ` - ${m.description}` : ''}{m.on_node === false ? ` (${t('ptNotOnThisNode')})` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                        ) : null}
+                                        {!list.length && info.may_add !== false && (
+                                            <div className="text-xs text-gray-500 mt-2" data-vfs-no-mappings>{t('vfsNoMappings')}</div>
+                                        )}
+                                        {info.may_add === false && (
+                                            <div className="text-xs text-yellow-400 mt-2 flex items-start gap-1" data-vfs-confined>
+                                                <span className="shrink-0 mt-0.5"><Icons.Lock className="w-3.5 h-3.5" /></span>
+                                                <span>{t('vfsConfined')}</span>
+                                            </div>
+                                        )}
+                                        {picked && (
+                                            <div className="mt-2 p-3 bg-proxmox-dark rounded text-sm space-y-1" data-vfs-mapping-detail={picked.id}>
+                                                <div className="text-gray-400">{t('ptMappingNodes')}: <span className="text-white">{picked.nodes.length ? picked.nodes.join(', ') : '-'}</span></div>
+                                                {here.map((e, i) => (
+                                                    <div key={i} className="text-gray-400">{node}: <span className="font-mono text-white break-all">{e.path}</span></div>
+                                                ))}
+                                                {!here.length && (
+                                                    <div className="text-xs text-yellow-400" data-vfs-off-node>{t('vfsNotHere').replace(/\{node\}/g, () => node)}</div>
+                                                )}
+                                                {(picked.checks || []).filter(c => here.length || c.severity === 'error').map((c, i) => (
+                                                    <div key={i} className={`text-xs ${c.severity === 'error' ? 'text-red-400' : 'text-yellow-400'}`} data-vfs-check={c.severity}>{c.message}</div>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {twice && (
+                                            <p className="text-xs text-yellow-400 mt-2" data-vfs-warning="twice">{t('vfsSameTwice').replace(/\{key\}/g, () => twice[0])}</p>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('vfsCache')}</label>
+                                <select value={form.cache} onChange={e => setForm(prev => ({ ...prev, cache: e.target.value }))} data-vfs-cache
+                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white">
+                                    {!VFS_CACHE.includes(form.cache) && <option value={form.cache}>{form.cache}</option>}
+                                    {VFS_CACHE.map(c => <option key={c} value={c}>{c === 'auto' ? t('vfsCacheAuto') : c}</option>)}
+                                </select>
+                                <p className="text-xs text-gray-500 mt-1">{t('vfsCacheHint')}</p>
+                            </div>
+                            <div className="space-y-2">
+                                {VFS_FLAGS.map(flag => {
+                                    const implied = flag === 'expose-xattr' && form['expose-acl'];
+                                    return (
+                                        <label key={flag} className="flex items-start gap-2 text-sm text-gray-300 cursor-pointer" data-vfs-flag={flag}>
+                                            <input type="checkbox" className="mt-1" checked={!!form[flag] || implied} disabled={implied} onChange={flip(flag)} />
+                                            <span>
+                                                <span className="font-mono text-white">{flag}</span> <span className="text-gray-400">{t(VFS_FLAG_LABELS[flag])}</span>
+                                                {flag === 'direct-io' && <span className="block text-xs text-gray-500">{t('vfsDirectIoHint')}</span>}
+                                                {implied && <span className="block text-xs text-gray-500" data-vfs-implied>{t('vfsAclHint')}</span>}
+                                            </span>
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                            {problem && !loading && <p className="text-xs text-red-400" data-vfs-problem={problem}>{t(problem)}</p>}
+                            <div className="flex gap-2 justify-end pt-4">
+                                <button onClick={onClose} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                <button onClick={save} disabled={!!problem || busy || loading} data-vfs-save
+                                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded disabled:opacity-50">
+                                    {busy ? t('saving') : (value ? t('save') : t('add'))}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Nov 2026 - Corporate Redesigned names the reads of a tab that failed, with Retry, so an empty list
+        // below it is not taken for the guest's own (parts: { name: HTTP code, 0 for no answer })
+        function CrVcTabFail({ id, what, parts, onRetry }) {
+            const { t } = useTranslation();
+            const { isCorpRedesigned } = useLayout();
+            const bad = Object.entries(parts || {}).filter(([, v]) => v !== null && v !== undefined);
+            if (!isCorpRedesigned || !bad.length) return null;
+            const why = bad.map(([k, v]) => `${k}: ${v ? `HTTP ${v}` : t('crVmNoAnswer')}`).join(', ');
+            return (
+                <div className="cr-callout cr-callout-error" role="alert" data-cr-vc-tabfail={id} data-cr-vc-tabfail-parts={bad.map(([k]) => k).join(' ')}>
+                    <Icons.AlertCircle className="w-4 h-4" />
+                    <div><p>{crFill(t('crVcTabFailed'), { what, why })}</p></div>
+                    <button type="button" className="cr-btn cr-btn-xs" onClick={onRetry} data-cr-vc-tabfail-retry={id}>{t('retry')}</button>
+                </div>
+            );
+        }
+
+        function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false, variant = 'default', initialTab = 'general' }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, haReadOnly, haStandby } = useAuth();
+            // LW Nov 2026 - the guest view reads its config again once this dialog is gone
+            const closedRef = useRef(null);
+            closedRef.current = { cluster_id: clusterId, vmid: vm.vmid, vm_type: vm.type };
+            useEffect(() => () => {
+                window.dispatchEvent(new CustomEvent('pegaprox-vm-config-closed', { detail: closedRef.current }));
+            }, []);
+            // LW Nov 2026 - the tab reads that failed, by tab and part (a code, 0 for no answer); shown by the redesign
+            const [crFail, setCrFail] = useState({});
+            const crFailed = (tab, part, res) => setCrFail(f => ({ ...f, [tab]: { ...(f[tab] || {}), [part]: res && res.ok ? null : (res ? res.status : 0) } }));
+            const crAnyFail = (tab) => Object.values(crFail[tab] || {}).some(v => v !== null && v !== undefined);
+            const [config, setConfig] = useState(null);
+            const [configError, setConfigError] = useState(null);  // MK: Track config load errors
+            const [loading, setLoading] = useState(true);
+            const [saving, setSaving] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned opens it on the tab of the part that was clicked
+            const [activeTab, setActiveTab] = useState(initialTab);
+            const [changes, setChanges] = useState({});
+            const [hasChanges, setHasChanges] = useState(false);
+            const [descEditMode, setDescEditMode] = useState(false);
+            const [clusterTags, setClusterTags] = useState([]);
+            const [tagInputValue, setTagInputValue] = useState('');
+            const [showTagDropdown, setShowTagDropdown] = useState(false);
+
+            // Additional states for hardware options and lists
+            const [hardwareOptions, setHardwareOptions] = useState(null);
+            const [storageList, setStorageList] = useState([]);
+            const [bridgeList, setBridgeList] = useState([]);
+            const [isoList, setIsoList] = useState([]);
+            const [dcMacPrefix, setDcMacPrefix] = useState('');  // MK May 2026 (#365): datacenter MAC prefix for generateMAC
+            
+            // Snapshot states
+            const [snapshots, setSnapshots] = useState([]);
+            const [snapshotLoading, setSnapshotLoading] = useState(false);
+            const [showCreateSnapshot, setShowCreateSnapshot] = useState(false);
+
+            // NS: Feb 2026 - Efficient snapshot states
+            const [efficientSnapshots, setEfficientSnapshots] = useState([]);
+            const [efficientInfo, setEfficientInfo] = useState(null);
+
+            // Replication states
+            const [replications, setReplications] = useState([]);
+            
+            // NS: Backup states - Dec 2025
+            const [vmBackups, setVmBackups] = useState([]);
+            const [backupLoading, setBackupLoading] = useState(false);
+            const [showCreateBackup, setShowCreateBackup] = useState(false);
+            const [showRestoreBackup, setShowRestoreBackup] = useState(null);
+            const [verifyingBackup, setVerifyingBackup] = useState(null);
+            const [verifyResults, setVerifyResults] = useState({});
+            // File-restore browser states
+            const [showFileRestore, setShowFileRestore] = useState(null);
+            // navStack: [{text, filepath}] - filepath is what PVE returns per item
+            // and is passed back verbatim as the filepath param for listing that dir.
+            // Empty stack = root (we omit the param so PVE uses its default).
+            const [fileRestoreNavStack, setFileRestoreNavStack] = useState([]);
+            const [fileRestoreList, setFileRestoreList] = useState([]);
+            const [fileRestoreLoading, setFileRestoreLoading] = useState(false);
+            const [fileRestoreSelected, setFileRestoreSelected] = useState(null);
+            const [fileRestoreDestPath, setFileRestoreDestPath] = useState('');
+            const [fileRestoring, setFileRestoring] = useState(false);
+            const verifyPollRef = useRef(null);
+            // cleanup verify poll on unmount
+            useEffect(() => () => { if (verifyPollRef.current) clearInterval(verifyPollRef.current); }, []);
+            
+            // MK: History states - Jan 2026
+            const [vmProxmoxTasks, setVmProxmoxTasks] = useState([]);
+            const [vmPegaproxActions, setVmPegaproxActions] = useState([]);
+            const [historyLoading, setHistoryLoading] = useState(false);
+            const [historySubTab, setHistorySubTab] = useState('proxmox');
+            
+            // Local authFetch helper
+            const authFetch = async (url, options = {}) => {
+                try {
+                    const response = await fetch(url, {
+                        ...options,
+                        credentials: 'include',
+                        headers: {
+                            ...options.headers,
+                            ...getAuthHeaders()
+                        }
+                    });
+                    return response;
+                } catch (err) {
+                    console.error('Auth fetch error:', err);
+                    return null;
+                }
+            };
+            const [replicationLoading, setReplicationLoading] = useState(false);
+            const [showCreateReplication, setShowCreateReplication] = useState(false);
+            const [clusterNodes, setClusterNodes] = useState([]);
+            const [allClusterNodes, setAllClusterNodes] = useState([]);
+            const [crossClusterRepls, setCrossClusterRepls] = useState([]); // MK: cross-cluster DR jobs
+            const [showCreateXRepl, setShowCreateXRepl] = useState(false);
+            const [xReplForm, setXReplForm] = useState({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
+            // NS: Target cluster resources for cross-cluster replication dropdowns
+            const [xReplTargetStorages, setXReplTargetStorages] = useState([]);
+            const [xReplTargetBridges, setXReplTargetBridges] = useState([]);
+            const [xReplLoadingResources, setXReplLoadingResources] = useState(false);
+            // MK #532 - per-source-bridge -> target-bridge map so a multi-NIC VM keeps each card on its own net
+            const [xReplBridgeMap, setXReplBridgeMap] = useState({});
+            
+            // Modal states for sub-dialogs
+            const [showAddDisk, setShowAddDisk] = useState(false);
+            const [showAddNetwork, setShowAddNetwork] = useState(false);
+            const [showEditNetwork, setShowEditNetwork] = useState(null);
+            const [showMoveDisk, setShowMoveDisk] = useState(null);
+            const [showResizeDisk, setShowResizeDisk] = useState(null);
+            const [showEditDisk, setShowEditDisk] = useState(null);  // NS: Edit disk bus type
+            const [showReattachDisk, setShowReattachDisk] = useState(null);  // MK: Reattach unused disk modal
+            const [showMountISO, setShowMountISO] = useState(false);
+            // NS May 2026 — when "Change ISO" is clicked on an existing cdrom row,
+            // we open the same MountISOModal but pre-select that drive.
+            const [mountIsoInitialDrive, setMountIsoInitialDrive] = useState(null);
+            const [showImportDisk, setShowImportDisk] = useState(false);  // MK: Import disk from storage
+            const [showReassignOwner, setShowReassignOwner] = useState(null);  // MK: Reassign disk to another VM
+            const [importableDisks, setImportableDisks] = useState([]);  // MK: List of importable disk images
+            
+            // PCI/USB/Serial Passthrough states
+            const [passthrough, setPassthrough] = useState({ pci: [], usb: [], serial: [] });
+            const [availablePci, setAvailablePci] = useState([]);
+            const [availableUsb, setAvailableUsb] = useState([]);
+            const [showAddPci, setShowAddPci] = useState(false);
+            const [showAddUsb, setShowAddUsb] = useState(false);
+            const [showAddSerial, setShowAddSerial] = useState(false);
+            const [showAddEfiDisk, setShowAddEfiDisk] = useState(false);  // NS: EFI Disk modal
+            const [showAddTpm, setShowAddTpm] = useState(false);          // NS: TPM modal
+            const [showAddCloudInit, setShowAddCloudInit] = useState(false);
+            const [efiStorage, setEfiStorage] = useState('');             // NS: Selected storage for EFI
+            const [tpmStorage, setTpmStorage] = useState('');             // NS: Selected storage for TPM
+            const [cloudInitStorage, setCloudInitStorage] = useState('');
+            const [cloudInitFormat, setCloudInitFormat] = useState('raw');
+            const [cloudInitBus, setCloudInitBus] = useState('ide');
+            const [cloudInitDevice, setCloudInitDevice] = useState('2');
+            const [showRngDialog, setShowRngDialog] = useState(false);
+            const [vfsDialog, setVfsDialog] = useState(null);   // { slot, value } of the virtiofs dialog
+            const [selectedPciDevice, setSelectedPciDevice] = useState(null);
+            const [selectedUsbDevice, setSelectedUsbDevice] = useState(null);
+            const [pciOptions, setPciOptions] = useState({ pcie: true, rombar: true });
+            const [usbOptions, setUsbOptions] = useState({ usb3: false });
+            const [serialType, setSerialType] = useState('socket');
+            const [passthroughLoading, setPassthroughLoading] = useState(false);
+            // LW Oct 2026 - cluster resource mappings for the passthrough dialogs, per kind:
+            // { loading, error, mappings, access }. A mapped device is the first choice, a
+            // raw one only where this cluster connection is root@pam
+            const [ptMappings, setPtMappings] = useState({});
+            const [pciMode, setPciMode] = useState('mapping');
+            const [usbMode, setUsbMode] = useState('mapping');
+            const [selectedPciMapping, setSelectedPciMapping] = useState('');
+            const [selectedUsbMapping, setSelectedUsbMapping] = useState('');
+
+            // Firewall states
+            const [fwOptions, setFwOptions] = useState({});
+            const [fwRules, setFwRules] = useState([]);
+            const [fwAliases, setFwAliases] = useState([]);
+            const [fwIpsets, setFwIpsets] = useState([]);
+            const [fwLog, setFwLog] = useState([]);
+            const [fwRefs, setFwRefs] = useState([]);
+            const [fwLoading, setFwLoading] = useState(false);
+            const [showAddFwRule, setShowAddFwRule] = useState(false);
+            const [newFwRule, setNewFwRule] = useState({ type: 'in', action: 'ACCEPT', enable: 1 });
+            const [showAddFwAlias, setShowAddFwAlias] = useState(false);
+            const [newFwAlias, setNewFwAlias] = useState({ name: '', cidr: '', comment: '' });
+            const [showAddFwIpset, setShowAddFwIpset] = useState(false);
+            const [newFwIpset, setNewFwIpset] = useState({ name: '', comment: '' });
+            const [expandedIpset, setExpandedIpset] = useState(null);
+            const [newIpsetCidr, setNewIpsetCidr] = useState('');
+            const [fwSubTab, setFwSubTab] = useState('rules');
+
+            const isQemu = vm.type === 'qemu';
+            // LW Nov 2026 - Corporate Redesigned: a QEMU VM's dialog hands its changes to cr_vmcfg.js
+            // (restart classes, the pending changes panel, the General tab in sections)
+            // (a Proxmox VE cluster only: the restart rules are those of qemu-server)
+            const { isCorpRedesigned } = useLayout();
+            // NS Nov 2026 — the cloud layout gets its own chrome (third branch below) and
+            // consumes the SAME restart/pending engine read-only: classification for the
+            // change band. The crVc content swap stays corporate-redesign-only.
+            const isCloud = variant === 'cloud';
+            // the modal's raw t() echoes missing keys back — the cloud chrome strings need
+            // real fallbacks until they exist in every language
+            const cT = (k, fb) => { const v = t(k); return v === k ? fb : v; };
+            const crVcCluster = allClusters.find(c => c.id === clusterId);
+            const crVc = isCorpRedesigned && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
+            const crVcEngine = (crVc || isCloud) && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
+            // LW Nov 2026 - the redesign's edits of network devices, saved from the review with the classic request
+            const [crNets, setCrNets] = useState({});
+            const [advOpen, setAdvOpen] = useState(false);      // cloud: advanced hardware folded by default
+            const [cpuDetOpen, setCpuDetOpen] = useState(false);  // cloud: reported-model/level/flags folded
+            const [cfgResult, setCfgResult] = useState(null);      // cloud: applied/failed after a save
+            const [lastSaveErr, setLastSaveErr] = useState(null);  // cloud: message of the last failed save
+            const [externDirty, setExternDirty] = useState(false); // cloud: config changed underneath (SSE)
+            const [cfgBandOpen, setCfgBandOpen] = useState(false); // cloud: footer change list
+            const crv = useCrVc({ on: crVcEngine, vm, clusterId, authFetch, config, changes, nets: crNets });
+
+            // NS Jul 2026 (modal-perf): fire the ~14 open-time fetches ONLY when the
+            // target VM/cluster changes. This effect previously ALSO depended on
+            // hasChanges + saving, so every keystroke (hasChanges false->true) and every
+            // save re-ran the WHOLE fetch storm — including the slow PCI/USB passthrough
+            // node-scan and the backup-catalog fetch — which is exactly what made the
+            // config modal lag while editing. The SSE listener is split out below.
+            useEffect(() => {
+                fetchConfig();
+                fetchHardwareOptions();
+                fetchStorageList();
+                fetchBridgeList();
+                if (isQemu) {
+                    fetchISOList();
+                }
+                fetchSnapshots();
+                fetchEfficientSnapshots();
+                fetchEfficientInfo();
+                fetchReplications();
+                fetchCrossClusterRepls();
+                fetchBackups();
+                fetchClusterNodes();
+
+                // Fetch unique Proxmox tags from cluster resources for tag selector
+                authFetch(`${API_URL}/clusters/${clusterId}/resources`)
+                    .then(r => r && r.ok ? r.json() : [])
+                    .then(data => {
+                        const tagSet = new Set();
+                        (Array.isArray(data) ? data : []).forEach(vm => {
+                            if (vm.tags) {
+                                const tags = Array.isArray(vm.tags) ? vm.tags : vm.tags.split(';');
+                                tags.filter(t => t.trim()).forEach(t => tagSet.add(t.trim()));
+                            }
+                        });
+                        setClusterTags(Array.from(tagSet).sort().map(name => ({ name })));
+                    })
+                    .catch(() => {});
+                // depend on stable VM identity, not the whole vm object — a parent re-render
+                // that rebuilds `vm` would otherwise re-fire every fetch and bounce the modal
+                // back to the loading spinner (#698). vmid+node+type is enough to key a refetch.
+            }, [vm.vmid, vm.node, vm.type, clusterId]);
+
+            // NS: SSE vm_config live-update listener — split from the fetch effect so
+            // re-subscribing when the user's edit state changes never re-fires the
+            // fetches above (add/removeEventListener is cheap, no network).
+            useEffect(() => {
+                const handleVmConfigUpdate = (event) => {
+                    const { vmid: eventVmid, vm_type, config: newConfig } = event.detail;
+                    // Only update if this is our VM and user has no pending changes
+                    if (eventVmid === vm.vmid && vm_type === vm.type && !hasChanges && !saving) {
+                        console.log('SSE: Updating config for', vm.vmid);
+                        setConfig(prev => ({
+                            ...prev,
+                            ...newConfig,
+                            // Preserve some local state
+                            disks: newConfig.disks || prev?.disks,
+                            unused_disks: newConfig.unused_disks || prev?.unused_disks,
+                            options: {
+                                ...prev?.options,
+                                ...newConfig.options
+                            },
+                            raw: {
+                                ...prev?.raw,
+                                ...newConfig.raw
+                            }
+                        }));
+                        // LW Nov 2026 - the redesign reads what waits for the next start again, the
+                        // running config its prediction compares with comes from it
+                        if (crVc) crv.refresh();
+                    } else if (eventVmid === vm.vmid && vm_type === vm.type && isCloud && hasChanges && !saving) {
+                        // a parallel edit while ours are unsaved: never overwrite, warn instead
+                        setExternDirty(true);
+                    }
+                };
+
+                window.addEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+                return () => window.removeEventListener('pegaprox-vm-config', handleVmConfigUpdate);
+            }, [vm, clusterId, hasChanges, saving, crVc]);
+
+            // MK: Auto-fetch history when history tab is selected
+            useEffect(() => {
+                if (activeTab === 'history') {
+                    fetchHistory();
+                }
+            }, [activeTab]);
+
+            useEffect(() => {
+                if (activeTab === 'firewall') {
+                    fetchFirewallData();
+                }
+                if (activeTab === 'backups') {
+                    fetchBackups();
+                }
+            }, [activeTab]);
+
+            // NS Jul 2026 (modal-perf): the PCI/USB passthrough scan enumerates node
+            // hardware (~900ms of lspci/lsusb on the node) and is only shown on the
+            // Hardware/Resources tab — fetch it on tab entry instead of on every modal
+            // open (default tab is 'general'). Mirrors the history/firewall gating above.
+            useEffect(() => {
+                if (isQemu && (activeTab === 'hardware' || activeTab === 'resources')) {
+                    fetchPassthrough();
+                }
+            }, [activeTab, vm.vmid, vm.node, vm.type, clusterId]);
+
+            const fetchPassthrough = async () => {
+                if (vm.type !== 'qemu') return;
+                try {
+                    // Fetch current passthrough config
+                    const ptRes = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough`);
+                    if (ptRes && ptRes.ok) {
+                        const pt = await ptRes.json();
+                        setPassthrough(pt);
+                        // the nodes a mapped device covers, only when the VM has one
+                        ['pci', 'usb'].forEach(kind => {
+                            if ((pt[kind] || []).some(d => d.parsed?.mapping)) loadPtMappings(kind);
+                        });
+                    }
+                    
+                    // Fetch available PCI devices
+                    const pciRes = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/hardware/pci`);
+                    if (pciRes && pciRes.ok) {
+                        setAvailablePci(await pciRes.json());
+                    }
+                    
+                    // Fetch available USB devices
+                    const usbRes = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/hardware/usb`);
+                    if (usbRes && usbRes.ok) {
+                        setAvailableUsb(await usbRes.json());
+                    }
+                } catch (error) {
+                    console.error('to load passthrough:', error);
+                }
+            };
+
+            // one hardware key set ({rng0: value}) or removed ({delete: 'rng0'}); true when it went through
+            const putHwConfig = async (body, okKey, failKey) => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    if (res?.ok) {
+                        addToast(t(okKey), 'success');
+                        fetchConfig();
+                        return true;
+                    }
+                    const err = res ? await res.json().catch(() => ({})) : {};
+                    addToast(err.error || t(failKey), 'error');
+                } catch (e) {
+                    addToast(t('connectionError'), 'error');
+                }
+                return false;
+            };
+
+            const saveRng = async (value) => {
+                const ok = await putHwConfig({ rng0: value }, 'rngSaved', 'rngSaveFailed');
+                if (ok) setShowRngDialog(false);
+                return ok;
+            };
+
+            const removeRng = () => {
+                if (!confirm(t('rngRemoveConfirm'))) return;
+                putHwConfig({ delete: 'rng0' }, 'rngRemoved', 'rngRemoveFailed');
+            };
+
+            // virtiofsN of the dialog: slot is the key, a new share takes the first free one
+            const openVirtiofs = (slot) => {
+                const raw = config?.raw || {};
+                const key = slot || Array.from({ length: VFS_SLOTS }, (_, i) => `virtiofs${i}`).find(k => !raw[k]);
+                if (!key) return;
+                setVfsDialog({ slot: key, value: slot ? raw[slot] : '' });
+                if (!ptMappings.dir || ptMappings.dir.error) loadPtMappings('dir');
+            };
+
+            const saveVirtiofs = async (slot, value) => {
+                const ok = await putHwConfig({ [slot]: value }, 'vfsSaved', 'vfsSaveFailed');
+                if (ok) setVfsDialog(null);
+                return ok;
+            };
+
+            const removeVirtiofs = (slot, dirid) => {
+                if (!confirm(t('vfsRemoveConfirm').replace(/\{id\}/g, () => dirid || slot).replace(/\{key\}/g, () => slot))) return;
+                putHwConfig({ delete: slot }, 'vfsRemoved', 'vfsRemoveFailed');
+            };
+
+            // the card names the path of each share on this node: one read when the VM has any
+            useEffect(() => {
+                if (vm.type === 'qemu' && (activeTab === 'hardware' || activeTab === 'resources')
+                    && vfsKeys(config?.raw).length && !ptMappings.dir) loadPtMappings('dir');
+            }, [activeTab, config]);
+
+            const loadPtMappings = async (kind) => {
+                setPtMappings(prev => ({ ...prev, [kind]: { ...(prev[kind] || {}), loading: true, error: '' } }));
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough/mappings?kind=${kind}`);
+                    const d = r ? await r.json().catch(() => ({})) : {};
+                    if (r && r.ok) {
+                        setPtMappings(prev => ({ ...prev, [kind]: { loading: false, error: '', mappings: d.mappings || [], access: d.access || null,
+                                                                    supported: d.supported, may_add: d.may_add } }));
+                        return d;
+                    }
+                    setPtMappings(prev => ({ ...prev, [kind]: { loading: false, error: d.error || t('operationFailed'), mappings: [], access: null } }));
+                } catch (e) {
+                    setPtMappings(prev => ({ ...prev, [kind]: { loading: false, error: t('connectionError'), mappings: [], access: null } }));
+                }
+                return null;
+            };
+
+            // opens the add dialog on a mapped device, or on a raw one when the cluster has no
+            // mapping of that kind and this connection may attach raw devices
+            const openAddPassthrough = async (kind) => {
+                const setMode = kind === 'pci' ? setPciMode : setUsbMode;
+                (kind === 'pci' ? setSelectedPciMapping : setSelectedUsbMapping)('');
+                setMode('mapping');
+                (kind === 'pci' ? setShowAddPci : setShowAddUsb)(true);
+                const d = await loadPtMappings(kind);
+                if (d && !(d.mappings || []).length && d.access?.root) setMode('raw');
+            };
+
+            // under an attached mapped device: the nodes it can start and migrate to
+            const ptMappedLine = (kind, dev) => {
+                const id = dev.parsed?.mapping;
+                if (!id) return null;
+                const m = (ptMappings[kind]?.mappings || []).find(x => x.id === id);
+                return (
+                    <span className="block text-xs text-gray-500" data-pt-mapped={id}>
+                        {t('ptMappingNodes')}: {m ? (m.nodes.length ? m.nodes.join(', ') : '-') : '...'}
+                        {m && !m.nodes.includes(vm.node) && <span className="ml-2 text-yellow-400">{t('ptNotOnThisNode')}</span>}
+                    </span>
+                );
+            };
+
+            const ptRefused = async (response) => {
+                const err = response ? await response.json().catch(() => ({})) : {};
+                if (err.code === 'PVE_ROOT_REQUIRED') addToast(`${t('ptRawRootOnly')} ${pveRootReasonText(t, err.reason)}`, 'error');
+                else addToast(err.error || t('operationFailed'), 'error');
+            };
+
+            const ptAdded = (response) => response.json().catch(() => ({})).then(d => {
+                // a mapping without a device on this node: the VM does not start here
+                if (d.mapping && d.covers_node === false) {
+                    addToast(t('ptMappingNotHere').replace(/\{node\}/g, () => vm.node), 'warning');
+                } else {
+                    addToast(t('deviceAdded'));
+                }
+            });
+
+            const handleAddPciDevice = async () => {
+                const mapped = pciMode === 'mapping';
+                if (mapped ? !selectedPciMapping : !selectedPciDevice) return;
+                setPassthroughLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough/pci`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(mapped ? { mapping: selectedPciMapping } : { device_id: selectedPciDevice.id }),
+                            pcie: pciOptions.pcie,
+                            rombar: pciOptions.rombar
+                        })
+                    });
+                    if (response && response.ok) {
+                        setShowAddPci(false);
+                        setSelectedPciDevice(null);
+                        setSelectedPciMapping('');
+                        fetchPassthrough();
+                        if (crVc) crv.refresh();
+                        await ptAdded(response);
+                    }else{
+                        await ptRefused(response);
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setPassthroughLoading(false);
+            };
+
+            const handleAddUsbDevice = async () => {
+                const mapped = usbMode === 'mapping';
+                if (mapped ? !selectedUsbMapping : !selectedUsbDevice) return;
+                setPassthroughLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough/usb`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            ...(mapped ? { mapping: selectedUsbMapping } : { vendorid: selectedUsbDevice.vendid, productid: selectedUsbDevice.prodid }),
+                            usb3: usbOptions.usb3
+                        })
+                    });
+                    if (response && response.ok) {
+                        setShowAddUsb(false);
+                        setSelectedUsbDevice(null);
+                        setSelectedUsbMapping('');
+                        fetchPassthrough();
+                        if (crVc) crv.refresh();
+                        await ptAdded(response);
+                    }else{
+                        await ptRefused(response);
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setPassthroughLoading(false);
+            };
+
+            const handleAddSerialPort = async () => {
+                setPassthroughLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough/serial`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ type: serialType })
+                    });
+                    if (response && response.ok) {
+                        setShowAddSerial(false);
+                        fetchPassthrough();
+                        if (crVc) crv.refresh();
+                        addToast(t('deviceAdded'));
+                    }else{
+                        const err = await response.json();
+                        addToast(err.error || t('operationFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setPassthroughLoading(false);
+            };
+
+            const handleRemovePassthrough = async (type, key) => {
+                if (!confirm(`${key} ${t('remove')}?`)) return;
+                setPassthroughLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/passthrough/${type}/${key}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        fetchPassthrough();
+                        if (crVc) crv.refresh();
+                        addToast(t('deviceRemoved'));
+                    }else{
+                        await ptRefused(response);
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setPassthroughLoading(false);
+            };
+
+            const fetchConfig = async (retryCount = 0) => {
+                setLoading(true);
+                // LW Nov 2026 - handed back for the redesign's save (the classic callers ignore it)
+                let loaded = null;
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`
+                    );
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        loaded = data;
+                        setConfig(data);
+                        setConfigError(null);  // LW: Clear any previous error
+                    } else if (response) {
+                        // MK: API returned error status
+                        const errText = await response.text();
+                        setConfigError(t('configLoadError') || 'Could not load configuration');
+                        console.error('Config load failed:', errText);
+                    }
+                } catch (error) {
+                    console.error('Failed to load config:', error);
+                    // LW: Retry up to 2 times with increasing delay
+                    if (retryCount < 2) {
+                        setTimeout(() => fetchConfig(retryCount + 1), 1000 * (retryCount + 1));
+                        return;
+                    }
+                    setConfigError(t('configLoadError') || 'Could not load configuration');
+                }
+                setLoading(false);
+                return loaded;
+            };
+
+            const fetchHardwareOptions = async () => {
+                try {
+                    // LW Nov 2026 - from this VM's cluster, not from the first one registered
+                    const response = await authFetch(`${API_URL}/hardware-options?cluster_id=${encodeURIComponent(clusterId)}`);
+                    if (response && response.ok) {
+                        setHardwareOptions(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load hardware options:', error);
+                }
+            };
+
+            const fetchStorageList = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/storage`);
+                    if (response && response.ok) {
+                        setStorageList(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load storage list:', error);
+                }
+            };
+
+            const fetchBridgeList = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/networks`);
+                    if (response && response.ok) {
+                        setBridgeList(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load bridge list:', error);
+                }
+            };
+
+            const fetchISOList = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/isos`);
+                    if (response && response.ok) {
+                        setIsoList(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load ISO list:', error);
+                }
+            };
+
+            const fetchSnapshots = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots`);
+                    crFailed('snapshots', 'snapshots', response);
+                    if (response && response.ok) {
+                        setSnapshots(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load snapshots:', error);
+                    crFailed('snapshots', 'snapshots', null);
+                }
+            };
+
+            // NS: Feb 2026 - Fetch efficient snapshots + capability
+            const fetchEfficientSnapshots = async () => {
+                try {
+                    // ?refresh=true runs lvs, maybe lvextend, on the node; a standby reads what is stored (#625).
+                    // A GET is not forwarded, so a forwarding standby leaves it out too
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots${haStandby ? '' : '?refresh=true'}`);
+                    if (response && response.ok) {
+                        setEfficientSnapshots(await response.json());
+                    }
+                } catch (error) {
+                    console.error('Failed to load efficient snapshots:', error);
+                }
+            };
+
+            const fetchEfficientInfo = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshot-capability`);
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        setEfficientInfo(data.efficient_snapshot || null);
+                    }
+                } catch (error) {
+                    // Not critical - just means efficient snapshots won't be offered
+                }
+            };
+
+            const fetchReplications = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/replication?vmid=${vm.vmid}`);
+                    crFailed('replication', 'replication', response);
+                    if (response && response.ok) {
+                        setReplications(await response.json());
+                    }
+                } catch (error) {
+                    console.error('to load replications:', error);
+                }
+            };
+
+            // MK: fetch cross-cluster replication jobs for this VM
+            const fetchCrossClusterRepls = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/cross-cluster-replications?vmid=${vm.vmid}`);
+                    crFailed('replication', 'cross-cluster', response);
+                    if (response && response.ok) {
+                        setCrossClusterRepls(await response.json());
+                    }
+                } catch (e) {
+                    console.error('cross-cluster repl fetch:', e);
+                }
+            };
+
+            // NS: Fetch target cluster storages/bridges when target cluster changes
+            useEffect(() => {
+                if (!xReplForm.target_cluster || !dashboardAuthFetch) return;
+                let cancelled = false;
+                const fetchTargetResources = async () => {
+                    setXReplLoadingResources(true);
+                    setXReplTargetStorages([]);
+                    setXReplTargetBridges([]);
+                    try {
+                        const nodesRes = await dashboardAuthFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes`);
+                        if (!nodesRes.ok || cancelled) return;
+                        const nodesData = await nodesRes.json();
+                        const onlineNode = (Array.isArray(nodesData) ? nodesData : nodesData.nodes || []).find(n => n.status === 'online');
+                        if (!onlineNode || cancelled) return;
+                        const nodeName = onlineNode.node || onlineNode.name;
+                        const [storRes, netRes] = await Promise.all([
+                            dashboardAuthFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes/${nodeName}/storage`),
+                            dashboardAuthFetch(`${API_URL}/clusters/${xReplForm.target_cluster}/nodes/${nodeName}/networks`)
+                        ]);
+                        if (cancelled) return;
+                        if (storRes.ok) {
+                            const storData = await storRes.json();
+                            const storages = (Array.isArray(storData) ? storData : storData.storages || [])
+                                .filter(s => s.content && (s.content.includes('images') || s.content.includes('rootdir')));
+                            setXReplTargetStorages(storages);
+                        }
+                        if (netRes.ok) {
+                            const netData = await netRes.json();
+                            const bridges = (Array.isArray(netData) ? netData : netData.networks || [])
+                                .filter(n => n.type === 'bridge' || n.type === 'OVSBridge' || n.source === 'sdn');
+                            setXReplTargetBridges(bridges);
+                            // #532 - seed the per-NIC bridge map: default each source bridge to the
+                            // same-named target bridge (they usually exist on both), else first avail.
+                            const avail = bridges.map(b => b.iface);
+                            const fallback = avail[0] || 'vmbr0';
+                            const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
+                            const seeded = {};
+                            srcBridges.forEach(sb => { seeded[sb] = avail.includes(sb) ? sb : fallback; });
+                            setXReplBridgeMap(seeded);
+                        }
+                    } catch (err) {
+                        console.error('Error fetching target cluster resources:', err);
+                    }
+                    if (!cancelled) setXReplLoadingResources(false);
+                };
+                fetchTargetResources();
+                return () => { cancelled = true; };
+            }, [xReplForm.target_cluster]);
+
+            // NS: Fetch backups for this VM
+            const fetchBackups = async () => {
+                setBackupLoading(true);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups`);
+                    crFailed('backups', 'backups', response);
+                    if (response && response.ok) {
+                        setVmBackups(await response.json());
+                    }
+                } catch (error) {
+                    console.error('failed to load backups:', error);
+                    crFailed('backups', 'backups', null);
+                } finally {
+                    setBackupLoading(false);
+                }
+            };
+
+            // MK: Fetch VM History (Proxmox Tasks + PegaProx Audit)
+            const fetchHistory = async () => {
+                setHistoryLoading(true);
+                try {
+                    // Fetch Proxmox tasks for this VM
+                    const tasksRes = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/tasks?vmid=${vm.vmid}&limit=50`);
+                    crFailed('history', 'tasks', tasksRes);
+                    if (tasksRes && tasksRes.ok) {
+                        setVmProxmoxTasks(await tasksRes.json());
+                    }
+                    
+                    // Fetch PegaProx audit log for this VM
+                    const auditRes = await authFetch(`${API_URL}/clusters/${clusterId}/audit?vmid=${vm.vmid}&limit=50`);
+                    crFailed('history', 'audit', auditRes);
+                    if (auditRes && auditRes.ok) {
+                        setVmPegaproxActions(await auditRes.json());
+                    }
+                } catch (error) {
+                    console.error('Failed to load history:', error);
+                } finally {
+                    setHistoryLoading(false);
+                }
+            };
+
+            const fetchFirewallData = async () => {
+                setFwLoading(true);
+                try {
+                    const base = `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall`;
+                    const [optRes, rulesRes, aliasRes, ipsetRes, refsRes] = await Promise.all([
+                        authFetch(`${base}/options`),
+                        authFetch(`${base}/rules`),
+                        authFetch(`${base}/aliases`),
+                        authFetch(`${base}/ipset`),
+                        authFetch(`${base}/refs`)
+                    ]);
+                    setCrFail(f => ({ ...f, firewall: Object.fromEntries([['options', optRes], ['rules', rulesRes], ['aliases', aliasRes], ['ipset', ipsetRes], ['refs', refsRes]]
+                        .map(([k, r]) => [k, r && r.ok ? null : (r ? r.status : 0)])) }));
+                    if (optRes?.ok) setFwOptions(await optRes.json());
+                    if (rulesRes?.ok) setFwRules(await rulesRes.json());
+                    if (aliasRes?.ok) setFwAliases(await aliasRes.json());
+                    if (ipsetRes?.ok) setFwIpsets(await ipsetRes.json());
+                    if (refsRes?.ok) setFwRefs(await refsRes.json());
+                } catch (e) {
+                    console.error('Failed to load firewall data:', e);
+                }
+                setFwLoading(false);
+            };
+
+            const fetchFwLog = async () => {
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/log`);
+                    if (res?.ok) setFwLog(await res.json());
+                } catch (e) {}
+            };
+
+            const fetchClusterNodes = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/metrics`);
+                    if (response && response.ok) {
+                        const metrics = await response.json();
+                        const allNodes = Object.keys(metrics);
+                        setAllClusterNodes(allNodes);
+                        setClusterNodes(allNodes.filter(n => n !== vm.node));
+                    }
+                } catch (error) {
+                    console.error('to load cluster nodes:', error);
+                }
+            };
+
+            // Snapshot operations - NS: Feb 2026 enhanced with efficient mode
+            const handleCreateSnapshot = async (snapname, description, vmstate, modeInfo) => {
+                setSnapshotLoading(true);
+                try {
+                    if (modeInfo?.mode === 'efficient') {
+                        // Create efficient (LVM COW) snapshot
+                        const response = await authFetch(
+                            `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots`,
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ snapname, description, snap_size_gb: modeInfo.snap_size_gb })
+                            }
+                        );
+                        if (response && response.ok) {
+                            const data = await response.json();
+                            const savings = data.space_savings;
+                            addToast(`${t('efficientSnapshotCreated')}: '${snapname}' (${savings?.savings_percent}% ${t('spaceSavings').toLowerCase()})`);
+                            setShowCreateSnapshot(false);
+                            await fetchEfficientSnapshots();
+                        } else if (response) {
+                            const err = await response.json();
+                            addToast(err.error || t('snapshotFailed'), 'error');
+                        }
+                    } else {
+                        // Standard Proxmox snapshot
+                        const response = await authFetch(
+                            `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots`,
+                            {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ snapname, description, vmstate })
+                            }
+                        );
+                        if (response && response.ok) {
+                            addToast(`${t('snapshotCreated') || 'Snapshot created'}: '${snapname}'`);
+                            setShowCreateSnapshot(false);
+                            await fetchSnapshots();
+                        } else if (response) {
+                            const err = await response.json();
+                            addToast(err.error || t('snapshotFailed'), 'error');
+                        }
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSnapshotLoading(false);
+            };
+
+            // NS: quick confirm before delete, then refresh list
+            const handleDeleteSnapshot = async (snapname) => {
+                if (!confirm(`${t('confirmDelete')} '${snapname}'?`)) return;
+                setSnapshotLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${snapname}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response?.ok) {
+                        addToast(t('snapshotDeleted'));
+                        await fetchSnapshots();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('deleteFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSnapshotLoading(false);
+            };
+
+            const handleRollbackSnapshot = async (snapname) => {
+                if (!confirm(`${snapname}: ${t('rollbackConfirm')}`)) return;
+                setSnapshotLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/snapshots/${snapname}/rollback`,
+                        { method: 'POST' }
+                    );
+                    if (response && response.ok) {
+                        addToast(`${t('rollbackStarted') || 'Rollback started'}: '${snapname}'`);
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('rollbackFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSnapshotLoading(false);
+            };
+
+            // NS: Feb 2026 - Efficient snapshot delete/rollback
+            const handleDeleteEfficientSnapshot = async (snapId, snapname) => {
+                if (!confirm(`${t('confirmDelete')} '${snapname}'?`)) return;
+                setSnapshotLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${snapId}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response?.ok) {
+                        addToast(t('efficientSnapshotDeleted'));
+                        await fetchEfficientSnapshots();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('deleteFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSnapshotLoading(false);
+            };
+
+            const handleRollbackEfficientSnapshot = async (snapId, snapname) => {
+                if (!confirm(`${snapname}: ${t('rollbackConfirm')}\n\n${t('vmMustBeStopped')}`)) return;
+                setSnapshotLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/efficient-snapshots/${snapId}/rollback`,
+                        { method: 'POST' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('efficientSnapshotRollback'));
+                        await fetchEfficientSnapshots();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('rollbackFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setSnapshotLoading(false);
+            };
+
+            // NS: Backup operations - Dec 2025
+            // finally got around to implementing this, been on the TODO list forever
+            const handleCreateBackup = async (storage, mode, compress, notes) => {
+                setBackupLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/create`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ storage, mode, compress, notes })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('backupStarted') || 'Backup started');
+                        setShowCreateBackup(false);
+                        setTimeout(() => fetchBackups(), 5000);
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Backup failed', 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setBackupLoading(false);
+            };
+            
+            const handleRestoreBackup = async (volid, targetVmid, storage, startAfter) => {
+                // LW: confirmation before restore - learned this the hard way lol
+                if (!confirm(t('confirmRestore') || `Really restore this backup? ${targetVmid === vm.vmid ? 'VM will be overwritten!' : ''}`)) return;
+                
+                setBackupLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/restore`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ volid, target_vmid: targetVmid, storage, start: startAfter })
+                        }
+                    );
+                    if (response && response.ok) {
+                        const result = await response.json();
+                        addToast(t('restoreStarted') || `Restore started (VMID: ${result.vmid})`);
+                        setShowRestoreBackup(null);
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Restore failed', 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setBackupLoading(false);
+            };
+            
+            const handleDeleteBackup = async (volid) => {
+                if (!confirm(t('confirmDeleteBackup') || 'Really delete this backup?')) return;
+                
+                setBackupLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/${encodeURIComponent(volid)}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('backupDeleted') || 'Backup deleted');
+                        await fetchBackups();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Delete failed', 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setBackupLoading(false);
+            };
+
+            // NS: Apr 2026 — Backup Verification
+            const handleVerifyBackup = async (backup) => {
+                if (!confirm(t('confirmVerify') || 'Verify this backup? A temporary VM will be created, booted, checked, and then deleted.')) return;
+                setVerifyingBackup(backup.volid);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/backup-verify`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                node: vm.node,
+                                vmid: vm.vmid,
+                                vm_type: vm.type || 'qemu',
+                                vm_name: vm.name || '',
+                                backup_volid: backup.volid,
+                                backup_time: backup.ctime ? new Date(backup.ctime * 1000).toISOString() : '',
+                                // NS Oct 2026 (#1168) - no storage from here: the first 'images' one of a list
+                                // Proxmox orders differently each time is no place for a container. The server
+                                // takes the recovery settings' test storage, else the backup's own storages
+                                check_agent: true,
+                                auto_cleanup: true,
+                            })
+                        }
+                    );
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        addToast(t('verificationStarted') || 'Backup verification started', 'info');
+                        const taskId = data.task_id;
+                        if (verifyPollRef.current) clearInterval(verifyPollRef.current);
+                        const poll = setInterval(async () => {
+                            try {
+                                const sr = await authFetch(`${API_URL}/clusters/${clusterId}/backup-verify/${taskId}`);
+                                if (sr && sr.ok) {
+                                    const st = await sr.json();
+                                    setVerifyResults(prev => ({...prev, [backup.volid]: st}));
+                                    if (st.status !== 'running') {
+                                        clearInterval(poll);
+                                        verifyPollRef.current = null;
+                                        setVerifyingBackup(null);
+                                        addToast(st.status === 'passed'
+                                            ? (t('verificationPassed') || '✓ Backup verified — restore + boot OK')
+                                            : (t('verificationFailed') || '✗ Verification failed: ' + (st.error || st.status)), st.status === 'passed' ? 'success' : 'error');
+                                    }
+                                }
+                            } catch(e) { clearInterval(poll); verifyPollRef.current = null; setVerifyingBackup(null); }
+                        }, 3000);
+                        verifyPollRef.current = poll;
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Verification failed', 'error');
+                        setVerifyingBackup(null);
+                    }
+                } catch(e) { addToast(t('connectionError'), 'error'); setVerifyingBackup(null); }
+            };
+
+            // File-restore: open browser for a backup
+            const handleOpenFileRestore = async (backup) => {
+                setShowFileRestore(backup);
+                setFileRestoreNavStack([]);
+                setFileRestoreSelected(null);
+                setFileRestoreDestPath('');
+                setFileRestoreList([]);
+                await _fetchFileRestoreList(backup, null);
+            };
+
+            // filepath=null → root listing (param omitted so PVE uses its default).
+            // filepath=<string from item.filepath> → specific directory.
+            const _fetchFileRestoreList = async (backup, filepath) => {
+                setFileRestoreLoading(true);
+                try {
+                    const params = new URLSearchParams({ volid: backup.volid });
+                    if (filepath != null) params.set('path', filepath);
+                    const resp = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/files?${params}`
+                    );
+                    if (resp.ok) {
+                        const items = await resp.json();
+                        items.sort((a, b) => {
+                            if (a.type !== b.type) return a.type === 'd' ? -1 : 1;
+                            return (a.text || '').localeCompare(b.text || '');
+                        });
+                        setFileRestoreList(items);
+                    } else {
+                        const err = await resp.json().catch(() => ({}));
+                        setFileRestoreList([{ _error: err.error || (t('fileRestoreBrowseFailed') || 'Failed to browse backup') }]);
+                    }
+                } catch(e) {
+                    setFileRestoreList([{ _error: t('connectionError') || 'Connection error' }]);
+                } finally {
+                    setFileRestoreLoading(false);
+                }
+            };
+
+            const handleFileRestoreNavigate = async (item) => {
+                if (!item.leaf) {
+                    // Use item.filepath returned by PVE - already in the correct format
+                    // (possibly base64). Never construct this path ourselves.
+                    const nextFilepath = item.filepath ?? null;
+                    setFileRestoreNavStack(prev => [...prev, { text: item.text, filepath: nextFilepath }]);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, nextFilepath);
+                } else {
+                    setFileRestoreSelected(item);
+                    setFileRestoreDestPath(fileRestoreGuestPath(item.filepath));
+                }
+            };
+
+            // The path in the guest for a file PVE listed (#1139). Its filepath starts with the
+            // archive (root.pxar.didx), on a VM disk also with where the file system sits:
+            // part/<n>, lvm/<vg>/<lv> or raw. '' where that says nothing (a ZFS pool), the
+            // field is the user's then
+            const fileRestoreGuestPath = (filepath) => {
+                let parts;
+                try {
+                    const bytes = Uint8Array.from(atob(filepath || ''), c => c.charCodeAt(0));
+                    parts = new TextDecoder().decode(bytes).split('/').filter(Boolean);
+                } catch (e) {
+                    return '';
+                }
+                const archive = parts.shift() || '';
+                if (archive.endsWith('.img.fidx')) {
+                    // how many names follow the kind: raw none, part one, lvm two
+                    const depth = ['raw', 'part', 'lvm'].indexOf(parts.shift());
+                    if (depth < 0) return '';
+                    parts.splice(0, depth);
+                } else if (!/\.m?pxar\.didx$/.test(archive)) {
+                    return '';
+                }
+                return parts.length ? '/' + parts.join('/') : '';
+            };
+
+            const handleFileRestoreGoUp = async () => {
+                if (fileRestoreNavStack.length === 0) return;
+                const newStack = fileRestoreNavStack.slice(0, -1);
+                setFileRestoreNavStack(newStack);
+                setFileRestoreSelected(null);
+                const parentFilepath = newStack.length > 0 ? newStack[newStack.length - 1].filepath : null;
+                await _fetchFileRestoreList(showFileRestore, parentFilepath);
+            };
+
+            const handleFileRestoreGoToIndex = async (idx) => {
+                if (idx < 0) {
+                    // root
+                    setFileRestoreNavStack([]);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, null);
+                } else {
+                    const newStack = fileRestoreNavStack.slice(0, idx + 1);
+                    setFileRestoreNavStack(newStack);
+                    setFileRestoreSelected(null);
+                    await _fetchFileRestoreList(showFileRestore, newStack[newStack.length - 1].filepath);
+                }
+            };
+
+            const handleFileRestoreSubmit = async () => {
+                if (!fileRestoreSelected || !fileRestoreDestPath || !showFileRestore) return;
+                // Use item.filepath from PVE response - it's the correct path for the restore API
+                const backupFilepath = fileRestoreSelected.filepath ?? fileRestoreSelected.text;
+                setFileRestoring(true);
+                try {
+                    const resp = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/backups/file-restore`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                volid: showFileRestore.volid,
+                                filepath: backupFilepath,
+                                dest_path: fileRestoreDestPath
+                            })
+                        }
+                    );
+                    const result = await resp.json().catch(() => ({}));
+                    if (resp.ok && result.success) {
+                        addToast(t('fileRestoreSuccess') || 'File restored successfully', 'success');
+                        setShowFileRestore(null);
+                    } else {
+                        addToast(result.error || (t('fileRestoreFailed') || 'File restore failed'), 'error');
+                    }
+                } catch(e) {
+                    addToast(t('connectionError'), 'error');
+                } finally {
+                    setFileRestoring(false);
+                }
+            };
+
+            // Replication operations
+            const handleCreateReplication = async (target, schedule, rate, comment) => {
+                setReplicationLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/replication`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ vmid: vm.vmid, target, schedule, rate, comment })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('replicationCreated'), 'success');
+                        setShowCreateReplication(false);
+                        await fetchReplications();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Creation failed', 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setReplicationLoading(false);
+            };
+
+            const handleDeleteReplication = async (jobId) => {
+                if (!confirm(t('confirmDeleteReplication') || `Really delete replication job '${jobId}'?`)) return;
+                setReplicationLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/replication/${jobId}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('replicationDeleted'), 'success');
+                        await fetchReplications();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || 'Delete failed', 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setReplicationLoading(false);
+            };
+
+            const handleRunReplicationNow = async (jobId) => {
+                setReplicationLoading(true);
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/replication/${jobId}/run`,
+                        { method: 'POST' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('replicationStarted'), 'success');
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('startFailed'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                setReplicationLoading(false);
+            };
+
+            // MK: cross-cluster replication handlers
+            const handleCreateXRepl = async () => {
+                try {
+                    const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
+                    const payload = {
+                        source_cluster: clusterId,
+                        vmid: vm.vmid,
+                        vm_type: vm.type || 'qemu',
+                        ...xReplForm,
+                        target_vmid: xReplForm.target_vmid ? parseInt(xReplForm.target_vmid, 10) : null,
+                    };
+                    // #532 - per-NIC bridge map when the VM has NICs, single bridge otherwise
+                    if (srcBridges.length > 0 && Object.keys(xReplBridgeMap).length > 0) {
+                        payload.target_bridge_map = xReplBridgeMap;
+                    }
+                    const response = await authFetch(`${API_URL}/cross-cluster-replications`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (response && response.ok) {
+                        addToast(t('xReplCreated'), 'success');
+                        setShowCreateXRepl(false);
+                        setXReplForm({ target_cluster: '', target_storage: '', target_bridge: 'vmbr0', target_vmid: '', schedule: '0 */6 * * *', retention: 3 });
+                        setXReplBridgeMap({});
+                        await fetchCrossClusterRepls();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('xReplCreateFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleDeleteXRepl = async (jobId) => {
+                if (!confirm(t('confirmDeleteXRepl'))) return;
+                // #552 - second prompt: optionally tear down the replica VM on the target too
+                const alsoDeleteTarget = confirm(t('confirmDeleteXReplTarget') || 'Also delete the replicated VM on the target? OK = remove the replica VM, Cancel = keep it.');
+                try {
+                    // MK #564 — send the choice explicitly. Omitting the param let the
+                    // job's stored delete_target flag win, so "keep replica" was ignored
+                    // and a failed teardown left the job permanently undeletable.
+                    const url = `${API_URL}/cross-cluster-replications/${jobId}?delete_target=${alsoDeleteTarget ? '1' : '0'}`;
+                    const response = await authFetch(url, { method: 'DELETE' });
+                    if (response && response.ok) {
+                        addToast(t('xReplDeleted'), 'success');
+                        await fetchCrossClusterRepls();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('xReplDeleteFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleRunXReplNow = async (jobId) => {
+                try {
+                    const response = await authFetch(`${API_URL}/cross-cluster-replications/${jobId}/run`, { method: 'POST' });
+                    if (response && response.ok) {
+                        addToast(t('xReplStarted'), 'success');
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('xReplStartFailed'), 'error');
+                    }
+                } catch (error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // LW Nov 2026 - one change taken back (key null: all of them)
+            const crVcRevert = (key) => {
+                if (key == null) setCrNets({});
+                else if (crNets[key]) {
+                    const n = { ...crNets };
+                    delete n[key];
+                    setCrNets(n);
+                    return;
+                }
+                const next = { ...changes };
+                if (key == null) Object.keys(next).forEach(k => { delete next[k]; });
+                else delete next[key];
+                setChanges(next);
+                setHasChanges(Object.keys(next).length > 0);
+            };
+
+            // LW Nov 2026 - an edit of the redesign's Hardware tab: several keys and the delete list in one go
+            const crVcSet = (patch) => {
+                const next = crVcPatch(changes, patch, config?.raw);
+                setChanges(next);
+                setHasChanges(Object.keys(next).length > 0);
+            };
+
+            const handleChange = (section, key, value) => {
+                // in the redesign a value set back to what the config holds is no change any more
+                if (crVc && crVcSame(config?.raw?.[key], value)) return crVcRevert(key);
+                setChanges(prev => ({
+                    ...prev,
+                    [key]: value
+                }));
+                setHasChanges(true);
+            };
+
+            const handleSave = async () => {
+                if (Object.keys(changes).length === 0) return false;
+
+                // Validate VM name format (DNS-compatible)
+                // KG Aug 2026 — this demanded a SINGLE label starting with a LETTER, which is
+                // stricter than both PVE and our own create wizard (which doesn't check the name
+                // at all). PVE's `name`/`hostname` are format=dns-name: dot-separated labels,
+                // each up to 63 chars, and a label may start with a digit. So a guest created
+                // here as "10.158.163.101-app01" could never be renamed afterwards — the request
+                // was rejected client-side and never reached the API. Mirror dns-name instead.
+                const nameValue = 'name' in changes ? changes.name : ('hostname' in changes ? changes.hostname : undefined);
+                if (nameValue !== undefined && nameValue !== '') {
+                    const dnsLabel = '[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?';
+                    const dnsRegex = new RegExp(`^${dnsLabel}(?:\\.${dnsLabel})*$`);
+                    // The per-label rule above does not bound the total length, and PVE declares
+                    // the LXC hostname with maxLength 255 — check it here instead of letting the
+                    // API reject the request.
+                    if (!dnsRegex.test(nameValue) || nameValue.length > 255) {
+                        addToast(t('invalidDnsName'), 'error');
+                        return false;
+                    }
+                }
+
+                setSaving(true);
+                let saved = false;
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(changes)
+                        }
+                    );
+                    
+                    if (response && response.ok) {
+                        saved = true;
+                        addToast(t('configSaved'), 'success');
+                        setChanges({});
+                        setHasChanges(false);
+                if (isCloud && crVcEngine && crv && crv.refresh) crv.refresh();   // cloud only: the redesign counts its pending reads
+                        await fetchConfig();
+                    } else {
+                        const err = await response.json();
+                        addToast(err.error || t('saveFailed'), 'error');
+                        setLastSaveErr(err.error || t('saveFailed'));
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                    setLastSaveErr(t('connectionError'));
+                }
+                setSaving(false);
+                // LW Nov 2026 - the redesign reads what PVE keeps pending once it knows the outcome
+                return saved;
+            };
+
+            // the redesign saves only from its review; the rows are the prediction PVE's answer goes next to
+            const crVcSave = async () => {
+                const sent = crv.rows;
+                crv.beginSave();
+                let ok = true;
+                // a network device goes through the classic dialog's request, one per device; the
+                // panel's save stays disabled meanwhile
+                const left = { ...crNets };
+                // the keys of the requests that failed: only those can be "not saved"
+                const failed = [];
+                if (Object.keys(crNets).length) setSaving(true);
+                for (const id of Object.keys(crNets)) {
+                    if (await handleUpdateNetwork(id, crNets[id])) delete left[id];
+                    else { ok = false; failed.push(id); }
+                }
+                setCrNets(left);
+                setSaving(false);
+                let after = null;
+                if (Object.keys(changes).length && !(await handleSave())) {
+                    ok = false;
+                    failed.push(...Object.keys(changes).filter(k => k !== 'delete'), ...crVcDelList(changes));
+                    // PVE applies and writes what it can before it raises the error (API2/Qemu.pm 2641):
+                    // read the config once (the classic form does not after a failure), keep the rest
+                    const data = await fetchConfig();
+                    after = (data && data.raw) || null;
+                    if (after) {
+                        const next = crVcUnstored(changes, after);
+                        setChanges(next);
+                        setHasChanges(Object.keys(next).length > 0);
+                    }
+                }
+                await crv.afterSave(sent, ok, failed, after);
+            };
+
+            // LW Nov 2026 - the delete buttons of EFI disk, TPM and cloud-init drive, out of the classic
+            // Hardware tab so the redesign's tab sends the same requests
+            const handleDeleteEfiDisk = async () => {
+                if (!confirm(t('confirmDeleteEfiDisk') || 'Delete EFI disk? This may prevent the VM from booting.')) return;
+                try {
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: 'efidisk0' })
+                    });
+                    if (res.ok) {
+                        addToast(t('efiDiskDeleted') || 'EFI disk deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting EFI disk', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting EFI disk', 'error');
+                }
+            };
+
+            const handleDeleteTpm = async () => {
+                if (!confirm(t('confirmDeleteTpm') || 'Delete TPM? Windows 11 and BitLocker will stop working.')) return;
+                try {
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        credentials: 'include',
+                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: 'tpmstate0' })
+                    });
+                    if (res.ok) {
+                        addToast(t('tpmDeleted') || 'TPM deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting TPM', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting TPM', 'error');
+                }
+            };
+
+            const handleDeleteCloudInit = async (driveKey) => {
+                if (!confirm(t('confirmDeleteCloudInitDrive'))) return;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: driveKey })
+                    });
+                    if (res?.ok) {
+                        addToast(t('cloudInitDriveRemoved'), 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || t('cloudInitDriveRemoveFailed'), 'error');
+                    }
+                } catch (e) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleUnlockVm = async () => {
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/unlock`, {
+                        method: 'POST'
+                    });
+                    if (response && response.ok) {
+                        addToast(t('vmUnlocked'), 'success');
+                        fetchConfig(); // Reload config
+                    } else {
+                        const err = await response.json();
+                        addToast(err.error || t('deleteFailed'), 'error');
+                    }
+                } catch(e) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // Disk operations - LW: refactored this like 3 times, finally happy with it
+            // NS: Just don't touch the size parsing, that took forever to get right
+            const handleAddDisk = async (diskConfig) => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(diskConfig)
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('diskAdded') || 'Disk added');
+                        setShowAddDisk(false);
+                        // MK: Small delay to allow Proxmox to allocate the disk
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleRemoveDisk = async (diskId) => {
+                if (!confirm(`${t('removeDiskConfirm') || 'Really remove disk'} ${diskId}? ${t('dataWillBeDeleted') || 'Data will be permanently deleted!'}`)) return;
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${diskId}?delete_data=true`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('diskDeleted') || 'Disk deleted');
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // LW Nov 2026 - the permanent delete of an unused disk, out of the classic Disks tab so
+            // the redesign's tab sends the same request
+            const handleDeleteUnusedDisk = async (disk) => {
+                if (!confirm(t('deleteUnusedDiskConfirm') || `Permanently delete ${disk.id}? This cannot be undone!`)) return;
+                try {
+                    // First delete the unused reference, then purge the actual volume
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ delete: disk.id })
+                    });
+                    if (res && res.ok) {
+                        addToast(t('unusedDiskDeleted') || 'Unused disk deleted', 'success');
+                        fetchConfig();
+                    } else {
+                        const err = await res.json();
+                        addToast(err.error || 'Error deleting disk', 'error');
+                    }
+                } catch (e) {
+                    addToast('Error deleting disk', 'error');
+                }
+            };
+
+            // MK: Detach disk - removes from VM but keeps as unused
+            const handleDetachDisk = async (diskId) => {
+                if (!confirm(`${t('detachDiskConfirm') || 'Really detach disk?'} ${diskId}`)) return;
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${diskId}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('diskDetached') || 'Disk detached');
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleResizeDisk = async (diskId, newSize) => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/resize`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ disk: diskId, size: newSize })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('diskResized') || 'Disk resized');
+                        setShowResizeDisk(null);
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleMoveDisk = async (diskId, targetStorage, deleteOriginal = true) => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${diskId}/move`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ storage: targetStorage, delete: deleteOriginal })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('moveStarted') || 'Move started');
+                        setShowMoveDisk(null);
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // CD-ROM operations
+            const handleMountISO = async (isoPath, drive = 'ide2') => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/cdrom`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ iso: isoPath, drive: drive })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(isoPath ? (t('isoMounted') || `ISO mounted on ${drive}`) : (t('isoEjected') || `${drive} ejected`));
+                        setShowMountISO(false);
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // Network operations
+            const handleAddNetwork = async (netConfig) => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/networks`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(netConfig)
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('vmNetworkAdded'));
+                        setShowAddNetwork(false);
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            const handleUpdateNetwork = async (netId, netConfig) => {
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/networks/${netId}`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(netConfig)
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('vmNetworkUpdated'));
+                        setShowEditNetwork(null);
+                        await fetchConfig();
+                        return true;
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+                return false;
+            };
+
+            const handleRemoveNetwork = async (netId) => {
+                if (!confirm(`${t('removeNetworkConfirm') || 'Really remove network'} ${netId}?`)) return;
+                try {
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/networks/${netId}`,
+                        { method: 'DELETE' }
+                    );
+                    if (response && response.ok) {
+                        addToast(t('vmNetworkRemoved'));
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // LW: Toggle network link_down state (simulates cable unplug)
+            const handleToggleNetworkLink = async (netId, currentLinkDown) => {
+                try {
+                    const newLinkDown = !currentLinkDown;
+                    const response = await authFetch(
+                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/networks/${netId}/link`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ link_down: newLinkDown })
+                        }
+                    );
+                    if (response && response.ok) {
+                        addToast(newLinkDown ? t('networkDisconnected') : t('connectNetwork'), newLinkDown ? 'warning' : 'success');
+                        await fetchConfig();
+                    } else if (response) {
+                        const err = await response.json();
+                        addToast(err.error || t('error'), 'error');
+                    }
+                } catch(error) {
+                    addToast(t('connectionError'), 'error');
+                }
+            };
+
+            // MK May 2026 (#365 j0c00): fetch datacenter MAC prefix once on mount so
+            // generateMAC can honour Datacenter → Options → MAC address prefix.
+            // PVE itself uses this prefix when it auto-generates MACs; our button
+            // was just rolling random `02:xx:xx:xx:xx:xx` regardless.
+            useEffect(() => {
+                if (!clusterId) return;
+                let cancelled = false;
+                (async () => {
+                    try {
+                        const r = await dashboardAuthFetch(`${API_URL}/clusters/${clusterId}/datacenter/options`);
+                        if (r?.ok && !cancelled) {
+                            const data = await r.json();
+                            if (data?.mac_prefix) setDcMacPrefix(String(data.mac_prefix));
+                        }
+                    } catch (e) { /* non-fatal — generateMAC falls back to '02:' */ }
+                })();
+                return () => { cancelled = true; };
+            }, [clusterId]);
+
+            // Helper functions
+            const generateMAC = () => {
+                const hex = '0123456789ABCDEF';
+                const rand = () => hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+                // MK May 2026 (#365): honour the cluster's MAC prefix when set.
+                // PVE accepts 1–3 octets (BC, BC:24, BC:24:11); we mirror that.
+                const prefix = (dcMacPrefix || '').trim();
+                let parts = [];
+                if (/^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2}){0,2}$/.test(prefix)) {
+                    parts = prefix.toUpperCase().split(':');
+                }
+                if (parts.length === 0) parts = ['02'];  // fall back to locally-administered prefix
+                while (parts.length < 6) parts.push(rand());
+                return parts.join(':');
+            };
+
+            const diskBusSlotLimits = { ide: 4, scsi: 30, sata: 30, virtio: 30, mp: 30 };
+            const getDiskBusSlots = (bus) => Array.from(
+                { length: diskBusSlotLimits[bus] || 30 },
+                (_, index) => String(index)
+            );
+
+            const getNextDiskId = (busType = 'scsi') => {
+                const existing = config?.disks?.filter(d => d.id.startsWith(busType)).map(d => parseInt(d.id.replace(busType, ''))) || [];
+                for (const slot of getDiskBusSlots(busType)) {
+                    if (!existing.includes(Number(slot))) return `${busType}${slot}`;
+                }
+                return `${busType}0`;
+            };
+
+            const getFirstFreeCloudInitDevice = (bus) => {
+                const used = new Set(Object.keys(config?.raw || {}));
+                return getDiskBusSlots(bus).find(slot => !used.has(`${bus}${slot}`)) || '';
+            };
+
+            const getCloudInitFormatsForStorage = (storageName) => {
+                // NS Aug 2026 — a cloud-init drive is a tiny config disk; keep the format valid for
+                // the target: raw-first everywhere (Proxmox's own default, cf. templates_lib.py which
+                // attaches plain `storage:cloudinit`), block storages are raw-only, and vmdk is not a
+                // valid cloud-init format so it's dropped. Prevents PVE rejecting qcow2-on-LVM /
+                // vmdk-cloud-init combos the original PR offered.
+                const storageType = storageList.find(s => s.storage === storageName)?.type;
+                if (!storageType) return ['raw', 'qcow2'];
+                switch (storageType) {
+                    case 'dir': case 'nfs': case 'cifs': case 'glusterfs': case 'btrfs':
+                        return ['raw', 'qcow2'];
+                    case 'lvm': case 'lvmthin':
+                    case 'zfspool': case 'zfs': case 'rbd': case 'iscsi': case 'iscsidirect':
+                        return ['raw'];
+                    default:
+                        return ['raw', 'qcow2'];
+                }
+            };
+
+            // memoized so the reset-effect below doesn't fire on every render (stable array identity)
+            const cloudInitStorageFormats = useMemo(
+                () => cloudInitStorage ? getCloudInitFormatsForStorage(cloudInitStorage) : ['raw', 'qcow2'],
+                [cloudInitStorage, storageList]
+            );
+
+            useEffect(() => {
+                if (!showAddCloudInit) return;
+                const preferredBus = getFirstFreeCloudInitDevice('ide') ? 'ide'
+                    : getFirstFreeCloudInitDevice('scsi') ? 'scsi'
+                    : 'sata';
+                setCloudInitBus(preferredBus);
+                setCloudInitDevice(getFirstFreeCloudInitDevice(preferredBus));
+            }, [showAddCloudInit]);
+
+            useEffect(() => {
+                if (!cloudInitStorage) {
+                    setCloudInitFormat('raw');
+                    return;
+                }
+                if (!cloudInitStorageFormats.includes(cloudInitFormat)) {
+                    setCloudInitFormat(cloudInitStorageFormats[0] || 'raw');
+                }
+            }, [cloudInitStorage, cloudInitStorageFormats, cloudInitFormat]);
+
+            const getNextNetId = () => {
+                const existing = config?.networks?.map(n => parseInt(n.id.replace('net', ''))) || [];
+                for (let i = 0; i < 10; i++) {
+                    if (!existing.includes(i)) return `net${i}`;
+                }
+                return 'net0';
+            };
+
+            const getValue = (section, key) => {
+                if (key in changes) return changes[key];
+                // Try parsed section first, then raw config as fallback
+                const sectionObj = config?.[section];
+                if (sectionObj && key in sectionObj) return sectionObj[key];
+                // Fallback to raw config
+                return config?.raw?.[key] ?? '';
+            };
+
+            const tabs = isQemu
+                ? [
+                    { id: 'general', labelKey: 'generalTab', icon: Icons.Server },
+                    { id: 'hardware', labelKey: 'hardware', icon: Icons.Cpu },
+                    { id: 'disks', labelKey: 'disks', icon: Icons.HardDrive },
+                    { id: 'network', labelKey: 'networkTab', icon: Icons.Network },
+                    { id: 'snapshots', labelKey: 'snapshotsTab', icon: Icons.Clock },
+                    { id: 'backups', labelKey: 'backupsTab', icon: Icons.Database },
+                    { id: 'replication', labelKey: 'replicationTab', icon: Icons.RefreshCw },
+                    { id: 'history', labelKey: 'historyTab', icon: Icons.List },
+                    { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield },
+                    { id: 'options', labelKey: 'optionsTab', icon: Icons.Settings },
+                ]
+                : [
+                    { id: 'general', labelKey: 'generalTab', icon: Icons.Server },
+                    { id: 'resources', labelKey: 'resourcesTab', icon: Icons.Cpu },
+                    { id: 'disks', labelKey: 'storageTab', icon: Icons.HardDrive },
+                    { id: 'network', labelKey: 'networkTab', icon: Icons.Network },
+                    { id: 'snapshots', labelKey: 'snapshotsTab', icon: Icons.Clock },
+                    { id: 'backups', labelKey: 'backupsTab', icon: Icons.Database },
+                    { id: 'replication', labelKey: 'replicationTab', icon: Icons.RefreshCw },
+                    { id: 'history', labelKey: 'historyTab', icon: Icons.List },
+                    { id: 'firewall', labelKey: 'firewall', icon: Icons.Shield },
+                    { id: 'options', labelKey: 'optionsTab', icon: Icons.Settings },
+                ];
+
+            const lockedTab = haReadOnly && activeTab !== 'history';
+
+            // NS May 2026: in Corporate layout we render a corporate flat
+            // chrome (flat, light-weighted typography, underlined tabs, clean
+            // header with explicit Apply / Cancel actions). The Modern dark
+            // pill-tab look feels foreign in the Corporate layout especially
+            // under the light theme. Body markup is shared between layouts.
+            // LW Nov 2026 - the SMBIOS card of the Options tab, the redesign's Options tab shows it too
+            const renderSmbiosCard = () => (
+                                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <label className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                                                                <Icons.Cpu />
+                                                                {t('smbiosSettings') || 'SMBIOS Settings'}
+                                                            </label>
+                                                            <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</CrVcRestartBadge>
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mb-4">{t('smbiosHint') || 'System Management BIOS settings - useful for Windows licensing and VM identification'}</p>
+                                                        
+                                                        {/* Current SMBIOS value display */}
+                                                        {getValue('options', 'smbios1') && (
+                                                            <div className="mb-4 p-3 bg-black/50 rounded-lg border border-green-500/30">
+                                                                <label className="block text-[10px] text-green-400 mb-1 font-medium">{t('currentValue') || 'Current Value'} (smbios1):</label>
+                                                                <code className="text-xs text-green-300 font-mono break-all">
+                                                                    {getValue('options', 'smbios1')}
+                                                                </code>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {(() => {
+                                                            // Parse existing smbios1 value
+                                                            const smbiosRaw = getValue('options', 'smbios1') || '';
+                                                            const parseSmbios = (raw) => {
+                                                                const result = { uuid: '', manufacturer: '', product: '', version: '', serial: '', sku: '', family: '' };
+                                                                if (!raw) return result;
+                                                                raw.split(',').forEach(part => {
+                                                                    const [key, ...valueParts] = part.split('=');
+                                                                    const value = valueParts.join('='); // Handle values with = in them
+                                                                    if (key && result.hasOwnProperty(key)) {
+                                                                        result[key] = value || '';
+                                                                    }
+                                                                });
+                                                                return result;
+                                                            };
+                                                            
+                                                            const smbios = parseSmbios(smbiosRaw);
+                                                            
+                                                            // Sanitize for Proxmox SMBIOS - only A-Za-z0-9, learned the hard way that underscores dont work either
+                                                            const sanitizeSmbios = (value) => {
+                                                                if (!value) return '';
+                                                                return value
+                                                                    .replace(/\s+/g, '')  // Remove spaces
+                                                                    .replace(/[^A-Za-z0-9]/g, '');  // Remove ALL other chars including underscores
+                                                            };
+                                                            
+                                                            const buildSmbios = (newValues) => {
+                                                                const parts = [];
+                                                                Object.entries(newValues).forEach(([key, value]) => {
+                                                                    if (value && value.trim()) {
+                                                                        // UUID is special - don't sanitize
+                                                                        const finalValue = key === 'uuid' ? value : sanitizeSmbios(value);
+                                                                        if (finalValue) {
+                                                                            parts.push(`${key}=${finalValue}`);
+                                                                        }
+                                                                    }
+                                                                });
+                                                                return parts.join(',');
+                                                            };
+                                                            
+                                                            const updateSmbios = (field, value) => {
+                                                                const newSmbios = { ...smbios, [field]: value };
+                                                                const encoded = buildSmbios(newSmbios);
+                                                                handleChange('options', 'smbios1', encoded || null);
+                                                            };
+                                                            
+                                                            const generateUuid = () => {
+                                                                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+                                                                    const r = Math.random() * 16 | 0;
+                                                                    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                                                                    return v.toString(16);
+                                                                });
+                                                            };
+                                                            
+                                                            return (
+                                                                <div className="space-y-3">
+                                                                    {/* UUID - Display only, managed by Proxmox */}
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">UUID <span className="text-gray-600">({t('managedByProxmox') || 'managed by Proxmox'})</span></label>
+                                                                        <div className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-gray-500 text-sm font-mono">
+                                                                            {smbios.uuid ? smbios.uuid : <span className="italic">{t('willBeAutoGenerated') || 'Will be auto-generated on save'}</span>}
+                                                                        </div>
+                                                                    </div>
+                                                                    
+                                                                    {/* Format hint */}
+                                                                    <p className="text-[10px] text-yellow-500/70">
+                                                                        ⚠️ {t('smbiosFormatHint') || 'Only letters and numbers allowed (A-Za-z0-9)'}
+                                                                    </p>
+                                                                    
+                                                                    <div className="grid grid-cols-2 gap-3">
+                                                                        {/* Manufacturer */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('manufacturer') || 'Manufacturer'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.manufacturer}
+                                                                                onChange={(e) => updateSmbios('manufacturer', e.target.value)}
+                                                                                placeholder="e.g. Dell"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.manufacturer && sanitizeSmbios(smbios.manufacturer) !== smbios.manufacturer && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.manufacturer)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Product */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('product') || 'Product'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.product}
+                                                                                onChange={(e) => updateSmbios('product', e.target.value)}
+                                                                                placeholder="e.g. PowerEdgeR740"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.product && sanitizeSmbios(smbios.product) !== smbios.product && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.product)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Version */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('version') || 'Version'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.version}
+                                                                                onChange={(e) => updateSmbios('version', e.target.value)}
+                                                                                placeholder="e.g. v1"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.version && sanitizeSmbios(smbios.version) !== smbios.version && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.version)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Serial */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('serialNumber') || 'Serial Number'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.serial}
+                                                                                onChange={(e) => updateSmbios('serial', e.target.value)}
+                                                                                placeholder="e.g. ABC123"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.serial && sanitizeSmbios(smbios.serial) !== smbios.serial && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.serial)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* SKU */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">SKU</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.sku}
+                                                                                onChange={(e) => updateSmbios('sku', e.target.value)}
+                                                                                placeholder="e.g. SKU12345"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.sku && sanitizeSmbios(smbios.sku) !== smbios.sku && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.sku)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                        
+                                                                        {/* Family */}
+                                                                        <div>
+                                                                            <label className="block text-xs text-gray-400 mb-1">{t('family') || 'Family'}</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={smbios.family}
+                                                                                onChange={(e) => updateSmbios('family', e.target.value)}
+                                                                                placeholder="e.g. Server"
+                                                                                className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm"
+                                                                            />
+                                                                            {smbios.family && sanitizeSmbios(smbios.family) !== smbios.family && (
+                                                                                <p className="text-[10px] text-yellow-400 mt-0.5">↑ {sanitizeSmbios(smbios.family)}</p>
+                                                                            )}
+                                                                        </div>
+                                                                    </div>
+                                                                    
+                                                                    {/* Live Preview */}
+                                                                    {(smbios.uuid || smbios.manufacturer || smbios.product || smbios.version || smbios.serial || smbios.sku || smbios.family) && (
+                                                                        <div className="p-3 bg-black/50 rounded-lg border border-proxmox-border">
+                                                                            <label className="block text-[10px] text-gray-500 mb-1">{t('preview') || 'Preview'} (smbios1):</label>
+                                                                            <code className="text-xs text-green-400 font-mono break-all">
+                                                                                {buildSmbios(smbios)}
+                                                                            </code>
+                                                                        </div>
+                                                                    )}
+                                                                    
+                                                                    {/* Quick presets - using only safe characters (A-Za-z0-9) */}
+                                                                    <div className="pt-2 border-t border-proxmox-border">
+                                                                        <label className="block text-xs text-gray-400 mb-2">{t('presets') || 'Quick Presets'}</label>
+                                                                        <div className="flex flex-wrap gap-2">
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Dell,product=PowerEdgeR740,version=v1,serial=DELL${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Dell Server
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=HP,product=ProLiantDL380,version=v1,serial=MXQ${Math.random().toString(36).substr(2, 8).toUpperCase()},family=Server`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                HP Server
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Lenovo,product=ThinkPadX1,version=v1,serial=PF${Math.random().toString(36).substr(2, 8).toUpperCase()},family=ThinkPad`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Lenovo Laptop
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={async () => {
+                                                                                    // NS: fetch smbios settings from cluster config
+                                                                                    const sanitize = (v) => (v || '').replace(/\s+/g, '').replace(/[^A-Za-z0-9]/g, '');
+                                                                                    try {
+                                                                                        const res = await authFetch(`${API_URL}/clusters/${clusterId}/smbios-autoconfig`);
+                                                                                        const settings = res?.ok ? await res.json() : {};
+                                                                                        const mfg = sanitize(settings.manufacturer) || 'Proxmox';
+                                                                                        const prod = sanitize(settings.product) || 'PegaProxManagment';
+                                                                                        const ver = sanitize(settings.version) || 'v1';
+                                                                                        const fam = sanitize(settings.family) || 'ProxmoxVE';
+                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
+                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
+                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=${mfg},product=${prod},version=${ver},serial=PVE${timestamp}${randomPart},family=${fam}`);
+                                                                                    } catch (e) {
+                                                                                        // fallback to defaults
+                                                                                        const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                        const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(2, 14);
+                                                                                        const randomPart = Math.floor(Math.random() * 9000 + 1000);
+                                                                                        handleChange('options', 'smbios1', `${base}manufacturer=Proxmox,product=PegaProxManagment,version=v1,serial=PVE${timestamp}${randomPart},family=ProxmoxVE`);
+                                                                                    }
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-orange/20 border border-proxmox-orange/50 rounded text-xs text-proxmox-orange hover:bg-proxmox-orange/30"
+                                                                                title={t('applySmbiosFromClusterConfig') || 'Apply SMBIOS settings from cluster configuration'}
+                                                                            >
+                                                                                🦄 PegaProx
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    const base = smbios.uuid ? `uuid=${smbios.uuid},` : '';
+                                                                                    handleChange('options', 'smbios1', `${base}manufacturer=Microsoft,product=VirtualMachine,version=HyperV,serial=0000000000000000,family=VirtualMachine`);
+                                                                                }}
+                                                                                className="px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-xs text-gray-400 hover:text-white hover:bg-proxmox-border"
+                                                                            >
+                                                                                Hyper-V
+                                                                            </button>
+                                                                            <button
+                                                                                onClick={() => {
+                                                                                    handleChange('options', 'smbios1', '');
+                                                                                }}
+                                                                                className="px-2 py-1 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-400 hover:bg-red-500/20"
+                                                                            >
+                                                                                {t('clear') || 'Clear'}
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+            );
+
+            return(
+                <CrVcBadgeOff.Provider value={crVc}>
+                <div className={isCorporate
+                    ? 'corp-vm-modal-overlay'
+                    : isCloud ? 'cloud-cfg-overlay cloud-mounted'
+                    : 'fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80'}>
+                    <div className={isCorporate
+                        ? 'corp-vm-modal'
+                        : isCloud ? 'cloud-cfg'
+                        : 'w-full max-w-4xl max-h-[90vh] bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl animate-scale-in overflow-hidden flex flex-col'}>
+                        {/* Header */}
+                        {isCorporate ? (
+                            <div className="corp-vm-modal-header">
+                                <div className="corp-vm-modal-header-left">
+                                    <span className={`corp-vm-type-pill ${isQemu ? '' : 'lxc'}`}>{isQemu ? 'VM' : 'CT'}</span>
+                                    <div className="corp-vm-modal-title-block">
+                                        <h2 className="corp-vm-modal-title">{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</h2>
+                                        <div className="corp-vm-modal-meta">
+                                            <span>ID {vm.vmid}</span>
+                                            <span className="corp-meta-sep">·</span>
+                                            <span>{vm.node}</span>
+                                            <span className="corp-meta-sep">·</span>
+                                            <span>{isQemu ? 'QEMU' : 'LXC'}</span>
+                                            {vm.status && (
+                                                <>
+                                                    <span className="corp-meta-sep">·</span>
+                                                    <span className={`corp-badge corp-badge-${vm.status === 'running' ? 'running' : 'stopped'}`}>
+                                                        {vm.status}
+                                                    </span>
+                                                </>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="corp-vm-modal-actions">
+                                    {hasChanges && !crVc && (
+                                        <span className="corp-unsaved-pill">{t('unsavedChanges') || 'Unsaved Changes'}</span>
+                                    )}
+                                    {hasChanges && !haReadOnly && (crVc ? null :
+                                        <button
+                                            onClick={handleSave}
+                                            disabled={saving}
+                                            className="corp-vm-btn corp-vm-btn-primary"
+                                            title={t('save') || 'Apply changes'}
+                                        >
+                                            {saving ? (t('saving') || 'Saving...') : (t('apply') || 'Apply')}
+                                        </button>
+                                    )}
+                                    <button
+                                        onClick={onClose}
+                                        className="corp-vm-btn corp-vm-btn-ghost"
+                                    >
+                                        {t('close') || 'Close'}
+                                    </button>
+                                </div>
+                            </div>
+                        ) : isCloud ? (
+                            <div className={'cloud-cfg-head is-' + (vm.status || 'unknown')}>
+                                <div className="cloud-cfg-head-left">
+                                    <span className="cloud-cfg-head-ico">{isQemu ? <Icons.Server /> : <Icons.Container />}</span>
+                                    <div className="cloud-cfg-head-title">
+                                        <h2>{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</h2>
+                                        <div className="cloud-cfg-head-meta">
+                                            <span className={'cloud-hc-badge ' + (vm.status === 'running' ? 'is-healthy' : vm.status === 'stopped' ? 'is-na' : 'is-unknown')}>{String(vm.status || '—').toUpperCase()}</span>
+                                            <span className="cloud-detail-id">#{vm.vmid} · {isQemu ? 'VM' : 'CT'} · {crVcCluster?.display_name || crVcCluster?.name || clusterId} · {vm.node}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="cloud-cfg-head-actions">
+                                    {hasChanges && <span className="cloud-hc-badge is-warning">{cT('unsavedChanges', 'Unsaved changes')}</span>}
+                                    <button type="button" className="cloud-icon-btn" onClick={onClose} title={t('close') || 'Close'}><Icons.X /></button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
+                                <div className="flex items-center gap-3">
+                                    <div className={`p-2 rounded-lg ${isQemu ? 'bg-blue-500/10' : 'bg-purple-500/10'}`}>
+                                        {isQemu ? <Icons.VM /> : <Icons.Container />}
+                                    </div>
+                                    <div>
+                                        <h2 className="font-semibold text-white">{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</h2>
+                                        <p className="text-xs text-gray-400">
+                                            {isQemu ? 'QEMU Virtual Machine' : 'LXC Container'} · ID {vm.vmid} · {vm.node}
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {hasChanges && (
+                                        <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded">
+                                            {t('unsavedChanges') || 'Unsaved Changes'}
+                                        </span>
+                                    )}
+                                    <button
+                                        onClick={onClose}
+                                        className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors"
+                                    >
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Tabs */}
+                        {isCloud ? (
+                            <div className="cloud-cfg-nav">
+                                {[
+                                    ['cloudCfgNavBase', 'General', ['general']],
+                                    ['cloudCfgNavOps', 'Operations', [isQemu ? 'hardware' : 'resources', 'disks', 'network']],
+                                    ['cloudCfgNavProtect', 'Protection', ['snapshots', 'backups', 'replication']],
+                                    ['cloudCfgNavAdmin', 'Administration', ['history', 'firewall', 'options']],
+                                ].map(([gl, glFallback, ids]) => (
+                                    <div key={gl} className="cloud-cfg-nav-group">
+                                        <div className="cloud-cfg-nav-label">{cT(gl, glFallback)}</div>
+                                        {ids.map(id => {
+                                            const tb = tabs.find(x => x.id === id);
+                                            if (!tb) return null;
+                                            const TI = tb.icon;
+                                            return (
+                                                <button type="button" key={id} className={'cloud-cfg-nav-item' + (activeTab === id ? ' is-active' : '')} onClick={() => setActiveTab(id)}>
+                                                    <TI /> {t(tb.labelKey)}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : isCorporate ? (
+                            <div className="corp-vm-modal-tabs">
+                                {tabs.map(tab => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        className={`corp-vm-modal-tab ${activeTab === tab.id ? 'active' : ''}`}
+                                    >
+                                        <tab.icon className="w-3.5 h-3.5" />
+                                        {t(tab.labelKey)}
+                                    </button>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="flex flex-wrap items-center gap-1 px-6 py-3 border-b border-proxmox-border bg-proxmox-dark/50">
+                                {tabs.map(tab => (
+                                    <button
+                                        key={tab.id}
+                                        onClick={() => setActiveTab(tab.id)}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
+                                            activeTab === tab.id
+                                                ? 'bg-proxmox-orange text-white'
+                                                : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'
+                                        }`}
+                                    >
+                                        <tab.icon />
+                                        {t(tab.labelKey)}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Content */}
+                        <div className={isCorporate ? 'corp-vm-modal-body' : 'flex-1 overflow-y-auto p-6' + (isCloud ? ' cloud-cfg-body cloud-mounted' : '')}>
+                            {loading ? (
+                                isCorporate ? (
+                                    <div className="corp-vm-modal-state">
+                                        <div className="corp-vm-spinner"></div>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center justify-center h-64">
+                                        <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full"></div>
+                                    </div>
+                                )
+                            ) : configError ? (
+                                /* MK: Show error when config fails to load */
+                                isCorporate ? (
+                                    <div className="corp-vm-modal-state">
+                                        <Icons.AlertTriangle className="w-10 h-10 mb-3" style={{color: '#f54f47'}} />
+                                        <p style={{color: '#f54f47', fontWeight: 500, marginBottom: '6px'}}>{configError}</p>
+                                        <p style={{fontSize: '12px', color: 'var(--corp-text-muted)', marginBottom: '14px'}}>
+                                            {t('checkConnectionAndRetry') || 'Please check your connection and try again.'}
+                                        </p>
+                                        <button
+                                            onClick={() => { setConfigError(null); fetchConfig(); }}
+                                            className="corp-vm-btn corp-vm-btn-primary"
+                                        >
+                                            <Icons.RotateCw className="w-3.5 h-3.5" />
+                                            {t('retry') || 'Retry'}
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <div className="flex flex-col items-center justify-center h-64 text-center">
+                                        <Icons.AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
+                                        <p className="text-red-400 font-medium mb-2">{configError}</p>
+                                        <p className="text-gray-500 text-sm mb-4">{t('checkConnectionAndRetry') || 'Please check your connection and try again.'}</p>
+                                        <button
+                                            onClick={() => { setConfigError(null); fetchConfig(); }}
+                                            className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 flex items-center gap-2"
+                                        >
+                                            <Icons.RotateCw className="w-4 h-4" />
+                                            {t('retry') || 'Retry'}
+                                        </button>
+                                    </div>
+                                )
+                            ) : config ? (
+                                // #625 v2 - a standby shows the configuration and changes none of
+                                // it: every tab but History renders its controls disabled
+                                <fieldset disabled={lockedTab} className="contents" data-ha-locked={lockedTab ? '' : undefined}>
+                                    {/* General Tab */}
+                                    {activeTab === 'general' && (crVc ? (
+                                        <CrVcGeneral t={t} vm={vm} config={config} changes={changes} rows={crv.rows}
+                                            clusterName={crVcCluster?.display_name || crVcCluster?.name || clusterId}
+                                            onChange={(k, v) => handleChange('general', k, v)} onRevert={crVcRevert}
+                                            clusterTags={clusterTags} onUnlock={handleUnlockVm} />
+                                    ) : (
+                                        <div className="space-y-6">
+                                            {isCloud && (
+                                                <div className="cloud-cfg-sec-h">
+                                                    <span className="cloud-cfg-sec-t">{cT('cloudCfgSecConfig', 'Configuration')}</span>
+                                                    <span className="cloud-cfg-sec-s">{cT('cloudCfgSecConfigHint', 'identity and description — saved with the VM')}</span>
+                                                </div>
+                                            )}
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <ConfigInputField
+                                                    label={isQemu ? t('name') : t('hostname')}
+                                                    value={getValue('general', isQemu ? 'name' : 'hostname')}
+                                                    onChange={(v) => handleChange('general', isQemu ? 'name' : 'hostname', v)}
+                                                />
+                                                <div>
+                                                    <label className="block text-xs font-medium text-gray-400 mb-1">{t('tags')}</label>
+                                                    <div className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg min-h-[38px] relative">
+                                                        <div className="flex flex-wrap gap-1 mb-1">
+                                                            {(getValue('general', 'tags') || '').split(';').filter(t => t.trim()).map((tag, i) => (
+                                                                <span key={i} className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs" style={{
+                                                                    background: 'rgba(249,115,22,0.15)', color: '#f97316'
+                                                                }}>
+                                                                    {tag.trim()}
+                                                                    <button type="button" onClick={() => {
+                                                                        const current = (getValue('general', 'tags') || '').split(';').filter(t => t.trim());
+                                                                        current.splice(i, 1);
+                                                                        handleChange('general', 'tags', current.join(';'));
+                                                                    }} className="hover:text-red-400 ml-0.5">
+                                                                        <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                                    </button>
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                        <input
+                                                            type="text"
+                                                            placeholder={t('addTag') || 'Add tag...'}
+                                                            value={tagInputValue}
+                                                            onChange={(e) => { setTagInputValue(e.target.value); setShowTagDropdown(true); }}
+                                                            onFocus={() => setShowTagDropdown(true)}
+                                                            onBlur={() => setTimeout(() => setShowTagDropdown(false), 200)}
+                                                            className="bg-transparent text-white text-sm focus:outline-none w-full"
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter' && tagInputValue.trim()) {
+                                                                    e.preventDefault();
+                                                                    const val = tagInputValue.trim();
+                                                                    if (!/^[a-z0-9][a-z0-9\-_.+]*$/.test(val)) {
+                                                                        addToast(t('invalidTagFormat') || 'Invalid format. Tags must be lowercase alphanumeric (hyphens, dots, underscores allowed).', 'error');
+                                                                        return;
+                                                                    }
+                                                                    const current = (getValue('general', 'tags') || '').split(';').filter(t => t.trim());
+                                                                    if (!current.includes(val)) {
+                                                                        current.push(val);
+                                                                        handleChange('general', 'tags', current.join(';'));
+                                                                    }
+                                                                    setTagInputValue('');
+                                                                }
+                                                            }}
+                                                        />
+                                                        {showTagDropdown && clusterTags.length > 0 && (() => {
+                                                            const currentTags = (getValue('general', 'tags') || '').split(';').filter(t => t.trim());
+                                                            const filtered = clusterTags.filter(ct =>
+                                                                !currentTags.includes(ct.name) &&
+                                                                (!tagInputValue || ct.name.toLowerCase().includes(tagInputValue.toLowerCase()))
+                                                            );
+                                                            return filtered.length > 0 ? (
+                                                                <div className="absolute left-0 right-0 top-full mt-1 bg-proxmox-darker border border-proxmox-border rounded-lg shadow-lg z-50 max-h-[150px] overflow-y-auto">
+                                                                    {filtered.map(ct => (
+                                                                        <button key={ct.name} type="button"
+                                                                            className="w-full px-3 py-1.5 text-left text-xs text-gray-300 hover:bg-proxmox-orange/10 hover:text-white flex items-center gap-2"
+                                                                            onMouseDown={(e) => {
+                                                                                e.preventDefault();
+                                                                                const current = (getValue('general', 'tags') || '').split(';').filter(t => t.trim());
+                                                                                current.push(ct.name);
+                                                                                handleChange('general', 'tags', current.join(';'));
+                                                                                setTagInputValue('');
+                                                                            }}
+                                                                        >
+                                                                            <span className="w-2 h-2 rounded-full" style={{background: ct.color || '#f97316'}} />
+                                                                            {ct.name}
+                                                                        </button>
+                                                                    ))}
+                                                                </div>
+                                                            ) : null;
+                                                        })()}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <label className="text-xs font-medium text-gray-400">{t('description')}</label>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setDescEditMode(!descEditMode)}
+                                                        className="text-xs px-2 py-0.5 rounded bg-proxmox-dark border border-proxmox-border text-gray-400 hover:text-white transition-colors"
+                                                    >
+                                                        {descEditMode ? (t('preview') || 'Preview') : (t('edit') || 'Edit')}
+                                                    </button>
+                                                </div>
+                                                {descEditMode ? (
+                                                    <textarea
+                                                        value={getValue('general', 'description')}
+                                                        onChange={(e) => handleChange('general', 'description', e.target.value)}
+                                                        rows={6}
+                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm focus:outline-none focus:border-proxmox-orange"
+                                                    />
+                                                ) : (
+                                                    <div
+                                                        className="w-full px-3 py-2 border border-proxmox-border rounded-lg text-sm text-white min-h-[120px] cursor-pointer transition-colors"
+                                                        style={{overflowWrap: 'break-word', background: 'transparent'}}
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: (() => {
+                                                                const raw = getValue('general', 'description');
+                                                                if (!raw) return '<span style="color:#6b7280">No description</span>';
+                                                                if (!window.marked) return (window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>'));
+                                                                // MK: security audit — if DOMPurify not loaded, render as escaped plain text, NEVER unsanitized HTML
+                                                                const html = window.DOMPurify ? window.DOMPurify.sanitize(window.marked.parse(raw)) : raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+                                                                return '<style>.md-desc table,.md-desc thead,.md-desc tbody,.md-desc tr,.md-desc th,.md-desc td{background:none!important;background-color:transparent!important;color:inherit!important}.md-desc table{border-collapse:collapse;width:100%;margin:8px 0}.md-desc th,.md-desc td{border:1px solid rgba(255,255,255,0.15)!important;padding:6px 12px}.md-desc th{background-color:rgba(255,255,255,0.05)!important;text-align:left}.md-desc tr:nth-child(even) td{background-color:rgba(255,255,255,0.02)!important}.md-desc a{color:#f97316;text-decoration:underline}.md-desc code{background:rgba(255,255,255,0.08)!important;padding:1px 4px;border-radius:3px;font-size:0.85em}.md-desc pre{background:rgba(255,255,255,0.05)!important;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0}.md-desc pre code{background:none!important;padding:0}.md-desc blockquote{border-left:3px solid #f97316;padding-left:12px;margin:8px 0;color:#9ca3af}.md-desc hr{border:none;border-top:1px solid rgba(255,255,255,0.1);margin:12px 0}.md-desc h1,.md-desc h2,.md-desc h3,.md-desc h4{color:inherit;margin:12px 0 6px}.md-desc p{margin:6px 0}.md-desc img{max-width:100%;border-radius:4px}</style><div class="md-desc">' + html + '</div>';
+                                                            })()
+                                                        }}
+                                                        onClick={() => setDescEditMode(true)}
+                                                    />
+                                                )}
+                                            </div>
+                                            {config.status && (
+                                                <div className={'grid grid-cols-3 gap-4 p-4 bg-proxmox-dark rounded-lg' + (isCloud ? ' cfg-status-strip' : '')}>
+                                                    {isCloud && (
+                                                        <div className="col-span-3 cfg-live-head">
+                                                            <span className={'cloud-hc-rail-dot ' + (config.status.status === 'running' ? 'is-healthy' : 'is-na')}></span>
+                                                            <span className="cfg-live-title">{cT('cloudCfgLive', 'Current operation')}</span>
+                                                            <span className="cloud-cell-muted">{cT('cloudCfgLiveHint', 'live values from the host — read-only')}</span>
+                                                        </div>
+                                                    )}
+                                                    <div>
+                                                        <div className="text-xs text-gray-500">{t('status')}</div>
+                                                        <div className={`font-medium ${config.status.status === 'running' ? 'text-green-400' : 'text-red-400'}`}>
+                                                            {config.status.status === 'running' ? t('running') : t('stopped')}
+                                                        </div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-xs text-gray-500">{t('cpuUsage')}</div>
+                                                        <div className="font-medium text-white">{((config.status.cpu || 0) * 100).toFixed(1)}%</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-xs text-gray-500">{t('ramUsage')}</div>
+                                                        <div className="font-medium text-white">
+                                                            {((config.status.mem || 0) / 1073741824).toFixed(1)} GB
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            
+                                            {/* Lock Warning and Unlock Button */}
+                                            {config.lock?.locked && (
+                                                <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex items-center gap-2">
+                                                            <Icons.AlertTriangle className="text-yellow-400" />
+                                                            <div>
+                                                                <div className="text-yellow-400 font-medium">{t('vmLocked')}</div>
+                                                                <div className="text-xs text-yellow-300/70">{config.lock?.description || config.lock?.reason || 'Locked'}</div>
+                                                            </div>
+                                                        </div>
+                                                        <button
+                                                            onClick={handleUnlockVm}
+                                                            className="px-3 py-1.5 bg-yellow-500/20 hover:bg-yellow-500/30 border border-yellow-500/30 rounded-lg text-yellow-400 text-sm font-medium transition-colors"
+                                                        >
+                                                            {t('unlockVm')}
+                                                        </button>
+                                                    </div>
+                                                    <div className="mt-2 text-xs text-gray-500">
+                                                        CLI: <code className="text-green-400">{config.lock?.unlock_command}</code>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {/* Hardware/Resources Tab */}
+                                    {(activeTab === 'hardware' || activeTab === 'resources') && (crVc ? (
+                                        <CrVcHardware t={t} vm={vm} config={config} changes={changes} crv={crv}
+                                            hardwareOptions={hardwareOptions} onSet={crVcSet} onRevert={crVcRevert}
+                                            dev={{ passthrough, ptMappedLine, onAddPassthrough: openAddPassthrough,
+                                                   onRemovePassthrough: handleRemovePassthrough, onAddSerial: () => setShowAddSerial(true),
+                                                   onAddEfi: () => setShowAddEfiDisk(true), onDeleteEfi: handleDeleteEfiDisk,
+                                                   onAddTpm: () => setShowAddTpm(true), onDeleteTpm: handleDeleteTpm,
+                                                   onAddCloudInit: () => setShowAddCloudInit(true), onDeleteCloudInit: handleDeleteCloudInit }}
+                                            rngCard={
+                                                // running only draws the yellow restart pill; the device row's pending chip says it in the redesign
+                                                <VirtioRngCard value={config?.raw?.rng0} running={false}
+                                                    onAdd={() => setShowRngDialog(true)} onEdit={() => setShowRngDialog(true)} onRemove={removeRng} t={t} />
+                                            }
+                                            vfsCard={
+                                                <VirtiofsCard raw={config?.raw} running={false} info={ptMappings.dir} node={vm.node}
+                                                    onAdd={() => openVirtiofs(null)} onEdit={openVirtiofs} onRemove={removeVirtiofs} t={t} />
+                                            } />
+                                    ) : (
+                                        <div className="space-y-6">
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecCpu', 'CPU')}</span></div>}
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <ConfigInputField
+                                                    label={t('cpuCores')}
+                                                    type="number"
+                                                    value={getValue('hardware', 'cores')}
+                                                    onChange={(v) => handleChange('hardware', 'cores', v)}
+                                                    needsRestart={vm.status === 'running'}
+                                                />
+                                                {isQemu && (
+                                                    <ConfigInputField
+                                                        label={t('sockets')}
+                                                        type="number"
+                                                        value={getValue('hardware', 'sockets')}
+                                                        onChange={(v) => handleChange('hardware', 'sockets', v)}
+                                                        needsRestart={true}
+                                                    />
+                                                )}
+                                                {!isQemu && (
+                                                    <ConfigInputField
+                                                        label={t('cpuLimit')}
+                                                        type="number"
+                                                        value={getValue('hardware', 'cpulimit')}
+                                                        onChange={(v) => handleChange('hardware', 'cpulimit', v)}
+                                                        suffix={t('cores')}
+                                                    />
+                                                )}
+                                            </div>
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecMem', 'Memory')}</span></div>}
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <MemoryInputField
+                                                    label={t('memory')}
+                                                    value={getValue('hardware', 'memory') || 2048}
+                                                    onChange={(v) => handleChange('hardware', 'memory', v)}
+                                                    minMB={128}
+                                                    stepMB={128}
+                                                    needsRestart={vm.status === 'running'}
+                                                />
+                                                {isQemu ? (
+                                                    <MemoryInputField
+                                                        label={t('ballooningMinimum')}
+                                                        value={getValue('hardware', 'balloon') || 0}
+                                                        onChange={(v) => handleChange('hardware', 'balloon', v)}
+                                                        minMB={0}
+                                                        stepMB={128}
+                                                    />
+                                                ) : (
+                                                    <MemoryInputField
+                                                        label={t('swap')}
+                                                        value={getValue('hardware', 'swap') || 512}
+                                                        onChange={(v) => handleChange('hardware', 'swap', v)}
+                                                        minMB={0}
+                                                        stepMB={64}
+                                                    />
+                                                )}
+                                            </div>
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecVirt', 'Virtualization & Display')}</span></div>}
+                                            {isQemu && (
+                                                <>
+                                                    {/* NS May 2026 — composite cpu= string parsers. PVE accepts
+                                                        "type,flags=...,reported-model=...,level=...". We keep the
+                                                        existing dropdown bound to the BASE type (first segment) and
+                                                        add reported-model + level as separate inputs below that
+                                                        splice into the composite. PVE 9.2+ exposes those sub-options
+                                                        formally; older PVE just sees them as unknown sub-options and
+                                                        ignores quietly. */}
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <ConfigInputField
+                                                            label={t('cpuType')}
+                                                            value={(getValue('hardware', 'cpu') || '').split(',')[0]}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const parts = cur.split(',').slice(1);
+                                                                handleChange('hardware', 'cpu', [v, ...parts].filter(Boolean).join(','));
+                                                            }}
+                                                            options={hardwareOptions?.cpu_types || ['host', 'kvm64', 'qemu64']}
+                                                            needsRestart={true}
+                                                        />
+                                                        <ConfigInputField
+                                                            label="VGA"
+                                                            value={getValue('hardware', 'vga')}
+                                                            onChange={(v) => handleChange('hardware', 'vga', v)}
+                                                            options={[
+                                                                { value: 'std', label: 'Standard VGA' },
+                                                                { value: 'vmware', label: 'VMware compatible' },
+                                                                { value: 'qxl', label: 'SPICE (QXL)' },
+                                                                { value: 'qxl2', label: 'SPICE (QXL) 2 heads' },
+                                                                { value: 'qxl3', label: 'SPICE (QXL) 3 heads' },
+                                                                { value: 'qxl4', label: 'SPICE (QXL) 4 heads' },
+                                                                { value: 'virtio', label: 'VirtIO-GPU' },
+                                                                { value: 'virtio-gl', label: 'VirtIO-GPU (virgl)' },
+                                                                { value: 'cirrus', label: 'Cirrus Logic' },
+                                                                { value: 'serial0', label: 'Serial 0' },
+                                                                { value: 'serial1', label: 'Serial 1' },
+                                                                { value: 'serial2', label: 'Serial 2' },
+                                                                { value: 'serial3', label: 'Serial 3' },
+                                                                { value: 'none', label: t('none') },
+                                                            ]}
+                                                            needsRestart={true}
+                                                        />
+                                                    </div>
+                                                    {/* NS May 2026 — PVE 9.2 cpu sub-options. Splice in/out of the
+                                                        composite cpu= string. Empty input = remove the sub-option. */}
+                                                    {isCloud && (
+                                                        <div className="cloud-cfg-adv">
+                                                            <button type="button" className="cloud-cfg-adv-toggle" onClick={() => setCpuDetOpen(o => !o)}>
+                                                                {cT('cloudCfgCpuDet', 'CPU details & flags')}
+                                                                <span className="cloud-cfg-band-chev">{cpuDetOpen ? '▾' : '▸'}</span>
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    <div className={'grid grid-cols-2 gap-4' + ((isCloud && !cpuDetOpen) ? ' cfg-hide' : '')}>
+                                                        <ConfigInputField
+                                                            label="reported-model"
+                                                            value={(() => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    const [k, v] = part.split('=');
+                                                                    if (k === 'reported-model') return v || '';
+                                                                }
+                                                                return '';
+                                                            })()}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const [base, ...rest] = cur.split(',');
+                                                                const kept = rest.filter(p => !p.startsWith('reported-model='));
+                                                                if (v && v.trim()) kept.push(`reported-model=${v.trim()}`);
+                                                                handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                            }}
+                                                            placeholder="(empty) e.g. Skylake-Client, host"
+                                                            needsRestart={true}
+                                                        />
+                                                        <ConfigInputField
+                                                            label="level"
+                                                            type="number"
+                                                            min={1}
+                                                            max={64}
+                                                            value={(() => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    const [k, v] = part.split('=');
+                                                                    if (k === 'level') return v || '';
+                                                                }
+                                                                return '';
+                                                            })()}
+                                                            onChange={(v) => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                const [base, ...rest] = cur.split(',');
+                                                                const kept = rest.filter(p => !p.startsWith('level='));
+                                                                const num = parseInt(v, 10);
+                                                                if (!isNaN(num) && num >= 1 && num <= 64) {
+                                                                    kept.push(`level=${num}`);
+                                                                }
+                                                                handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                            }}
+                                                            placeholder="(empty) 1-64"
+                                                            needsRestart={true}
+                                                        />
+                                                    </div>
+                                                    {/* MK Jul 2026 — Extra CPU Flags (#410). Tri-state per flag:
+                                                        off (absent) / +flag (enabled) / -flag (disabled). Spliced
+                                                        in/out of the composite cpu= string as one semicolon-joined
+                                                        flags= segment, preserving type/reported-model/level. Backend
+                                                        passes cpu= through untouched, so this rides the delta-save. */}
+                                                    <div className={'mt-1' + ((isCloud && !cpuDetOpen) ? ' cfg-hide' : '')}>
+                                                        <label className="block text-sm text-gray-400 mb-2">{t('extraCpuFlags') || 'Extra CPU Flags'}</label>
+                                                        <div className="grid grid-cols-3 gap-2">
+                                                            {['pcid', 'spec-ctrl', 'ssbd', 'ibpb', 'virt-ssbd', 'amd-ssbd', 'amd-no-ssb', 'pdpe1gb', 'hv-tlbflush', 'hv-evmcs', 'aes', 'md-clear'].map(flag => {
+                                                                const cur = getValue('hardware', 'cpu') || '';
+                                                                let state = 0; // 0 = default, 1 = +, -1 = -
+                                                                for (const part of cur.split(',').slice(1)) {
+                                                                    if (part.startsWith('flags=')) {
+                                                                        for (const tk of part.slice(6).split(';').filter(Boolean)) {
+                                                                            if (tk === '+' + flag) state = 1;
+                                                                            else if (tk === '-' + flag) state = -1;
+                                                                        }
+                                                                    }
+                                                                }
+                                                                const cycle = () => {
+                                                                    const cur2 = getValue('hardware', 'cpu') || '';
+                                                                    const [base, ...rest] = cur2.split(',');
+                                                                    let toks = [];
+                                                                    const kept = rest.filter(p => {
+                                                                        if (p.startsWith('flags=')) { toks = p.slice(6).split(';').filter(Boolean); return false; }
+                                                                        return true;
+                                                                    });
+                                                                    toks = toks.filter(tk => tk !== '+' + flag && tk !== '-' + flag);
+                                                                    const next = state === 0 ? 1 : (state === 1 ? -1 : 0);
+                                                                    if (next === 1) toks.push('+' + flag);
+                                                                    else if (next === -1) toks.push('-' + flag);
+                                                                    if (toks.length) kept.push('flags=' + toks.join(';'));
+                                                                    handleChange('hardware', 'cpu', [base, ...kept].filter(Boolean).join(','));
+                                                                };
+                                                                const cls = state === 1 ? 'bg-green-500/20 border-green-500/50 text-green-300'
+                                                                    : state === -1 ? 'bg-red-500/20 border-red-500/50 text-red-300'
+                                                                        : 'bg-proxmox-dark border-proxmox-border text-gray-400';
+                                                                return (
+                                                                    <button key={flag} type="button" onClick={cycle}
+                                                                        title={state === 1 ? `+${flag} (enabled)` : state === -1 ? `-${flag} (disabled)` : `${flag} (default)`}
+                                                                        className={`px-2 py-1.5 text-xs rounded-lg border font-mono ${cls} hover:opacity-80 transition-opacity`}>
+                                                                        {state === 1 ? '+' : state === -1 ? '−' : ''}{flag}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                        <p className="text-xs text-gray-500 mt-1.5">{t('extraCpuFlagsHint') || 'Click to cycle each flag: default → enabled (+) → disabled (−). Requires a VM restart.'}</p>
+                                                    </div>
+                                                    {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecFw', 'Firmware & Controller')}</span></div>}
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <ConfigInputField
+                                                            label="BIOS"
+                                                            value={getValue('hardware', 'bios')}
+                                                            onChange={(v) => handleChange('hardware', 'bios', v)}
+                                                            options={[
+                                                                { value: 'seabios', label: 'SeaBIOS (Legacy)' },
+                                                                { value: 'ovmf', label: 'OVMF (UEFI)' },
+                                                            ]}
+                                                            needsRestart={true}
+                                                        />
+                                                        <ConfigInputField
+                                                            label={t('scsiController')}
+                                                            value={getValue('hardware', 'scsihw')}
+                                                            onChange={(v) => handleChange('hardware', 'scsihw', v)}
+                                                            options={hardwareOptions?.scsi_controllers || [
+                                                                { value: 'virtio-scsi-pci', label: 'VirtIO SCSI' },
+                                                                { value: 'virtio-scsi-single', label: 'VirtIO SCSI Single' },
+                                                                { value: 'lsi', label: 'LSI 53C895A' },
+                                                            ]}
+                                                            needsRestart={true}
+                                                        />
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <ConfigInputField
+                                                            label={t('machineType')}
+                                                            value={getValue('hardware', 'machine')}
+                                                            onChange={(v) => handleChange('hardware', 'machine', v)}
+                                                            options={hardwareOptions?.machine_types || [
+                                                                { value: '', label: t('default') },
+                                                                // q35 versions
+                                                                { value: 'q35', label: 'q35 (Latest)' },
+                                                                { value: 'pc-q35-10.1', label: 'q35 10.1' },
+                                                                { value: 'pc-q35-10.0+pve1', label: 'q35 10.0+pve1' },
+                                                                { value: 'pc-q35-10.0', label: 'q35 10.0' },
+                                                                { value: 'pc-q35-9.2+pve1', label: 'q35 9.2+pve1' },
+                                                                { value: 'pc-q35-9.2', label: 'q35 9.2' },
+                                                                { value: 'pc-q35-9.1', label: 'q35 9.1' },
+                                                                { value: 'pc-q35-9.0', label: 'q35 9.0' },
+                                                                { value: 'pc-q35-8.2', label: 'q35 8.2' },
+                                                                { value: 'pc-q35-8.1', label: 'q35 8.1' },
+                                                                { value: 'pc-q35-8.0', label: 'q35 8.0' },
+                                                                { value: 'pc-q35-7.2', label: 'q35 7.2' },
+                                                                { value: 'pc-q35-7.1', label: 'q35 7.1' },
+                                                                { value: 'pc-q35-7.0', label: 'q35 7.0' },
+                                                                { value: 'pc-q35-6.2', label: 'q35 6.2' },
+                                                                { value: 'pc-q35-6.1', label: 'q35 6.1' },
+                                                                { value: 'pc-q35-6.0', label: 'q35 6.0' },
+                                                                { value: 'pc-q35-5.2', label: 'q35 5.2' },
+                                                                { value: 'pc-q35-5.1', label: 'q35 5.1' },
+                                                                { value: 'pc-q35-5.0', label: 'q35 5.0' },
+                                                                { value: 'pc-q35-4.2', label: 'q35 4.2' },
+                                                                { value: 'pc-q35-4.1', label: 'q35 4.1' },
+                                                                { value: 'pc-q35-4.0', label: 'q35 4.0' },
+                                                                { value: 'pc-q35-3.1', label: 'q35 3.1' },
+                                                                { value: 'pc-q35-3.0', label: 'q35 3.0' },
+                                                                { value: 'pc-q35-2.12', label: 'q35 2.12' },
+                                                                { value: 'pc-q35-2.11', label: 'q35 2.11' },
+                                                                { value: 'pc-q35-2.10', label: 'q35 2.10' },
+                                                                // i440fx versions
+                                                                { value: 'i440fx', label: 'i440fx (Latest)' },
+                                                                { value: 'pc-i440fx-10.1', label: 'i440fx 10.1' },
+                                                                { value: 'pc-i440fx-10.0+pve1', label: 'i440fx 10.0+pve1' },
+                                                                { value: 'pc-i440fx-10.0', label: 'i440fx 10.0' },
+                                                                { value: 'pc-i440fx-9.2+pve1', label: 'i440fx 9.2+pve1' },
+                                                                { value: 'pc-i440fx-9.2', label: 'i440fx 9.2' },
+                                                                { value: 'pc-i440fx-9.1', label: 'i440fx 9.1' },
+                                                                { value: 'pc-i440fx-9.0', label: 'i440fx 9.0' },
+                                                                { value: 'pc-i440fx-8.2', label: 'i440fx 8.2' },
+                                                                { value: 'pc-i440fx-8.1', label: 'i440fx 8.1' },
+                                                                { value: 'pc-i440fx-8.0', label: 'i440fx 8.0' },
+                                                                { value: 'pc-i440fx-7.2', label: 'i440fx 7.2' },
+                                                                { value: 'pc-i440fx-7.1', label: 'i440fx 7.1' },
+                                                                { value: 'pc-i440fx-7.0', label: 'i440fx 7.0' },
+                                                                { value: 'pc-i440fx-6.2', label: 'i440fx 6.2' },
+                                                                { value: 'pc-i440fx-6.1', label: 'i440fx 6.1' },
+                                                                { value: 'pc-i440fx-6.0', label: 'i440fx 6.0' },
+                                                                { value: 'pc-i440fx-5.2', label: 'i440fx 5.2' },
+                                                                { value: 'pc-i440fx-5.1', label: 'i440fx 5.1' },
+                                                                { value: 'pc-i440fx-5.0', label: 'i440fx 5.0' },
+                                                                { value: 'pc-i440fx-4.2', label: 'i440fx 4.2' },
+                                                                { value: 'pc-i440fx-4.1', label: 'i440fx 4.1' },
+                                                                { value: 'pc-i440fx-4.0', label: 'i440fx 4.0' },
+                                                                { value: 'pc-i440fx-3.1', label: 'i440fx 3.1' },
+                                                                { value: 'pc-i440fx-3.0', label: 'i440fx 3.0' },
+                                                                { value: 'pc-i440fx-2.12', label: 'i440fx 2.12' },
+                                                                { value: 'pc-i440fx-2.11', label: 'i440fx 2.11' },
+                                                                { value: 'pc-i440fx-2.10', label: 'i440fx 2.10' },
+                                                            ]}
+                                                            needsRestart={true}
+                                                        />
+                                                        {/* LW: vIOMMU for nested virt and GPU passthrough
+                                                            MK: Appends to machine string like "q35,viommu=intel" */}
+                                                        <ConfigInputField
+                                                            label="vIOMMU"
+                                                            value={getValue('hardware', 'machine')?.includes('viommu=') ? getValue('hardware', 'machine').split('viommu=')[1]?.split(',')[0] : ''}
+                                                            onChange={(v) => {
+                                                                const currentMachine = getValue('hardware', 'machine') || '';
+                                                                const baseMachine = currentMachine.split(',')[0];
+                                                                if (v && v !== 'none') {
+                                                                    handleChange('hardware', 'machine', `${baseMachine},viommu=${v}`);
+                                                                } else {
+                                                                    handleChange('hardware', 'machine', baseMachine);
+                                                                }
+                                                            }}
+                                                            options={[
+                                                                { value: '', label: t('default') + ' (None)' },
+                                                                { value: 'intel', label: 'Intel (VT-d)' },
+                                                                { value: 'virtio', label: 'VirtIO' },
+                                                            ]}
+                                                            needsRestart={true}
+                                                        />
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <div className="flex items-center gap-4 pt-2">
+                                                            <ConfigCheckboxField
+                                                                label={t('enableNuma')}
+                                                                checked={getValue('hardware', 'numa') == 1}
+                                                                onChange={(v) => handleChange('hardware', 'numa', v)}
+                                                                needsRestart={true}
+                                                                t={t}
+                                                            />
+                                                        </div>
+                                                        <div></div>
+                                                    </div>
+
+                                                    {isCloud && (
+                                                        <div className="cloud-cfg-adv">
+                                                            <button type="button" className="cloud-cfg-adv-toggle" onClick={() => setAdvOpen(o => !o)}>
+                                                                {cT('cloudCfgAdvanced', 'Advanced hardware')}
+                                                                <span className="cloud-cfg-band-chev">{advOpen ? '▾' : '▸'}</span>
+                                                            </button>
+                                                            <span className="cloud-cell-muted cloud-cfg-adv-hint">{cT('cloudCfgAdvHint', 'EFI · TPM · Cloud-Init · RNG · VirtioFS · Passthrough')}</span>
+                                                        </div>
+                                                    )}
+                                                    {/* EFI Disk & TPM Section - MK: For UEFI and Windows 11 */}
+                                                    {((!isCloud || advOpen) && getValue('hardware', 'bios') === 'ovmf') && (
+                                                        <div className="mt-6 pt-6 border-t border-proxmox-border">
+                                                            <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                                                                🔐 {t('efiTpmSettings') || 'EFI & TPM Settings'}
+                                                                {vm.status === 'running' && (
+                                                                    <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-0.5 rounded">
+                                                                        {t('changesAfterRestart')}
+                                                                    </span>
+                                                                )}
+                                                            </h3>
+                                                            
+                                                            {/* EFI Disk */}
+                                                            <div className="mb-4">
+                                                                <div className="flex justify-between items-center mb-2">
+                                                                    <span className="text-sm text-gray-400">{t('efiDisk') || 'EFI Disk'}</span>
+                                                                </div>
+                                                                {config?.raw?.efidisk0 ? (
+                                                                    <div className="p-3 bg-proxmox-dark rounded-lg">
+                                                                        <div className="flex items-center justify-between">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <Icons.HardDrive className="w-4 h-4 text-blue-400" />
+                                                                                <span className="text-sm font-mono text-gray-300">{config.raw.efidisk0}</span>
+                                                                            </div>
+                                                                            <div className="flex items-center gap-2">
+                                                                                <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">{t('configured') || 'Configured'}</span>
+                                                                                <button
+                                                                                    onClick={handleDeleteEfiDisk}
+                                                                                    className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
+                                                                                    title={t('delete')}
+                                                                                >
+                                                                                    <Icons.Trash className="w-3.5 h-3.5" />
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                                                                        <div className="flex items-center justify-between">
+                                                                            <span className="text-sm text-gray-500">{t('noEfiDisk') || 'No EFI disk configured'}</span>
+                                                                            <button
+                                                                                onClick={() => setShowAddEfiDisk(true)}
+                                                                                className="text-xs px-3 py-1.5 bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 flex items-center gap-1"
+                                                                            >
+                                                                                <Icons.Plus className="w-3 h-3" />
+                                                                                {t('addEfiDisk') || 'Add EFI Disk'}
+                                                                            </button>
+                                                                        </div>
+                                                                        <p className="text-xs text-gray-600 mt-2">{t('efiDiskRequired') || 'Required for UEFI boot. Will be created automatically on first boot if not configured.'}</p>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            
+                                                            {/* TPM */}
+                                                            <div>
+                                                                <div className="flex justify-between items-center mb-2">
+                                                                    <span className="text-sm text-gray-400">{t('tpmChip') || 'TPM Chip'}</span>
+                                                                </div>
+                                                                {config?.raw?.tpmstate0 ? (
+                                                                    <div className="p-3 bg-proxmox-dark rounded-lg">
+                                                                        <div className="flex items-center justify-between">
+                                                                            <div className="flex items-center gap-2">
+                                                                                <Icons.Shield className="w-4 h-4 text-green-400" />
+                                                                                <span className="text-sm font-mono text-gray-300">{config.raw.tpmstate0}</span>
+                                                                            </div>
+                                                                            <div className="flex items-center gap-2">
+                                                                                <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">TPM 2.0</span>
+                                                                                <button
+                                                                                    onClick={handleDeleteTpm}
+                                                                                    className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
+                                                                                    title={t('delete')}
+                                                                                >
+                                                                                    <Icons.Trash className="w-3.5 h-3.5" />
+                                                                                </button>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                                                                        <div className="flex items-center justify-between">
+                                                                            <span className="text-sm text-gray-500">{t('noTpm') || 'No TPM configured'}</span>
+                                                                            <button
+                                                                                onClick={() => setShowAddTpm(true)}
+                                                                                className="text-xs px-3 py-1.5 bg-green-500/20 text-green-400 rounded hover:bg-green-500/30 flex items-center gap-1"
+                                                                            >
+                                                                                <Icons.Plus className="w-3 h-3" />
+                                                                                {t('addTpm') || 'Add TPM'}
+                                                                            </button>
+                                                                        </div>
+                                                                        <p className="text-xs text-yellow-500 mt-2 flex items-center gap-1">
+                                                                            <Icons.AlertTriangle className="w-3 h-3" />
+                                                                            {t('win11NeedsTpm') || 'Windows 11 requires TPM 2.0'}
+                                                                        </p>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    <div className={'mt-6 pt-6 border-t border-proxmox-border' + ((isCloud && !advOpen) ? ' cfg-hide' : '')}>
+                                                        <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                                                            <Icons.Cloud className="w-4 h-4 text-cyan-400" />
+                                                            {t('cloudInitDrive')}
+                                                        </h3>
+                                                        {(() => {
+                                                            const cloudInitDrive = Object.entries(config?.raw || {}).find(([key, value]) =>
+                                                                /^(ide|scsi|sata)\d+$/.test(key) && String(value).includes('cloudinit')
+                                                            );
+                                                            return cloudInitDrive ? (
+                                                                <div className="p-3 bg-proxmox-dark rounded-lg">
+                                                                    <div className="flex items-center justify-between">
+                                                                        <div className="flex items-center gap-2 min-w-0">
+                                                                            <Icons.Cloud className="w-4 h-4 text-cyan-400 shrink-0" />
+                                                                            <span className="text-xs text-gray-500 font-mono">{cloudInitDrive[0]}</span>
+                                                                            <span className="text-sm font-mono text-gray-300 truncate">{cloudInitDrive[1]}</span>
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={() => handleDeleteCloudInit(cloudInitDrive[0])}
+                                                                            className="text-xs px-2 py-1 text-red-400 hover:bg-red-500/20 rounded"
+                                                                            title={t('remove')}
+                                                                        >
+                                                                            <Icons.Trash className="w-3.5 h-3.5" />
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="p-3 bg-proxmox-dark rounded-lg border border-dashed border-proxmox-border">
+                                                                    <div className="flex items-center justify-between gap-4">
+                                                                        <span className="text-sm text-gray-500">{t('noCloudInitDrive')}</span>
+                                                                        <button
+                                                                            onClick={() => setShowAddCloudInit(true)}
+                                                                            className="shrink-0 text-xs px-3 py-1.5 bg-cyan-500/20 text-cyan-400 rounded hover:bg-cyan-500/30 flex items-center gap-1"
+                                                                        >
+                                                                            <Icons.Plus className="w-3 h-3" />
+                                                                            {t('addCloudInitDrive')}
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                    
+                                                    {(!isCloud || advOpen) && allClusters.find(c => c.id === clusterId)?.cluster_type !== 'xcpng' && (
+                                                        <VirtioRngCard
+                                                            value={config?.raw?.rng0}
+                                                            running={vm.status === 'running'}
+                                                            onAdd={() => setShowRngDialog(true)}
+                                                            onEdit={() => setShowRngDialog(true)}
+                                                            onRemove={removeRng}
+                                                            t={t}
+                                                        />
+                                                    )}
+
+                                                    {(!isCloud || advOpen) && !['xcpng', 'esxi'].includes(allClusters.find(c => c.id === clusterId)?.cluster_type) && (
+                                                        <VirtiofsCard
+                                                            raw={config?.raw}
+                                                            running={vm.status === 'running'}
+                                                            info={ptMappings.dir}
+                                                            node={vm.node}
+                                                            onAdd={() => openVirtiofs(null)}
+                                                            onEdit={openVirtiofs}
+                                                            onRemove={removeVirtiofs}
+                                                            t={t}
+                                                        />
+                                                    )}
+
+                                                    {/* PCI/USB/Serial Passthrough Section */}
+                                                    <div className={'mt-6 pt-6 border-t border-proxmox-border' + ((isCloud && !advOpen) ? ' cfg-hide' : '')}>
+                                                        <h3 className="text-white font-medium mb-4 flex items-center gap-2">
+                                                            🔌 {t('devicePassthrough')}
+                                                            {vm.status === 'running' && (
+                                                                <span className="text-xs text-yellow-400 bg-yellow-500/10 px-2 py-0.5 rounded">
+                                                                    {t('changesAfterRestart')}
+                                                                </span>
+                                                            )}
+                                                        </h3>
+                                                        
+                                                        {/* PCI Devices */}
+                                                        <div className="mb-4">
+                                                            <div className="flex justify-between items-center mb-2">
+                                                                <span className="text-sm text-gray-400">{t('pciDevices')}</span>
+                                                                <button
+                                                                    onClick={() => openAddPassthrough('pci')}
+                                                                    className="text-xs px-2 py-1 bg-proxmox-orange/20 text-proxmox-orange rounded hover:bg-proxmox-orange/30"
+                                                                >
+                                                                    + {t('addPci')}
+                                                                </button>
+                                                            </div>
+                                                            {passthrough.pci?.length > 0 ? (
+                                                                <div className="space-y-1">
+                                                                    {passthrough.pci.map((dev, idx) => (
+                                                                        <div key={idx} className="flex items-center justify-between p-2 bg-proxmox-dark rounded text-sm">
+                                                                            <span className="min-w-0">
+                                                                                <span className="font-mono text-gray-300">{dev.key}: {dev.value}</span>
+                                                                                {ptMappedLine('pci', dev)}
+                                                                            </span>
+                                                                            <button
+                                                                                onClick={() => handleRemovePassthrough('pci', dev.key)}
+                                                                                className="text-red-400 hover:text-red-300 p-1"
+                                                                            >
+                                                                                <Icons.Trash className="w-3 h-3" />
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-xs text-gray-500 italic">{t('noPciDevices')}</div>
+                                                            )}
+                                                        </div>
+                                                        
+                                                        {/* USB Devices */}
+                                                        <div className="mb-4">
+                                                            <div className="flex justify-between items-center mb-2">
+                                                                <span className="text-sm text-gray-400">{t('usbDevices')}</span>
+                                                                <button
+                                                                    onClick={() => openAddPassthrough('usb')}
+                                                                    className="text-xs px-2 py-1 bg-proxmox-orange/20 text-proxmox-orange rounded hover:bg-proxmox-orange/30"
+                                                                >
+                                                                    + {t('addUsb')}
+                                                                </button>
+                                                            </div>
+                                                            {passthrough.usb?.length > 0 ? (
+                                                                <div className="space-y-1">
+                                                                    {passthrough.usb.map((dev, idx) => (
+                                                                        <div key={idx} className="flex items-center justify-between p-2 bg-proxmox-dark rounded text-sm">
+                                                                            <span className="min-w-0">
+                                                                                <span className="font-mono text-gray-300">{dev.key}: {dev.value}</span>
+                                                                                {ptMappedLine('usb', dev)}
+                                                                            </span>
+                                                                            <button
+                                                                                onClick={() => handleRemovePassthrough('usb', dev.key)}
+                                                                                className="text-red-400 hover:text-red-300 p-1"
+                                                                            >
+                                                                                <Icons.Trash className="w-3 h-3" />
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-xs text-gray-500 italic">{t('noUsbDevices')}</div>
+                                                            )}
+                                                        </div>
+                                                        
+                                                        {/* Serial Ports */}
+                                                        <div>
+                                                            <div className="flex justify-between items-center mb-2">
+                                                                <span className="text-sm text-gray-400">{t('serialPorts')}</span>
+                                                                <button
+                                                                    onClick={() => setShowAddSerial(true)}
+                                                                    className="text-xs px-2 py-1 bg-proxmox-orange/20 text-proxmox-orange rounded hover:bg-proxmox-orange/30"
+                                                                >
+                                                                    + {t('addSerial')}
+                                                                </button>
+                                                            </div>
+                                                            {passthrough.serial?.length > 0 ? (
+                                                                <div className="space-y-1">
+                                                                    {passthrough.serial.map((dev, idx) => (
+                                                                        <div key={idx} className="flex items-center justify-between p-2 bg-proxmox-dark rounded text-sm">
+                                                                            <span className="font-mono text-gray-300">{dev.key}: {dev.value}</span>
+                                                                            <button
+                                                                                onClick={() => handleRemovePassthrough('serial', dev.key)}
+                                                                                className="text-red-400 hover:text-red-300 p-1"
+                                                                            >
+                                                                                <Icons.Trash className="w-3 h-3" />
+                                                                            </button>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="text-xs text-gray-500 italic">{t('noSerialPorts')}</div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {/* Disks Tab */}
+                                    {activeTab === 'disks' && (crVc ? (
+                                        <CrVcDisks t={t} config={config} changes={changes} crv={crv} onSet={crVcSet} onRevert={crVcRevert}
+                                            act={{ onMountIso: () => setShowMountISO(true), onAddDisk: () => setShowAddDisk(true),
+                                                   onImportDisk: () => setShowImportDisk(true),
+                                                   onChangeIso: (id) => { setMountIsoInitialDrive(id); setShowMountISO(true); },
+                                                   onEject: (id) => handleMountISO(null, id), onEditBus: setShowEditDisk, onResize: setShowResizeDisk,
+                                                   onMove: setShowMoveDisk, onReassign: setShowReassignOwner, onDetach: handleDetachDisk,
+                                                   onRemove: handleRemoveDisk, onReattach: setShowReattachDisk, onDeleteUnused: handleDeleteUnusedDisk }} />
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecDisks', isQemu ? 'Virtual disks' : 'Root filesystem & mount points')}</span></div>}
+                                            <div className="flex justify-between items-center">
+                                                <h3 className="font-medium text-white" style={isCloud ? { display: 'none' } : undefined}>{t('disks')}</h3>
+                                                <div className="flex gap-2">
+                                                    {isQemu && (
+                                                        <button
+                                                            onClick={() => setShowMountISO(true)}
+                                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                                        >
+                                                            <Icons.Play />
+                                                            {t('mountIso')}
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => setShowAddDisk(true)}
+                                                        className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange rounded-lg text-sm text-white hover:bg-orange-600 transition-colors"
+                                                    >
+                                                        <Icons.Plus />
+                                                        {t('addDisk')}
+                                                    </button>
+                                                    {isQemu && (
+                                                        <button
+                                                            onClick={() => setShowImportDisk(true)}
+                                                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-sm text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                                        >
+                                                            <Icons.Download />
+                                                            {t('importDisk') || 'Import Disk'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            
+                                            {config.disks?.length > 0 ? (
+                                                // #610 follow-up: order the list sensibly instead of raw PVE config
+                                                // order — data disks first (by bus then index), then CD/DVD drives,
+                                                // then firmware volumes (EFI / TPM) last. LXC: rootfs, then mp0..n.
+                                                [...config.disks].sort(vcDiskOrder).map((disk) => {
+                                                    // NS May 2026 — single source of truth for the cdrom check
+                                                    // (used to swap the row's actions for an ISO-aware set).
+                                                    const isCdrom = isQemu && (
+                                                        String(disk.value || '').includes('media=cdrom') ||
+                                                        disk.media === 'cdrom' ||
+                                                        (disk.volume || '').includes('iso')
+                                                    );
+                                                    // #610: an empty CD/DVD drive is `none,media=cdrom` (no ISO). Show it as a
+                                                    // first-class mount slot instead of hiding it, so users mount/eject media.
+                                                    const cdromEmpty = isCdrom && String(disk.value || '').replace(/\s+/g, '').startsWith('none');
+                                                    return (
+                                                    <div key={disk.id} className={'p-4 bg-proxmox-dark rounded-lg border border-proxmox-border' + (isCloud ? ' cfg-dev-card' : '') + (isCloud && isCdrom ? ' is-cdrom' : '')}>
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <div className="flex items-center gap-3">
+                                                                {isCdrom ? <Icons.Disc /> : <Icons.HardDrive />}
+                                                                <span className="font-medium text-white">{disk.id}</span>
+                                                                {disk.storage ? (
+                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{disk.storage}</span>
+                                                                ) : cdromEmpty ? (
+                                                                    <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded italic">{t('noMedia') || 'No media'}</span>
+                                                                ) : null}
+                                                                {isCdrom && (
+                                                                    <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30">CD</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="text-sm text-proxmox-orange font-mono mr-2">{disk.size}</span>
+                                                                {/* NS May 2026 — direct "Change ISO" entry point so the user
+                                                                    no longer has to detach + remount just to swap the image. */}
+                                                                {isCdrom && (
+                                                                    <button
+                                                                        onClick={() => { setMountIsoInitialDrive(disk.id); setShowMountISO(true); }}
+                                                                        className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-blue-400 transition-colors"
+                                                                        title={cdromEmpty ? (t('mountIso') || 'Mount ISO') : (t('changeIso') || 'Change ISO')}
+                                                                    >
+                                                                        <Icons.Disc />
+                                                                    </button>
+                                                                )}
+                                                                {isCdrom && !cdromEmpty && (
+                                                                    <button
+                                                                        onClick={() => handleMountISO(null, disk.id)}
+                                                                        className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-red-400 transition-colors"
+                                                                        title={t('eject') || 'Eject'}
+                                                                    >
+                                                                        <Icons.Unplug />
+                                                                    </button>
+                                                                )}
+                                                                {/* MK: Edit disk bus type — not for CD-ROMs */}
+                                                                {isQemu && !isCdrom && disk.id !== 'rootfs' && !disk.id.includes('efidisk') && !disk.id.includes('tpmstate') && (
+                                                                    <button
+                                                                        onClick={() => setShowEditDisk(disk)}
+                                                                        className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-yellow-400 transition-colors"
+                                                                        title={t('editDiskType') || 'Change Bus Type'}
+                                                                    >
+                                                                        <Icons.Edit />
+                                                                    </button>
+                                                                )}
+                                                                {!isCdrom && (
+                                                                <button
+                                                                    onClick={() => setShowResizeDisk(disk)}
+                                                                    className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-green-400 transition-colors"
+                                                                    title={t('resize')}
+                                                                >
+                                                                    <Icons.Plus />
+                                                                </button>
+                                                                )}
+                                                                {!isCdrom && (
+                                                                <button
+                                                                    onClick={() => setShowMoveDisk(disk)}
+                                                                    className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-blue-400 transition-colors"
+                                                                    title={t('move')}
+                                                                >
+                                                                    <Icons.ArrowRight />
+                                                                </button>
+                                                                )}
+                                                                {disk.id !== 'rootfs' && !disk.id.includes('efidisk') && !disk.id.includes('tpmstate') && (
+                                                                    <>
+                                                                        {/* MK: Only show reassign for real disks, not CD-ROM/ISO */}
+                                                                        {isQemu && !disk.volume?.includes('iso') && !disk.media?.includes('cdrom') && !String(disk.value || '').includes('media=cdrom') && (
+                                                                            <button
+                                                                                onClick={() => setShowReassignOwner(disk)}
+                                                                                className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-purple-400 transition-colors"
+                                                                                title={t('reassignOwner') || 'Reassign Owner'}
+                                                                            >
+                                                                                <Icons.Users />
+                                                                            </button>
+                                                                        )}
+                                                                        <button
+                                                                            onClick={() => handleDetachDisk(disk.id)}
+                                                                            className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-yellow-400 transition-colors"
+                                                                            title={t('detachDisk') || 'Detach'}
+                                                                        >
+                                                                            <Icons.Unplug />
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => handleRemoveDisk(disk.id)}
+                                                                            className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-red-400 transition-colors"
+                                                                            title={t('remove')}
+                                                                        >
+                                                                            <Icons.Trash />
+                                                                        </button>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-4 gap-4 text-sm">
+                                                            <div>
+                                                                <span className="text-gray-500">Volume:</span>
+                                                                <span className="ml-2 text-gray-300 font-mono text-xs">{disk.volume}</span>
+                                                            </div>
+                                                            {disk.cache && (
+                                                                <div>
+                                                                    <span className="text-gray-500">Cache:</span>
+                                                                    <span className="ml-2 text-gray-300">{disk.cache}</span>
+                                                                </div>
+                                                            )}
+                                                            {disk.iothread ? (
+                                                                <div><span className="text-green-400">IOthread</span></div>
+                                                            ) : null}
+                                                            {disk.ssd ? (
+                                                                <div><span className="text-blue-400">SSD</span></div>
+                                                            ) : null}
+                                                            {disk.mountpoint && (
+                                                                <div>
+                                                                    <span className="text-gray-500">Mount:</span>
+                                                                    <span className="ml-2 text-gray-300">{disk.mountpoint}</span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    );
+                                                })
+                                            ) : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    {t('noDisksConfigured')}
+                                                </div>
+                                            )}
+                                            
+                                            {/* MK: Unused Disks Section - detached disks that can be reattached or deleted */}
+                                            {config.unused_disks?.length > 0 && (
+                                                <div className="mt-6 pt-4 border-t border-proxmox-border">
+                                                    <div className="flex items-center gap-2 mb-3">
+                                                        <Icons.AlertTriangle className="w-4 h-4 text-yellow-500" />
+                                                        <h4 className="font-medium text-yellow-400">{t('unusedDisks') || 'Unused Disks'}</h4>
+                                                        <span className="text-xs text-gray-500">({config.unused_disks.length})</span>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 mb-3">
+                                                        {t('unusedDisksDesc') || 'These disks are detached but still exist. You can reattach or delete them.'}
+                                                    </p>
+                                                    {config.unused_disks.map((disk) => (
+                                                        <div key={disk.id} className="p-3 bg-yellow-500/5 rounded-lg border border-yellow-500/30 mb-2">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <Icons.HardDrive className="text-yellow-500" />
+                                                                    <span className="font-medium text-yellow-400">{disk.id}</span>
+                                                                    <span className="text-xs text-gray-400 font-mono">{disk.value}</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    {/* MK: Open reattach modal */}
+                                                                    <button
+                                                                        onClick={() => setShowReattachDisk(disk)}
+                                                                        className="px-2 py-1 text-xs bg-green-600/20 text-green-400 rounded hover:bg-green-600/30 transition-colors"
+                                                                        title={t('reattachDisk') || 'Reattach disk'}
+                                                                    >
+                                                                        {t('reattach') || 'Reattach'}
+                                                                    </button>
+                                                                    {/* MK: Delete permanently */}
+                                                                    <button
+                                                                        onClick={() => handleDeleteUnusedDisk(disk)}
+                                                                        className="px-2 py-1 text-xs bg-red-600/20 text-red-400 rounded hover:bg-red-600/30 transition-colors"
+                                                                        title={t('deletePermanently') || 'Delete permanently'}
+                                                                    >
+                                                                        {t('delete')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {/* Network Tab */}
+                                    {activeTab === 'network' && (crVc ? (
+                                        <CrVcNetwork t={t} config={config} crv={crv} nets={crNets} onNets={setCrNets} netInitial={vcNetEditInitial}
+                                            bridgeList={bridgeList} hardwareOptions={hardwareOptions} generateMAC={generateMAC}
+                                            onAdd={() => setShowAddNetwork(true)} onToggleLink={handleToggleNetworkLink} onRemove={handleRemoveNetwork} />
+                                    ) : (
+                                        <div className="space-y-4">
+
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecNet', 'Network interfaces')}</span></div>}                                            <div className="flex justify-between items-center">
+                                                <h3 className="font-medium text-white">{t('networkInterfaces')}</h3>
+                                                <button
+                                                    onClick={() => setShowAddNetwork(true)}
+                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange rounded-lg text-sm text-white hover:bg-orange-600 transition-colors"
+                                                >
+                                                    <Icons.Plus />
+                                                    {t('addNetwork')}
+                                                </button>
+                                            </div>
+                                            
+                                            {config.networks?.length > 0 ? (
+                                                config.networks.map((net) => (
+                                                    <div key={net.id} className={`p-4 bg-proxmox-dark rounded-lg border ${net.link_down ? 'border-red-500/50' : 'border-proxmox-border'}${isCloud ? ' cfg-dev-card' : ''}`}>
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <div className="flex items-center gap-3">
+                                                                <Icons.Network className={net.link_down ? 'text-red-400' : ''} />
+                                                                <span className="font-medium text-white">{net.id}</span>
+                                                                {net.bridge && (() => {
+                                                                    const bridgeInfo = bridgeList.find(b => b.iface === net.bridge);
+                                                                    const isSDN = bridgeInfo?.source === 'sdn';
+                                                                    // Check if it looks like an SDN VNet name (no vmbr prefix)
+                                                                    const looksLikeSDN = !bridgeInfo && net.bridge && !net.bridge.startsWith('vmbr');
+                                                                    return (
+                                                                        <span className={`text-xs px-2 py-0.5 rounded ${isSDN ? 'text-purple-400 bg-purple-500/10' : looksLikeSDN ? 'text-purple-400 bg-purple-500/10' : 'text-gray-500 bg-proxmox-card'}`} 
+                                                                            title={bridgeInfo?.comments || (isSDN ? `SDN Zone: ${bridgeInfo?.zone}` : (looksLikeSDN ? 'Possible SDN VNet' : ''))}>
+                                                                            {(isSDN || looksLikeSDN) && <span className="mr-1">🌐</span>}
+                                                                            {net.bridge}
+                                                                            {bridgeInfo?.zone ? ` (${bridgeInfo.zone})` : (bridgeInfo?.comments ? ` (${bridgeInfo.comments})` : '')}
+                                                                            {looksLikeSDN && !bridgeInfo && ' (SDN?)'}
+                                                                        </span>
+                                                                    );
+                                                                })()}
+                                                                {/* LW: Show disconnected status */}
+                                                                {net.link_down && (
+                                                                    <span className="text-xs text-red-400 bg-red-500/10 px-2 py-0.5 rounded flex items-center gap-1">
+                                                                        <Icons.WifiOff className="w-3 h-3" />
+                                                                        {t('networkDisconnected')}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                {net.firewall ? (
+                                                                    <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">Firewall</span>
+                                                                ) : null}
+                                                                {/* NS: Connect/Disconnect toggle (QEMU only - hot-pluggable) */}
+                                                                {isQemu && (
+                                                                    <button
+                                                                        onClick={() => handleToggleNetworkLink(net.id, net.link_down)}
+                                                                        className={`p-1.5 rounded hover:bg-proxmox-hover transition-colors ${net.link_down ? 'text-red-400 hover:text-green-400' : 'text-gray-400 hover:text-red-400'}`}
+                                                                        title={net.link_down ? t('connectNetwork') : t('disconnectNetwork')}
+                                                                    >
+                                                                        {net.link_down ? <Icons.Plug /> : <Icons.Unplug />}
+                                                                    </button>
+                                                                )}
+                                                                <button
+                                                                    onClick={() => setShowEditNetwork(net)}
+                                                                    className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-blue-400 transition-colors"
+                                                                    title={t('edit')}
+                                                                >
+                                                                    <Icons.Cog />
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => handleRemoveNetwork(net.id)}
+                                                                    className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-red-400 transition-colors"
+                                                                    title={t('remove')}
+                                                                >
+                                                                    <Icons.Trash />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-3 gap-4 text-sm">
+                                                            {isQemu ? (
+                                                                <>
+                                                                    <div><span className="text-gray-500">Model:</span><span className="ml-2 text-gray-300">{net.model || 'virtio'}</span></div>
+                                                                    <div><span className="text-gray-500">MAC:</span><span className="ml-2 text-gray-300 font-mono text-xs">{net.macaddr || 'auto'}</span></div>
+                                                                    {net.queues && <div><span className="text-gray-500">Queues:</span><span className="ml-2 text-gray-300">{net.queues}</span></div>}
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <div><span className="text-gray-500">{t('name')}:</span><span className="ml-2 text-gray-300">{net.name || 'eth0'}</span></div>
+                                                                    <div><span className="text-gray-500">IP:</span><span className="ml-2 text-gray-300 font-mono">{net.ip || 'dhcp'}</span></div>
+                                                                    {net.gw && <div><span className="text-gray-500">Gateway:</span><span className="ml-2 text-gray-300 font-mono">{net.gw}</span></div>}
+                                                                </>
+                                                            )}
+                                                            {net.tag && <div><span className="text-gray-500">VLAN:</span><span className="ml-2 text-gray-300">{net.tag}</span></div>}
+                                                            {net.rate && <div><span className="text-gray-500">Rate:</span><span className="ml-2 text-gray-300">{net.rate} MB/s</span></div>}
+                                                            {net.mtu && <div><span className="text-gray-500">MTU:</span><span className="ml-2 text-gray-300">{net.mtu}</span></div>}
+                                                        </div>
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    {t('noNetworksConfigured')}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    {/* Snapshots Tab */}
+                                    {activeTab === 'snapshots' && (
+                                        <div className="space-y-6">
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-sm font-semibold text-gray-300">Snapshots</h3>
+                                                <button
+                                                    onClick={() => setShowCreateSnapshot(true)}
+                                                    className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
+                                                >
+                                                    <Icons.Plus />
+                                                    {t('createSnapshot')}
+                                                </button>
+                                            </div>
+                                            
+                                            <CrVcTabFail id="snapshots" what={t('snapshotsTab')} parts={crFail.snapshots} onRetry={fetchSnapshots} />
+                                            {snapshots.length > 0 ? (
+                                                <div className="space-y-3">
+                                                    {snapshots.map(snap => (
+                                                        <div key={snap.name} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className="p-2 bg-blue-500/10 rounded-lg">
+                                                                        <Icons.Clock />
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="font-medium text-white">{snap.name}</div>
+                                                                        <div className="text-xs text-gray-400">
+                                                                            {snap.snaptime ? fmtDate(snap.snaptime) : t('unknown')}
+                                                                            {snap.vmstate && <span className="ml-2 text-blue-400">+ RAM</span>}
+                                                                        </div>
+                                                                        {snap.description && (
+                                                                            <div className="text-sm text-gray-500 mt-1">{snap.description}</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        onClick={() => handleRollbackSnapshot(snap.name)}
+                                                                        disabled={snapshotLoading}
+                                                                        className="p-2 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 transition-colors disabled:opacity-50"
+                                                                        title={t('rollback')}
+                                                                    >
+                                                                        <Icons.RotateCcw />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleDeleteSnapshot(snap.name)}
+                                                                        disabled={snapshotLoading}
+                                                                        className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors disabled:opacity-50"
+                                                                        title={t('delete')}
+                                                                    >
+                                                                        <Icons.Trash />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : crAnyFail('snapshots') && isCorpRedesigned ? null : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    <Icons.Clock />
+                                                    <p className="mt-2">{t('noSnapshots')}</p>
+                                                </div>
+                                            )}
+
+                                            {/* NS: Feb 2026 - Space-Efficient Snapshots Section */}
+                                            {efficientSnapshots.length > 0 && (
+                                                <div className="mt-6">
+                                                    <div className="flex items-center gap-2 mb-3">
+                                                        <Icons.Zap className="text-green-400" />
+                                                        <h3 className="text-sm font-semibold text-green-400">{t('spaceEfficientSnapshots')}</h3>
+                                                        <span className="text-xs text-gray-500">({t('managedByPegaprox')})</span>
+                                                    </div>
+                                                    <div className="space-y-3">
+                                                        {efficientSnapshots.map(snap => {
+                                                            const isInvalidated = snap.status === 'invalidated';
+                                                            return (
+                                                                <div key={snap.id} className={`p-4 rounded-lg border ${
+                                                                    isInvalidated
+                                                                        ? 'bg-gray-800/50 border-gray-700'
+                                                                        : 'bg-proxmox-dark border-green-500/30'
+                                                                }`}>
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <div className="flex items-center gap-3">
+                                                                            <div className={`p-2 rounded-lg ${isInvalidated ? 'bg-gray-500/10' : 'bg-green-500/10'}`}>
+                                                                                <Icons.Zap className={isInvalidated ? 'text-gray-500' : ''} />
+                                                                            </div>
+                                                                            <div>
+                                                                                <div className="flex items-center gap-2">
+                                                                                    <span className={`font-medium ${isInvalidated ? 'text-gray-500 line-through' : 'text-white'}`}>{snap.snapname}</span>
+                                                                                    <span className="px-1.5 py-0.5 text-xs rounded bg-green-500/20 text-green-400">{t('cowSnapshot')}</span>
+                                                                                    {snap.fs_frozen && <span className="px-1.5 py-0.5 text-xs rounded bg-blue-500/20 text-blue-400">{t('fsFrozen')}</span>}
+                                                                                </div>
+                                                                                <div className="text-xs text-gray-400 mt-0.5">
+                                                                                    {snap.created_at ? new Date(snap.created_at).toLocaleString() : ''}
+                                                                                    <span className="ml-2 text-gray-500">
+                                                                                        {snap.total_snap_alloc_gb?.toFixed(1)} GB / {snap.total_disk_size_gb?.toFixed(1)} GB
+                                                                                    </span>
+                                                                                </div>
+                                                                                {snap.description && <div className="text-sm text-gray-500 mt-1">{snap.description}</div>}
+                                                                                {isInvalidated && <div className="text-xs text-red-400 mt-1">{t('snapshotInvalidated')}</div>}
+                                                                            </div>
+                                                                        </div>
+                                                                        {!isInvalidated && (
+                                                                            <div className="flex items-center gap-2">
+                                                                                <button
+                                                                                    onClick={() => handleRollbackEfficientSnapshot(snap.id, snap.snapname)}
+                                                                                    disabled={snapshotLoading}
+                                                                                    className="p-2 rounded-lg bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 transition-colors disabled:opacity-50"
+                                                                                    title={t('rollback')}
+                                                                                >
+                                                                                    <Icons.RotateCcw />
+                                                                                </button>
+                                                                                <button
+                                                                                    onClick={() => handleDeleteEfficientSnapshot(snap.id, snap.snapname)}
+                                                                                    disabled={snapshotLoading}
+                                                                                    className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors disabled:opacity-50"
+                                                                                    title={t('delete')}
+                                                                                >
+                                                                                    <Icons.Trash />
+                                                                                </button>
+                                                                            </div>
+                                                                        )}
+                                                                        {isInvalidated && (
+                                                                            <button
+                                                                                onClick={() => handleDeleteEfficientSnapshot(snap.id, snap.snapname)}
+                                                                                disabled={snapshotLoading}
+                                                                                className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors disabled:opacity-50"
+                                                                                title={t('delete')}
+                                                                            >
+                                                                                <Icons.Trash />
+                                                                            </button>
+                                                                        )}
+                                                                    </div>
+                                                                    {/* Per-disk usage bars */}
+                                                                    {!isInvalidated && snap.disks?.length > 0 && (
+                                                                        <div className="mt-2 space-y-1.5">
+                                                                            {snap.disks.map(disk => {
+                                                                                const pct = disk.snap_used_percent || 0;
+                                                                                const barColor = pct >= 80 ? (pct >= 95 ? 'bg-red-500' : 'bg-yellow-500') : 'bg-green-500';
+                                                                                return (
+                                                                                    <div key={disk.disk_key} className="text-xs">
+                                                                                        <div className="flex justify-between text-gray-400 mb-0.5">
+                                                                                            <span>{disk.disk_key} ({disk.original_lv})</span>
+                                                                                            <span className={pct >= 80 ? (pct >= 95 ? 'text-red-400' : 'text-yellow-400') : 'text-gray-400'}>
+                                                                                                {pct.toFixed(1)}% {t('snapshotUsage')}
+                                                                                                {pct >= 80 && ' ⚠'}
+                                                                                            </span>
+                                                                                        </div>
+                                                                                        <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden">
+                                                                                            <div className={`h-full ${barColor} rounded-full transition-all`} style={{width: `${Math.min(100, pct)}%`}}></div>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                );
+                                                                            })}
+                                                                            {snap.disks.some(d => (d.snap_used_percent || 0) >= 80) && (
+                                                                                <div className="text-xs text-yellow-400 flex items-center gap-1 mt-1">
+                                                                                    <Icons.AlertTriangle />
+                                                                                    {t('snapshotOverflow')}
+                                                                                </div>
+                                                                            )}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Create Snapshot Modal */}
+                                            {showCreateSnapshot && (
+                                                <CreateSnapshotModal
+                                                    isQemu={isQemu}
+                                                    onSubmit={handleCreateSnapshot}
+                                                    onClose={() => setShowCreateSnapshot(false)}
+                                                    loading={snapshotLoading}
+                                                    efficientInfo={efficientInfo}
+                                                />
+                                            )}
+                                        </div>
+                                    )}
+                                    
+                                    {/* LW: Backups Tab - Dec 2025 */}
+                                    {activeTab === 'backups' && (
+                                        <div className="space-y-6">
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-sm font-semibold text-gray-300">{t('backupsTab') || 'Backups'}</h3>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={fetchBackups}
+                                                        disabled={backupLoading}
+                                                        className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400"
+                                                        title={t('refresh')}
+                                                    >
+                                                        <Icons.RotateCw className={backupLoading ? 'animate-spin' : ''} />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => setShowCreateBackup(true)}
+                                                        className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
+                                                    >
+                                                        <Icons.Plus />
+                                                        {t('createBackup') || 'Create Backup'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            
+                                            <CrVcTabFail id="backups" what={t('backupsTab')} parts={crFail.backups} onRetry={fetchBackups} />
+                                            {backupLoading ? (
+                                                <div className="flex items-center justify-center py-8">
+                                                    <Icons.RotateCw className="animate-spin text-gray-400" />
+                                                </div>
+                                            ) : vmBackups.length > 0 ? (
+                                                <div className="space-y-3">
+                                                    {vmBackups.map(backup => (
+                                                        <div key={backup.volid} className={`p-4 bg-proxmox-dark rounded-lg border ${verifyResults[backup.volid]?.status === 'passed' ? 'border-green-500/30' : verifyResults[backup.volid]?.status === 'failed' || verifyResults[backup.volid]?.status === 'error' ? 'border-red-500/30' : 'border-proxmox-border'}`}>
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className="p-2 bg-purple-500/10 rounded-lg">
+                                                                        <Icons.Database className="text-purple-400" />
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="font-medium text-white">{backup.filename}</div>
+                                                                        <div className="text-xs text-gray-400">
+                                                                            {backup.ctime ? new Date(backup.ctime * 1000).toLocaleString() : ''}
+                                                                            <span className="mx-2">•</span>
+                                                                            {(backup.size / (1024*1024*1024)).toFixed(2)} GB
+                                                                            <span className="mx-2">•</span>
+                                                                            <span className="text-gray-500">{backup.storage}</span>
+                                                                        </div>
+                                                                        {backup.notes && (
+                                                                            <div className="text-sm text-gray-500 mt-1">{backup.notes}</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        onClick={() => handleVerifyBackup(backup)}
+                                                                        disabled={verifyingBackup === backup.volid}
+                                                                        className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${
+                                                                            verifyResults[backup.volid]?.status === 'passed' ? 'bg-green-500/10 text-green-400' :
+                                                                            verifyResults[backup.volid]?.status === 'failed' || verifyResults[backup.volid]?.status === 'error' ? 'bg-red-500/10 text-red-400' :
+                                                                            verifyingBackup === backup.volid ? 'bg-yellow-500/10 text-yellow-400' :
+                                                                            'bg-purple-500/10 hover:bg-purple-500/20 text-purple-400'
+                                                                        }`}
+                                                                        title={verifyResults[backup.volid]?.status === 'passed' ? (t('verifiedOk') || 'Verified ✓') :
+                                                                               verifyResults[backup.volid]?.status ? verifyResults[backup.volid].status :
+                                                                               (t('verifyBackup') || 'Verify Backup')}
+                                                                    >
+                                                                        {verifyingBackup === backup.volid ? (
+                                                                            <Icons.RotateCw className="animate-spin" />
+                                                                        ) : verifyResults[backup.volid]?.status === 'passed' ? (
+                                                                            <Icons.CheckCircle />
+                                                                        ) : verifyResults[backup.volid]?.status === 'failed' || verifyResults[backup.volid]?.status === 'error' ? (
+                                                                            <Icons.XCircle />
+                                                                        ) : (
+                                                                            <Icons.Shield />
+                                                                        )}
+                                                                    </button>
+                                                                    <button
+                                                                        data-file-restore-open
+                                                                        onClick={() => handleOpenFileRestore(backup)}
+                                                                        disabled={backupLoading}
+                                                                        className="p-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 transition-colors disabled:opacity-50"
+                                                                        title={t('fileRestore') || 'File Restore'}
+                                                                    >
+                                                                        <Icons.FolderOpen />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => setShowRestoreBackup(backup)}
+                                                                        disabled={backupLoading}
+                                                                        className="p-2 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-colors disabled:opacity-50"
+                                                                        title={t('restore') || 'Restore'}
+                                                                    >
+                                                                        <Icons.RotateCcw />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleDeleteBackup(backup.volid)}
+                                                                        disabled={backupLoading}
+                                                                        className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors disabled:opacity-50"
+                                                                        title={t('delete')}
+                                                                    >
+                                                                        <Icons.Trash />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                            {/* Verification status bar */}
+                                                            {(verifyingBackup === backup.volid || verifyResults[backup.volid]) && (
+                                                                <div className={`mt-3 pt-3 border-t text-xs flex items-center gap-2 ${
+                                                                    verifyResults[backup.volid]?.status === 'passed' ? 'border-green-500/20 text-green-400' :
+                                                                    verifyResults[backup.volid]?.status === 'failed' || verifyResults[backup.volid]?.status === 'error' ? 'border-red-500/20 text-red-400' :
+                                                                    'border-yellow-500/20 text-yellow-400'
+                                                                }`}>
+                                                                    {verifyingBackup === backup.volid ? (
+                                                                        <>
+                                                                            <Icons.RotateCw className="w-3 h-3 animate-spin" />
+                                                                            <span>{verifyResults[backup.volid]?.phase === 'restoring' ? (t('restoring') || 'Restoring...') :
+                                                                                   verifyResults[backup.volid]?.phase === 'booting' ? (t('booting') || 'Booting...') :
+                                                                                   verifyResults[backup.volid]?.phase === 'verifying' ? (t('verifying') || 'Checking health...') :
+                                                                                   verifyResults[backup.volid]?.phase === 'cleanup' ? (t('cleaningUp') || 'Cleaning up...') :
+                                                                                   (t('verifying') || 'Verifying...')}</span>
+                                                                        </>
+                                                                    ) : verifyResults[backup.volid]?.status === 'passed' ? (
+                                                                        <>
+                                                                            <Icons.CheckCircle className="w-3 h-3" />
+                                                                            <span>{t('backupVerified') || 'Backup verified'} — {t('restoreBootOk') || 'Restore + Boot OK'}</span>
+                                                                            <span className="text-gray-500 ml-auto">{verifyResults[backup.volid]?.duration_seconds}s</span>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <Icons.XCircle className="w-3 h-3" />
+                                                                            <span>{verifyResults[backup.volid]?.error?.substring(0, 80) || (t('verificationFailed') || 'Failed')}</span>
+                                                                            <span className="text-gray-500 ml-auto">{verifyResults[backup.volid]?.duration_seconds}s</span>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : crAnyFail('backups') && isCorpRedesigned ? null : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    <Icons.Database className="mx-auto opacity-50" />
+                                                    <p className="mt-2">{t('noBackups') || 'No backups found'}</p>
+                                                    <p className="text-xs mt-1">{t('noBackupsHint') || 'Create a backup or check your backup storages'}</p>
+                                                </div>
+                                            )}
+                                            
+                                            {/* MK: Create Backup Modal */}
+                                            {showCreateBackup && (
+                                                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
+                                                        <h3 className="text-lg font-semibold mb-4">{t('createBackup') || 'Create Backup'}</h3>
+                                                        <div className="space-y-4">
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('storage') || 'Storage'}</label>
+                                                                <select
+                                                                    id="backup-storage"
+                                                                    defaultValue="local"
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                >
+                                                                    {storageList.filter(s => s.content?.includes('backup')).map(s => (
+                                                                        <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                                                    ))}
+                                                                    {!storageList.some(s => s.content?.includes('backup')) && (
+                                                                        <option value="local">local</option>
+                                                                    )}
+                                                                </select>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupMode') || 'Mode'}</label>
+                                                                <select
+                                                                    id="backup-mode"
+                                                                    defaultValue="snapshot"
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                >
+                                                                    <option value="snapshot">{t('backupModeSnapshot') || 'Snapshot (no stop)'}</option>
+                                                                    <option value="suspend">{t('backupModeSuspend') || 'Suspend (brief pause)'}</option>
+                                                                    <option value="stop">{t('backupModeStop') || 'Stop (VM will stop)'}</option>
+                                                                </select>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('compression') || 'Compression'}</label>
+                                                                <select
+                                                                    id="backup-compress"
+                                                                    defaultValue="zstd"
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                >
+                                                                    <option value="zstd">{t('compressZstd') || 'ZSTD (recommended)'}</option>
+                                                                    <option value="lzo">{t('compressLzo') || 'LZO (fast)'}</option>
+                                                                    <option value="gzip">{t('compressGzip') || 'GZIP'}</option>
+                                                                    <option value="0">{t('compressNone') || 'None'}</option>
+                                                                </select>
+                                                            </div>
+                                                            {/* NS: Notes/Description field */}
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('backupNotes') || 'Notes (optional)'}</label>
+                                                                <textarea
+                                                                    id="backup-notes"
+                                                                    placeholder={t('backupNotesPlaceholder') || 'e.g. Before major update, weekly backup...'}
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white resize-none"
+                                                                    rows={2}
+                                                                />
+                                                            </div>
+                                                            <div className="flex gap-2 justify-end pt-2">
+                                                                <button
+                                                                    onClick={() => setShowCreateBackup(false)}
+                                                                    className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
+                                                                >
+                                                                    {t('cancel')}
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const storage = document.getElementById('backup-storage').value;
+                                                                        const mode = document.getElementById('backup-mode').value;
+                                                                        const compress = document.getElementById('backup-compress').value;
+                                                                        const notes = document.getElementById('backup-notes').value;
+                                                                        handleCreateBackup(storage, mode, compress, notes);
+                                                                    }}
+                                                                    disabled={backupLoading}
+                                                                    className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50"
+                                                                >
+                                                                    {backupLoading ? t('loading') : t('create') || 'Create'}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                            
+                                            {/* File Restore Modal */}
+                                            {showFileRestore && (
+                                                <div data-file-restore-dialog className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-2xl max-h-[80vh] flex flex-col">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className="text-lg font-semibold">{t('fileRestore') || 'File Restore'}</h3>
+                                                            <button onClick={() => setShowFileRestore(null)} className="p-1 hover:bg-proxmox-hover rounded-lg text-gray-400">
+                                                                <Icons.X />
+                                                            </button>
+                                                        </div>
+                                                        <div className="text-xs text-gray-500 mb-3 truncate font-mono">{showFileRestore.filename}</div>
+
+                                                        {/* Breadcrumb + Up button */}
+                                                        <div className="flex items-center gap-1 mb-3 text-sm flex-wrap">
+                                                            {fileRestoreNavStack.length > 0 && (
+                                                                <button
+                                                                    onClick={handleFileRestoreGoUp}
+                                                                    disabled={fileRestoreLoading}
+                                                                    className="px-2 py-1 bg-proxmox-dark hover:bg-proxmox-hover rounded text-gray-400 text-xs disabled:opacity-50"
+                                                                >
+                                                                    ↑ ..
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                onClick={() => handleFileRestoreGoToIndex(-1)}
+                                                                disabled={fileRestoreLoading}
+                                                                className="text-cyan-400 hover:text-white disabled:opacity-50"
+                                                            >
+                                                                /
+                                                            </button>
+                                                            {fileRestoreNavStack.map((entry, idx) => (
+                                                                <span key={idx} className="flex items-center gap-1">
+                                                                    <span className="text-gray-600">/</span>
+                                                                    <button
+                                                                        onClick={() => handleFileRestoreGoToIndex(idx)}
+                                                                        disabled={fileRestoreLoading}
+                                                                        className="text-cyan-400 hover:text-white disabled:opacity-50"
+                                                                    >
+                                                                        {entry.text}
+                                                                    </button>
+                                                                </span>
+                                                            ))}
+                                                        </div>
+
+                                                        {/* File listing */}
+                                                        <div className="flex-1 overflow-y-auto border border-proxmox-border rounded-lg" style={{ minHeight: 0 }}>
+                                                            {fileRestoreLoading ? (
+                                                                <div className="flex items-center justify-center py-8">
+                                                                    <Icons.RotateCw className="animate-spin text-gray-400" />
+                                                                </div>
+                                                            ) : fileRestoreList.length === 1 && fileRestoreList[0]._error ? (
+                                                                <div data-file-restore-error className="text-center py-8 text-red-400 text-sm px-4">
+                                                                    <Icons.XCircle className="mx-auto mb-2 opacity-70" />
+                                                                    {fileRestoreList[0]._error}
+                                                                </div>
+                                                            ) : fileRestoreList.length === 0 ? (
+                                                                <div className="text-center py-8 text-gray-500 text-sm">
+                                                                    {t('emptyDirectory') || 'Empty directory'}
+                                                                </div>
+                                                            ) : (
+                                                                <table className="w-full text-sm">
+                                                                    <tbody>
+                                                                        {fileRestoreList.map((item, idx) => (
+                                                                            <tr
+                                                                                key={idx}
+                                                                                data-file-restore-entry={item.text}
+                                                                                onClick={() => handleFileRestoreNavigate(item)}
+                                                                                className={`border-b border-proxmox-border/50 cursor-pointer hover:bg-proxmox-hover/50 transition-colors ${fileRestoreSelected === item ? 'bg-cyan-500/10' : ''}`}
+                                                                            >
+                                                                                <td className="px-3 py-2 w-8">
+                                                                                    {!item.leaf
+                                                                                        ? <Icons.FolderOpen className="w-4 h-4 text-yellow-400" />
+                                                                                        : <Icons.FileText className="w-4 h-4 text-gray-400" />}
+                                                                                </td>
+                                                                                <td className="px-2 py-2 text-white font-mono">{item.text}</td>
+                                                                                <td className="px-3 py-2 text-right text-gray-500 text-xs whitespace-nowrap">
+                                                                                    {item.type !== 'd' && item.size != null
+                                                                                        ? item.size < 1024 ? `${item.size} B`
+                                                                                          : item.size < 1048576 ? `${(item.size / 1024).toFixed(1)} KB`
+                                                                                          : `${(item.size / 1048576).toFixed(1)} MB`
+                                                                                        : ''}
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            )}
+                                                        </div>
+
+                                                        {/* Destination path + restore button (shown when file selected) */}
+                                                        {fileRestoreSelected && (
+                                                            <div className="mt-4 space-y-3 border-t border-proxmox-border pt-4">
+                                                                <div className="text-xs text-gray-400">
+                                                                    <span className="font-medium text-white">{fileRestoreSelected.text}</span>
+                                                                    {' '}{t('selectedForRestore') || 'selected. Destination path in the guest:'}
+                                                                </div>
+                                                                <input
+                                                                    data-file-restore-dest
+                                                                    type="text"
+                                                                    value={fileRestoreDestPath}
+                                                                    onChange={e => setFileRestoreDestPath(e.target.value)}
+                                                                    placeholder={t('destPath') || '/etc/nginx/nginx.conf'}
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white font-mono text-sm"
+                                                                />
+                                                                {vm.type === 'qemu' && (
+                                                                    <p data-file-restore-note="qemu" className="text-xs text-yellow-400">{t('fileRestoreNoteQemu') || 'The VM must be running with the QEMU Guest Agent enabled. The agent takes files up to 45 KB.'}</p>
+                                                                )}
+                                                                {vm.type === 'lxc' && (
+                                                                    <p data-file-restore-note="lxc" className="text-xs text-yellow-400">{t('fileRestoreNoteLxc') || 'Container must be running. Requires SSH access configured on the cluster.'}</p>
+                                                                )}
+                                                                <div className="flex gap-2 justify-end">
+                                                                    <button
+                                                                        onClick={() => setFileRestoreSelected(null)}
+                                                                        className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm"
+                                                                    >
+                                                                        {t('cancel')}
+                                                                    </button>
+                                                                    <button
+                                                                        data-file-restore-submit
+                                                                        onClick={handleFileRestoreSubmit}
+                                                                        disabled={fileRestoring || !fileRestoreDestPath.startsWith('/')}
+                                                                        className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm disabled:opacity-50"
+                                                                    >
+                                                                        {fileRestoring
+                                                                            ? <span className="flex items-center gap-2"><Icons.RotateCw className="w-4 h-4 animate-spin" />{t('restoring') || 'Restoring...'}</span>
+                                                                            : (t('restoreFile') || 'Restore File')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* NS: Restore Backup Modal */}
+                                            {showRestoreBackup && (
+                                                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
+                                                        <h3 className="text-lg font-semibold mb-4">{t('restoreBackup') || 'Restore Backup'}</h3>
+                                                        <div className="space-y-4">
+                                                            <div className="p-3 bg-proxmox-dark rounded-lg">
+                                                                <p className="text-sm text-gray-400">{t('selectedBackup') || 'Selected Backup'}:</p>
+                                                                <p className="font-mono text-sm truncate">{showRestoreBackup.filename}</p>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetVmid') || 'Target VMID'}</label>
+                                                                <input
+                                                                    type="number"
+                                                                    id="restore-vmid"
+                                                                    defaultValue={vm.vmid}
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                />
+                                                                <p className="text-xs text-yellow-400 mt-1">
+                                                                    {t('sameVmidWarning') || 'Same VMID = VM will be overwritten!'}
+                                                                </p>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-sm text-gray-400 mb-2">{t('targetStorage') || 'Target Storage (optional)'}</label>
+                                                                <select
+                                                                    id="restore-storage"
+                                                                    defaultValue=""
+                                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                                                >
+                                                                    <option value="">{t('originalStorage') || 'Keep original'}</option>
+                                                                    {storageList.filter(s => s.content?.includes('images')).map(s => (
+                                                                        <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                                                    ))}
+                                                                </select>
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    id="restore-start"
+                                                                    className="w-4 h-4 rounded"
+                                                                />
+                                                                <label htmlFor="restore-start" className="text-sm text-gray-300">
+                                                                    {t('startAfterRestore') || 'Start after restore'}
+                                                                </label>
+                                                            </div>
+                                                            <div className="flex gap-2 justify-end pt-2">
+                                                                <button
+                                                                    onClick={() => setShowRestoreBackup(null)}
+                                                                    className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
+                                                                >
+                                                                    {t('cancel')}
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => {
+                                                                        const targetVmid = parseInt(document.getElementById('restore-vmid').value);
+                                                                        const storage = document.getElementById('restore-storage').value;
+                                                                        const startAfter = document.getElementById('restore-start').checked;
+                                                                        handleRestoreBackup(showRestoreBackup.volid, targetVmid, storage, startAfter);
+                                                                    }}
+                                                                    disabled={backupLoading}
+                                                                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50"
+                                                                >
+                                                                    {backupLoading ? t('loading') : t('restore') || 'Restore'}
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Replication Tab */}
+                                    {activeTab === 'replication' && (
+                                        <div className="space-y-6">
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-sm font-semibold text-gray-300">{t('replicationJobs')}</h3>
+                                                <button
+                                                    onClick={() => setShowCreateReplication(true)}
+                                                    disabled={allClusterNodes.length < 2}
+                                                    className="flex items-center gap-2 px-3 py-1.5 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                                >
+                                                    <Icons.Plus />
+                                                    {t('createReplication')}
+                                                </button>
+                                            </div>
+                                            
+                                            {allClusterNodes.length < 2 && (
+                                                <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-400">
+                                                    ⚠️ {t('replicationNeedsTwoNodes')}
+                                                </div>
+                                            )}
+                                            
+                                            <CrVcTabFail id="replication" what={t('replicationJobs')} parts={crFail.replication}
+                                                onRetry={() => { fetchReplications(); fetchCrossClusterRepls(); }} />
+                                            {replications.length > 0 ? (
+                                                <div className="space-y-3">
+                                                    {replications.map(job => (
+                                                        <div key={job.id} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className={`p-2 rounded-lg ${job.error ? 'bg-red-500/10' : 'bg-green-500/10'}`}>
+                                                                        <Icons.RefreshCw />
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="font-medium text-white">
+                                                                            ↑ {job.target}
+                                                                        </div>
+                                                                        <div className="text-xs text-gray-400">
+                                                                            Schedule: {job.schedule || '*/15'} | 
+                                                                            {job.last_sync ? ` ${t('lastSync')}: ${new Date(job.last_sync * 1000).toLocaleString()}` : ` ${t('neverSynced')}`}
+                                                                        </div>
+                                                                        {job.error && (
+                                                                            <div className="text-xs text-red-400 mt-1">{t('error')}: {job.error}</div>
+                                                                        )}
+                                                                        {job.comment && (
+                                                                            <div className="text-sm text-gray-500 mt-1">{job.comment}</div>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <button
+                                                                        onClick={() => handleRunReplicationNow(job.id)}
+                                                                        disabled={replicationLoading}
+                                                                        className="p-2 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 transition-colors disabled:opacity-50"
+                                                                        title={t('syncNow')}
+                                                                    >
+                                                                        <Icons.PlayCircle />
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => handleDeleteReplication(job.id)}
+                                                                        disabled={replicationLoading}
+                                                                        className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 transition-colors disabled:opacity-50"
+                                                                        title={t('delete')}
+                                                                    >
+                                                                        <Icons.Trash />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (crFail.replication || {}).replication != null && isCorpRedesigned ? null : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    <Icons.RefreshCw />
+                                                    <p className="mt-2">{t('noReplicationJobs')}</p>
+                                                </div>
+                                            )}
+
+                                            {/* Create Replication Modal */}
+                                            {showCreateReplication && (
+                                                <CreateReplicationModal
+                                                    nodes={clusterNodes}
+                                                    onSubmit={handleCreateReplication}
+                                                    onClose={() => setShowCreateReplication(false)}
+                                                    loading={replicationLoading}
+                                                />
+                                            )}
+
+                                            {/* NS: Cross-cluster replication - DR to other clusters */}
+                                            <div className="mt-6">
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                                                        <Icons.Globe className="w-4 h-4 text-proxmox-orange" />
+                                                        {t('crossClusterReplication')}
+                                                    </h4>
+                                                    <button
+                                                        onClick={() => setShowCreateXRepl(true)}
+                                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-proxmox-orange/10 text-proxmox-orange rounded-lg text-xs hover:bg-proxmox-orange/20 transition-colors"
+                                                    >
+                                                        <Icons.Plus className="w-3.5 h-3.5" />
+                                                        {t('addDrJob')}
+                                                    </button>
+                                                </div>
+
+                                                {crossClusterRepls.length === 0 ? ((crFail.replication || {})['cross-cluster'] != null && isCorpRedesigned ? null :
+                                                    <div className="text-center py-6 text-gray-500 text-sm">
+                                                        {t('noReplicationJobs')}
+                                                    </div>
+                                                ) : (
+                                                    <div className="space-y-2">
+                                                        {crossClusterRepls.map(job => (
+                                                            <div key={job.id} className="bg-proxmox-darker rounded-lg p-3 flex items-center justify-between">
+                                                                <div className="flex-1">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className={`w-2 h-2 rounded-full ${job.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
+                                                                        <span className="text-sm text-white">&rarr; {job.target_cluster}</span>
+                                                                        <span className="text-xs text-gray-500">{job.schedule}</span>
+                                                                    </div>
+                                                                    <div className="text-xs text-gray-500 mt-1">
+                                                                        {job.last_run ? `${t('lastRunPrefix')}: ${new Date(job.last_run).toLocaleString()}` : t('neverRun')}
+                                                                        {job.last_status && ` \u00b7 ${job.last_status}`}
+                                                                        {job.last_error && <span className="text-red-400 ml-1">{job.last_error}</span>}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex gap-1">
+                                                                    <button onClick={() => handleRunXReplNow(job.id)} className="p-1.5 rounded hover:bg-green-500/10 text-gray-400 hover:text-green-400" title={t('runNow')}>
+                                                                        <Icons.Play className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                    <button onClick={() => handleDeleteXRepl(job.id)} className="p-1.5 rounded hover:bg-red-500/10 text-gray-400 hover:text-red-400" title={t('delete')}>
+                                                                        <Icons.Trash className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+
+                                                {/* MK: inline form for new cross-cluster job */}
+                                                {showCreateXRepl && (
+                                                    <div className="bg-proxmox-dark border border-proxmox-border rounded-lg p-4 mt-3">
+                                                        <h5 className="text-sm font-medium mb-3">{t('newCrossClusterReplication')}</h5>
+                                                        <div className="grid grid-cols-2 gap-3">
+                                                            <XReplFeatureWarning authFetch={authFetch} sourceCluster={clusterId} vmid={vm.vmid} vmType={vm.type} node={vm.node} />
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetCluster')}</label>
+                                                                <select
+                                                                    value={xReplForm.target_cluster}
+                                                                    onChange={e => setXReplForm(f => ({ ...f, target_cluster: e.target.value, target_storage: '', target_bridge: 'vmbr0' }))}
+                                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                >
+                                                                    <option value="">{t('selectCluster') || 'Select cluster...'}</option>
+                                                                    {allClusters.filter(c => c.id !== clusterId && c.connected).map(c => (
+                                                                        <option key={c.id} value={c.id}>{clusterLabel(c)}</option>
+                                                                    ))}
+                                                                </select>
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetStorage')}</label>
+                                                                {xReplLoadingResources ? (
+                                                                    <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                                        <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                                        {t('loading')}...
+                                                                    </div>
+                                                                ) : xReplForm.target_cluster ? (
+                                                                    <select
+                                                                        value={xReplForm.target_storage}
+                                                                        onChange={e => setXReplForm(f => ({ ...f, target_storage: e.target.value }))}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    >
+                                                                        <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                                                        {xReplTargetStorages.map(s => (
+                                                                            <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                                                        ))}
+                                                                    </select>
+                                                                ) : (
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                )}
+                                                            </div>
+                                                            <div className="col-span-2">
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('networkMappings') || t('targetBridge')}</label>
+                                                                {xReplLoadingResources ? (
+                                                                    <div className="flex items-center gap-2 text-gray-500 text-sm py-2">
+                                                                        <Icons.RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                                                        {t('loading')}...
+                                                                    </div>
+                                                                ) : !xReplForm.target_cluster ? (
+                                                                    <div className="text-xs text-gray-500 py-2">{t('selectClusterFirst') || 'Select a target cluster first'}</div>
+                                                                ) : [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))].length > 0 ? (
+                                                                    // #532 - map each source NIC's bridge to a target bridge of choice
+                                                                    <div className="space-y-2">
+                                                                        {[...new Set((config.networks || []).map(n => n.bridge).filter(Boolean))].map(sb => (
+                                                                            <div key={sb} className="flex items-center gap-2">
+                                                                                <span className="text-xs text-gray-400 w-28 shrink-0 truncate" title={sb}>{sb}</span>
+                                                                                <span className="text-gray-600">→</span>
+                                                                                <select
+                                                                                    value={xReplBridgeMap[sb] || ''}
+                                                                                    onChange={e => setXReplBridgeMap(prev => ({ ...prev, [sb]: e.target.value }))}
+                                                                                    className="flex-1 px-2 py-1.5 bg-proxmox-darker border border-proxmox-border rounded text-white text-sm"
+                                                                                >
+                                                                                    {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                                        <optgroup label="Local Bridges">
+                                                                                            {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                    {xReplTargetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                                        <optgroup label="SDN VNets">
+                                                                                            {xReplTargetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                                            ))}
+                                                                                        </optgroup>
+                                                                                    )}
+                                                                                </select>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                ) : (
+                                                                    <select
+                                                                        value={xReplForm.target_bridge}
+                                                                        onChange={e => setXReplForm(f => ({ ...f, target_bridge: e.target.value }))}
+                                                                        className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                    >
+                                                                        {xReplTargetBridges.filter(b => b.source !== 'sdn').length > 0 && (
+                                                                            <optgroup label="Local Bridges">
+                                                                                {xReplTargetBridges.filter(b => b.source !== 'sdn').map(b => (
+                                                                                    <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                                                ))}
+                                                                            </optgroup>
+                                                                        )}
+                                                                        {xReplTargetBridges.filter(b => b.source === 'sdn').length > 0 && (
+                                                                            <optgroup label="SDN VNets">
+                                                                                {xReplTargetBridges.filter(b => b.source === 'sdn').map(b => (
+                                                                                    <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                                                ))}
+                                                                            </optgroup>
+                                                                        )}
+                                                                    </select>
+                                                                )}
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('targetVmidOptional') || 'Target VMID (optional)'}</label>
+                                                                <input
+                                                                    type="number"
+                                                                    min="100"
+                                                                    value={xReplForm.target_vmid}
+                                                                    onChange={e => setXReplForm(f => ({ ...f, target_vmid: e.target.value }))}
+                                                                    placeholder={t('autoNextId') || 'auto'}
+                                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('scheduleCron')}</label>
+                                                                <input
+                                                                    type="text"
+                                                                    value={xReplForm.schedule}
+                                                                    onChange={e => setXReplForm(f => ({ ...f, schedule: e.target.value }))}
+                                                                    placeholder="0 */6 * * *"
+                                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                />
+                                                            </div>
+                                                            <div>
+                                                                <label className="block text-xs text-gray-400 mb-1">{t('replicationRetention')}</label>
+                                                                <input
+                                                                    type="number"
+                                                                    min="1"
+                                                                    max="30"
+                                                                    value={xReplForm.retention}
+                                                                    onChange={e => setXReplForm(f => ({ ...f, retention: parseInt(e.target.value) || 1 }))}
+                                                                    className="w-full px-3 py-2 bg-proxmox-darker border border-proxmox-border rounded-lg text-white text-sm"
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex gap-2 mt-3">
+                                                            <button onClick={handleCreateXRepl} className="px-3 py-1.5 bg-proxmox-orange text-white rounded-lg text-sm hover:bg-proxmox-orange/90 transition-colors">{t('create')}</button>
+                                                            <button onClick={() => setShowCreateXRepl(false)} className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border text-gray-300 rounded-lg text-sm hover:bg-proxmox-darker transition-colors">{t('cancel')}</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* History Tab - MK Jan 2026 */}
+                                    {activeTab === 'history' && (
+                                        <div className="space-y-4">
+                                            {/* Sub-tabs */}
+                                            <div className="flex gap-2 border-b border-proxmox-border pb-2">
+                                                <button 
+                                                    onClick={() => { setHistorySubTab('proxmox'); fetchHistory(); }}
+                                                    className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${historySubTab === 'proxmox' ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'}`}
+                                                >
+                                                    {t('proxmoxTasks')}
+                                                </button>
+                                                <button 
+                                                    onClick={() => { setHistorySubTab('pegaprox'); fetchHistory(); }}
+                                                    className={`px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${historySubTab === 'pegaprox' ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'}`}
+                                                >
+                                                    {t('pegaproxActions')}
+                                                </button>
+                                                <button 
+                                                    onClick={fetchHistory}
+                                                    className="ml-auto p-2 hover:bg-proxmox-dark rounded-lg text-gray-400 hover:text-white"
+                                                    title="Refresh"
+                                                >
+                                                    <Icons.RefreshCw className={`w-4 h-4 ${historyLoading ? 'animate-spin' : ''}`} />
+                                                </button>
+                                            </div>
+
+                                            <CrVcTabFail id="history" what={historySubTab === 'proxmox' ? t('proxmoxTasks') : t('pegaproxActions')}
+                                                parts={historySubTab === 'proxmox' ? { tasks: (crFail.history || {}).tasks } : { audit: (crFail.history || {}).audit }} onRetry={fetchHistory} />
+                                            {historyLoading ? (
+                                                <div className="flex items-center justify-center py-8">
+                                                    <Icons.RotateCw className="w-6 h-6 animate-spin text-proxmox-orange" />
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {/* Proxmox Tasks */}
+                                                    {historySubTab === 'proxmox' && (
+                                                        <div className="space-y-2">
+                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">Proxmox Tasks for {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
+                                                            {vmProxmoxTasks && vmProxmoxTasks.length > 0 ? (
+                                                                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                                                                    <table className="w-full text-sm">
+                                                                        <thead className="sticky top-0 bg-proxmox-dark">
+                                                                            <tr className="text-left text-gray-400">
+                                                                                <th className="p-2">Time</th>
+                                                                                <th className="p-2">Type</th>
+                                                                                <th className="p-2">User</th>
+                                                                                <th className="p-2">Status</th>
+                                                                                <th className="p-2">Node</th>
+                                                                            </tr>
+                                                                        </thead>
+                                                                        <tbody>
+                                                                            {vmProxmoxTasks.map((task, idx) => (
+                                                                                <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                    <td className="p-2 text-gray-300 whitespace-nowrap">
+                                                                                        {task.starttime ? new Date(task.starttime * 1000).toLocaleString() : '-'}
+                                                                                    </td>
+                                                                                    <td className="p-2 font-mono text-xs">
+                                                                                        <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded">{task.type || '-'}</span>
+                                                                                    </td>
+                                                                                    <td className="p-2 text-gray-300">{task.user || '-'}</td>
+                                                                                    <td className="p-2">
+                                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                            task.status === 'OK' ? 'bg-green-500/20 text-green-400' :
+                                                                                            task.status && task.status.includes('ERROR') ? 'bg-red-500/20 text-red-400' :
+                                                                                            task.exitstatus === 'OK' ? 'bg-green-500/20 text-green-400' :
+                                                                                            !task.endtime ? 'bg-yellow-500/20 text-yellow-400' :
+                                                                                            'bg-gray-500/20 text-gray-400'
+                                                                                        }`}>
+                                                                                            {task.status || task.exitstatus || (task.endtime ? 'completed' : 'running')}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td className="p-2 text-gray-400 font-mono text-xs">{task.node || vm.node}</td>
+                                                                                </tr>
+                                                                            ))}
+                                                                        </tbody>
+                                                                    </table>
+                                                                </div>
+                                                            ) : (crFail.history || {}).tasks != null && isCorpRedesigned ? null : (
+                                                                <div className="text-center py-8 text-gray-500">
+                                                                    <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                                    <p>No Proxmox tasks found for this {isQemu ? 'VM' : 'Container'}</p>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    {/* PegaProx Actions */}
+                                                    {historySubTab === 'pegaprox' && (
+                                                        <div className="space-y-2">
+                                                            <h4 className="text-sm font-medium text-gray-400 mb-2">PegaProx Actions for {isQemu ? 'VM' : 'CT'} {vm.vmid}</h4>
+                                                            {vmPegaproxActions && vmPegaproxActions.length > 0 ? (
+                                                                <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                                                                    <table className="w-full text-sm">
+                                                                        <thead className="sticky top-0 bg-proxmox-dark">
+                                                                            <tr className="text-left text-gray-400">
+                                                                                <th className="p-2">Time</th>
+                                                                                <th className="p-2">Action</th>
+                                                                                <th className="p-2">User</th>
+                                                                                <th className="p-2">Details</th>
+                                                                            </tr>
+                                                                        </thead>
+                                                                        <tbody>
+                                                                            {vmPegaproxActions.map((action, idx) => (
+                                                                                <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                    <td className="p-2 text-gray-300 whitespace-nowrap">
+                                                                                        {action.timestamp ? new Date(action.timestamp).toLocaleString() : '-'}
+                                                                                    </td>
+                                                                                    <td className="p-2">
+                                                                                        <span className="px-2 py-0.5 bg-proxmox-orange/20 text-proxmox-orange rounded text-xs font-mono">
+                                                                                            {action.action || '-'}
+                                                                                        </span>
+                                                                                    </td>
+                                                                                    <td className="p-2 text-gray-300 font-medium">{action.user || '-'}</td>
+                                                                                    <td className="p-2 text-gray-400 text-xs max-w-xs truncate" title={action.details || ''}>
+                                                                                        {action.details || '-'}
+                                                                                    </td>
+                                                                                </tr>
+                                                                            ))}
+                                                                        </tbody>
+                                                                    </table>
+                                                                </div>
+                                                            ) : (crFail.history || {}).audit != null && isCorpRedesigned ? null : (
+                                                                <div className="text-center py-8 text-gray-500">
+                                                                    <Icons.List className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                                                                    <p>No PegaProx actions found for this {isQemu ? 'VM' : 'Container'}</p>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'firewall' && (
+                                        <div className="space-y-6">
+                                            {fwLoading ? (
+                                                <div className="flex items-center justify-center py-12">
+                                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    <CrVcTabFail id="firewall" what={t('firewall')} parts={crFail.firewall} onRetry={fetchFirewallData} />
+                                                    {/* Sub-tabs for firewall sections */}
+                                                    <div className="flex gap-1 border-b border-proxmox-border pb-2">
+                                                        {['rules', 'options', 'aliases', 'ipsets', 'log'].map(st => (
+                                                            <button
+                                                                key={st}
+                                                                onClick={() => { setFwSubTab(st); if (st === 'log') fetchFwLog(); }}
+                                                                className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                    fwSubTab === st
+                                                                        ? 'bg-proxmox-orange text-white'
+                                                                        : 'text-gray-400 hover:text-white hover:bg-proxmox-dark'
+                                                                }`}
+                                                            >
+                                                                {st === 'rules' ? t('firewallRules') || 'Rules' :
+                                                                 st === 'options' ? t('firewallOptions') || 'Options' :
+                                                                 st === 'aliases' ? t('aliases') || 'Aliases' :
+                                                                 st === 'ipsets' ? 'IP Sets' :
+                                                                 t('log') || 'Log'}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+
+                                                    {/* Rules Sub-Tab */}
+                                                    {fwSubTab === 'rules' && (
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                            <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                                                <h3 className="font-semibold">{t('firewallRules') || 'Firewall Rules'}</h3>
+                                                                <button
+                                                                    onClick={() => setShowAddFwRule(true)}
+                                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                                >
+                                                                    <Icons.Plus /> {t('add')}
+                                                                </button>
+                                                            </div>
+                                                            <div className="overflow-x-auto">
+                                                                <table className="w-full">
+                                                                    <thead className="bg-proxmox-dark">
+                                                                        <tr>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">#</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('type')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('action')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">Macro</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('source')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">Dest</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">Proto</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">Port</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('enabled')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('comment')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400"></th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {(!fwRules || fwRules.length === 0) ? (
+                                                                            <tr><td colSpan="11" className="p-8 text-center text-gray-500">{(crFail.firewall || {}).rules != null && isCorpRedesigned ? t('crVmNotRead') : (t('noFirewallRules') || 'No firewall rules configured')}</td></tr>
+                                                                        ) : (Array.isArray(fwRules) ? fwRules : []).map((rule, idx) => (
+                                                                            <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                <td className="p-3 text-gray-400">{rule.pos}</td>
+                                                                                <td className="p-3">
+                                                                                    <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                        rule.type === 'in' ? 'bg-blue-500/20 text-blue-400' :
+                                                                                        rule.type === 'out' ? 'bg-purple-500/20 text-purple-400' :
+                                                                                        'bg-yellow-500/20 text-yellow-400'
+                                                                                    }`}>
+                                                                                        {(rule.type || 'in').toUpperCase()}
+                                                                                    </span>
+                                                                                </td>
+                                                                                <td className="p-3">
+                                                                                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                                                                        rule.action === 'ACCEPT' ? 'bg-green-500/20 text-green-400' :
+                                                                                        rule.action === 'DROP' ? 'bg-red-500/20 text-red-400' :
+                                                                                        'bg-yellow-500/20 text-yellow-400'
+                                                                                    }`}>
+                                                                                        {rule.action}
+                                                                                    </span>
+                                                                                </td>
+                                                                                <td className="p-3 text-gray-300">{rule.macro || '-'}</td>
+                                                                                <td className="p-3 font-mono text-xs text-gray-300">{rule.source || '-'}</td>
+                                                                                <td className="p-3 font-mono text-xs text-gray-300">{rule.dest || '-'}</td>
+                                                                                <td className="p-3 text-gray-300">{rule.proto || '-'}</td>
+                                                                                <td className="p-3 font-mono text-xs text-gray-300">{rule.dport || '-'}</td>
+                                                                                <td className="p-3">
+                                                                                    <button
+                                                                                        onClick={async () => {
+                                                                                            try {
+                                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/rules/${rule.pos}`, {
+                                                                                                    method: 'PUT',
+                                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                                    body: JSON.stringify({ enable: rule.enable ? 0 : 1 })
+                                                                                                });
+                                                                                                if (res?.ok) {
+                                                                                                    setFwRules(prev => prev.map(r =>
+                                                                                                        r.pos === rule.pos ? { ...r, enable: rule.enable ? 0 : 1 } : r
+                                                                                                    ));
+                                                                                                } else {
+                                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                                    addToast(err.error || `Failed to toggle rule (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                }
+                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                        }}
+                                                                                        className={`w-8 h-5 rounded-full transition-colors ${rule.enable ? 'bg-green-500' : 'bg-gray-600'}`}
+                                                                                    >
+                                                                                        <div className={`w-4 h-4 rounded-full bg-white transition-transform ${rule.enable ? 'translate-x-3.5' : 'translate-x-0.5'}`}></div>
+                                                                                    </button>
+                                                                                </td>
+                                                                                <td className="p-3 text-gray-500 text-xs max-w-32 truncate">{rule.comment || ''}</td>
+                                                                                <td className="p-3">
+                                                                                    <button
+                                                                                        onClick={async () => {
+                                                                                            if (!confirm(t('confirmDeleteRule') || 'Delete this firewall rule?')) return;
+                                                                                            try {
+                                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/rules/${rule.pos}`, { method: 'DELETE' });
+                                                                                                if (res?.ok) {
+                                                                                                    fetchFirewallData();
+                                                                                                } else {
+                                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                }
+                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                        }}
+                                                                                        className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                                                    >
+                                                                                        <Icons.Trash />
+                                                                                    </button>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Options Sub-Tab */}
+                                                    {fwSubTab === 'options' && (
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                                            <h3 className="font-semibold flex items-center gap-2 mb-4">
+                                                                <Icons.Shield />
+                                                                {t('firewallOptions') || 'Firewall Options'}
+                                                            </h3>
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-2">{t('fwEnable') || 'Firewall'}</div>
+                                                                    <button
+                                                                        disabled={(crFail.firewall || {}).options != null && isCorpRedesigned}
+                                                                        data-cr-vc-fw-switch={!isCorpRedesigned ? undefined : (crFail.firewall || {}).options != null ? 'unread' : fwOptions.enable ? 'on' : 'off'}
+                                                                        onClick={async () => {
+                                                                            const newVal = fwOptions.enable ? 0 : 1;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ enable: newVal })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, enable: newVal }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                                                                            fwOptions.enable
+                                                                                ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                                                                                : 'bg-red-500/20 text-red-400 hover:bg-red-500/30'
+                                                                        }`}
+                                                                    >
+                                                                        {(crFail.firewall || {}).options != null && isCorpRedesigned ? t('crVmNotRead') : fwOptions.enable ? t('enabled') || 'Enabled' : t('disabled') || 'Disabled'}
+                                                                    </button>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">Policy In</div>
+                                                                    <select
+                                                                        value={fwOptions.policy_in || 'DROP'}
+                                                                        onChange={async (e) => {
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ policy_in: e.target.value })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, policy_in: e.target.value }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
+                                                                    >
+                                                                        <option value="ACCEPT">ACCEPT</option>
+                                                                        <option value="DROP">DROP</option>
+                                                                        <option value="REJECT">REJECT</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">Policy Out</div>
+                                                                    <select
+                                                                        value={fwOptions.policy_out || 'ACCEPT'}
+                                                                        onChange={async (e) => {
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ policy_out: e.target.value })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, policy_out: e.target.value }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
+                                                                    >
+                                                                        <option value="ACCEPT">ACCEPT</option>
+                                                                        <option value="DROP">DROP</option>
+                                                                        <option value="REJECT">REJECT</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwDhcp') || 'DHCP'}</div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            const newVal = fwOptions.dhcp ? 0 : 1;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ dhcp: newVal })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, dhcp: newVal }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                            fwOptions.dhcp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
+                                                                        }`}
+                                                                    >
+                                                                        {fwOptions.dhcp ? 'On' : 'Off'}
+                                                                    </button>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwNdp') || 'NDP'}</div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            const newVal = fwOptions.ndp ? 0 : 1;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ ndp: newVal })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, ndp: newVal }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                            fwOptions.ndp ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
+                                                                        }`}
+                                                                    >
+                                                                        {fwOptions.ndp ? 'On' : 'Off'}
+                                                                    </button>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwRadv') || 'Router Adv.'}</div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            const newVal = fwOptions.radv ? 0 : 1;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ radv: newVal })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, radv: newVal }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                            fwOptions.radv ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
+                                                                        }`}
+                                                                    >
+                                                                        {fwOptions.radv ? 'On' : 'Off'}
+                                                                    </button>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwMacFilter') || 'MAC Filter'}</div>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            const newVal = fwOptions.macfilter ? 0 : 1;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ macfilter: newVal })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, macfilter: newVal }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                            fwOptions.macfilter ? 'bg-green-500/20 text-green-400' : 'bg-gray-600/30 text-gray-400'
+                                                                        }`}
+                                                                    >
+                                                                        {fwOptions.macfilter ? 'On' : 'Off'}
+                                                                    </button>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevel') || 'Log Level In'}</div>
+                                                                    <select
+                                                                        value={fwOptions.log_level_in || 'nolog'}
+                                                                        onChange={async (e) => {
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ log_level_in: e.target.value })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, log_level_in: e.target.value }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
+                                                                    >
+                                                                        <option value="nolog">No Log</option>
+                                                                        <option value="emerg">Emergency</option>
+                                                                        <option value="alert">Alert</option>
+                                                                        <option value="crit">Critical</option>
+                                                                        <option value="err">Error</option>
+                                                                        <option value="warning">Warning</option>
+                                                                        <option value="notice">Notice</option>
+                                                                        <option value="info">Info</option>
+                                                                        <option value="debug">Debug</option>
+                                                                    </select>
+                                                                </div>
+                                                                <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                    <div className="text-sm text-gray-400 mb-1">{t('fwLogLevelOut') || 'Log Level Out'}</div>
+                                                                    <select
+                                                                        value={fwOptions.log_level_out || 'nolog'}
+                                                                        onChange={async (e) => {
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/options`, {
+                                                                                    method: 'PUT',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify({ log_level_out: e.target.value })
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    setFwOptions(prev => ({ ...prev, log_level_out: e.target.value }));
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to update firewall option (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="w-full bg-proxmox-darker border border-proxmox-border rounded-lg p-2 text-white"
+                                                                    >
+                                                                        <option value="nolog">No Log</option>
+                                                                        <option value="emerg">Emergency</option>
+                                                                        <option value="alert">Alert</option>
+                                                                        <option value="crit">Critical</option>
+                                                                        <option value="err">Error</option>
+                                                                        <option value="warning">Warning</option>
+                                                                        <option value="notice">Notice</option>
+                                                                        <option value="info">Info</option>
+                                                                        <option value="debug">Debug</option>
+                                                                    </select>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Aliases Sub-Tab */}
+                                                    {fwSubTab === 'aliases' && (
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                            <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                                                <h3 className="font-semibold">{t('aliases') || 'Aliases'}</h3>
+                                                                <button
+                                                                    onClick={() => setShowAddFwAlias(true)}
+                                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                                >
+                                                                    <Icons.Plus /> {t('add')}
+                                                                </button>
+                                                            </div>
+                                                            <div className="overflow-x-auto">
+                                                                <table className="w-full">
+                                                                    <thead className="bg-proxmox-dark">
+                                                                        <tr>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">CIDR</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400">{t('comment')}</th>
+                                                                            <th className="text-left p-3 text-sm text-gray-400"></th>
+                                                                        </tr>
+                                                                    </thead>
+                                                                    <tbody>
+                                                                        {(!fwAliases || fwAliases.length === 0) ? (
+                                                                            <tr><td colSpan="4" className="p-8 text-center text-gray-500">{t('noAliases') || 'No aliases configured'}</td></tr>
+                                                                        ) : fwAliases.map((alias, idx) => (
+                                                                            <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                                <td className="p-3 font-medium">{alias.name}</td>
+                                                                                <td className="p-3 font-mono text-sm text-gray-300">{alias.cidr}</td>
+                                                                                <td className="p-3 text-gray-500 text-sm">{alias.comment || ''}</td>
+                                                                                <td className="p-3">
+                                                                                    <button
+                                                                                        onClick={async () => {
+                                                                                            if (!confirm(`Delete alias "${alias.name}"?`)) return;
+                                                                                            try {
+                                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/aliases/${alias.name}`, { method: 'DELETE' });
+                                                                                                if (res?.ok) {
+                                                                                                    fetchFirewallData();
+                                                                                                } else {
+                                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                                    addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                }
+                                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                                        }}
+                                                                                        className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                                                    >
+                                                                                        <Icons.Trash />
+                                                                                    </button>
+                                                                                </td>
+                                                                            </tr>
+                                                                        ))}
+                                                                    </tbody>
+                                                                </table>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* IP Sets Sub-Tab */}
+                                                    {fwSubTab === 'ipsets' && (
+                                                        <div className="space-y-4">
+                                                            <div className="flex justify-between items-center">
+                                                                <h3 className="font-semibold">IP Sets</h3>
+                                                                <button
+                                                                    onClick={() => setShowAddFwIpset(true)}
+                                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm text-white transition-colors"
+                                                                >
+                                                                    <Icons.Plus /> {t('add')}
+                                                                </button>
+                                                            </div>
+                                                            {(!fwIpsets || fwIpsets.length === 0) ? (
+                                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center text-gray-500">
+                                                                    {t('noIpsets') || 'No IP sets configured'}
+                                                                </div>
+                                                            ) : fwIpsets.map((ipset, idx) => (
+                                                                <div key={idx} className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                                    <div
+                                                                        className="p-4 flex justify-between items-center cursor-pointer hover:bg-proxmox-dark/50"
+                                                                        onClick={() => setExpandedIpset(expandedIpset === ipset.name ? null : ipset.name)}
+                                                                    >
+                                                                        <div className="flex items-center gap-3">
+                                                                            <Icons.ChevronRight className={`w-4 h-4 transition-transform ${expandedIpset === ipset.name ? 'rotate-90' : ''}`} />
+                                                                            <span className="font-medium">{ipset.name}</span>
+                                                                            {ipset.comment && <span className="text-gray-500 text-sm">- {ipset.comment}</span>}
+                                                                        </div>
+                                                                        <button
+                                                                            onClick={async (e) => {
+                                                                                e.stopPropagation();
+                                                                                if (!confirm(`Delete IP set "${ipset.name}"?`)) return;
+                                                                                try {
+                                                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset/${ipset.name}`, { method: 'DELETE' });
+                                                                                    if (res?.ok) {
+                                                                                        fetchFirewallData();
+                                                                                    } else {
+                                                                                        const err = await res.json().catch(() => ({}));
+                                                                                        addToast(err.error || `Operation failed (HTTP ${res?.status || '?'})`, 'error');
+                                                                                    }
+                                                                                } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                            }}
+                                                                            className="p-1.5 hover:bg-red-500/20 rounded text-red-400 transition-colors"
+                                                                        >
+                                                                            <Icons.Trash />
+                                                                        </button>
+                                                                    </div>
+                                                                    {expandedIpset === ipset.name && (
+                                                                        <div className="border-t border-proxmox-border">
+                                                                            <IpsetEntries
+                                                                                clusterId={clusterId}
+                                                                                vm={vm}
+                                                                                ipsetName={ipset.name}
+                                                                                authFetch={authFetch}
+                                                                                onRefresh={fetchFirewallData}
+                                                                                t={t}
+                                                                                addToast={addToast}
+                                                                            />
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Log Sub-Tab */}
+                                                    {fwSubTab === 'log' && (
+                                                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                            <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                                                <h3 className="font-semibold">{t('firewallLog') || 'Firewall Log'}</h3>
+                                                                <button
+                                                                    onClick={fetchFwLog}
+                                                                    className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg text-sm transition-colors"
+                                                                >
+                                                                    <Icons.RefreshCw className="w-4 h-4" /> {t('refresh') || 'Refresh'}
+                                                                </button>
+                                                            </div>
+                                                            <div className="p-4 max-h-96 overflow-y-auto">
+                                                                {(!fwLog || fwLog.length === 0) ? (
+                                                                    <div className="text-center text-gray-500 py-8">{t('noLogEntries') || 'No log entries'}</div>
+                                                                ) : (
+                                                                    <div className="space-y-1 font-mono text-xs">
+                                                                        {(Array.isArray(fwLog) ? fwLog : []).map((entry, idx) => (
+                                                                            <div key={idx} className="p-2 bg-proxmox-dark rounded text-gray-300 whitespace-pre-wrap break-all">
+                                                                                {typeof entry === 'string' ? entry : (entry.t || entry.n || JSON.stringify(entry))}
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Add Rule Modal */}
+                                                    {showAddFwRule && (
+                                                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwRule(false)}>
+                                                            <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                                <div className="p-4 border-b border-proxmox-border">
+                                                                    <h3 className="font-semibold">{t('addFirewallRule') || 'Add Firewall Rule'}</h3>
+                                                                </div>
+                                                                <div className="p-4 space-y-4">
+                                                                    <div className="grid grid-cols-2 gap-4">
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Direction</label>
+                                                                            <select
+                                                                                value={newFwRule.type || 'in'}
+                                                                                onChange={e => setNewFwRule(p => ({...p, type: e.target.value}))}
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            >
+                                                                                <option value="in">IN</option>
+                                                                                <option value="out">OUT</option>
+                                                                                <option value="group">GROUP</option>
+                                                                            </select>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Action</label>
+                                                                            <select
+                                                                                value={newFwRule.action || 'ACCEPT'}
+                                                                                onChange={e => setNewFwRule(p => ({...p, action: e.target.value}))}
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            >
+                                                                                <option value="ACCEPT">ACCEPT</option>
+                                                                                <option value="DROP">DROP</option>
+                                                                                <option value="REJECT">REJECT</option>
+                                                                            </select>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="grid grid-cols-2 gap-4">
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Macro</label>
+                                                                            <select
+                                                                                value={newFwRule.macro || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, macro: e.target.value || undefined}))}
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            >
+                                                                                <option value="">None</option>
+                                                                                {(() => {
+                                                                                    const dynamicMacros = (Array.isArray(fwRefs) ? fwRefs : []).filter(r => r.type === 'macro').map(r => r.name);
+                                                                                    const allMacros = dynamicMacros.length > 0 ? dynamicMacros : [
+                                                                                        'Amanda','Auth','BGP','BitTorrent','Ceph','CephMon','CephOSD','CephMGR','CephMDS',
+                                                                                        'DHCPfwd','DHCPv6','DNS','Dropbox','FTP','GNUnet','GRE','HKP',
+                                                                                        'HTTP','HTTPS','ICMP','ICMPv6','IMAP','IMAPS','IPsec-ah','IPsec-esp',
+                                                                                        'IRC','Jabber','JetDirect','L2TP','LDAP','LDAPS','MDNS','MSSQL',
+                                                                                        'MySQL','NFS','NTP','OSPF','OpenVPN','PCA','PMG','POP3','POP3S',
+                                                                                        'PPtP','Ping','PostgreSQL','Printer','RDP','RIP','RNDC',
+                                                                                        'Razor','Rsh','SANE','SMB','SMBv2','SMTP','SMTPS','SNMP','SPAMD',
+                                                                                        'SSH','SVN','SixXS','Squid','Submission','Syslog','TFTP','Telnet',
+                                                                                        'Tinc','Traceroute','VNC','VXLAN','Webmin','NFS','Razor'
+                                                                                    ];
+                                                                                    return allMacros.sort().map(name => (
+                                                                                        <option key={name} value={name}>{name}</option>
+                                                                                    ));
+                                                                                })()}
+                                                                            </select>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Interface</label>
+                                                                            <select
+                                                                                value={newFwRule.iface || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, iface: e.target.value}))}
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            >
+                                                                                <option value="">Any</option>
+                                                                                {(config?.networks || []).map(n => (
+                                                                                    <option key={n.id} value={n.id}>{n.id}{n.bridge ? ` (${n.bridge})` : ''}</option>
+                                                                                ))}
+                                                                                {(!config?.networks || config.networks.length === 0) && (
+                                                                                    <>
+                                                                                        <option value="net0">net0</option>
+                                                                                        <option value="net1">net1</option>
+                                                                                    </>
+                                                                                )}
+                                                                            </select>
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="grid grid-cols-2 gap-4">
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Protocol</label>
+                                                                            <select
+                                                                                value={newFwRule.proto || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, proto: e.target.value}))}
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            >
+                                                                                <option value="">Any</option>
+                                                                                <option value="tcp">TCP</option>
+                                                                                <option value="udp">UDP</option>
+                                                                                <option value="icmp">ICMP</option>
+                                                                                <option value="sctp">SCTP</option>
+                                                                            </select>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Dest. Port</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={newFwRule.dport || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, dport: e.target.value}))}
+                                                                                placeholder="e.g. 22, 80, 443"
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="grid grid-cols-2 gap-4">
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Source</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={newFwRule.source || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, source: e.target.value}))}
+                                                                                placeholder="10.0.0.0/24 or 10.0.0.1"
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-sm text-gray-400 mb-1 block">Destination</label>
+                                                                            <input
+                                                                                type="text"
+                                                                                value={newFwRule.dest || ''}
+                                                                                onChange={e => setNewFwRule(p => ({...p, dest: e.target.value}))}
+                                                                                placeholder="192.168.1.0/24 or 192.168.1.1"
+                                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">Comment</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwRule.comment || ''}
+                                                                            onChange={e => setNewFwRule(p => ({...p, comment: e.target.value}))}
+                                                                            placeholder="Optional description"
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                    <label className="flex items-center gap-2">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={newFwRule.enable !== 0}
+                                                                            onChange={e => setNewFwRule(p => ({...p, enable: e.target.checked ? 1 : 0}))}
+                                                                            className="w-4 h-4 rounded"
+                                                                        />
+                                                                        <span>Enable rule</span>
+                                                                    </label>
+                                                                </div>
+                                                                <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                    <button
+                                                                        onClick={() => setShowAddFwRule(false)}
+                                                                        className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors"
+                                                                    >
+                                                                        {t('cancel')}
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            try {
+                                                                                const ruleData = { ...newFwRule };
+                                                                                Object.keys(ruleData).forEach(k => { if (!ruleData[k] && ruleData[k] !== 0) delete ruleData[k]; });
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/rules`, {
+                                                                                    method: 'POST',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify(ruleData)
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    fetchFirewallData();
+                                                                                    setShowAddFwRule(false);
+                                                                                    setNewFwRule({ type: 'in', action: 'ACCEPT', enable: 1 });
+                                                                                    if (addToast) addToast(t('firewallRuleCreated') || 'Firewall rule created', 'success');
+                                                                                } else {
+                                                                                    const err = await res?.json().catch(() => ({}));
+                                                                                    let errMsg = 'Failed to create rule';
+                                                                                    if (err?.error && typeof err.error === 'object') {
+                                                                                        errMsg = Object.entries(err.error).map(([k,v]) => `${k}: ${String(v).trim()}`).join('; ');
+                                                                                    } else if (err?.error) {
+                                                                                        errMsg = String(err.error);
+                                                                                    } else if (err?.message) {
+                                                                                        errMsg = String(err.message);
+                                                                                    }
+                                                                                    if (addToast) addToast(errMsg, 'error');
+                                                                                }
+                                                                            } catch (e) { if (addToast) addToast('Connection error', 'error'); }
+                                                                        }}
+                                                                        className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                                    >
+                                                                        {t('add')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Add Alias Modal */}
+                                                    {showAddFwAlias && (
+                                                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwAlias(false)}>
+                                                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                                <div className="p-4 border-b border-proxmox-border">
+                                                                    <h3 className="font-semibold">{t('fwAddAlias') || 'Add Alias'}</h3>
+                                                                </div>
+                                                                <div className="p-4 space-y-4">
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">{t('name')}</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwAlias.name}
+                                                                            onChange={e => setNewFwAlias(p => ({...p, name: e.target.value}))}
+                                                                            placeholder="e.g. myserver"
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">CIDR</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwAlias.cidr}
+                                                                            onChange={e => setNewFwAlias(p => ({...p, cidr: e.target.value}))}
+                                                                            placeholder="e.g. 10.0.0.1/32"
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">{t('comment')}</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwAlias.comment}
+                                                                            onChange={e => setNewFwAlias(p => ({...p, comment: e.target.value}))}
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                </div>
+                                                                <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                    <button onClick={() => setShowAddFwAlias(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            if (!newFwAlias.name || !newFwAlias.cidr) return;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/aliases`, {
+                                                                                    method: 'POST',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify(newFwAlias)
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    fetchFirewallData();
+                                                                                    setShowAddFwAlias(false);
+                                                                                    setNewFwAlias({ name: '', cidr: '', comment: '' });
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to add alias (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                                    >
+                                                                        {t('add')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Add IP Set Modal */}
+                                                    {showAddFwIpset && (
+                                                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 modal-backdrop" onClick={() => setShowAddFwIpset(false)}>
+                                                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                                                                <div className="p-4 border-b border-proxmox-border">
+                                                                    <h3 className="font-semibold">{t('fwAddIpset') || 'Add IP Set'}</h3>
+                                                                </div>
+                                                                <div className="p-4 space-y-4">
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">{t('name')}</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwIpset.name}
+                                                                            onChange={e => setNewFwIpset(p => ({...p, name: e.target.value}))}
+                                                                            placeholder="e.g. allowed-hosts"
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="text-sm text-gray-400 mb-1 block">{t('comment')}</label>
+                                                                        <input
+                                                                            type="text"
+                                                                            value={newFwIpset.comment}
+                                                                            onChange={e => setNewFwIpset(p => ({...p, comment: e.target.value}))}
+                                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded-lg p-2"
+                                                                        />
+                                                                    </div>
+                                                                </div>
+                                                                <div className="p-4 border-t border-proxmox-border flex gap-3 justify-end">
+                                                                    <button onClick={() => setShowAddFwIpset(false)} className="px-4 py-2 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover transition-colors">{t('cancel')}</button>
+                                                                    <button
+                                                                        onClick={async () => {
+                                                                            if (!newFwIpset.name) return;
+                                                                            try {
+                                                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/firewall/ipset`, {
+                                                                                    method: 'POST',
+                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                    body: JSON.stringify(newFwIpset)
+                                                                                });
+                                                                                if (res?.ok) {
+                                                                                    fetchFirewallData();
+                                                                                    setShowAddFwIpset(false);
+                                                                                    setNewFwIpset({ name: '', comment: '' });
+                                                                                } else {
+                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                    addToast(err.error || `Failed to add IP set (HTTP ${res?.status || '?'})`, 'error');
+                                                                                }
+                                                                            } catch (e) { addToast(`Network error: ${e.message || e}`, 'error'); }
+                                                                        }}
+                                                                        className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors"
+                                                                    >
+                                                                        {t('add')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* Options Tab */}
+                                    {activeTab === 'options' && (crVc ? (
+                                        <CrVcOptions t={t} config={config} changes={changes} crv={crv} onSet={crVcSet} onRevert={crVcRevert}
+                                            bootModel={vcBootModel} smbiosCard={renderSmbiosCard()} onGoto={setActiveTab} />
+                                    ) : (
+                                        <div className="space-y-6">
+                                            <div className="space-y-4">
+                                                {/* General Options Card */}
+                                                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border space-y-3">
+                                                    <ConfigCheckboxField
+                                                        label={t('startOnBoot')}
+                                                        checked={getValue('options', 'onboot') == 1}
+                                                        onChange={(v) => handleChange('options', 'onboot', v)}
+                                                        t={t}
+                                                    />
+                                                    <ConfigCheckboxField
+                                                        label={t('protection')}
+                                                        checked={getValue('options', 'protection') == 1}
+                                                        onChange={(v) => handleChange('options', 'protection', v)}
+                                                        t={t}
+                                                    />
+                                                </div>
+                                                {isQemu && (
+                                                    <>
+                                                        {/* QEMU Guest Agent Section */}
+                                                        <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                            <div className="flex items-center justify-between mb-2">
+                                                                <label className="flex items-center gap-2">
+                                                                    <input 
+                                                                        type="checkbox" 
+                                                                        checked={getValue('options', 'agent')?.toString().includes('1')}
+                                                                        onChange={(e) => {
+                                                                            const current = getValue('options', 'agent') || '';
+                                                                            if (e.target.checked) {
+                                                                                handleChange('options', 'agent', '1');
+                                                                            } else {
+                                                                                handleChange('options', 'agent', '0');
+                                                                            }
+                                                                        }}
+                                                                        className="w-4 h-4 rounded"
+                                                                    />
+                                                                    <span className="text-sm font-medium text-gray-300">{t('qemuGuestAgent')}</span>
+                                                                    <CrVcRestartBadge className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded font-medium">{t('needsRestart')}</CrVcRestartBadge>
+                                                                </label>
+                                                            </div>
+                                                            <p className="text-xs text-gray-500 mb-3">{t('qemuGuestAgentHint')}</p>
+                                                            
+                                                            {getValue('options', 'agent')?.toString().includes('1') && (
+                                                                <div className="mt-3 pt-3 border-t border-proxmox-border space-y-2">
+                                                                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                                                                        <input 
+                                                                            type="checkbox"
+                                                                            checked={getValue('options', 'agent')?.toString().includes('fstrim_cloned_disks=1')}
+                                                                            onChange={(e) => {
+                                                                                let agent = getValue('options', 'agent') || '1';
+                                                                                if (e.target.checked) {
+                                                                                    agent = agent.includes(',') ? agent + ',fstrim_cloned_disks=1' : '1,fstrim_cloned_disks=1';
+                                                                                } else {
+                                                                                    agent = agent.replace(/,?fstrim_cloned_disks=1/, '').replace(/^,/, '');
+                                                                                }
+                                                                                handleChange('options', 'agent', agent || '1');
+                                                                            }}
+                                                                            className="w-4 h-4 rounded"
+                                                                        />
+                                                                        {t('fstrim')}
+                                                                    </label>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        
+                                                        {/* Hotplug options */}
+                                                        <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                            <label className="text-sm font-medium text-gray-300 block mb-2">{t('hotplug')}</label>
+                                                            <p className="text-xs text-gray-500 mb-3">{t('hotplugHint')}</p>
+                                                            <div className="flex flex-wrap gap-4">
+                                                                {[
+                                                                    { key: 'disk', label: t('hotplugDisk') },
+                                                                    { key: 'network', label: t('hotplugNetwork') },
+                                                                    { key: 'usb', label: t('hotplugUsb') },
+                                                                    { key: 'memory', label: t('hotplugMemory') },
+                                                                    { key: 'cpu', label: t('hotplugCpu') },
+                                                                ].map(hp => {
+                                                                    // MK Nov 2026 - PVE reads '1' as its default network,disk,usb, not as every feature
+                                                                    // (QemuServer.pm parse_hotplug_features); memory and cpu stay off
+                                                                    let hotplugValue = getValue('options', 'hotplug') || 'disk,network,usb';
+                                                                    if (String(hotplugValue) === '1') hotplugValue = 'disk,network,usb';
+                                                                    const isEnabled = String(hotplugValue).split(',').includes(hp.key);
+                                                                    return (
+                                                                        <label key={hp.key} className="flex items-center gap-2 text-sm text-gray-400">
+                                                                            <input 
+                                                                                type="checkbox"
+                                                                                checked={isEnabled}
+                                                                                onChange={(e) => {
+                                                                                    let current = String(getValue('options', 'hotplug') || 'disk,network,usb');
+                                                                                    if (current === '1') current = 'disk,network,usb';
+                                                                                    if (current === '0') current = '';
+                                                                                    
+                                                                                    let parts = current.split(',').filter(p => p);
+                                                                                    if (e.target.checked && !parts.includes(hp.key)) {
+                                                                                        parts.push(hp.key);
+                                                                                    } else if (!e.target.checked) {
+                                                                                        parts = parts.filter(p => p !== hp.key);
+                                                                                    }
+                                                                                    handleChange('options', 'hotplug', parts.join(',') || '0');
+                                                                                }}
+                                                                                className="w-4 h-4 rounded"
+                                                                            />
+                                                                            {hp.label}
+                                                                        </label>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        {/* Virtualization Options Card */}
+                                                        <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border space-y-3">
+                                                            <ConfigCheckboxField
+                                                                label={t('kvmVirtualization')}
+                                                                checked={getValue('options', 'kvm') == 1}
+                                                                onChange={(v) => handleChange('options', 'kvm', v)}
+                                                                needsRestart={true}
+                                                                t={t}
+                                                            />
+                                                            <ConfigCheckboxField
+                                                                label="ACPI"
+                                                                checked={getValue('options', 'acpi') == 1}
+                                                                onChange={(v) => handleChange('options', 'acpi', v)}
+                                                                needsRestart={true}
+                                                                t={t}
+                                                            />
+                                                        </div>
+                                                    </>
+                                                )}
+                                                {!isQemu && (
+                                                    <>
+                                                        <ConfigCheckboxField
+                                                            label={t('unprivilegedContainer')}
+                                                            checked={getValue('options', 'unprivileged') == 1}
+                                                            onChange={(v) => handleChange('options', 'unprivileged', v)}
+                                                            disabled={true}
+                                                            needsRestart={true}
+                                                            t={t}
+                                                        />
+                                                        <LxcFeaturesCard vm={vm} clusterId={clusterId} authFetch={authFetch} addToast={addToast} t={t} haReadOnly={haReadOnly} />
+                                                    </>
+                                                )}
+                                            </div>
+                                            {isQemu && (
+                                                <div className="space-y-4">
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <ConfigInputField
+                                                            label={t('osType')}
+                                                            value={getValue('options', 'ostype')}
+                                                            onChange={(v) => handleChange('options', 'ostype', v)}
+                                                            options={[
+                                                                { value: 'l26', label: 'Linux 2.6+' },
+                                                                { value: 'l24', label: 'Linux 2.4' },
+                                                                { value: 'win11', label: 'Windows 11' },
+                                                                { value: 'win10', label: 'Windows 10' },
+                                                                { value: 'win8', label: 'Windows 8' },
+                                                                { value: 'win7', label: 'Windows 7' },
+                                                                { value: 'wxp', label: 'Windows XP' },
+                                                                { value: 'other', label: t('other') },
+                                                            ]}
+                                                        />
+                                                    </div>
+                                                    
+                                                    {/* NS: Boot Order UI - Dec 2025 */}
+                                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="flex items-center justify-between mb-3">
+                                                            <label className="text-sm font-medium text-gray-300">{t('bootOrder') || 'Boot Order'}</label>
+                                                            <span className="text-xs text-gray-500">{t('bootOrderHint') || 'Click to toggle, use arrows to reorder'}</span>
+                                                        </div>
+                                                        
+                                                        {/* Parse current boot order and available devices */}
+                                                        {(() => {
+                                                            const currentBoot = getValue('options', 'boot') || '';
+                                                            const bootdisk = getValue('options', 'bootdisk') || '';
+                                                            // LW Nov 2026 - parsed in vcBootModel, the redesign's Options tab reads the same
+                                                            const { bootDevices, sortedDevices } = vcBootModel(config, currentBoot, bootdisk);
+                                                            
+                                                            const toggleDevice = (device) => {
+                                                                const newOrder = bootDevices.includes(device)
+                                                                    ? bootDevices.filter(d => d !== device)
+                                                                    : [...bootDevices, device];
+                                                                handleChange('options', 'boot', newOrder.length > 0 ? 'order=' + newOrder.join(';') : '');
+                                                            };
+                                                            
+                                                            const moveDevice = (device, direction) => {
+                                                                const idx = bootDevices.indexOf(device);
+                                                                if (idx === -1) return;
+                                                                const newOrder = [...bootDevices];
+                                                                const newIdx = direction === 'up' ? idx - 1 : idx + 1;
+                                                                if (newIdx < 0 || newIdx >= newOrder.length) return;
+                                                                [newOrder[idx], newOrder[newIdx]] = [newOrder[newIdx], newOrder[idx]];
+                                                                handleChange('options', 'boot', 'order=' + newOrder.join(';'));
+                                                            };
+                                                            
+                                                            return (
+                                                                <div className="space-y-1.5">
+                                                                    {(() => {
+                                                                        let enabledCounter = 0;
+                                                                        return sortedDevices.map((device, idx) => {
+                                                                        const isEnabled = bootDevices.includes(device);
+                                                                        if (isEnabled) enabledCounter++;
+                                                                        const displayNum = enabledCounter;
+                                                                        const bootIdx = bootDevices.indexOf(device);
+                                                                        const isFirst = bootIdx === 0;
+                                                                        const isLast = bootIdx === bootDevices.length - 1;
+                                                                        
+                                                                        // NS: Determine device type icon + color
+                                                                        const isDisk = device.match(/^(scsi|virtio|ide|sata)\d+$/);
+                                                                        const isNet = device.match(/^net\d+$/);
+                                                                        const deviceRaw = config.raw ? config.raw[device] : undefined;
+                                                                        const isCdrom = device === 'ide2' || (deviceRaw && String(deviceRaw).includes('media=cdrom'));
+                                                                        const iconColor = isCdrom ? 'text-yellow-400' : isNet ? 'text-cyan-400' : isDisk ? 'text-blue-400' : 'text-gray-400';
+                                                                        const iconBg = isCdrom ? 'bg-yellow-500/10' : isNet ? 'bg-cyan-500/10' : isDisk ? 'bg-blue-500/10' : 'bg-gray-500/10';
+                                                                        
+                                                                        // Get device detail from config
+                                                                        const deviceDetail = deviceRaw ? String(deviceRaw).split(',')[0] : '';
+                                                                        
+                                                                        return (
+                                                                            <div 
+                                                                                key={device}
+                                                                                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all ${
+                                                                                    isEnabled 
+                                                                                        ? 'bg-gradient-to-r from-proxmox-orange/5 to-transparent border border-proxmox-orange/30' 
+                                                                                        : 'bg-proxmox-darker/50 border border-transparent hover:border-proxmox-border'
+                                                                                }`}
+                                                                            >
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    checked={isEnabled}
+                                                                                    onChange={() => toggleDevice(device)}
+                                                                                    className="w-4 h-4 rounded border-gray-600 text-proxmox-orange focus:ring-proxmox-orange shrink-0"
+                                                                                />
+                                                                                <span className={`w-6 text-center text-xs font-bold shrink-0 ${isEnabled ? 'text-proxmox-orange' : 'text-gray-600'}`}>
+                                                                                    {isEnabled ? `${displayNum}.` : '-'}
+                                                                                </span>
+                                                                                <div className={`p-1.5 rounded-md ${iconBg} shrink-0`}>
+                                                                                    {isCdrom ? <Icons.Disc className={`w-4 h-4 ${iconColor}`} /> 
+                                                                                     : isNet ? <Icons.Globe className={`w-4 h-4 ${iconColor}`} />
+                                                                                     : isDisk ? <Icons.HardDrive className={`w-4 h-4 ${iconColor}`} />
+                                                                                     : <Icons.Database className={`w-4 h-4 ${iconColor}`} />}
+                                                                                </div>
+                                                                                <div className="flex-1 min-w-0">
+                                                                                    <span className={`font-mono text-sm ${isEnabled ? 'text-white font-medium' : 'text-gray-500'}`}>
+                                                                                        {device}
+                                                                                    </span>
+                                                                                    {deviceDetail && (
+                                                                                        <span className="ml-2 text-xs text-gray-500 truncate">{deviceDetail.length > 40 ? deviceDetail.substring(0,40) + '...' : deviceDetail}</span>
+                                                                                    )}
+                                                                                </div>
+                                                                                {isEnabled && (
+                                                                                    <div className="flex items-center gap-0.5 shrink-0">
+                                                                                        <button
+                                                                                            onClick={() => moveDevice(device, 'up')}
+                                                                                            disabled={isFirst}
+                                                                                            className="p-1.5 rounded-md hover:bg-white/5 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
+                                                                                            title="Move up"
+                                                                                        >
+                                                                                            <Icons.ChevronUp className="w-4 h-4" />
+                                                                                        </button>
+                                                                                        <button
+                                                                                            onClick={() => moveDevice(device, 'down')}
+                                                                                            disabled={isLast}
+                                                                                            className="p-1.5 rounded-md hover:bg-white/5 disabled:opacity-20 disabled:cursor-not-allowed transition-colors"
+                                                                                            title="Move down"
+                                                                                        >
+                                                                                            <Icons.ChevronDown className="w-4 h-4" />
+                                                                                        </button>
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    });
+                                                                    })()}
+                                                                    {sortedDevices.length === 0 && (
+                                                                        <div className="text-center py-4 text-gray-500 text-sm">
+                                                                            {t('noBootDevices') || 'No boot devices found'}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            );
+                                                        })()}
+                                                    </div>
+                                                    
+                                                    {/* SMBIOS Configuration */}
+                                                    {renderSmbiosCard()}
+                                                </div>
+                                            )}
+                                            {!isQemu && (
+                                                <div className="grid grid-cols-2 gap-4">
+                                                    <ConfigInputField
+                                                        label="Nameserver"
+                                                        value={getValue('options', 'nameserver')}
+                                                        onChange={(v) => handleChange('options', 'nameserver', v)}
+                                                    />
+                                                    <ConfigInputField
+                                                        label="Search Domain"
+                                                        value={getValue('options', 'searchdomain')}
+                                                        onChange={(v) => handleChange('options', 'searchdomain', v)}
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                    {activeTab === 'options' && crVc && <CrVcOther t={t} config={config} />}
+                                </fieldset>
+                            ) : (
+                                <div className="text-center py-8 text-red-400">
+                                    Konfiguration konnte nicht geladen werden
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Footer - the redesign has its pending changes panel there */}
+                        {crVc && (
+                            <CrVcPanel t={t} crv={crv} changesCount={Object.keys(changes).length + Object.keys(crNets).length} saving={saving}
+                                readOnly={haReadOnly} onSave={crVcSave} onRevert={crVcRevert} />
+                        )}
+                        {!crVc && (isCloud ? (
+                        <div className="cloud-cfg-foot">
+                            <div className="cloud-cfg-band">
+                                {(() => {
+                                    const rows = crv.rows || [];
+                                    const nowN = rows.filter(x => x.cls === 'now').length;
+                                    const nextN = rows.filter(x => x.cls === 'restart' || x.cls === 'next').length;
+                                    const openN = rows.filter(x => x.cls === 'open' || x.cls === 'maybe').length;
+                                    const pendRows = (crv.pend && crv.pend.state === 'ok' ? crv.pend.rows : []).filter(p => p && p.pending);
+                                    if (!rows.length && !pendRows.length) return (
+                                        <div className="cloud-cfg-band-idle">
+                                            <span className="cloud-cell-muted">{cT('cloudCfgIdle', 'Current configuration loaded')}</span>
+                                            {cfgResult && cfgResult.phase === 'applied' && (
+                                                <span className="cloud-cfg-result is-applied">
+                                                    <span className="cloud-hc-badge is-healthy">{cT('cloudCfgApplied', 'APPLIED')}</span>
+                                                    {cfgResult.n} {cT('cloudCfgAppliedN', 'changes taken over')}
+                                                    {pendRows.length > 0 ? ` · ${pendRows.length} ${cT('cloudCfgPending', 'pending at next start')}` : ''}
+                                                </span>
+                                            )}
+                                            {cfgResult && cfgResult.phase === 'failed' && (
+                                                <span className="cloud-cfg-result is-failed">
+                                                    <span className="cloud-hc-badge is-critical">{cT('cloudCfgFailed', 'SAVE FAILED')}</span>
+                                                    {cfgResult.err || ''}
+                                                </span>
+                                            )}
+                                        </div>
+                                    );
+                                    return (<>
+                                        {externDirty && (
+                                            <div className="cloud-cfg-warn">{cT('cloudCfgExtern', 'The configuration changed underneath (another administrator?) — saving may overwrite foreign changes.')}</div>
+                                        )}
+                                        <button type="button" className="cloud-cfg-band-toggle" onClick={() => setCfgBandOpen(o => !o)}>
+                                            <span className="cloud-hc-badge is-warning">{rows.length} {cT('cloudCfgChanged', 'unsaved')}</span>
+                                            {nowN > 0 && <span className="cloud-hc-badge is-healthy">{nowN} {cT('cloudCfgNow', 'immediate')}</span>}
+                                            {nextN > 0 && <span className="cloud-hc-badge is-critical">{nextN} {cT('cloudCfgRestart', 'restart')}</span>}
+                                            {openN > 0 && <span className="cloud-hc-badge is-unknown">{openN} {cT('cloudCfgOpen', 'unclear')}</span>}
+                                            {pendRows.length > 0 && <span className="cloud-hc-badge is-na">{pendRows.length} {cT('cloudCfgPending', 'pending')}</span>}
+                                            <span className="cloud-cfg-band-chev">{cfgBandOpen ? '▾' : '▸'}</span>
+                                        </button>
+                                        {cfgBandOpen && (
+                                            <div className="cloud-cfg-band-list">
+                                                <div className="cloud-cfg-band-sec">{cT('cloudCfgUnsavedSec', 'Unsaved changes (local)')}</div>
+                                                {rows.map(x => (
+                                                    <div key={x.key} className="cloud-cfg-band-row">
+                                                        <span className="cloud-table-mono">{x.key}</span>
+                                                        <span className="cloud-cfg-band-diff">
+                                                            <span className="cloud-cell-muted">{x.old != null ? String(x.old).slice(0, 48) : '—'}</span>
+                                                            <span className="cloud-cfg-band-arrow">→</span>
+                                                            <span>{x.value != null ? String(x.value).slice(0, 48) : <em>({cT('cloudCfgRemoved', 'removed')})</em>}</span>
+                                                        </span>
+                                                        <span className={'cloud-hc-badge ' + (x.cls === 'now' ? 'is-healthy' : (x.cls === 'restart' || x.cls === 'next') ? 'is-critical' : 'is-unknown')}>
+                                                            {x.cls === 'now' ? (cT('cloudCfgNow', 'IMMEDIATE')) : (x.cls === 'restart' || x.cls === 'next') ? (cT('cloudCfgRestart', 'RESTART')) : (cT('cloudCfgOpen', 'UNCLEAR'))}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                                {pendRows.length > 0 && <div className="cloud-cfg-band-sec">{cT('cloudCfgPendingSec', 'Pending in Proxmox (applies at next start)')}</div>}
+                                                {pendRows.map(p => (
+                                                    <div key={'p-' + p.key} className="cloud-cfg-band-row">
+                                                        <span className="cloud-table-mono">{p.key}</span>
+                                                        <span className="cloud-cfg-band-diff"><span className="cloud-cell-muted">{cT('cloudCfgPendingHint', 'applied at next start')}</span></span>
+                                                        <span className="cloud-hc-badge is-na">{cT('cloudCfgPending', 'PENDING')}</span>
+                                                    </div>
+                                                ))}
+                                                <div className="cloud-cfg-band-legend cloud-cell-muted">
+                                                    {cT('cloudCfgNow', 'IMMEDIATE')} = {cT('cloudCfgLegNow', 'applies right away')} · {cT('cloudCfgRestart', 'RESTART')} = {cT('cloudCfgLegRestart', 'applies at the next start')} · {cT('cloudCfgPending', 'PENDING')} = {cT('cloudCfgLegPending', 'already queued by Proxmox')}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>);
+                                })()}
+                            </div>
+                            <div className="cloud-cfg-foot-actions">
+                                <button type="button" className="cloud-btn" onClick={onClose} disabled={saving}>{t('cancel')}</button>
+                                {!haReadOnly && (
+                                    <button type="button" className="cloud-btn cloud-btn-primary" disabled={!hasChanges || saving}
+                                        onClick={() => {
+                                            const n = Object.keys(changes).length;
+                                            setLastSaveErr(null);
+                                            Promise.resolve(handleSave()).then(ok => {
+                                                setCfgResult(ok ? { phase: 'applied', n, at: Date.now() } : { phase: 'failed', err: lastSaveErr, at: Date.now() });
+                                                if (ok) setExternDirty(false);
+                                            });
+                                        }}>
+                                        {saving ? <Icons.RotateCw /> : <Icons.Save />} {t('save')}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        ) : (
+                        <div className="flex items-center justify-between px-6 py-4 border-t border-proxmox-border bg-proxmox-dark">
+                            <div className="text-xs text-gray-500">
+                                {vm.status === 'running' && (
+                                    <span className="text-yellow-400">
+                                        {t('changesRequireRestart')}
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <button
+                                    onClick={onClose}
+                                    className="px-4 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 font-medium hover:bg-proxmox-hover transition-colors"
+                                >
+                                    {t('cancel')}
+                                </button>
+                                {!haReadOnly && <button
+                                    onClick={handleSave}
+                                    disabled={!hasChanges || saving}
+                                    className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white font-medium hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {saving ? (
+                                        <Icons.RotateCw />
+                                    ) : (
+                                        <Icons.Save />
+                                    )}
+                                    {t('save')}
+                                </button>}
+                            </div>
+                        </div>
+                        ))}
+                    </div>
+
+                    {/* Sub-Modals */}
+                    {showAddDisk && (
+                        <AddDiskModal
+                            isQemu={isQemu}
+                            storageList={storageList}
+                            hardwareOptions={hardwareOptions}
+                            getNextDiskId={getNextDiskId}
+                            onAdd={handleAddDisk}
+                            onClose={() => setShowAddDisk(false)}
+                        />
+                    )}
+
+                    {showResizeDisk && (
+                        <ResizeDiskModal
+                            disk={showResizeDisk}
+                            onResize={(size) => handleResizeDisk(showResizeDisk.id, size)}
+                            onClose={() => setShowResizeDisk(null)}
+                        />
+                    )}
+
+                    {showMoveDisk && (
+                        <MoveDiskModal
+                            disk={showMoveDisk}
+                            storageList={storageList}
+                            onMove={(storage, deleteSource) => handleMoveDisk(showMoveDisk.id, storage, deleteSource)}
+                            onClose={() => setShowMoveDisk(null)}
+                        />
+                    )}
+
+                    {/* MK: Edit Disk Bus Type Modal */}
+                    {showEditDisk && (
+                        <EditDiskBusModal
+                            disk={showEditDisk}
+                            hardwareOptions={hardwareOptions}
+                            vmStatus={config?.status?.status}
+                            onSave={async (newBusType) => {
+                                // MK: Double-check VM is stopped before changing bus type
+                                if (config?.status?.status === 'running') {
+                                    addToast(t('vmMustBeStopped') || 'VM must be stopped to change disk bus type', 'error');
+                                    return;
+                                }
+                                
+                                const oldId = showEditDisk.id;
+                                const oldBusMatch = oldId.match(/^([a-z]+)(\d+)$/);
+                                if (!oldBusMatch) {
+                                    addToast('Invalid disk ID format', 'error');
+                                    return;
+                                }
+                                const oldBus = oldBusMatch[1];
+                                const oldNum = oldBusMatch[2];
+                                
+                                // Find next available ID for new bus type
+                                const existingIds = (config?.disks || []).map(d => d.id);
+                                let newNum = 0;
+                                while (existingIds.includes(`${newBusType}${newNum}`)) {
+                                    newNum++;
+                                }
+                                const newId = `${newBusType}${newNum}`;
+                                
+                                if (oldId === newId) {
+                                    setShowEditDisk(null);
+                                    return;
+                                }
+                                
+                                try {
+                                    // LW: Get current disk value and clean it for new bus type
+                                    let currentValue = config?.raw?.[oldId] || showEditDisk.volume;
+                                    
+                                    // MK: Strip unsupported options based on target bus type
+                                    // iothread only supported on scsi/virtio
+                                    if (!['scsi', 'virtio'].includes(newBusType)) {
+                                        currentValue = currentValue.replace(/,iothread=\d+/g, '');
+                                    }
+                                    // ssd only supported on scsi/virtio/sata (not ide)
+                                    if (!['scsi', 'virtio', 'sata'].includes(newBusType)) {
+                                        currentValue = currentValue.replace(/,ssd=\d+/g, '');
+                                    }
+                                    
+                                    // MK: IMPORTANT - Remove size= parameter! 
+                                    // If size is present, Proxmox thinks we want to CREATE a new disk
+                                    // For reattaching existing volumes, size must be omitted
+                                    currentValue = currentValue.replace(/,size=\d+[KMGT]?/gi, '');
+                                    
+                                    // LW: Two-step process to avoid creating new volume:
+                                    // Delete old disk config (volume becomes "unused")
+                                    const deleteRes = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                        method: 'PUT',
+                                        credentials: 'include',
+                                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ delete: oldId })
+                                    });
+                                    
+                                    if (!deleteRes.ok) {
+                                        const err = await deleteRes.json();
+                                        addToast(err.error || 'Error detaching old disk', 'error');
+                                        return;
+                                    }
+                                    
+                                    // MK: Small delay to let Proxmox process the detach
+                                    await new Promise(r => setTimeout(r, 500));
+                                    
+                                    // Attach volume with new bus type
+                                    const attachRes = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                        method: 'PUT',
+                                        credentials: 'include',
+                                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ [newId]: currentValue })
+                                    });
+                                    
+                                    if (attachRes.ok) {
+                                        addToast(`${t('diskBusChanged') || 'Disk bus changed'}: ${oldId} ↑ ${newId}`, 'success');
+                                        fetchConfig();
+                                        setShowEditDisk(null);
+                                    } else {
+                                        const err = await attachRes.json();
+                                        addToast(err.error || 'Error attaching disk with new bus type', 'error');
+                                        // LW: Try to restore old config on failure
+                                        await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                            method: 'PUT',
+                                            credentials: 'include',
+                                            headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ [oldId]: config?.raw?.[oldId] || showEditDisk.volume })
+                                        });
+                                        fetchConfig();
+                                    }
+                                } catch (e) {
+                                    addToast('Error changing disk bus', 'error');
+                                }
+                            }}
+                            onClose={() => setShowEditDisk(null)}
+                        />
+                    )}
+
+                    {/* MK: Reattach unused disk modal */}
+                    {showReattachDisk && (
+                        <ReattachDiskModal
+                            disk={showReattachDisk}
+                            getNextDiskId={getNextDiskId}
+                            onReattach={async (diskId, diskValue) => {
+                                try {
+                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                        method: 'PUT',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ [diskId]: diskValue })
+                                    });
+                                    if (res && res.ok) {
+                                        addToast(`${t('diskReattached') || 'Disk reattached as'} ${diskId}`, 'success');
+                                        fetchConfig();
+                                        setShowReattachDisk(null);
+                                    } else {
+                                        const err = await res.json();
+                                        addToast(err.error || 'Error reattaching disk', 'error');
+                                    }
+                                } catch (e) {
+                                    addToast('Error reattaching disk', 'error');
+                                }
+                            }}
+                            onClose={() => setShowReattachDisk(null)}
+                        />
+                    )}
+
+                    {/* MK: Import Disk Modal */}
+                    {showImportDisk && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-2">{t('importDisk') || 'Import Disk'}</h3>
+                                <p className="text-sm text-gray-400 mb-4">{t('importDiskDesc') || 'Import existing disk image from storage'}</p>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('selectImportStorage') || 'Source Storage'}</label>
+                                        <select
+                                            id="importStorage"
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            onChange={async (e) => {
+                                                const storage = e.target.value;
+                                                if (!storage) { setImportableDisks([]); return; }
+                                                try {
+                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${vm.node}/storage/${storage}/content?content=images`);
+                                                    if (res && res.ok) {
+                                                        const data = await res.json();
+                                                        // Filter for disk images that could be imported
+                                                        const disks = (data || []).filter(item => 
+                                                            item.format && ['raw', 'qcow2', 'vmdk'].includes(item.format)
+                                                        );
+                                                        setImportableDisks(disks);
+                                                    }
+                                                } catch(e) { setImportableDisks([]); }
+                                            }}
+                                        >
+                                            <option value="">-- {t('selectStorage') || 'Select Storage'} --</option>
+                                            {storageList.filter(s => s.type !== 'iso' && s.type !== 'vztmpl').map(s => (
+                                                <option key={s.storage} value={s.storage}>{s.storage} ({s.type})</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('selectDiskImage') || 'Select Disk Image'}</label>
+                                        <select
+                                            id="importDiskImage"
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="">-- {t('selectDiskImage') || 'Select Image'} --</option>
+                                            {importableDisks.map(disk => (
+                                                <option key={disk.volid} value={disk.volid}>
+                                                    {disk.volid} ({disk.format}, {Math.round((disk.size || 0) / 1024 / 1024 / 1024)} GB)
+                                                </option>
+                                            ))}
+                                        </select>
+                                        {importableDisks.length === 0 && (
+                                            <p className="text-xs text-yellow-500 mt-1">{t('noImportableDisks') || 'No importable disk images found'}</p>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus') || 'Target Bus'}</label>
+                                        <select
+                                            id="importTargetBus"
+                                            defaultValue="scsi"
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="scsi">SCSI</option>
+                                            <option value="virtio">VirtIO</option>
+                                            <option value="sata">SATA</option>
+                                            <option value="ide">IDE</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => { setShowImportDisk(false); setImportableDisks([]); }} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded text-gray-300">{t('cancel')}</button>
+                                        <button 
+                                            onClick={async () => {
+                                                const volid = document.getElementById('importDiskImage').value;
+                                                const sourceStorage = document.getElementById('importStorage').value;
+                                                const targetBus = document.getElementById('importTargetBus').value;
+                                                if (!volid) { addToast('Please select a disk image', 'error'); return; }
+                                                
+                                                // MK: Ensure volid has storage prefix (some APIs return just volume name)
+                                                let fullVolid = volid;
+                                                if (!volid.includes(':') && sourceStorage) {
+                                                    fullVolid = `${sourceStorage}:${volid}`;
+                                                }
+                                                
+                                                // Get next available disk ID for the bus type
+                                                const nextId = getNextDiskId(targetBus);
+                                                
+                                                try {
+                                                    // Import by setting the disk config
+                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ [nextId]: fullVolid })
+                                                    });
+                                                    if (res && res.ok) {
+                                                        addToast(t('diskImported') || 'Disk imported', 'success');
+                                                        await new Promise(resolve => setTimeout(resolve, 500));
+                                                        fetchConfig();
+                                                        setShowImportDisk(false);
+                                                        setImportableDisks([]);
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || 'Error importing disk', 'error');
+                                                    }
+                                                } catch(e) {
+                                                    addToast('Error importing disk', 'error');
+                                                }
+                                            }}
+                                            className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded text-white"
+                                        >
+                                            {t('import') || 'Import'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MK: Reassign Owner Modal */}
+                    {showReassignOwner && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-2">{t('reassignOwner') || 'Reassign Owner'}</h3>
+                                <p className="text-sm text-gray-400 mb-4">{t('reassignOwnerDesc') || 'Assign disk to a different VM'}</p>
+                                <div className="space-y-4">
+                                    <div className="p-3 bg-proxmox-dark rounded">
+                                        <span className="text-gray-400">{t('disk') || 'Disk'}:</span>
+                                        <span className="ml-2 text-white font-mono">{showReassignOwner.id}</span>
+                                        <span className="ml-2 text-gray-500">({showReassignOwner.volume})</span>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetVm') || 'Target VM'}</label>
+                                        <select
+                                            id="reassignTargetVm"
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="">-- {t('selectVm') || 'Select VM'} --</option>
+                                            {(window.pegaproxVmList || []).filter(v => v.type === 'qemu' && v.vmid !== vm.vmid).map(v => (
+                                                <option key={v.vmid} value={v.vmid}>{v.vmid} - {v.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('targetBus') || 'Target Bus'}</label>
+                                        <select
+                                            id="reassignTargetBus"
+                                            defaultValue="scsi"
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="scsi">SCSI</option>
+                                            <option value="virtio">VirtIO</option>
+                                            <option value="sata">SATA</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowReassignOwner(null)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded text-gray-300">{t('cancel')}</button>
+                                        <button 
+                                            onClick={async () => {
+                                                const targetVmid = document.getElementById('reassignTargetVm').value;
+                                                const targetBus = document.getElementById('reassignTargetBus').value;
+                                                if (!targetVmid) { addToast('Please select a target VM', 'error'); return; }
+                                                
+                                                try {
+                                                    // Detach from current VM
+                                                    const detachRes = await authFetch(
+                                                        `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/disks/${showReassignOwner.id}`,
+                                                        { method: 'DELETE' }
+                                                    );
+                                                    if (!detachRes || !detachRes.ok) {
+                                                        const err = await detachRes.json();
+                                                        addToast(err.error || 'Error detaching disk', 'error');
+                                                        return;
+                                                    }
+                                                    
+                                                    // Attach to target VM
+                                                    // Need to get the next available disk ID for target VM
+                                                    const configRes = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${targetVmid}/config`);
+                                                    let nextId = `${targetBus}0`;
+                                                    if (configRes && configRes.ok) {
+                                                        const targetConfig = await configRes.json();
+                                                        // Find next available ID
+                                                        for (let i = 0; i < 30; i++) {
+                                                            const testId = `${targetBus}${i}`;
+                                                            if (!targetConfig[testId]) {
+                                                                nextId = testId;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    
+                                                    // MK: Use full volume path (storage:volume) - disk.value has the complete string
+                                                    // But we need to strip any extra options like ,size=32G
+                                                    let volumePath = showReassignOwner.value || `${showReassignOwner.storage}:${showReassignOwner.volume}`;
+                                                    // Extract just the storage:volume part (before any comma)
+                                                    volumePath = volumePath.split(',')[0];
+                                                    
+                                                    const attachRes = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${targetVmid}/config`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ [nextId]: volumePath })
+                                                    });
+                                                    
+                                                    if (attachRes && attachRes.ok) {
+                                                        addToast(t('diskReassigned') || 'Disk reassigned', 'success');
+                                                        await new Promise(resolve => setTimeout(resolve, 500));
+                                                        fetchConfig();
+                                                        setShowReassignOwner(null);
+                                                    } else {
+                                                        const err = await attachRes.json();
+                                                        addToast(err.error || 'Error attaching to target VM', 'error');
+                                                    }
+                                                } catch(e) {
+                                                    addToast('Error reassigning disk', 'error');
+                                                }
+                                            }}
+                                            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-white"
+                                        >
+                                            {t('reassign') || 'Reassign'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showMountISO && (
+                        <MountISOModal
+                            isoList={isoList}
+                            initialDrive={mountIsoInitialDrive}
+                            existingDrives={
+                                // Extract existing drives from config.disks array
+                                (config?.disks || []).map(disk => ({
+                                    key: disk.id,
+                                    isCdrom: String(disk.value || '').includes('media=cdrom')
+                                }))
+                            }
+                            onMount={handleMountISO}
+                            onClose={() => { setShowMountISO(false); setMountIsoInitialDrive(null); }}
+                        />
+                    )}
+
+                    {showAddNetwork && (
+                        <AddNetworkModal
+                            isQemu={isQemu}
+                            bridgeList={bridgeList}
+                            hardwareOptions={hardwareOptions}
+                            getNextNetId={getNextNetId}
+                            generateMAC={generateMAC}
+                            onAdd={handleAddNetwork}
+                            onClose={() => setShowAddNetwork(false)}
+                        />
+                    )}
+
+                    {showEditNetwork && (
+                        <EditNetworkModal
+                            isQemu={isQemu}
+                            network={showEditNetwork}
+                            bridgeList={bridgeList}
+                            hardwareOptions={hardwareOptions}
+                            generateMAC={generateMAC}
+                            onUpdate={(config) => handleUpdateNetwork(showEditNetwork.id, config)}
+                            onClose={() => setShowEditNetwork(null)}
+                        />
+                    )}
+
+                    {/* Add PCI Device Modal */}
+                    {showAddPci && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4">{t('addPci')}</h3>
+                                <div className="space-y-4">
+                                    <PassthroughModeSwitch mode={pciMode} setMode={setPciMode} t={t} />
+                                    {pciMode === 'mapping' ? (
+                                        <PassthroughMappingPicker kind="pci" info={ptMappings.pci} value={selectedPciMapping} onChange={setSelectedPciMapping} node={vm.node} t={t} />
+                                    ) : (
+                                        <>
+                                            <PassthroughRawNote info={ptMappings.pci} t={t} />
+                                            {ptMappings.pci?.access?.root !== false && (
+                                                <>
+                                                    <div>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('availableDevices')}</label>
+                                                        <select
+                                                            value={selectedPciDevice?.id || ''}
+                                                            onChange={(e) => setSelectedPciDevice(availablePci.find(d => d.id === e.target.value))}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                                        >
+                                                            <option value="">-- {t('selectDevice')} --</option>
+                                                            {availablePci.filter(d => d.iommugroup >= 0).map(dev => (
+                                                                <option key={dev.id} value={dev.id}>
+                                                                    {dev.id} - {dev.vendor_name} {dev.device_name} (IOMMU: {dev.iommugroup})
+                                                                </option>
+                                                            ))}
+                                                        </select>
+                                                    </div>
+                                                    {selectedPciDevice && (
+                                                        <div className="p-3 bg-proxmox-dark rounded text-sm">
+                                                            <div className="text-gray-400">{t('vendor')}: <span className="text-white">{selectedPciDevice.vendor_name}</span></div>
+                                                            <div className="text-gray-400">Device: <span className="text-white">{selectedPciDevice.device_name}</span></div>
+                                                            <div className="text-gray-400">{t('iommuGroup')}: <span className="text-white">{selectedPciDevice.iommugroup}</span></div>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </>
+                                    )}
+                                    <div className="space-y-2">
+                                        <label className="flex items-center gap-2">
+                                            <input type="checkbox" checked={pciOptions.pcie} onChange={(e) => setPciOptions({...pciOptions, pcie: e.target.checked})} className="rounded" />
+                                            <span className="text-sm text-gray-300">{t('pcie')}</span>
+                                        </label>
+                                        <label className="flex items-center gap-2">
+                                            <input type="checkbox" checked={pciOptions.rombar} onChange={(e) => setPciOptions({...pciOptions, rombar: e.target.checked})} className="rounded" />
+                                            <span className="text-sm text-gray-300">{t('romBar')}</span>
+                                        </label>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => { setShowAddPci(false); setSelectedPciDevice(null); setSelectedPciMapping(''); }} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button onClick={handleAddPciDevice} disabled={(pciMode === 'mapping' ? !selectedPciMapping : (!selectedPciDevice || ptMappings.pci?.access?.root === false)) || passthroughLoading} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded disabled:opacity-50" data-pt-add="pci">
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Add USB Device Modal */}
+                    {showAddUsb && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4">{t('addUsb')}</h3>
+                                <div className="space-y-4">
+                                    <PassthroughModeSwitch mode={usbMode} setMode={setUsbMode} t={t} />
+                                    {usbMode === 'mapping' ? (
+                                        <PassthroughMappingPicker kind="usb" info={ptMappings.usb} value={selectedUsbMapping} onChange={setSelectedUsbMapping} node={vm.node} t={t} />
+                                    ) : (
+                                        <>
+                                            <PassthroughRawNote info={ptMappings.usb} t={t} />
+                                            {ptMappings.usb?.access?.root !== false && (
+                                                <div>
+                                                    <label className="block text-xs text-gray-400 mb-1">{t('availableDevices')}</label>
+                                                    <select
+                                                        value={selectedUsbDevice ? `${selectedUsbDevice.vendid}:${selectedUsbDevice.prodid}` : ''}
+                                                        onChange={(e) => {
+                                                            const [vid, pid] = e.target.value.split(':');
+                                                            setSelectedUsbDevice(availableUsb.find(d => d.vendid === vid && d.prodid === pid));
+                                                        }}
+                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                                    >
+                                                        <option value="">-- {t('selectDevice')} --</option>
+                                                        {availableUsb.map((dev, idx) => (
+                                                            <option key={idx} value={`${dev.vendid}:${dev.prodid}`}>
+                                                                {dev.manufacturer || dev.vendid} - {dev.product || dev.prodid}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+                                    <label className="flex items-center gap-2">
+                                        <input type="checkbox" checked={usbOptions.usb3} onChange={(e) => setUsbOptions({...usbOptions, usb3: e.target.checked})} className="rounded" />
+                                        <span className="text-sm text-gray-300">{t('usb3')}</span>
+                                    </label>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => { setShowAddUsb(false); setSelectedUsbDevice(null); setSelectedUsbMapping(''); }} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button onClick={handleAddUsbDevice} disabled={(usbMode === 'mapping' ? !selectedUsbMapping : (!selectedUsbDevice || ptMappings.usb?.access?.root === false)) || passthroughLoading} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded disabled:opacity-50" data-pt-add="usb">
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Add Serial Port Modal */}
+                    {showAddSerial && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4">{t('addSerial')}</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('serialType')}</label>
+                                        <select
+                                            value={serialType}
+                                            onChange={(e) => setSerialType(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="socket">{t('socketConsole')}</option>
+                                            <option value="/dev/ttyUSB0">/dev/ttyUSB0</option>
+                                            <option value="/dev/ttyUSB1">/dev/ttyUSB1</option>
+                                            <option value="/dev/ttyS0">/dev/ttyS0</option>
+                                            <option value="/dev/ttyS1">/dev/ttyS1</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddSerial(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button onClick={handleAddSerialPort} disabled={passthroughLoading} className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded disabled:opacity-50">
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* MK: Add EFI Disk Modal - Jan 2026
+                        LW: Size is always 4MB, pre-enrolled keys for Secure Boot */}
+                    {showAddEfiDisk && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                    <Icons.HardDrive className="text-blue-400" />
+                                    {t('addEfiDisk') || 'Add EFI Disk'}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm text-blue-300">
+                                        {t('efiDiskInfo') || 'EFI disk stores UEFI firmware variables and is required for UEFI boot. Size is automatically set to 4MB.'}
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage') || 'Storage'}</label>
+                                        <select
+                                            value={efiStorage}
+                                            onChange={(e) => setEfiStorage(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                            {storageList.filter(s => s.content?.includes('images')).map(s => (
+                                                <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddEfiDisk(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button 
+                                            onClick={async () => {
+                                                if (!efiStorage) return;
+                                                setPassthroughLoading(true);
+                                                try {
+                                                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        credentials: 'include',
+                                                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ efidisk0: `${efiStorage}:1,efitype=4m,pre-enrolled-keys=1` })
+                                                    });
+                                                    if (res.ok) {
+                                                        addToast(t('efiDiskAdded') || 'EFI disk added', 'success');
+                                                        setShowAddEfiDisk(false);
+                                                        fetchConfig();
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || 'Error adding EFI disk', 'error');
+                                                    }
+                                                } catch (e) {
+                                                    addToast('Error adding EFI disk', 'error');
+                                                }
+                                                setPassthroughLoading(false);
+                                            }}
+                                            disabled={!efiStorage || passthroughLoading} 
+                                            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 rounded disabled:opacity-50"
+                                        >
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {showAddCloudInit && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                    <Icons.Cloud className="text-cyan-400" />
+                                    {t('addCloudInitDrive')}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage')}</label>
+                                        <select
+                                            value={cloudInitStorage}
+                                            onChange={(e) => {
+                                                setCloudInitStorage(e.target.value);
+                                                const nextFormats = getCloudInitFormatsForStorage(e.target.value);
+                                                setCloudInitFormat(nextFormats.includes(cloudInitFormat) ? cloudInitFormat : (nextFormats[0] || 'raw'));
+                                            }}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                                <option value="">{t('selectStorage')}</option>
+                                            {storageList.filter(s => s.content?.includes('images')).map(s => (
+                                                <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
+                                            <select
+                                                value={cloudInitBus}
+                                                onChange={(e) => {
+                                                    const bus = e.target.value;
+                                                    setCloudInitBus(bus);
+                                                    setCloudInitDevice(getFirstFreeCloudInitDevice(bus));
+                                                }}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            >
+                                                <option value="ide">IDE</option>
+                                                <option value="scsi">SCSI</option>
+                                                <option value="sata">SATA</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('device')}</label>
+                                            <select
+                                                value={cloudInitDevice}
+                                                onChange={(e) => setCloudInitDevice(e.target.value)}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            >
+                                                {getDiskBusSlots(cloudInitBus).map(slot => {
+                                                    const driveId = `${cloudInitBus}${slot}`;
+                                                    const occupied = Boolean(config?.raw?.[driveId]);
+                                                    return <option key={slot} value={slot} disabled={occupied}>{driveId}{occupied ? ` (${t('inUse')})` : ''}</option>;
+                                                })}
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('cloudInitDiskFormat')}</label>
+                                        <select
+                                            value={cloudInitFormat}
+                                            onChange={(e) => setCloudInitFormat(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            disabled={cloudInitStorageFormats.length <= 1}
+                                        >
+                                            {cloudInitStorageFormats.map(format => (
+                                                <option key={format} value={format}>{format}</option>
+                                            ))}
+                                        </select>
+                                        {cloudInitStorageFormats.length === 1 && (
+                                            <p className="text-xs text-gray-500 mt-1">{t('cloudInitDiskFormatLockedHint')}</p>
+                                        )}
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddCloudInit(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button
+                                            onClick={async () => {
+                                                const driveId = `${cloudInitBus}${cloudInitDevice}`;
+                                                if (!cloudInitStorage || !cloudInitDevice || config?.raw?.[driveId]) return;
+                                                setPassthroughLoading(true);
+                                                try {
+                                                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/qemu/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ [driveId]: `${cloudInitStorage}:cloudinit,format=${cloudInitFormat}` })
+                                                    });
+                                                    if (res?.ok) {
+                                                        addToast(t('cloudInitDriveAdded'), 'success');
+                                                        setShowAddCloudInit(false);
+                                                        setCloudInitStorage('');
+                                                        setCloudInitFormat('raw');
+                                                        fetchConfig();
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || t('cloudInitDriveAddFailed'), 'error');
+                                                    }
+                                                } catch (e) {
+                                                    addToast(t('connectionError'), 'error');
+                                                }
+                                                setPassthroughLoading(false);
+                                            }}
+                                            disabled={!cloudInitStorage || !cloudInitDevice || passthroughLoading}
+                                            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded disabled:opacity-50"
+                                        >
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {showRngDialog && !haReadOnly && (
+                        <VirtioRngDialog value={config?.raw?.rng0} onSave={saveRng} onClose={() => setShowRngDialog(false)} t={t} />
+                    )}
+
+                    {vfsDialog && !haReadOnly && (
+                        <VirtiofsDialog slot={vfsDialog.slot} value={vfsDialog.value} info={ptMappings.dir} node={vm.node}
+                            ostype={config?.raw?.ostype}
+                            others={Object.fromEntries(vfsKeys(config?.raw).map(k => [k, config.raw[k]]))}
+                            onSave={saveVirtiofs} onClose={() => setVfsDialog(null)} t={t} />
+                    )}
+
+                    {/* MK: Add TPM Modal */}
+                    {showAddTpm && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                            <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                                    <Icons.Shield className="text-green-400" />
+                                    {t('addTpm') || 'Add TPM'}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-300">
+                                        <div className="flex items-start gap-2">
+                                            <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                            <div>{t('tpmInfo') || 'TPM (Trusted Platform Module) is required for Windows 11 and provides hardware-based security features like BitLocker.'}</div>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('storage') || 'Storage'}</label>
+                                        <select
+                                            value={tpmStorage}
+                                            onChange={(e) => setTpmStorage(e.target.value)}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                        >
+                                            <option value="">{t('selectStorage') || 'Select storage...'}</option>
+                                            {storageList.filter(s => s.content?.includes('images')).map(s => (
+                                                <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('tpmVersion') || 'TPM Version'}</label>
+                                        <select
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded px-3 py-2 text-white"
+                                            defaultValue="v2.0"
+                                        >
+                                            <option value="v2.0">TPM 2.0 ({t('recommended') || 'Recommended'})</option>
+                                            <option value="v1.2">TPM 1.2</option>
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button onClick={() => setShowAddTpm(false)} className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded">{t('cancel')}</button>
+                                        <button 
+                                            onClick={async () => {
+                                                if (!tpmStorage) return;
+                                                setPassthroughLoading(true);
+                                                try {
+                                                    const res = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/config`, {
+                                                        method: 'PUT',
+                                                        credentials: 'include',
+                                                        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({ tpmstate0: `${tpmStorage}:1,version=v2.0` })
+                                                    });
+                                                    if (res.ok) {
+                                                        addToast(t('tpmAdded') || 'TPM added', 'success');
+                                                        setShowAddTpm(false);
+                                                        fetchConfig();
+                                                    } else {
+                                                        const err = await res.json();
+                                                        addToast(err.error || 'Error adding TPM', 'error');
+                                                    }
+                                                } catch (e) {
+                                                    addToast('Error adding TPM', 'error');
+                                                }
+                                                setPassthroughLoading(false);
+                                            }}
+                                            disabled={!tpmStorage || passthroughLoading} 
+                                            className="px-4 py-2 bg-green-500 hover:bg-green-600 rounded disabled:opacity-50"
+                                        >
+                                            {passthroughLoading ? t('adding') : t('add')}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+                </CrVcBadgeOff.Provider>
+            );
+        }
+
+        // Sub-modals for disk/network operations
+        // LW: Disk creation modal - handles both QEMU and LXC
+        // LW: ZFS RAID level is set at pool creation, not per-disk. Type shown in selector.
+        function AddDiskModal({ isQemu, storageList, hardwareOptions, getNextDiskId, onAdd, onClose }) {
+            const { t } = useTranslation();
+
+            // MK Apr 2026 — explicit format-per-storage matrix. PVE 9.1 added qcow2
+            // support on LVM and LVM-thin (was raw-only before). ZFS/Ceph RBD remain
+            // raw-only because they're block-level. We expose the format choice in the
+            // UI rather than silently defaulting it (#user-feedback).
+            const formatsForStorageType = (st) => {
+                if (!st) return ['raw', 'qcow2'];
+                switch (st) {
+                    case 'dir': case 'nfs': case 'cifs': case 'glusterfs':
+                        return ['qcow2', 'raw', 'vmdk'];
+                    case 'btrfs':
+                        return ['raw', 'qcow2'];
+                    case 'lvm': case 'lvmthin':
+                        // PVE 9.1+ added qcow2 on LVM(-thin) — list it first so it's the
+                        // default for snapshot-friendly setups.
+                        return ['qcow2', 'raw'];
+                    case 'zfspool': case 'zfs': case 'rbd': case 'iscsi': case 'iscsidirect':
+                        return ['raw'];
+                    default:
+                        return ['raw', 'qcow2'];
+                }
+            };
+            const initialStorage = storageList[0]?.storage || 'local-lvm';
+            const initialFmt = formatsForStorageType(storageList[0]?.type)[0] || 'raw';
+
+            const [diskConfig, setDiskConfig] = useState({
+                disk_id: isQemu ? 'scsi1' : 'mp0',
+                storage: initialStorage,
+                format: initialFmt,
+                size: 32,
+                mountpoint: '',   // NS: LXC only — container-side mount path for the mpN volume
+                cache: '',
+                iothread: true,
+                ssd: false,
+                discard: true,
+            });
+
+            // MK: Get current bus type from disk_id (e.g. "scsi0" -> "scsi")
+            const currentBus = diskConfig.disk_id.replace(/[0-9]/g, '');
+            // LW: iothread needs virtio-scsi-pci controller, won't work with IDE/SATA
+            const supportsIothread = ['scsi', 'virtio'].includes(currentBus);
+            // MK: ssd emulation for TRIM support - IDE doesn't support it at all
+            const supportsSsd = ['scsi', 'virtio', 'sata'].includes(currentBus);
+
+            // Available formats for the currently-selected storage
+            const selectedStorageEntry = storageList.find(s => s.storage === diskConfig.storage);
+            const availableFormats = formatsForStorageType(selectedStorageEntry?.type);
+
+            // When the user picks a different storage, snap the format to the first
+            // valid choice for that storage type — but keep their existing pick if
+            // it's still valid.
+            useEffect(() => {
+                if (!availableFormats.includes(diskConfig.format)) {
+                    setDiskConfig(prev => ({...prev, format: availableFormats[0]}));
+                }
+            }, [diskConfig.storage]);
+
+            useEffect(() => {
+                if (getNextDiskId) {
+                    // LXC volumes are mountpoints (mpN); QEMU disks default to the next scsi slot.
+                    setDiskConfig(prev => ({...prev, disk_id: getNextDiskId(isQemu ? 'scsi' : 'mp')}));
+                }
+            }, []);
+            
+            // NS: Handle bus type change - reset unsupported options
+            const handleBusChange = (newBus) => {
+                const newId = getNextDiskId ? getNextDiskId(newBus) : newBus + '0';
+                const busSupportsIothread = ['scsi', 'virtio'].includes(newBus);
+                const busSupportsSsd = ['scsi', 'virtio', 'sata'].includes(newBus);
+                setDiskConfig({
+                    ...diskConfig, 
+                    disk_id: newId,
+                    iothread: busSupportsIothread ? diskConfig.iothread : false,
+                    ssd: busSupportsSsd ? diskConfig.ssd : false
+                });
+            };
+            
+            // NS: Filter out unsupported options before sending to API
+            const handleAdd = () => {
+                // NS Aug 2026 — a container gets an LXC mountpoint (mpN + a container-side
+                // mount path), not a QEMU bus disk, so no format/iothread/ssd/cache here.
+                if (!isQemu) {
+                    const mp = (diskConfig.mountpoint || '').trim();
+                    if (!mp || !mp.startsWith('/')) {
+                        alert(t('mountPathRequired') || 'Enter an absolute mount path inside the container (e.g. /data)');
+                        return;
+                    }
+                    onAdd({
+                        disk_id: diskConfig.disk_id,
+                        storage: diskConfig.storage,
+                        size: diskConfig.size,
+                        mountpoint: mp,
+                    });
+                    return;
+                }
+                const configToSend = {
+                    disk_id: diskConfig.disk_id,
+                    storage: diskConfig.storage,
+                    size: diskConfig.size,
+                    discard: diskConfig.discard,
+                    // MK Apr 2026 — pass selected format through to PVE.
+                    format: diskConfig.format || availableFormats[0] || 'raw',
+                };
+                // Only add cache if set
+                if (diskConfig.cache) {
+                    configToSend.cache = diskConfig.cache;
+                }
+                // Only add iothread for scsi/virtio
+                if (supportsIothread && diskConfig.iothread) {
+                    configToSend.iothread = true;
+                }
+                // Only add ssd for scsi/virtio/sata
+                if (supportsSsd && diskConfig.ssd) {
+                    configToSend.ssd = true;
+                }
+                onAdd(configToSend);
+            };
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('addDisk')}</h3>
+                        <div className="space-y-4">
+                            {isQemu && hardwareOptions && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">Bus/Device</label>
+                                        <select
+                                            value={currentBus}
+                                            onChange={(e) => handleBusChange(e.target.value)}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                        >
+                                            {(hardwareOptions?.disk_bus_types || [{value: 'scsi', label: 'SCSI'}]).map(bus => (
+                                                <option key={bus.value} value={bus.value}>{bus.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">ID</label>
+                                        <input
+                                            type="text"
+                                            value={diskConfig.disk_id}
+                                            onChange={(e) => setDiskConfig({...diskConfig, disk_id: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Storage</label>
+                                    <select
+                                        value={diskConfig.storage}
+                                        onChange={(e) => setDiskConfig({...diskConfig, storage: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        {storageList.map(s => {
+                                            const freeBytes = s.avail || s.free || 0;
+                                            const totalBytes = s.total || 0;
+                                            const usedPercent = totalBytes > 0 ? Math.round((1 - freeBytes / totalBytes) * 100) : 0;
+                                            const freeGB = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+                                            const totalGB = (totalBytes / (1024 * 1024 * 1024)).toFixed(1);
+                                            return(
+                                                <option key={s.storage} value={s.storage}>
+                                                    {s.storage} ({freeGB} GB {t('free')} / {totalGB} GB - {usedPercent}% {t('used')})
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                    {/* Show selected storage details */}
+                                    {diskConfig.storage && storageList.length > 0 && (() => {
+                                        const selected = storageList.find(s => s.storage === diskConfig.storage);
+                                        if (!selected) return null;
+                                        const freeBytes = selected.avail || selected.free || 0;
+                                        const totalBytes = selected.total || 0;
+                                        const usedPercent = totalBytes > 0 ? Math.round((1 - freeBytes / totalBytes) * 100) : 0;
+                                        const freeGB = (freeBytes / (1024 * 1024 * 1024)).toFixed(1);
+                                        return(
+                                            <div className="mt-2 p-2 bg-proxmox-darker rounded-lg">
+                                                <div className="flex justify-between text-xs mb-1">
+                                                    <span className="text-gray-400">{t('freeSpace') || 'Free'}:</span>
+                                                    <span className={`font-medium ${freeBytes < diskConfig.size * 1024 * 1024 * 1024 ? 'text-red-400' : 'text-green-400'}`}>
+                                                        {freeGB} GB
+                                                    </span>
+                                                </div>
+                                                <div className="h-1.5 bg-proxmox-dark rounded-full overflow-hidden">
+                                                    <div 
+                                                        className={`h-full rounded-full transition-all ${usedPercent > 90 ? 'bg-red-500' : usedPercent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                        style={{ width: `${usedPercent}%` }}
+                                                    />
+                                                </div>
+                                                {freeBytes < diskConfig.size * 1024 * 1024 * 1024 && diskConfig.size > 0 && (
+                                                    <p className="text-xs text-red-400 mt-1">⚠️ {t('notEnoughSpace') || 'Not enough space!'}</p>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('size')} (GB)</label>
+                                    <input
+                                        type="number"
+                                        value={diskConfig.size}
+                                        onChange={(e) => setDiskConfig({...diskConfig, size: parseInt(e.target.value) || 0})}
+                                        min="1"
+                                        placeholder="32"
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    />
+                                </div>
+                            </div>
+                            {/* NS Aug 2026 — LXC mountpoints need a container-side path; the
+                                slot (mpN) is picked automatically from the free slots. */}
+                            {!isQemu && (
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                        {t('mountPath') || 'Mount Path'}
+                                        <span className="ml-2 text-gray-500">({diskConfig.disk_id})</span>
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={diskConfig.mountpoint}
+                                        onChange={(e) => setDiskConfig({...diskConfig, mountpoint: e.target.value})}
+                                        placeholder="/data"
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    />
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        {t('mountPathHint') || 'Absolute path inside the container where this volume is mounted (e.g. /data).'}
+                                    </p>
+                                </div>
+                            )}
+                            {/* MK Apr 2026 — explicit format selector. Defaults follow the
+                                storage type (raw for ZFS/RBD, qcow2 for files / LVM since 9.1). */}
+                            {isQemu && (
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">
+                                        {t('diskFormat') || 'Format'}
+                                        {selectedStorageEntry?.type && (
+                                            <span className="ml-2 text-gray-500">({selectedStorageEntry.type})</span>
+                                        )}
+                                    </label>
+                                    <select
+                                        value={diskConfig.format}
+                                        onChange={(e) => setDiskConfig({...diskConfig, format: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        {availableFormats.map(f => (
+                                            <option key={f} value={f}>
+                                                {f === 'qcow2' ? 'qcow2 — supports snapshots, thin provisioning' :
+                                                 f === 'raw'   ? 'raw — best performance, fixed size' :
+                                                 f === 'vmdk'  ? 'vmdk — VMware compatibility' : f}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {availableFormats.length === 1 && (
+                                        <p className="text-xs text-gray-500 mt-1">
+                                            {t('diskFormatLockedHint') || 'This storage type only supports one format.'}
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+                            {isQemu && hardwareOptions && (
+                                <React.Fragment>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">Cache</label>
+                                        <select
+                                            value={diskConfig.cache}
+                                            onChange={(e) => setDiskConfig({...diskConfig, cache: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                        >
+                                            {(hardwareOptions?.cache_modes || [{value: '', label: 'Default'}]).map(c => (
+                                                <option key={c.value} value={c.value}>{c.label}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="flex flex-wrap gap-4">
+                                        {/* MK: IO Thread only for SCSI and VirtIO */}
+                                        {supportsIothread && (
+                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                <input type="checkbox" checked={diskConfig.iothread} onChange={(e) => setDiskConfig({...diskConfig, iothread: e.target.checked})} className="rounded" />
+                                                IO Thread
+                                            </label>
+                                        )}
+                                        {/* MK: SSD Emulation for SCSI, VirtIO, SATA (not IDE) */}
+                                        {supportsSsd && (
+                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                <input type="checkbox" checked={diskConfig.ssd} onChange={(e) => setDiskConfig({...diskConfig, ssd: e.target.checked})} className="rounded" />
+                                                SSD Emulation
+                                            </label>
+                                        )}
+                                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                                            <input type="checkbox" checked={diskConfig.discard} onChange={(e) => setDiskConfig({...diskConfig, discard: e.target.checked})} className="rounded" />
+                                            Discard
+                                        </label>
+                                    </div>
+                                </React.Fragment>
+                            )}
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button onClick={handleAdd} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600">{t('add')}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function ResizeDiskModal({ disk, onResize, onClose }) {
+            const { t } = useTranslation();
+            const [size, setSize] = useState('+10G');
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('resizeDisk') || 'Resize Disk'}</h3>
+                        <p className="text-sm text-gray-400 mb-4">{t('currentSize') || 'Current size'}: {disk.size}</p>
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1">{t('resizeDiskHint') || 'Increase by (e.g. +10G) or new size'}</label>
+                            <input
+                                type="text"
+                                value={size}
+                                onChange={(e) => setSize(e.target.value)}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                            />
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button onClick={() => onResize(size)} className="px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700">{t('resize') || 'Resize'}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // MK: Modal for reattaching unused disks with bus type selection
+        // LW: Jan 2026 - Makes it easier to reattach disks with correct settings
+        function ReattachDiskModal({ disk, getNextDiskId, onReattach, onClose }) {
+            const { t } = useTranslation();
+            const [busType, setBusType] = useState('scsi');
+            const [diskId, setDiskId] = useState(getNextDiskId('scsi'));
+            const [iothread, setIothread] = useState(true);
+            const [ssd, setSsd] = useState(false);
+            const [discard, setDiscard] = useState(true);
+            const [loading, setLoading] = useState(false);
+            
+            // MK: Update disk ID when bus type changes
+            const handleBusChange = (newBus) => {
+                setBusType(newBus);
+                setDiskId(getNextDiskId(newBus));
+                // Reset unsupported options
+                if (!['scsi', 'virtio'].includes(newBus)) {
+                    setIothread(false);
+                }
+                if (!['scsi', 'virtio', 'sata'].includes(newBus)) {
+                    setSsd(false);
+                }
+            };
+            
+            // LW: Check which options are supported
+            const supportsIothread = ['scsi', 'virtio'].includes(busType);
+            const supportsSsd = ['scsi', 'virtio', 'sata'].includes(busType);
+            
+            const busTypes = [
+                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') || 'Best performance with VirtIO SCSI controller' },
+                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') || 'Legacy VirtIO, good performance' },
+                { value: 'sata', label: 'SATA', desc: t('sataDesc') || 'Good compatibility, moderate performance' },
+                { value: 'ide', label: 'IDE', desc: t('ideDesc') || 'Maximum compatibility, lowest performance' },
+            ];
+            
+            const handleReattach = async () => {
+                if (loading) return;
+                setLoading(true);
+                
+                // MK: Build disk options string
+                let options = [];
+                if (supportsIothread && iothread) options.push('iothread=1');
+                if (supportsSsd && ssd) options.push('ssd=1');
+                if (discard) options.push('discard=on');
+                
+                const diskValue = options.length > 0 
+                    ? `${disk.value},${options.join(',')}` 
+                    : disk.value;
+                
+                try {
+                    await onReattach(diskId, diskValue);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+                            <Icons.HardDrive className="text-green-400" />
+                            {t('reattachDisk') || 'Reattach Disk'}
+                        </h3>
+                        <p className="text-sm text-gray-400 mb-4">
+                            {t('volume') || 'Volume'}: <span className="font-mono text-white">{disk.value}</span>
+                        </p>
+                        
+                        {/* Bus Type Selection */}
+                        <div className="mb-4">
+                            <label className="block text-xs text-gray-400 mb-2">{t('selectBusType') || 'Select Bus Type'}</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                {busTypes.map(bus => (
+                                    <button
+                                        key={bus.value}
+                                        onClick={() => handleBusChange(bus.value)}
+                                        disabled={loading}
+                                        className={`p-3 rounded-lg text-left transition-all ${
+                                            busType === bus.value
+                                                ? 'bg-green-600/20 border border-green-500'
+                                                : 'bg-proxmox-dark border border-proxmox-border hover:border-gray-500'
+                                        }`}
+                                    >
+                                        <div className="font-medium text-white text-sm">{bus.label}</div>
+                                        <div className="text-xs text-gray-500 mt-0.5">{bus.desc}</div>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                        
+                        {/* Disk ID */}
+                        <div className="mb-4">
+                            <label className="block text-xs text-gray-400 mb-1">{t('diskId') || 'Disk ID'}</label>
+                            <input
+                                type="text"
+                                value={diskId}
+                                onChange={(e) => setDiskId(e.target.value)}
+                                disabled={loading}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono"
+                            />
+                            <p className="text-xs text-gray-500 mt-1">{t('nextAvailableId') || 'Next available ID for selected bus type'}</p>
+                        </div>
+                        
+                        {/* Options */}
+                        <div className="mb-4 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                            <label className="block text-xs text-gray-400 mb-2">{t('diskOptions') || 'Disk Options'}</label>
+                            <div className="flex flex-wrap gap-4">
+                                {supportsIothread && (
+                                    <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={iothread} 
+                                            onChange={(e) => setIothread(e.target.checked)} 
+                                            disabled={loading}
+                                            className="rounded" 
+                                        />
+                                        IO Thread
+                                    </label>
+                                )}
+                                {supportsSsd && (
+                                    <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={ssd} 
+                                            onChange={(e) => setSsd(e.target.checked)} 
+                                            disabled={loading}
+                                            className="rounded" 
+                                        />
+                                        SSD Emulation
+                                    </label>
+                                )}
+                                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={discard} 
+                                        onChange={(e) => setDiscard(e.target.checked)} 
+                                        disabled={loading}
+                                        className="rounded" 
+                                    />
+                                    Discard (TRIM)
+                                </label>
+                            </div>
+                            {!supportsIothread && !supportsSsd && (
+                                <p className="text-xs text-yellow-500 mt-2">
+                                    {t('ideLimitedOptions') || 'IDE has limited options available'}
+                                </p>
+                            )}
+                        </div>
+                        
+                        {/* Preview */}
+                        <div className="mb-4 p-3 bg-proxmox-dark/50 rounded-lg border border-dashed border-proxmox-border">
+                            <label className="block text-xs text-gray-400 mb-1">{t('preview') || 'Preview'}</label>
+                            <div className="flex items-center gap-2">
+                                <span className="text-green-400 font-mono font-medium">{diskId}</span>
+                                <Icons.ArrowRight className="w-4 h-4 text-gray-500" />
+                                <span className="text-gray-300 font-mono text-sm truncate">{disk.value}</span>
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-end gap-3">
+                            <button 
+                                onClick={onClose} 
+                                disabled={loading}
+                                className="px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50"
+                            >
+                                {t('cancel')}
+                            </button>
+                            <button 
+                                onClick={handleReattach}
+                                disabled={loading || !diskId}
+                                className="px-4 py-2 bg-green-600 rounded-lg text-white hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
+                            >
+                                {loading && <Icons.RotateCw className="w-4 h-4 animate-spin" />}
+                                {loading ? (t('attaching') || 'Attaching...') : (t('reattach') || 'Reattach')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // NS: Simple modal for moving disks between storages
+        // Works with both local and shared storage
+        function MoveDiskModal({ disk, storageList, onMove, onClose }) {
+            const { t } = useTranslation();
+            const [storage, setStorage] = useState(storageList.filter(s => s.storage !== disk.storage)[0]?.storage || '');
+            const [deleteSource, setDeleteSource] = useState(true);
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('moveDisk') || 'Move Disk'}</h3>
+                        <p className="text-sm text-gray-400 mb-4">{disk.id} - {t('from') || 'from'} <span className="text-white font-mono">{disk.storage}</span></p>
+                        <div>
+                            <label className="block text-xs text-gray-400 mb-1">{t('targetStorage')}</label>
+                            <select
+                                value={storage}
+                                onChange={(e) => setStorage(e.target.value)}
+                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                            >
+                                {storageList.filter(s => s.storage !== disk.storage).map(s => (
+                                    <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                ))}
+                            </select>
+                        </div>
+                        <div className="mt-4 flex items-center gap-3 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                            <Toggle checked={deleteSource} onChange={setDeleteSource} label={t('deleteSourceDisk') || 'Delete source after move'} />
+                        </div>
+                        {!deleteSource && (
+                            <p className="mt-2 text-xs text-yellow-400/80">
+                                {t('deleteSourceDiskWarning') || 'The original disk will remain on the source storage. You can remove it manually later.'}
+                            </p>
+                        )}
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button onClick={() => onMove(storage, deleteSource)} className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700">{t('move') || 'Move'}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // MK: Edit Disk Bus Type Modal - allows changing disk from SCSI to IDE/SATA/VirtIO etc.
+        // LW: Added Jan 2026 - users kept asking for this in Discord
+        function EditDiskBusModal({ disk, hardwareOptions, vmStatus, onSave, onClose }) {
+            const { t } = useTranslation();
+            const currentBus = disk.id.replace(/[0-9]/g, '');
+            const [newBus, setNewBus] = useState(currentBus);
+            const [loading, setLoading] = useState(false);
+            
+            // MK: Check if VM is running - bus type change requires VM to be stopped
+            const isVmRunning = vmStatus === 'running';
+            
+            // MK: Check which options will be stripped - use Boolean to avoid JSX rendering 0
+            const hasIothread = Boolean(disk.iothread && disk.iothread > 0);
+            const hasSsd = Boolean(disk.ssd && disk.ssd > 0);
+            const willStripIothread = hasIothread && !['scsi', 'virtio'].includes(newBus);
+            const willStripSsd = hasSsd && !['scsi', 'virtio', 'sata'].includes(newBus);
+            
+            const handleSave = async () => {
+                if (loading || isVmRunning) return; // Prevent double-click and running VM
+                setLoading(true);
+                try {
+                    await onSave(newBus);
+                } finally {
+                    setLoading(false);
+                }
+            };
+            
+            const busTypes = [
+                { value: 'scsi', label: 'SCSI', desc: t('scsiDesc') || 'Best performance with VirtIO SCSI controller' },
+                { value: 'virtio', label: 'VirtIO Block', desc: t('virtioDesc') || 'Legacy VirtIO, good performance' },
+                { value: 'sata', label: 'SATA', desc: t('sataDesc') || 'Good compatibility, moderate performance' },
+                { value: 'ide', label: 'IDE', desc: t('ideDesc') || 'Maximum compatibility, lowest performance' },
+            ];
+            
+            return (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
+                            <Icons.Edit className="text-yellow-400" />
+                            {t('changeDiskBusType') || 'Change Disk Bus Type'}
+                        </h3>
+                        <p className="text-sm text-gray-400 mb-4">
+                            {t('currentDisk') || 'Current'}: <span className="font-mono text-white">{disk.id}</span> ({disk.size})
+                            {disk.iothread && <span className="ml-2 text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded">IOthread</span>}
+                            {disk.ssd && <span className="ml-1 text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">SSD</span>}
+                        </p>
+                        
+                        {/* MK: Error if VM is running */}
+                        {isVmRunning ? (
+                            <div className="p-4 bg-red-500/20 border border-red-500/50 rounded-lg mb-4">
+                                <div className="flex items-start gap-3">
+                                    <Icons.AlertTriangle className="w-6 h-6 text-red-400 flex-shrink-0" />
+                                    <div>
+                                        <div className="font-medium text-red-400 mb-1">{t('vmIsRunning') || 'VM is running'}</div>
+                                        <p className="text-sm text-red-300">{t('vmMustBeStoppedForBusChange') || 'The VM must be stopped before changing the disk bus type. Please shut down the VM first.'}</p>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm text-yellow-300 mb-4">
+                                <div className="flex items-start gap-2">
+                                    <Icons.AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                    <div>{t('diskBusWarning') || 'Changing the bus type requires the VM to be stopped. The guest OS may need driver updates.'}</div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* MK: Show warning about stripped options */}
+                        {(willStripIothread || willStripSsd) && !isVmRunning && (
+                            <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-sm text-red-300 mb-4">
+                                <div className="flex items-start gap-2">
+                                    <Icons.Info className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                                    <div>
+                                        {t('optionsWillBeRemoved') || 'The following options are not supported and will be removed'}:
+                                        {willStripIothread && <span className="ml-2 font-mono bg-red-500/20 px-1.5 py-0.5 rounded">IO Thread</span>}
+                                        {willStripSsd && <span className="ml-2 font-mono bg-red-500/20 px-1.5 py-0.5 rounded">SSD</span>}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                        
+                        <div className="space-y-2">
+                            <label className="block text-xs text-gray-400 mb-2">{t('selectNewBusType') || 'Select new bus type'}</label>
+                            {busTypes.map(bus => (
+                                <label 
+                                    key={bus.value}
+                                    className={`flex items-center p-3 rounded-lg cursor-pointer transition-all ${
+                                        newBus === bus.value 
+                                            ? 'bg-proxmox-orange/20 border border-proxmox-orange' 
+                                            : 'bg-proxmox-dark border border-proxmox-border hover:border-gray-500'
+                                    } ${loading || isVmRunning ? 'opacity-50 pointer-events-none' : ''}`}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="busType"
+                                        value={bus.value}
+                                        checked={newBus === bus.value}
+                                        onChange={(e) => setNewBus(e.target.value)}
+                                        disabled={loading || isVmRunning}
+                                        className="mr-3"
+                                    />
+                                    <div className="flex-1">
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-medium text-white">{bus.label}</span>
+                                            {currentBus === bus.value && (
+                                                <span className="text-xs bg-gray-600 px-2 py-0.5 rounded">{t('current') || 'Current'}</span>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-gray-500 mt-0.5">{bus.desc}</p>
+                                    </div>
+                                </label>
+                            ))}
+                        </div>
+                        
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} disabled={loading} className="px-4 py-2 text-gray-300 hover:text-white disabled:opacity-50">{t('cancel')}</button>
+                            <button 
+                                onClick={handleSave} 
+                                disabled={newBus === currentBus || loading || isVmRunning}
+                                className="px-4 py-2 bg-yellow-600 rounded-lg text-white hover:bg-yellow-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {loading && <Icons.RotateCw className="w-4 h-4 animate-spin" />}
+                                {isVmRunning ? (t('vmMustBeStopped') || 'VM must be stopped') : loading ? (t('saving') || 'Saving...') : (t('changeBusType') || 'Change Bus Type')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function MountISOModal({ isoList, existingDrives, onMount, onClose, initialDrive }) {
+            const { t } = useTranslation();
+            const [iso, setIso] = useState('');
+            // NS May 2026 — when invoked from a per-row "Change ISO" action, parse
+            // initialDrive ('ide2', 'sata0', …) into bus type + slot so we land
+            // directly on the existing CD-ROM instead of forcing the user to
+            // re-pick everything. Falls back to ide2 (PVE convention) otherwise.
+            const _parseInitial = (s) => {
+                if (typeof s !== 'string') return null;
+                const m = s.match(/^(ide|scsi|sata)(\d+)$/);
+                if (!m) return null;
+                return { type: m[1], num: m[2] };
+            };
+            const _parsed = _parseInitial(initialDrive);
+            const [driveType, setDriveType] = useState(_parsed?.type || 'ide');
+            const [driveNum, setDriveNum] = useState(_parsed?.num || '2');
+            
+            // calc which drives are already in use
+            const usedDrives = existingDrives || [];
+            
+            // Available drive options
+            const driveOptions = [
+                { type: 'ide', nums: ['0', '1', '2', '3'], label: 'IDE' },
+                { type: 'scsi', nums: ['0', '1', '2', '3', '4', '5'], label: 'SCSI' },
+                { type: 'sata', nums: ['0', '1', '2', '3', '4', '5'], label: 'SATA' },
+            ];
+            
+            const currentDrive = `${driveType}${driveNum}`;
+            const currentDriveInfo = usedDrives.find(d => d.key === currentDrive);
+            const isDriveUsedByDisk = currentDriveInfo && !currentDriveInfo.isCdrom;
+            const isDriveCdrom = currentDriveInfo?.isCdrom;
+            
+            // Find first free or cdrom slot when changing drive type
+            const findBestSlot = (type) => {
+                const nums = driveOptions.find(o => o.type === type)?.nums || [];
+                // First try to find existing CD-ROM
+                for (const num of nums) {
+                    const drive = `${type}${num}`;
+                    const info = usedDrives.find(d => d.key === drive);
+                    if (info?.isCdrom) return num;
+                }
+                // Then find free slot
+                for (const num of nums) {
+                    const drive = `${type}${num}`;
+                    const info = usedDrives.find(d => d.key === drive);
+                    if (!info) return num;
+                }
+                // Default to first
+                return nums[0];
+            };
+            
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-md bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('mountIso')}</h3>
+                        
+                        <div className="space-y-4">
+                            {/* ISO Selection */}
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">{t('isoImage')}</label>
+                                <select
+                                    value={iso}
+                                    onChange={(e) => setIso(e.target.value)}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                >
+                                    <option value="">-- {t('noIsoEject')} --</option>
+                                    {isoList.map(i => (
+                                        <option key={i.volid} value={i.volid}>{i.volid.split('/').pop()}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            
+                            {/* Drive Type Selection */}
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('busType')}</label>
+                                    <select
+                                        value={driveType}
+                                        onChange={(e) => {
+                                            const newType = e.target.value;
+                                            setDriveType(newType);
+                                            setDriveNum(findBestSlot(newType));
+                                        }}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        {driveOptions.map(opt => (
+                                            <option key={opt.type} value={opt.type}>{opt.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">{t('device')}</label>
+                                    <select
+                                        value={driveNum}
+                                        onChange={(e) => setDriveNum(e.target.value)}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm"
+                                    >
+                                        {driveOptions.find(o => o.type === driveType)?.nums.map(num => {
+                                            const drive = `${driveType}${num}`;
+                                            const info = usedDrives.find(d => d.key === drive);
+                                            const isUsedByDisk = info && !info.isCdrom;
+                                            const isCdrom = info?.isCdrom;
+                                            
+                                            let label = drive;
+                                            if (isCdrom) label += ` (${t('cdrom')})`;
+                                            else if (isUsedByDisk) label += ` (${t('hardDisk')})`;
+                                            
+                                            return(
+                                                <option 
+                                                    key={num} 
+                                                    value={num}
+                                                    disabled={isUsedByDisk}
+                                                    style={isUsedByDisk ? {color: '#666'} : {}}
+                                                >
+                                                    {label}
+                                                </option>
+                                            );
+                                        })}
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            {/* Drive info */}
+                            <div className="text-xs">
+                                <span className="text-gray-500">{t('target')}: </span>
+                                <span className="text-proxmox-orange font-mono">{currentDrive}</span>
+                                {isDriveCdrom && (
+                                    <span className="text-green-500 ml-2">✓ {t('existingCdrom')}</span>
+                                )}
+                                {isDriveUsedByDisk && (
+                                    <span className="text-red-500 ml-2">✗ {t('hardDiskNotAvailable')}</span>
+                                )}
+                                {!currentDriveInfo && (
+                                    <span className="text-blue-400 ml-2">○ {t('freeSlot')}</span>
+                                )}
+                            </div>
+                        </div>
+                        
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button 
+                                onClick={() => onMount(iso || null, currentDrive)} 
+                                disabled={isDriveUsedByDisk}
+                                className={`px-4 py-2 rounded-lg text-white ${
+                                    isDriveUsedByDisk 
+                                        ? 'bg-gray-600 cursor-not-allowed' 
+                                        : 'bg-proxmox-orange hover:bg-orange-600'
+                                }`}
+                            >
+                                {iso ? t('mount') : t('eject')}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function AddNetworkModal({ isQemu, bridgeList, hardwareOptions, getNextNetId, generateMAC, onAdd, onClose }) {
+            const { t } = useTranslation();
+            const [netConfig, setNetConfig] = useState({
+                net_id: 'net1',
+                bridge: bridgeList[0]?.iface || 'vmbr0',
+                model: 'virtio',
+                macaddr: '',
+                firewall: true,
+                tag: '',
+                rate: '',
+                mtu: '',
+                queues: '',
+                name: 'eth0',
+                ip: 'dhcp',
+                gw: '',
+                ip6: '',
+                gw6: '',
+                hwaddr: '',
+            });
+
+            useEffect(() => {
+                if (getNextNetId) {
+                    setNetConfig(prev => ({...prev, net_id: getNextNetId()}));
+                }
+            }, []);
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in max-h-[80vh] overflow-y-auto">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('addNetwork')}</h3>
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Interface ID</label>
+                                    <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                    <select value={netConfig.bridge} onChange={(e) => setNetConfig({...netConfig, bridge: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                        {/* Local bridges */}
+                                        {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
+                                            <optgroup label="Local Bridges">
+                                                {bridgeList.filter(b => b.source !== 'sdn').map(b => (
+                                                    <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                        {/* SDN VNets */}
+                                        {bridgeList.filter(b => b.source === 'sdn').length > 0 && (
+                                            <optgroup label="SDN VNets">
+                                                {bridgeList.filter(b => b.source === 'sdn').map(b => (
+                                                    <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                        {/* Fallback if no bridges loaded */}
+                                        {bridgeList.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                    </select>
+                                </div>
+                            </div>
+                            {isQemu && hardwareOptions && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">Model</label>
+                                        <select value={netConfig.model} onChange={(e) => setNetConfig({...netConfig, model: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (<option key={m.value} value={m.value}>{m.label}</option>))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                        <div className="flex gap-2">
+                                            <input type="text" value={netConfig.macaddr} onChange={(e) => setNetConfig({...netConfig, macaddr: e.target.value})}
+                                                placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                            <button onClick={() => setNetConfig({...netConfig, macaddr: generateMAC()})}
+                                                className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 hover:text-white text-sm">
+                                                <Icons.RefreshCw />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {!isQemu && (
+                                <>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <input type="text" value={netConfig.name} onChange={(e) => setNetConfig({...netConfig, name: e.target.value})}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                            <div className="flex gap-2">
+                                                <input type="text" value={netConfig.hwaddr} onChange={(e) => setNetConfig({...netConfig, hwaddr: e.target.value})}
+                                                    placeholder="auto" className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                                <button onClick={() => setNetConfig({...netConfig, hwaddr: generateMAC()})}
+                                                    className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 hover:text-white">
+                                                    <Icons.RefreshCw />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">IPv4</label>
+                                            <input type="text" value={netConfig.ip} onChange={(e) => setNetConfig({...netConfig, ip: e.target.value})}
+                                                placeholder="dhcp or 10.0.0.10/24" className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <input type="text" value={netConfig.gw} onChange={(e) => setNetConfig({...netConfig, gw: e.target.value})}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+                            <div className="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                    <input type="text" value={netConfig.tag} onChange={(e) => setNetConfig({...netConfig, tag: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Rate (MB/s)</label>
+                                    <input type="text" value={netConfig.rate} onChange={(e) => setNetConfig({...netConfig, rate: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">MTU</label>
+                                    <input type="text" value={netConfig.mtu} onChange={(e) => setNetConfig({...netConfig, mtu: e.target.value})}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                            </div>
+                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={netConfig.firewall} onChange={(e) => setNetConfig({...netConfig, firewall: e.target.checked})} className="rounded" />
+                                {t('enableFirewall')}
+                            </label>
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button onClick={() => onAdd(netConfig)} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600">{t('add')}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Nov 2026 - the order of the Disks tab (#610 follow-up), for the classic list and the redesign's:
+        // data disks by bus and index, then CD/DVD drives, then the EFI and TPM volumes
+        function vcDiskOrder(a, b) {
+            const rank = (d) => {
+                const id = String(d.id || '');
+                const mm = id.match(/^([a-z]+)(\d*)$/) || [];
+                const bus = mm[1] || id;
+                const idx = mm[2] ? parseInt(mm[2]) : 0;
+                const isCd = String(d.value || '').includes('media=cdrom') || d.media === 'cdrom' || (d.volume || '').includes('iso');
+                const isSys = bus === 'efidisk' || bus === 'tpmstate';
+                const cat = isSys ? 2 : (isCd ? 1 : 0);
+                const busOrder = { rootfs: 0, scsi: 1, virtio: 2, sata: 3, ide: 4, mp: 5, efidisk: 8, tpmstate: 9 };
+                return [cat, busOrder[bus] != null ? busOrder[bus] : 6, idx];
+            };
+            const ka = rank(a), kb = rank(b);
+            for (let i = 0; i < 3; i++) { if (ka[i] !== kb[i]) return ka[i] - kb[i]; }
+            return 0;
+        }
+
+        // LW Nov 2026 - the boot order of the Options tab as data, for the classic list and the redesign's:
+        // every device that can boot, the ones in the order (legacy letters resolved), and both sorted
+        function vcBootModel(config, currentBoot, bootdisk) {
+            const raw = config?.raw || {};
+
+            // Collect all bootable device IDs from config
+            const allBootableDevices = [];
+            if (config.disks) {
+                config.disks.forEach(d => {
+                    if (!d.id.includes('cloudinit')) allBootableDevices.push(d.id);
+                });
+            }
+            if (config.networks) {
+                config.networks.forEach(n => allBootableDevices.push(n.id));
+            }
+            ['ide2', 'ide0', 'sata0', 'scsi0', 'virtio0', 'net0'].forEach(dev => {
+                if (!allBootableDevices.includes(dev) && raw[dev]) {
+                    allBootableDevices.push(dev);
+                }
+            });
+
+            // Parse Proxmox boot order: [[legacy=]<[acdn]{1,4}>] [,order=<dev[;dev...]>]
+            // legacy chars: a=floppy, c=hard disk (bootdisk), d=cdrom, n=network
+            const bootDevices = [];
+            if (currentBoot) {
+                const parts = currentBoot.split(',');
+                const legacyChars = [];
+                let orderDevices = [];
+
+                parts.forEach(part => {
+                    if (part.startsWith('order=')) {
+                        orderDevices = part.split('order=')[1].split(';').filter(d => d);
+                    } else {
+                        // Strip optional 'legacy=' prefix, then extract chars
+                        const clean = part.startsWith('legacy=') ? part.slice(7) : part;
+                        for (const ch of clean.toLowerCase()) {
+                            if ('acdn'.includes(ch)) legacyChars.push(ch);
+                        }
+                    }
+                });
+
+                // Resolve legacy chars to device IDs
+                legacyChars.forEach(ch => {
+                    if (ch === 'c' && bootdisk && allBootableDevices.includes(bootdisk)) {
+                        if (!bootDevices.includes(bootdisk)) bootDevices.push(bootdisk);
+                    } else if (ch === 'd') {
+                        allBootableDevices.forEach(d => {
+                            if (d === 'ide2' || (raw[d] && String(raw[d]).includes('media=cdrom'))) {
+                                if (!bootDevices.includes(d)) bootDevices.push(d);
+                            }
+                        });
+                    } else if (ch === 'n') {
+                        allBootableDevices.forEach(d => {
+                            if (d.match(/^net\d+$/) && !bootDevices.includes(d)) bootDevices.push(d);
+                        });
+                    }
+                    // 'a' = floppy - rarely configured, skip if no floppy device exists
+                });
+
+                // Append order= devices (explicit, take precedence)
+                orderDevices.forEach(d => {
+                    if (allBootableDevices.includes(d) && !bootDevices.includes(d)) {
+                        bootDevices.push(d);
+                    }
+                });
+            }
+
+            // Sort: boot devices first in order, then others
+            const sortedDevices = [
+                ...bootDevices.filter(d => allBootableDevices.includes(d)),
+                ...allBootableDevices.filter(d => !bootDevices.includes(d))
+            ].filter((v, i, a) => a.indexOf(v) === i); // unique
+            return { bootDevices, sortedDevices };
+        }
+
+        // LW Nov 2026 - what the edit dialog of a network device starts from and sends (PUT .../networks/<id>);
+        // the redesign's Network tab edits the same object
+        function vcNetEditInitial(network) {
+            return {
+            bridge: network.bridge || 'vmbr0',
+            model: network.model || 'virtio',
+            macaddr: network.macaddr || '',
+            firewall: network.firewall || false,
+            tag: network.tag || '',
+            rate: network.rate || '',
+            mtu: network.mtu || '',
+            queues: network.queues || '',  // LW: Multiqueue support
+            link_down: network.link_down || false,  // NS: Disconnect checkbox
+            name: network.name || 'eth0',
+            ip: network.ip || 'dhcp',
+            gw: network.gw || '',
+            hwaddr: network.hwaddr || '',
+            };
+        }
+
+        function EditNetworkModal({ isQemu, network, bridgeList, hardwareOptions, generateMAC, onUpdate, onClose }) {
+            const { t } = useTranslation();
+            const [editConfig, setEditConfig] = useState(() => vcNetEditInitial(network));
+
+            return(
+                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
+                    <div className="w-full max-w-lg bg-proxmox-card border border-proxmox-border rounded-xl p-6 animate-scale-in max-h-[80vh] overflow-y-auto">
+                        <h3 className="text-lg font-semibold text-white mb-4">{t('editNetwork')}: {network.id}</h3>
+                        <div className="space-y-4">
+                            {/* Disconnect Checkbox - prominent at top for QEMU */}
+                            {isQemu && (
+                                <div className={`p-3 rounded-lg border ${editConfig.link_down ? 'bg-red-500/10 border-red-500/30' : 'bg-proxmox-dark border-proxmox-border'}`}>
+                                    <label className="flex items-center gap-3 cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={editConfig.link_down} 
+                                            onChange={(e) => setEditConfig({...editConfig, link_down: e.target.checked})} 
+                                            className="w-4 h-4 rounded" 
+                                        />
+                                        <div>
+                                            <span className={`text-sm font-medium ${editConfig.link_down ? 'text-red-400' : 'text-gray-300'}`}>
+                                                {t('disconnectNetwork')}
+                                            </span>
+                                            <p className="text-xs text-gray-500">{t('disconnectNetworkHint')}</p>
+                                        </div>
+                                    </label>
+                                </div>
+                            )}
+                            
+                            <div>
+                                <label className="block text-xs text-gray-400 mb-1">Bridge / VNet</label>
+                                <select value={editConfig.bridge} onChange={(e) => setEditConfig({...editConfig, bridge: e.target.value})}
+                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                    {/* Include current bridge if not in list (important for SDN VNets) */}
+                                    {editConfig.bridge && !bridgeList.find(b => b.iface === editConfig.bridge) && (
+                                        <option value={editConfig.bridge}>{editConfig.bridge} (current)</option>
+                                    )}
+                                    {/* Local bridges */}
+                                    {bridgeList.filter(b => b.source !== 'sdn').length > 0 && (
+                                        <optgroup label="Local Bridges">
+                                            {bridgeList.filter(b => b.source !== 'sdn').map(b => (
+                                                <option key={b.iface} value={b.iface}>{b.iface}{b.comments ? ` - ${b.comments}` : ''}</option>
+                                            ))}
+                                        </optgroup>
+                                    )}
+                                    {/* SDN VNets */}
+                                    {bridgeList.filter(b => b.source === 'sdn').length > 0 && (
+                                        <optgroup label="SDN VNets">
+                                            {bridgeList.filter(b => b.source === 'sdn').map(b => (
+                                                <option key={b.iface} value={b.iface}>{b.iface} - {b.zone || 'SDN'}{b.alias ? ` (${b.alias})` : ''}</option>
+                                            ))}
+                                        </optgroup>
+                                    )}
+                                    {/* Fallback if no bridges loaded */}
+                                    {bridgeList.length === 0 && <option value="vmbr0">vmbr0</option>}
+                                </select>
+                            </div>
+                            {isQemu && hardwareOptions && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">Model</label>
+                                        <select value={editConfig.model} onChange={(e) => setEditConfig({...editConfig, model: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                            {(hardwareOptions?.network_models || [{value: 'virtio', label: 'VirtIO'}]).map(m => (<option key={m.value} value={m.value}>{m.label}</option>))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">{t('macAddress') || 'MAC Address'}</label>
+                                        <div className="flex gap-2">
+                                            <input type="text" value={editConfig.macaddr} onChange={(e) => setEditConfig({...editConfig, macaddr: e.target.value})}
+                                                className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                            <button onClick={() => setEditConfig({...editConfig, macaddr: generateMAC()})}
+                                                className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 hover:text-white">
+                                                <Icons.RefreshCw />
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {!isQemu && (
+                                <React.Fragment>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">Interface Name</label>
+                                            <input type="text" value={editConfig.name} onChange={(e) => setEditConfig({...editConfig, name: e.target.value})}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">MAC</label>
+                                            <div className="flex gap-2">
+                                                <input type="text" value={editConfig.hwaddr} onChange={(e) => setEditConfig({...editConfig, hwaddr: e.target.value})}
+                                                    className="flex-1 px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono" />
+                                                <button onClick={() => setEditConfig({...editConfig, hwaddr: generateMAC()})}
+                                                    className="px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 hover:text-white">
+                                                    <Icons.RefreshCw />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">IPv4</label>
+                                            <input type="text" value={editConfig.ip} onChange={(e) => setEditConfig({...editConfig, ip: e.target.value})}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs text-gray-400 mb-1">Gateway</label>
+                                            <input type="text" value={editConfig.gw} onChange={(e) => setEditConfig({...editConfig, gw: e.target.value})}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        </div>
+                                    </div>
+                                </React.Fragment>
+                            )}
+                            
+                            {/* Network Settings Grid */}
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                    <input type="text" value={editConfig.tag} onChange={(e) => setEditConfig({...editConfig, tag: e.target.value})}
+                                        placeholder="z.B. 100"
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">MTU</label>
+                                    <input type="number" value={editConfig.mtu} onChange={(e) => setEditConfig({...editConfig, mtu: e.target.value})}
+                                        placeholder="1500"
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                            </div>
+                            
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs text-gray-400 mb-1">Rate Limit (MB/s)</label>
+                                    <input type="number" value={editConfig.rate} onChange={(e) => setEditConfig({...editConfig, rate: e.target.value})}
+                                        placeholder={t('unlimited')}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                </div>
+                                {/* Multiqueue - only for QEMU with virtio */}
+                                {isQemu && (
+                                    <div>
+                                        <label className="block text-xs text-gray-400 mb-1">Multiqueue</label>
+                                        <input type="number" value={editConfig.queues} onChange={(e) => setEditConfig({...editConfig, queues: e.target.value})}
+                                            placeholder="1"
+                                            min="1" max="64"
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                        <p className="text-xs text-gray-500 mt-1">{t('multiqueueHint') || '1–64 queues (VirtIO only)'}</p>
+                                    </div>
+                                )}
+                            </div>
+                            
+                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                <input type="checkbox" checked={editConfig.firewall} onChange={(e) => setEditConfig({...editConfig, firewall: e.target.checked})} className="rounded" />
+                                {t('enableFirewall')}
+                            </label>
+                        </div>
+                        <div className="flex justify-end gap-3 mt-6">
+                            <button onClick={onClose} className="px-4 py-2 text-gray-300 hover:text-white">{t('cancel')}</button>
+                            <button onClick={() => onUpdate(editConfig)} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600">{t('save')}</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+

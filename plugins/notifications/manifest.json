@@ -1,0 +1,8 @@
+{
+    "id": "notifications",
+    "name": "Push Notifications",
+    "version": "1.0.0",
+    "author": "PegaProx Team",
+    "description": "Send alerts via Ntfy, Apprise (Slack, Discord, Telegram, Gotify, and 80+ services)",
+    "min_pegaprox": "0.9.5"
+}

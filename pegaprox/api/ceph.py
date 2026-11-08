@@ -1,0 +1,1719 @@
+"""
+PegaProx Ceph API Routes - Layer 6
+Ceph cluster management: status, OSDs, monitors, pools, CephFS, RBD mirroring.
+"""
+
+import re
+import json
+import logging
+import requests
+from flask import Blueprint, jsonify, request
+
+from pegaprox.models.permissions import ROLE_ADMIN
+from pegaprox.utils.auth import require_auth
+from pegaprox.utils.audit import log_audit
+from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, require_unconfined
+from pegaprox.api.helpers import upstream_failure
+from pegaprox.api.helpers import pve_read_failed, pve_unreachable
+from pegaprox.utils.ssh import read_capped as _read_capped
+
+bp = Blueprint('ceph', __name__)
+
+
+def _ceph_url(manager, node, sub=''):
+    host, port = manager.host, manager.api_port
+    return f"https://{host}:{port}/api2/json/nodes/{node}/ceph{sub}"
+
+
+# MK Nov 2026 - what PVE answers on a node without Ceph (check_ceph_installed and
+# check_ceph_inited in PVE::Ceph::Tools die with a 500). Every 500 used to count as
+# "no Ceph", so a Ceph that timed out looked like one that was never installed, and the
+# lists below answered [] for any failure. Now only this is "no Ceph"; the rest is an error
+_CEPH_ABSENT = ('not installed', 'not initialized', 'not configured',
+                'rados_connect failed - no such file')
+
+
+def _ceph_absent(r):
+    if r.status_code == 501:
+        return True
+    return r.status_code == 500 and any(m in (r.text or '').lower() for m in _CEPH_ABSENT)
+
+
+def _ceph_list(manager, node, sub, what, timeout=10, params=None, shape=None):
+    """GET of a node's Ceph list: the data, [] on a node without Ceph, else the error."""
+    what = f'{what} of node {node}'
+    try:
+        r = manager._create_session().get(_ceph_url(manager, node, sub), params=params, timeout=timeout)
+    except requests.exceptions.RequestException:
+        return pve_unreachable(what)
+    except Exception as e:
+        # MK Nov 2026 - the session itself (login) failed: still JSON, never the HTML error page
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
+    if r.status_code != 200:
+        return jsonify([]) if _ceph_absent(r) else pve_read_failed(r.status_code, r.text, what)
+    try:
+        data = r.json().get('data', [])
+    except (ValueError, AttributeError):
+        return pve_read_failed(0, 'Proxmox VE sent an answer that is not JSON', what)
+    try:
+        return jsonify(shape(data) if shape else data)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
+
+
+# MK: Mar 2026 - PVE returns OSD data as CRUSH tree, not flat list
+# need to walk the tree and pull out actual osd entries (#113)
+def _flatten_osd_tree(data):
+    """Extract flat OSD list from Proxmox CRUSH tree response."""
+    osds = []
+    if isinstance(data, dict):
+        root = data.get('root', data)
+        _walk_osd_nodes(root, None, osds)
+    elif isinstance(data, list):
+        # some PVE versions return flat array already
+        for item in data:
+            if isinstance(item, dict) and item.get('type') == 'osd':
+                osds.append(item)
+            elif isinstance(item, dict) and 'children' in item:
+                _walk_osd_nodes(item, None, osds)
+    return osds
+
+def _walk_osd_nodes(node, parent_host, out):
+    if not isinstance(node, dict):
+        return
+    ntype = node.get('type', '')
+    host = parent_host
+    if ntype == 'host':
+        host = node.get('name', parent_host)
+    if ntype == 'osd':
+        entry = dict(node)
+        if host and not entry.get('host'):
+            entry['host'] = host
+        out.append(entry)
+    for child in node.get('children', []):
+        _walk_osd_nodes(child, host, out)
+
+
+# MK: Mar 2026 - Input validators for rbd mirror commands
+# Pool/image names go into shell commands via SSH, so we MUST validate
+_POOL_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,63}$')
+_IMAGE_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.\-]{0,127}$')
+_SCHED_RE = re.compile(r'^\d+[mhd]$')  # e.g. 5m, 1h, 1d
+
+def _valid_pool(name):
+    return bool(name and _POOL_RE.match(name))
+
+def _valid_image(name):
+    return bool(name and _IMAGE_RE.match(name))
+
+
+def _get_any_online_node(manager):
+    """NS: grab first online node - same approach as get_ceph_overview"""
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+        nr = session.get(f"https://{host}:{port}/api2/json/nodes", timeout=5)
+        if nr.status_code == 200:
+            for n in nr.json().get('data', []):
+                if n.get('status') == 'online':
+                    return n['node'], None
+    except Exception as e:
+        logging.warning(f"Failed to enumerate nodes: {e}")
+    return None, (jsonify({'error': 'No online node found'}), 503)
+
+
+def _resolve_node_ip(manager, node_name):
+    """MK: resolve node name to IP via cluster/status API
+    We need the actual IP for SSH, not the node name."""
+    try:
+        session = manager._create_session()
+        resp = session.get(f"https://{manager.host}:{manager.api_port}/api2/json/cluster/status", timeout=8)
+        if resp.status_code == 200:
+            for item in resp.json().get('data', []):
+                if item.get('type') == 'node' and item.get('name') == node_name:
+                    return item.get('ip', manager.raw_host)
+    except:
+        pass
+    # fallback — raw IP for SSH, not bracketed
+    return manager.raw_host
+
+
+def _rbd_cmd(manager, node_ip, args, timeout=30, expect_json=True):
+    """MK: Mar 2026 - Execute rbd command over SSH
+    Returns (data, None) on success or (None, error_response) on failure.
+
+    Uses manager._ssh_connect which handles key/password auth,
+    rate limiting, retries etc. We just need the IP.
+    """
+    ssh = None
+    try:
+        ssh = manager._ssh_connect(node_ip)
+        if not ssh:
+            return None, (jsonify({'error': 'SSH connection failed - check SSH credentials in cluster settings'}), 503)
+
+        fmt = ' --format json' if expect_json else ''
+        cmd = f"rbd {args}{fmt}"
+        logging.debug(f"rbd cmd on {node_ip}: {cmd}")
+
+        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        out = _read_capped(stdout).strip()
+        err = _read_capped(stderr).strip()
+
+        # NS: exit code 22 = EINVAL, usually means mirroring not enabled on pool
+        # JB Nov 2026 - that reads as nothing to show, but an action it refused has not happened: a promote
+        # came back as a success and wrote its audit line, so a failover looked done
+        if exit_code == 22 and expect_json:
+            return {}, None
+
+        if exit_code != 0:
+            # rbd not installed
+            if 'command not found' in err or 'No such file' in err:
+                return None, (jsonify({'error': 'rbd command not found - is ceph-common installed?'}), 501)
+            msg = err or out or f'rbd exited with code {exit_code}'
+            return None, (jsonify({'error': msg}), 500)
+
+        if not expect_json or not out:
+            return out, None
+
+        try:
+            return json.loads(out), None
+        except json.JSONDecodeError:
+            # NS: some rbd commands output partial JSON or plain text
+            return {'raw': out}, None
+
+    except Exception as e:
+        logging.error(f"rbd SSH error on {node_ip}: {e}")
+        return None, (jsonify({'error': safe_error(e, 'SSH error')}), 503)
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except:
+                pass
+
+
+def _rbd_batch(manager, node_ip, arg_list, timeout=30, expect_json=True):
+    """MK Jul 2026 — run several rbd commands over ONE SSH connection.
+
+    _rbd_cmd opens+auths+tears-down a fresh SSH session per call, so the mirror
+    views (one `rbd mirror image status` per image) fanned into N connections to
+    the same node on a single view load — a self-inflicted SSH storm a low-priv
+    cluster.view user could trigger repeatedly. This reuses a single connection
+    (one TCP + auth handshake, one channel per command) and returns a list of
+    (data, err) tuples in the same order as arg_list.
+    """
+    ssh = None
+    try:
+        ssh = manager._ssh_connect(node_ip)
+        if not ssh:
+            err = (jsonify({'error': 'SSH connection failed - check SSH credentials in cluster settings'}), 503)
+            return [(None, err) for _ in arg_list]
+
+        fmt = ' --format json' if expect_json else ''
+        results = []
+        for args in arg_list:
+            try:
+                cmd = f"rbd {args}{fmt}"
+                logging.debug(f"rbd cmd on {node_ip}: {cmd}")
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+                exit_code = stdout.channel.recv_exit_status()
+                out = _read_capped(stdout).strip()
+                err = _read_capped(stderr).strip()
+                if exit_code == 22:  # EINVAL — mirroring not enabled on pool
+                    results.append(({} if expect_json else '', None))
+                    continue
+                if exit_code != 0:
+                    if 'command not found' in err or 'No such file' in err:
+                        results.append((None, (jsonify({'error': 'rbd command not found - is ceph-common installed?'}), 501)))
+                        continue
+                    msg = err or out or f'rbd exited with code {exit_code}'
+                    results.append((None, (jsonify({'error': msg}), 500)))
+                    continue
+                if not expect_json or not out:
+                    results.append((out, None))
+                    continue
+                try:
+                    results.append((json.loads(out), None))
+                except json.JSONDecodeError:
+                    results.append(({'raw': out}, None))
+            except Exception as e:
+                logging.error(f"rbd SSH error on {node_ip}: {e}")
+                results.append((None, (jsonify({'error': safe_error(e, 'SSH error')}), 503)))
+        return results
+    except Exception as e:
+        logging.error(f"rbd SSH batch error on {node_ip}: {e}")
+        err = (jsonify({'error': safe_error(e, 'SSH error')}), 503)
+        return [(None, err) for _ in arg_list]
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except:
+                pass
+
+
+# ============================================
+# Datacenter-Level Ceph Overview
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/datacenter/ceph', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_ceph_overview(cluster_id):
+    """Ceph cluster overview - aggregates status from first available node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # MK Nov 2026 - Ceph is the cluster's storage, a pool or a guest grant does not cover it
+    # (as /api/ceph-overview answers 'confined')
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    result = {
+        'available': False,
+        'status': None,
+        'osd': [],
+        'mon': [],
+        'mds': [],
+        'mgr': [],
+        'pools': [],
+        'fs': [],
+        'rules': [],
+        # JB Nov 2026 - no answer is not "no Ceph": the page told people to install it
+        'read_failed': False,
+    }
+
+    try:
+        host, port = manager.host, manager.api_port
+        session = manager._create_session()
+
+        # Find first online node to query Ceph
+        nodes_url = f"https://{host}:{port}/api2/json/nodes"
+        nr = session.get(nodes_url, timeout=5)
+        online_nodes = []
+        if nr.status_code == 200:
+            online_nodes = [n['node'] for n in nr.json().get('data', []) if n.get('status') == 'online']
+
+        if not online_nodes:
+            result['read_failed'] = True
+            return jsonify(result)
+
+        # #191: try each online node until one has Ceph (not all nodes run Ceph daemons)
+        ceph_node = None
+        for candidate in online_nodes:
+            try:
+                sr = session.get(_ceph_url(manager, candidate, '/status'), timeout=10)
+                if sr.status_code == 200:
+                    # parsed first: a 200 without a readable body is a failed read, not this node
+                    status = sr.json().get('data', {})
+                    ceph_node = candidate
+                    result['available'] = True
+                    result['status'] = status
+                    break
+                if not _ceph_absent(sr):
+                    result['read_failed'] = True
+            except:
+                result['read_failed'] = True
+                continue
+
+        if not ceph_node:
+            return jsonify(result)
+
+        result['read_failed'] = False
+
+        result['node'] = ceph_node
+
+        # Fetch Ceph data from per-node endpoints (works on PVE 7/8/9)
+        endpoints = {
+            'osd': '/osd',
+            'mon': '/mon',
+            'mds': '/mds',
+            'mgr': '/mgr',
+            'pools': '/pool',
+            'fs': '/fs',
+            'rules': '/rules',
+        }
+
+        for key, sub in endpoints.items():
+            try:
+                r = session.get(_ceph_url(manager, ceph_node, sub), timeout=10)
+                if r.status_code == 200:
+                    raw = r.json().get('data', [])
+                    if key == 'osd':
+                        raw = _flatten_osd_tree(raw)
+                    result[key] = raw
+            except:
+                pass
+
+        # #191: fallback for missing data — try other nodes, then cluster endpoints
+        # some endpoints may 501 on specific PVE versions (PVE 9 + Ceph Squid)
+        for key, sub in endpoints.items():
+            if result.get(key):
+                continue
+            # try other online nodes
+            for fallback in online_nodes:
+                if fallback == ceph_node:
+                    continue
+                try:
+                    r = session.get(_ceph_url(manager, fallback, sub), timeout=10)
+                    if r.status_code == 200:
+                        raw = r.json().get('data', [])
+                        if key == 'osd':
+                            raw = _flatten_osd_tree(raw)
+                        result[key] = raw
+                        break
+                except:
+                    continue
+
+        # last resort: cluster-level metadata endpoint (PVE 9+)
+        cluster_url = f"https://{host}:{port}/api2/json/cluster/ceph"
+        if not result.get('osd') or not result.get('mon'):
+            try:
+                r = session.get(f"{cluster_url}/metadata", timeout=10)
+                if r.status_code == 200:
+                    meta = r.json().get('data', {})
+                    for mkey in ('osd', 'mon', 'mgr', 'mds'):
+                        if not result.get(mkey) and meta.get(mkey):
+                            mdata = meta[mkey]
+                            if isinstance(mdata, list):
+                                result[mkey] = mdata
+                            elif isinstance(mdata, dict):
+                                result[mkey] = [{'name': k, **(v if isinstance(v, dict) else {})} for k, v in mdata.items()]
+            except:
+                pass
+
+        return jsonify(result)
+
+    except Exception as e:
+        logging.error(f"Error getting Ceph overview: {e}")
+        if not result['available']:
+            result['read_failed'] = True
+        return jsonify(result)
+
+
+_CHECK_LEVELS = {'HEALTH_ERR': 2, 'HEALTH_WARN': 1}
+_CHECKS_SHOWN = 8
+_PG_STATES_SHOWN = 8
+
+
+def _num(value):
+    try:
+        n = int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(n, 0)
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def ceph_rollup(status):
+    """The figures of the Ceph overview from one /cluster/ceph/status answer (`ceph -s`):
+    health and its checks, OSDs, placement groups, capacity, client I/O and monitors."""
+    health = _dict(status.get('health'))
+    checks = []
+    for name, chk in _dict(health.get('checks')).items():
+        chk = _dict(chk)
+        msg = _dict(chk.get('summary')).get('message') or ''
+        checks.append({'name': str(name)[:64], 'severity': str(chk.get('severity') or '')[:16],
+                       'message': str(msg)[:200]})
+    checks.sort(key=lambda c: (-_CHECK_LEVELS.get(c['severity'], 0), c['name']))
+    osdmap = _dict(status.get('osdmap'))
+    if isinstance(osdmap.get('osdmap'), dict):
+        osdmap = osdmap['osdmap']        # before Quincy it is nested once more
+    pgmap = _dict(status.get('pgmap'))
+    states = sorted(({'state': str(s.get('state_name') or '')[:80], 'count': _num(s.get('count'))}
+                     for s in (pgmap.get('pgs_by_state') or []) if isinstance(s, dict)),
+                    key=lambda s: (-s['count'], s['state']))
+    clean = sum(s['count'] for s in states if {'active', 'clean'} <= set(s['state'].split('+')))
+    used, total = _num(pgmap.get('bytes_used')), _num(pgmap.get('bytes_total'))
+    monmap = _dict(status.get('monmap'))
+    mons = _num(monmap.get('num_mons')) or len(monmap.get('mons') or [])
+    return {
+        'health': str(health.get('status') or health.get('overall_status') or 'unknown')[:16],
+        'checks': checks[:_CHECKS_SHOWN], 'checks_more': max(0, len(checks) - _CHECKS_SHOWN),
+        'osds': {'total': _num(osdmap.get('num_osds')), 'up': _num(osdmap.get('num_up_osds')),
+                 'in': _num(osdmap.get('num_in_osds'))},
+        'pgs': {'total': _num(pgmap.get('num_pgs')) or sum(s['count'] for s in states), 'clean': clean,
+                'states': states[:_PG_STATES_SHOWN]},
+        'bytes': {'used': used, 'avail': _num(pgmap.get('bytes_avail')), 'total': total},
+        'percent': round(used * 100.0 / total, 1) if total > 0 else None,
+        'io': {'read_bps': _num(pgmap.get('read_bytes_sec')), 'write_bps': _num(pgmap.get('write_bytes_sec')),
+               'read_iops': _num(pgmap.get('read_op_per_sec')), 'write_iops': _num(pgmap.get('write_op_per_sec')),
+               'recovery_bps': _num(pgmap.get('recovering_bytes_per_sec'))},
+        'mons': {'total': mons, 'quorum': len(status.get('quorum_names') or [])},
+    }
+
+
+# MK Oct 2026 - the Ceph of every cluster the caller reaches in one panel. One
+# /cluster/ceph/status per cluster, the read the ceph_health alert makes (alert_events
+# ceph_status): either serves the other for CEPH_FRESH seconds, and a cluster without Ceph
+# is asked again after CEPH_RETRY only.
+@bp.route('/api/ceph-overview', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_ceph_rollup():
+    """Ceph health, capacity, OSDs and placement groups of all clusters"""
+    from pegaprox.globals import cluster_managers
+    from pegaprox.background import alert_events
+    from pegaprox.api.helpers import caller_is_scoped
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.concurrent import run_concurrent
+    user = build_authz_user(request.session.get('user', ''), request.session)
+
+    def _name(cid, mgr):
+        name = getattr(getattr(mgr, 'config', None), 'name', None)
+        return name if isinstance(name, str) and name else cid
+
+    reach, out_clusters = [], []
+    for cid, mgr in sorted(list(cluster_managers.items()), key=lambda kv: _name(*kv).lower()):
+        if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+            continue
+        ok, _err = check_cluster_access(cid)
+        if not ok:
+            continue
+        entry = {'cluster_id': cid, 'cluster_name': _name(cid, mgr), 'state': 'ok'}
+        out_clusters.append(entry)
+        # Ceph is the cluster's storage: a pool or a guest grant does not cover it
+        if caller_is_scoped(user, cid):
+            entry['state'] = 'confined'
+        elif not mgr.is_connected:
+            entry['state'] = 'offline'
+        else:
+            reach.append((cid, mgr, entry))
+
+    results = run_concurrent([lambda c=cid, m=mgr: alert_events.ceph_status(c, m, max_age=alert_events.CEPH_FRESH)
+                              for cid, mgr, _ in reach], timeout=30)
+    rows = []
+    for (cid, _mgr, entry), res in zip(reach, results):
+        state, data, at = res if res else ('unreadable', None, None)
+        if data is None:
+            entry['state'] = 'none' if state == 'none' else 'unreadable'
+            # a Ceph that answered before and does not now is news, a cluster that never had one is not
+            entry['had_ceph'] = alert_events.ceph_seen(cid)
+            continue
+        row = ceph_rollup(data)
+        row.update(cluster_id=cid, cluster_name=entry['cluster_name'], read_at=int(at))
+        rows.append(row)
+    return jsonify({'ceph': rows, 'clusters': out_clusters})
+
+
+# ============================================
+# Per-Node Ceph Status & Config
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/status', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_ceph_status(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # MK Nov 2026 - the status of the whole Ceph, whichever node it is asked on; so the
+    # reads below, as the log
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    what = f'the Ceph status of node {node}'
+    try:
+        r = manager._create_session().get(_ceph_url(manager, node, '/status'), timeout=10)
+    except requests.exceptions.RequestException:
+        return pve_unreachable(what)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, f'Could not read {what}'), 'code': 'READ_FAILED'}), 500
+    if r.status_code == 200:
+        try:
+            return jsonify(r.json().get('data', {}))
+        except (ValueError, AttributeError):
+            return pve_read_failed(0, 'Proxmox VE sent an answer that is not JSON', what)
+    if _ceph_absent(r):
+        return jsonify({'available': False})
+    return pve_read_failed(r.status_code, r.text, what)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/config', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_ceph_config(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().get(_ceph_url(manager, node, '/config'), timeout=5)
+        if r.status_code == 200:
+            return jsonify(r.json().get('data', ''))
+        return jsonify('')
+    except:
+        return jsonify('')
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/log', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_ceph_log(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # the cluster log of the whole Ceph, same as the node syslog
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    params = {}
+    if request.args.get('limit'):
+        params['limit'] = request.args['limit']
+    if request.args.get('start'):
+        params['start'] = request.args['start']
+    return _ceph_list(manager, node, '/log', 'the Ceph log', params=params)
+
+
+# ============================================
+# OSD Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_osds(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/osd', 'the Ceph OSDs', shape=_flatten_osd_tree)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_osd(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    priv = None
+    try:
+        data = request.get_json(silent=True) or {}
+        # NS 2026-07-17: PVE rejects OSD-create via API tokens (returns
+        # "user != root@pam") because it wipes a raw disk. When this manager is
+        # token-authed, mint a fresh password-based root@pam ticket for just this
+        # call; password-authed clusters use the normal session unchanged.
+        session = manager._create_session()
+        if getattr(manager, '_api_token', None):
+            priv, priv_err = manager.create_privileged_session()
+            if priv_err:
+                return jsonify({'error': priv_err}), 400
+            session = priv
+        r = session.post(_ceph_url(manager, node, '/osd'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.osd.create', f"Created OSD on {node}: {data.get('dev', '')}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
+    finally:
+        if priv is not None:
+            try: priv.close()
+            except Exception: pass
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd/<int:osdid>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_osd(cluster_id, node, osdid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
+    data = request.get_json(silent=True) or {}
+    if str(data.get('confirm_name', '')) != str(osdid):
+        return jsonify({'error': 'Confirmation required: send confirm_name matching the OSD ID'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    priv = None
+    try:
+        params = {}
+        if request.args.get('cleanup'):
+            params['cleanup'] = 1
+        # NS 2026-07-17: like OSD-create, PVE gates OSD-destroy to real root@pam
+        # (it zaps the disk), so a token-authed manager needs a password ticket.
+        session = manager._create_session()
+        if getattr(manager, '_api_token', None):
+            priv, priv_err = manager.create_privileged_session()
+            if priv_err:
+                return jsonify({'error': priv_err}), 400
+            session = priv
+        r = session.delete(_ceph_url(manager, node, f'/osd/{osdid}'), params=params, timeout=60)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.osd.destroy', f"Destroyed OSD {osdid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
+    finally:
+        if priv is not None:
+            try: priv.close()
+            except Exception: pass
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/osd/<int:osdid>/<action>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def ceph_osd_action(cluster_id, node, osdid, action):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if action not in ('in', 'out', 'scrub', 'deep-scrub'):
+        return jsonify({'error': f'Invalid OSD action: {action}'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().post(_ceph_url(manager, node, f'/osd/{osdid}/{action}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, f'ceph.osd.{action}', f"OSD {osdid} {action} on {node}", cluster=manager.config.name)
+            return jsonify({'success': True})
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph OSD operation failed')}), 500
+
+
+# ============================================
+# Monitor Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mon', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_mons(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/mon', 'the Ceph monitors')
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mon/<monid>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_mon(cluster_id, node, monid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/mon/{monid}'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mon.create', f"Created monitor {monid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph monitor operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mon/<monid>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_mon(cluster_id, node, monid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/mon/{monid}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mon.destroy', f"Destroyed monitor {monid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph monitor operation failed')}), 500
+
+
+# ============================================
+# MDS (Metadata Server) Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mds', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_mds(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/mds', 'the Ceph metadata servers')
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mds/<name>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_mds(cluster_id, node, name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().post(_ceph_url(manager, node, f'/mds/{name}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mds.create', f"Created MDS {name} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mds/<name>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_mds(cluster_id, node, name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/mds/{name}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mds.destroy', f"Destroyed MDS {name} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
+
+
+# ============================================
+# MGR (Manager) Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_mgr(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/mgr', 'the Ceph managers')
+
+
+# NS 2026-07-17: Ceph deploy needs at least one MGR (the cluster HEALTH_WARNs
+# without one), but there was no create endpoint — the UI could list managers
+# but never add or remove one. Forwards to PVE /ceph/mgr/<id> like the mon
+# endpoints. MGR create does not touch disks, so the API token works fine here.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr/<mgrid>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_mgr(cluster_id, node, mgrid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/mgr/{mgrid}'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mgr.create', f"Created manager {mgrid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/mgr/<mgrid>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_mgr(cluster_id, node, mgrid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/mgr/{mgrid}'), timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.mgr.destroy', f"Destroyed manager {mgrid} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph manager operation failed')}), 500
+
+
+# ============================================
+# Pool Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/pool', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_pools(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/pool', 'the Ceph pools')
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/pool', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_pool(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, '/pool'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.pool.create', f"Created pool {data.get('name', '')}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/pool/<name>', methods=['PUT'])
+@require_auth(perms=['ceph.manage'])
+def update_ceph_pool(cluster_id, node, name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().put(_ceph_url(manager, node, f'/pool/{name}'), data=data, timeout=10)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.pool.update', f"Updated pool {name}", cluster=manager.config.name)
+            return jsonify({'success': True})
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/pool/<name>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_pool(cluster_id, node, name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
+    data = request.get_json(silent=True) or {}
+    if data.get('confirm_name') != name:
+        return jsonify({'error': 'Confirmation required: send confirm_name matching the pool name'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        params = {}
+        if request.args.get('remove_storages'):
+            params['remove_storages'] = 1
+        if request.args.get('remove_ecprofile'):
+            params['remove_ecprofile'] = 1
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/pool/{name}'), params=params, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.pool.destroy', f"Destroyed pool {name}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph pool operation failed')}), 500
+
+
+# ============================================
+# CephFS Management
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/fs', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_fs(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/fs', 'the CephFS list')
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/fs', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def create_ceph_fs(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        # NS 2026-07-17: PVE's CephFS-create endpoint is POST /ceph/fs/<name>
+        # (name in the URL) — this used to POST to the collection /ceph/fs, which
+        # PVE has no POST handler for, so every create returned 501. Take the name
+        # from the body, validate it (it goes into the URL path), and forward to
+        # /fs/<name> with the remaining params (pg_num; add-storage on PVE 9,
+        # add-storages on PVE 7/8 — the caller sends the version-appropriate one).
+        fs_name = str(data.get('name', '')).strip()
+        if not fs_name or not _POOL_RE.match(fs_name):
+            return jsonify({'error': 'Invalid or missing CephFS name'}), 400
+        fwd = {k: v for k, v in data.items() if k != 'name'}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/fs/{fs_name}'), data=fwd, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.fs.create', f"Created CephFS {fs_name}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'CephFS operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/fs/<name>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def destroy_ceph_fs(cluster_id, node, name):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    # NS: Feb 2026 - SECURITY: require confirmation for destructive operations
+    data = request.get_json(silent=True) or {}
+    if data.get('confirm_name') != name:
+        return jsonify({'error': 'Confirmation required: send confirm_name matching the CephFS name'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        # NS 2026-07-17 (adversarial review): PVE's DELETE .../ceph/fs/<name>
+        # accepts remove-storages / remove-pools; without them the CephFS's
+        # metadata+data pools and the PVE storage entry orphan and the name can't
+        # be reused (this is exactly what stalled the live cleanup). Plumb them
+        # through like destroy_ceph_pool does for its remove-* params.
+        params = {}
+        if request.args.get('remove_storages'):
+            params['remove-storages'] = 1
+        if request.args.get('remove_pools'):
+            params['remove-pools'] = 1
+        r = manager._create_session().delete(_ceph_url(manager, node, f'/fs/{name}'), params=params, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.fs.destroy', f"Destroyed CephFS {name}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'CephFS operation failed')}), 500
+
+
+# ============================================
+# CRUSH Rules
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/rules', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_ceph_rules(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    return _ceph_list(manager, node, '/rules', 'the CRUSH rules', timeout=5)
+
+
+# ============================================
+# Service Control
+# ============================================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/<action>', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def ceph_service_action(cluster_id, node, action):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if action not in ('start', 'stop', 'restart'):
+        return jsonify({'error': f'Invalid service action: {action}'}), 400
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, f'/{action}'), data=data, timeout=30)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, f'ceph.service.{action}', f"Ceph {action} on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph service operation failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ceph/init', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def init_ceph(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+    try:
+        data = request.get_json(silent=True) or {}
+        r = manager._create_session().post(_ceph_url(manager, node, '/init'), data=data, timeout=60)
+        if r.status_code == 200:
+            usr = getattr(request, 'session', {}).get('user', 'system')
+            log_audit(usr, 'ceph.init', f"Initialized Ceph on {node}", cluster=manager.config.name)
+            return jsonify(r.json().get('data', ''))
+        return upstream_failure(r.status_code, r.text)
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Ceph init failed')}), 500
+
+
+# ============================================
+# RBD Mirroring
+# MK: Mar 2026 - Proxmox doesn't expose rbd-mirror via API,
+# so we SSH into a node and run rbd CLI commands directly.
+# ============================================
+
+# MK Oct 2026 - Ceph is the cluster's storage, a pool or a guest grant does not cover
+# its mirroring either: pools, peers and sites of the whole cluster. A confined caller
+# gets an empty answer before any SSH, so the mirroring pane just shows no pools.
+def _mirror_confined(cluster_id):
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.api.helpers import caller_is_scoped
+    return caller_is_scoped(build_authz_user(request.session.get('user', ''), request.session), cluster_id)
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/overview', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_mirror_overview(cluster_id):
+    """LW: overview of mirroring status across all pools"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if _mirror_confined(cluster_id):
+        return jsonify({'pools': [], 'node': None, 'confined': True})
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    # get pool list from Proxmox API first
+    pools = []
+    try:
+        session = manager._create_session()
+        r = session.get(_ceph_url(manager, node, '/pool'), timeout=10)
+        if r.status_code == 200:
+            pools = r.json().get('data', [])
+    except:
+        pass
+
+    if not pools:
+        return jsonify({'pools': [], 'node': node})
+
+    pnames = [pi.get('pool_name') or pi.get('name', '') for pi in pools]
+    pnames = [p for p in pnames if p and _valid_pool(p)]
+
+    # MK Jul 2026 — was 1-2 fresh SSH connects PER pool; now one connection for
+    # all `mirror pool info` calls, then one more for the enabled pools' status.
+    entries = {}
+    infos = _rbd_batch(manager, node_ip, [f'mirror pool info {p}' for p in pnames])
+    for pname, (info, info_err) in zip(pnames, infos):
+        entry = {'name': pname, 'mode': 'disabled', 'peers': [], 'health': None, 'image_count': 0}
+        if not info_err and isinstance(info, dict):
+            mode = info.get('mode', 'disabled')
+            entry['mode'] = mode if mode != 'disabled' else 'disabled'
+            entry['peers'] = info.get('peers', [])
+            entry['site_name'] = info.get('site_name', '')
+        entries[pname] = entry
+
+    enabled = [p for p in pnames if entries[p]['mode'] != 'disabled']
+    if enabled:
+        statuses = _rbd_batch(manager, node_ip, [f'mirror pool status {p}' for p in enabled])
+        for pname, (status, st_err) in zip(enabled, statuses):
+            if not st_err and isinstance(status, dict):
+                summary = status.get('summary', {})
+                entries[pname]['health'] = status.get('health', 'UNKNOWN')
+                entries[pname]['image_count'] = summary.get('states', {}).get('total', 0) if isinstance(summary, dict) else 0
+                entries[pname]['summary'] = summary
+
+    result = [entries[p] for p in pnames]
+    return jsonify({'pools': result, 'node': node})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/status', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_mirror_pool_status(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+    if _mirror_confined(cluster_id):
+        return jsonify({'summary': {}, 'confined': True})
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool status {pool}')
+    if cmd_err: return cmd_err
+    return jsonify(data)
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/enable', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def enable_mirror_pool(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    mode = body.get('mode', 'image')
+    if mode not in ('pool', 'image'):
+        return jsonify({'error': 'Mode must be "pool" or "image"'}), 400
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool enable {pool} {mode}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.pool.enable', f"Enabled mirroring on pool {pool} (mode={mode})", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/disable', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def disable_mirror_pool(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool disable {pool}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.pool.disable', f"Disabled mirroring on pool {pool}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+# -- Peer management --
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/peer', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def add_mirror_peer(cluster_id, pool):
+    """MK: add a mirroring peer to a pool"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    client = body.get('client', 'client.admin')
+    site = body.get('site_name', '')
+    mon_host = body.get('mon_host', '')
+
+    if not site:
+        return jsonify({'error': 'site_name is required'}), 400
+    # MK: validate client/site to prevent injection
+    if not re.match(r'^[a-zA-Z0-9._\-]+$', client):
+        return jsonify({'error': 'Invalid client name'}), 400
+    if not re.match(r'^[a-zA-Z0-9._\-]+$', site):
+        return jsonify({'error': 'Invalid site name'}), 400
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    cmd = f'mirror pool peer add {pool} {client}@{site}'
+    if mon_host:
+        # LW: mon_host can have commas/colons for multiple monitors
+        if not re.match(r'^[a-zA-Z0-9._:\-,/\[\]]+$', mon_host):
+            return jsonify({'error': 'Invalid monitor host format'}), 400
+        cmd += f' --mon-host {mon_host}'
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.peer.add', f"Added mirror peer {client}@{site} to pool {pool}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/peer/<uuid>', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def remove_mirror_peer(cluster_id, pool, uuid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+    # MK: UUID format validation
+    if not re.match(r'^[a-f0-9\-]{36}$', uuid):
+        return jsonify({'error': 'Invalid peer UUID'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror pool peer remove {pool} {uuid}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.peer.remove', f"Removed mirror peer {uuid} from pool {pool}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+# -- Image mirroring --
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/images', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def list_mirror_images(cluster_id, pool):
+    """NS: list images + their mirror status in one go
+    We batch this in a single SSH session to avoid hammering the node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    # MK Jul 2026 — was: `rbd ls` + one `rbd mirror image status` PER image, each
+    # its own SSH connect (N+1 sessions to the node on a single view load — SSH
+    # amplification a low-priv cluster.view user could spam). Now two commands over
+    # ONE connection: `ls` for the full image list (so non-mirrored images still
+    # show) + a single `mirror pool status --verbose` that carries every image's
+    # mirror state. Two SSH round-trips regardless of image count.
+    both = _rbd_batch(manager, node_ip, [f'ls {pool}', f'mirror pool status {pool} --verbose'])
+    images_data, img_err = both[0]
+    if img_err: return img_err
+    status_data, _st_err = both[1]
+
+    # rbd ls --format json returns a list of image names
+    if isinstance(images_data, list):
+        image_names = images_data
+    elif isinstance(images_data, dict) and 'raw' in images_data:
+        image_names = [n.strip() for n in images_data['raw'].split('\n') if n.strip()]
+    else:
+        image_names = []
+
+    # index the verbose pool status by image name (only mirror-enabled images appear)
+    by_name = {}
+    if isinstance(status_data, dict):
+        for im in (status_data.get('images') or []):
+            if isinstance(im, dict) and im.get('name'):
+                by_name[im['name']] = im
+
+    result = []
+    for img in image_names:
+        if not _valid_image(str(img)):
+            continue
+        result.append({'name': img, 'mirroring': by_name.get(img)})
+
+    # sec (audit): PVE names RBD images vm-<vmid>-disk-N / base-<vmid>-disk-N, so this list is
+    # the cluster's whole guest inventory by another route — same leak class as /resources, and
+    # cluster.view is a default viewer perm. Confine a scoped caller to their own guests.
+    import re as _re
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.api.helpers import caller_is_scoped
+    _au = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        def _own(name):
+            m = _re.match(r'(?:base|vm)-(\d+)-disk', str(name))
+            if not m:
+                return False        # unattributable image → not for a confined caller
+            return user_can_access_vm(_au, cluster_id, int(m.group(1)), 'vm.view')
+        result = [r for r in result if _own(r['name'])]
+
+    return jsonify({'images': result, 'pool': pool})
+
+
+def _mirror_image_visible(cluster_id, image):
+    """An RBD image is named vm-<vmid>-disk-N / base-<vmid>-disk-N, so the image name IS a
+    guest reference. The listing route was scoped earlier this campaign; the per-image status
+    beside it was not, and it confirms a guest's existence plus its mirror state."""
+    import re as _re
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    from pegaprox.api.helpers import caller_is_scoped
+    _u = build_authz_user(request.session.get('user', ''), request.session)
+    if not caller_is_scoped(_u, cluster_id):
+        return True
+    m = _re.match(r'(?:base|vm)-(\d+)-disk', str(image))
+    if not m:
+        return False
+    return user_can_access_vm(_u, cluster_id, int(m.group(1)), 'vm.view')
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/status', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_mirror_image_status(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if ok and not _mirror_image_visible(cluster_id, image):
+        return jsonify({'error': 'Access denied to this image'}), 403
+    if not ok: return err
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image status {pool}/{image}')
+    if cmd_err: return cmd_err
+    return jsonify(data)
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/enable', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def enable_mirror_image(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    mode = body.get('mode', 'snapshot')
+    if mode not in ('snapshot', 'journal'):
+        return jsonify({'error': 'Mode must be "snapshot" or "journal"'}), 400
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image enable {pool}/{image} {mode}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.image.enable', f"Enabled mirroring for {pool}/{image} (mode={mode})", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/disable', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def disable_mirror_image(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image disable {pool}/{image}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.image.disable', f"Disabled mirroring for {pool}/{image}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/promote', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def promote_mirror_image(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    force = body.get('force', False)
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    cmd = f'mirror image promote {pool}/{image}'
+    if force:
+        cmd += ' --force'
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, cmd, expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.image.promote', f"Promoted {pool}/{image}" + (" (forced)" if force else ""), cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/demote', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def demote_mirror_image(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image demote {pool}/{image}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.image.demote', f"Demoted {pool}/{image}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/image/<image>/resync', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def resync_mirror_image(cluster_id, pool, image):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool) or not _valid_image(image):
+        return jsonify({'error': 'Invalid pool or image name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror image resync {pool}/{image}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.image.resync', f"Resync {pool}/{image}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+# -- Snapshot schedules --
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/schedule', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_mirror_schedules(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+    if _mirror_confined(cluster_id):
+        return jsonify([])      # the answer is a list, "no schedules" is the empty one
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule list --pool {pool}')
+    # NS 2026-07-17: `rbd mirror snapshot schedule list` exits non-zero on a pool
+    # that has no mirroring configured — that's "no schedules", not a failure, so
+    # return an empty list for that benign case. But _rbd_cmd also returns errors
+    # for a genuinely broken node — rbd-not-installed (501) or SSH failure (503) —
+    # which we must NOT swallow, or a real outage silently reads as "no schedules".
+    # (adversarial review 2026-07-17: only collapse the rbd-exited-non-zero case.)
+    if cmd_err:
+        status = cmd_err[1] if isinstance(cmd_err, tuple) and len(cmd_err) > 1 else 500
+        if status in (501, 503):
+            return cmd_err
+        return jsonify([])
+    return jsonify(data if isinstance(data, list) else [])
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/schedule', methods=['POST'])
+@require_auth(perms=['ceph.manage'])
+def add_mirror_schedule(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    interval = body.get('interval', '')
+    if not _SCHED_RE.match(interval):
+        return jsonify({'error': 'Invalid interval format (e.g. 5m, 1h, 1d)'}), 400
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule add --pool {pool} {interval}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.schedule.add', f"Added schedule {interval} on pool {pool}", cluster=manager.config.name)
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/ceph/mirror/pool/<pool>/schedule', methods=['DELETE'])
+@require_auth(perms=['ceph.manage'])
+def remove_mirror_schedule(cluster_id, pool):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if not _valid_pool(pool):
+        return jsonify({'error': 'Invalid pool name'}), 400
+
+    manager, error = get_connected_manager(cluster_id)
+    if error: return error
+
+    body = request.get_json(silent=True) or {}
+    interval = body.get('interval', '')
+    if not _SCHED_RE.match(interval):
+        return jsonify({'error': 'Invalid interval format (e.g. 5m, 1h, 1d)'}), 400
+
+    node, node_err = _get_any_online_node(manager)
+    if node_err: return node_err
+    node_ip = _resolve_node_ip(manager, node)
+
+    data, cmd_err = _rbd_cmd(manager, node_ip, f'mirror snapshot schedule remove --pool {pool} {interval}', expect_json=False)
+    if cmd_err: return cmd_err
+
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'ceph.mirror.schedule.remove', f"Removed schedule {interval} from pool {pool}", cluster=manager.config.name)
+    return jsonify({'success': True})

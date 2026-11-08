@@ -1,0 +1,3344 @@
+# -*- coding: utf-8 -*-
+"""node management, updates, SMBIOS & scripts routes - split from monolith dec 2025, NS/MK"""
+
+import os
+import json
+import time
+import logging
+import uuid
+import re
+import shlex
+from datetime import datetime, timedelta
+import requests
+from flask import Blueprint, jsonify, request
+
+from pegaprox.constants import *
+from pegaprox.globals import *
+from pegaprox.models.permissions import *
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # CWE-117
+from pegaprox.utils.sanitization import task_ref_ok
+from pegaprox.core.db import get_db
+
+from pegaprox.utils.auth import require_auth, load_users, verify_password
+from pegaprox.utils.audit import log_audit
+from pegaprox.utils.ssh import read_capped as _read_capped
+from pegaprox.api.helpers import (check_cluster_access, safe_error, scope_vm_rows, caller_is_scoped, require_unconfined,
+                                  bounded_limit, upstream_failure, UPSTREAM_AUTH_STATUSES, parse_pve_error,
+                                  require_guest_node, caller_guest_nodes)
+from pegaprox.api.helpers import unread_failure
+
+bp = Blueprint('nodes', __name__)
+
+# ==================== NODE MANAGEMENT API ENDPOINTS ====================
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/summary', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_summary_api(cluster_id, node):
+    """Get node summary"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    # a caller confined to some guests reads the nodes those run on, as /metrics lists them
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    
+    manager = cluster_managers[cluster_id]
+    return jsonify(manager.get_node_summary(node))
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/ip', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_ip_api(cluster_id, node):
+    """Get node IP address for SSH connections
+
+    MK: Tries multiple methods to get the node's IP:
+    1. Cluster status API (for clustered nodes)
+    2. Network configuration API
+    3. Fallback to cluster host
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    
+    mgr = cluster_managers[cluster_id]
+    # #781 (Panxatony) — read only what this endpoint uses. It formerly unpacked mgr.api_port too
+    # (never used here), which AttributeError'd BEFORE the cluster-type branch below on XCP-ng
+    # (XcpngManager has no api_port) → 500 on the node-IP endpoint for XCP-ng clusters.
+    cluster_host = mgr.host
+
+    # MK Oct 2026 (#1143) - the node shell's own lookup, members only. _get_node_ip took any
+    # name, so a node.view caller had this server resolve it and knock on its SSH port, and
+    # XCP-ng's _get_host_ip named the pool's host as the address of a host it did not find.
+    # (NS Mar 2026: XCP-ng answers from XAPI's host.get_address, not Proxmox REST)
+    from pegaprox.api.helpers import node_shell_address
+    xcpng = getattr(mgr, 'cluster_type', 'proxmox') == 'xcpng'
+    node_ip = node_shell_address(mgr, node)
+    if node_ip:
+        source = 'xapi_host_address' if xcpng else 'manager_get_node_ip'
+    else:
+        # informational: the cluster host, said to be a stand-in
+        node_ip = cluster_host
+        source = 'xcpng_fallback' if xcpng else 'cluster_host_fallback'
+
+    return jsonify({
+        'ip': node_ip,
+        'node': node,
+        'source': source
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/rrddata', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_rrddata_api(cluster_id, node):
+    """Get node performance metrics (RRD data) for charts
+
+    Query params:
+    - timeframe: hour, day, week, month, year (default: hour)
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    
+    manager = cluster_managers[cluster_id]
+    timeframe = request.args.get('timeframe', 'hour')
+    return jsonify(manager.get_node_rrddata(node, timeframe))
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_network_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # the host's interfaces, addresses and gateways: not for a caller confined to some guests.
+    # The NIC dialog of their guest reads the bridge list of its node (vms.get_network_list_api)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    manager = cluster_managers[cluster_id]
+    # MK Nov 2026 - a failed read says so, it is not a node without interfaces
+    got = manager.get_node_network_config(node)
+    return unread_failure(got, f'the network configuration of node {node}') or jsonify(got)
+
+
+# MK Nov 2026 - what waits in interfaces.new until Apply. PVE sends it as the 'changes'
+# attribute next to the list (a unified diff, left out when nothing waits); the list read above
+# hands on only the list. Read only, same access as the list. A read that fails says so with
+# its reason and is never handed on as "nothing waits"
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/changes', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_network_changes_api(cluster_id, node):
+    """The changes that wait for Apply on a node's network, as the diff Proxmox VE sends. Read only."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    bad, status = _reject_bad_node(node)
+    if bad is not None:
+        return bad, status
+
+    manager = cluster_managers[cluster_id]
+    if getattr(manager, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Pending network changes are a Proxmox VE feature', 'code': 'NOT_SUPPORTED'}), 501
+    if not manager.is_connected and not manager.connect_to_proxmox():
+        return jsonify({'error': 'Cluster not connected', 'offline': True}), 503
+
+    url = f"https://{manager.host}:{manager.api_port}/api2/json/nodes/{node}/network"
+    try:
+        resp = manager._api_get(url)
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        logging.warning(f"[API] Cluster {_sl(cluster_id)} unreachable for the pending network changes: {e}")
+        return jsonify({'error': 'Cluster temporarily unreachable', 'offline': True}), 503
+    if resp.status_code != 200:
+        if resp.status_code in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(resp.status_code, parse_pve_error(resp.text))
+        return jsonify({'error': parse_pve_error(resp.text, 'Could not read the network configuration'),
+                        'upstream_status': resp.status_code}), 502
+    try:
+        body = resp.json()
+    except ValueError:
+        return jsonify({'error': 'Proxmox VE sent an answer that is not JSON', 'upstream_status': 200}), 502
+    # only a left out attribute means nothing waits; any other shape is an answer we cannot read
+    changes = body.get('changes') if isinstance(body, dict) else 0
+    if changes is None:
+        changes = ''
+    if not isinstance(changes, str):
+        return jsonify({'error': 'Proxmox VE sent an unexpected answer for the pending changes', 'upstream_status': 200}), 502
+    return jsonify({'changes': changes})
+
+
+# MK May 2026 — node-name regex (mirrors vms.py:2718 hardening). RFC-1035-ish
+# DNS rules: letter-led, then letters/digits/hyphen/dot, max ~63. Everything
+# else gets a 400 before the value flows into _get_node_ip() / PVE API URLs.
+_NODE_NAME_RE = re.compile(r'^[a-zA-Z][a-zA-Z0-9.\-]{0,62}$')
+
+
+def _reject_bad_node(node):
+    """Return (None, None) if node looks valid, (response, 400) otherwise.
+    Used by the SSH-fronted node endpoints below as a defense-in-depth gate
+    even though the SSH commands themselves don't interpolate `node`.
+    Non-strings (e.g. a crafted JSON list `{"nodes":[123]}`) are rejected as
+    invalid rather than blowing up the regex with a TypeError -> clean 400."""
+    if not isinstance(node, str) or not _NODE_NAME_RE.match(node):
+        return jsonify({'error': 'Invalid node name'}), 400
+    return None, None
+
+
+# MK May 2026 — per-NIC error/drop counters (SSH /proc/net/dev).
+# PVE's own /network endpoint only carries bridge+bond config; for the
+# actual rx_err/rx_drop/tx_err counters operators need we have to read
+# /proc/net/dev directly. Same auth path the syslog viewer uses.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/netstats', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_netstats_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    result = cluster_managers[cluster_id].get_node_netstats(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+# MK May 2026 — cluster health: corosync ring + pvecm quorum + service state.
+# /cluster/status gives "are we quorate" but not ring latency, per-service
+# uptime, or per-ring health — chasing a flapping cluster needs all three.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/cluster-health', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_cluster_health_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # corosync and quorum of the whole cluster
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    result = cluster_managers[cluster_id].get_node_cluster_health(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+# MK Oct 2026 (#1137) - the QDevice as the QDevice daemons of the nodes report it
+# (core/qdevice.py). The QNetd host is no node of the cluster: its connection state and
+# answer times are all there is of it. Cluster infrastructure, so no pool or guest grant
+# reaches it.
+@bp.route('/api/clusters/<cluster_id>/qdevice', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_qdevice_api(cluster_id):
+    """The QDevice of a Proxmox VE cluster and the state of the QDevice daemon on each node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'present': False})   # an XCP-ng pool has no corosync
+    if not getattr(mgr, 'is_connected', False):
+        return jsonify({'error': 'The cluster is not connected'}), 503
+    from pegaprox.core import qdevice
+    view = qdevice.view(cluster_id, mgr)
+    if view is None:
+        return jsonify({'error': 'The cluster did not answer'}), 503
+    if not view['present'] and not any(r['answered'] for r in view['nodes']):
+        return jsonify({'error': 'No node answered',
+                        'nodes': [{'node': r['node'], 'error': r['error']} for r in view['nodes'] if r['asked']]}), 503
+    return jsonify(qdevice.public(view))
+
+
+# MK May 2026 — lm-sensors readings (CPU temp, fan rpm, voltages).
+# Graceful on hosts without lm-sensors installed (returns error string the
+# UI can show as "not available").
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/sensors', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_sensors_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    # #781 (Panxatony) — lm-sensors is a Proxmox-manager feature; XCP-ng / ESXi managers don't
+    # implement get_node_sensors, so calling it unconditionally AttributeError'd → 500. Degrade the
+    # same way the endpoint already does for a host without lm-sensors: a clear "not available".
+    if not hasattr(mgr, 'get_node_sensors'):
+        return jsonify({'error': 'Sensor readings are not available for this cluster type'}), 200
+    result = mgr.get_node_sensors(node)
+    if isinstance(result, dict) and result.get('error'):
+        return jsonify(result), 502
+    return jsonify(result)
+
+
+# #601 — per-node hottest-temperature history for the chart-over-time ask. Reads the
+# background collector's persisted 5-min metrics_history snapshots (off-hub, the nodes of
+# this cluster only); no live SSH here, so it stays cheap even at fleet scale.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/temperature-history', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_temperature_history_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    from pegaprox.background.metrics import load_node_temps
+    try:
+        # MK Oct 2026 - the newest 1000 snapshots as before, this node's points worked out
+        # as they are read (load_node_temps)
+        series = [{'ts': ts, 'temp': temp} for ts, temp in load_node_temps(cluster_id, node)]
+    except Exception as e:
+        return jsonify({'error': f'history read failed: {e}'}), 500
+    series.sort(key=lambda x: x['ts'])
+    return jsonify({'series': series, 'unit': '°C', 'count': len(series)})
+
+
+# MK Oct 2026 - a range picked on the node charts that no RRD preset draws with more than
+# a handful of points (a few hours a week back): CPU and memory from the 5-minute snapshots
+# PegaProx stores itself. The same gate as the RRD charts it zooms.
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/metrics-history', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_metrics_history_api(cluster_id, node):
+    """CPU and memory of a node over a picked time range, from PegaProx's stored metrics
+
+    Query params:
+    - from, to: unix seconds, a year apart at most; cut to what is stored
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    from pegaprox.background.metrics import history_range, load_metrics_range, history_series
+    start, end, why = history_range(request.args)
+    if why:
+        return jsonify({'error': why}), 400
+
+    def _node(clusters):
+        return ((clusters.get(cluster_id) or {}).get('nodes') or {}).get(node)
+    out = history_series(load_metrics_range(start, end, _node, cluster_id=cluster_id, parts=('nodes',)),
+                         {'cpu': 'cpu', 'memory': 'mem_percent'})
+    out.update({'node': node, 'from': int(start), 'to': int(end)})
+    return jsonify(out)
+
+
+# ── In-band hardware monitoring / BMC (#609) ──────────────────────────────────
+# Credential-free reads via local ipmitool on the node (see pegaprox/core/bmc.py).
+# Gated behind a one-time, versioned compliance acknowledgement that is written to
+# the audit log — so "I never enabled that" cannot hold ("dann heißt es nicht 'Ich
+# hab es nie bekommen'"). The read route refuses to serve until consent is on.
+
+def _hw_int(v):
+    """Coerce a stored/posted ack_version to int, degrading to 0 on any bad value
+    (e.g. a corrupt/crafted settings blob with ack_version='x' or [1]) so the gate
+    fails CLOSED — returns disabled — rather than raising a 500 on every read."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _hw_consent_state():
+    """(enabled, ack_record) for in-band hardware monitoring from server settings.
+    enabled == acknowledged AND the stored ack is at/above the current warning ver."""
+    from pegaprox.api.helpers import load_server_settings
+    from pegaprox.core import bmc
+    ack = (load_server_settings() or {}).get('hardware_monitoring') or {}
+    enabled = bool(ack.get('enabled')) and _hw_int(ack.get('ack_version')) >= bmc.HW_CONSENT_VERSION
+    return enabled, ack
+
+
+def _redfish_consent_state():
+    """(enabled, ack_record) for OUT-OF-BAND Redfish monitoring — a separate, sharper
+    opt-in from the in-band one (its own versioned warning + 5s delay)."""
+    from pegaprox.api.helpers import load_server_settings
+    from pegaprox.core import bmc
+    ack = (load_server_settings() or {}).get('hardware_monitoring_redfish') or {}
+    enabled = bool(ack.get('enabled')) and _hw_int(ack.get('ack_version')) >= bmc.REDFISH_CONSENT_VERSION
+    return enabled, ack
+
+
+@bp.route('/api/hardware-monitoring/consent', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_hw_monitoring_consent():
+    """Current consent status + the versioned warning the UI must present, in the
+    requested language (?lang=de|en|fr|es|pt|ko|it; falls back to English)."""
+    from pegaprox.core import bmc
+    enabled, ack = _hw_consent_state()
+    return jsonify({
+        'enabled': enabled,
+        'acknowledged_by': ack.get('acknowledged_by'),
+        'acknowledged_at': ack.get('acknowledged_at'),
+        'ack_version': ack.get('ack_version'),
+        'ack_lang': ack.get('ack_lang'),
+        'current_version': bmc.HW_CONSENT_VERSION,
+        'warning': bmc.hw_consent_warning(request.args.get('lang')),
+    })
+
+
+@bp.route('/api/hardware-monitoring/consent', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_hw_monitoring_consent():
+    """Enable (acknowledge current warning) or disable in-band hardware monitoring.
+
+    Enabling requires acknowledge=true AND ack_version == the current warning
+    version, so a stale UI cannot silently opt in under an old warning. The
+    acknowledgement is persisted to the audit log with who/when/which-version.
+    """
+    from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.core import bmc
+    data = request.get_json(silent=True) or {}
+    usr = request.session.get('user', 'admin')
+    settings = load_server_settings() or {}
+
+    if data.get('enabled') is False:
+        settings['hardware_monitoring'] = {
+            'enabled': False,
+            'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': 0,
+        }
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring.disabled',
+                  'In-band hardware monitoring disabled')
+        return jsonify({'enabled': False})
+
+    if data.get('acknowledge') is True and _hw_int(data.get('ack_version')) == bmc.HW_CONSENT_VERSION:
+        # which localized text the user actually saw (part of the non-repudiation record)
+        ack_lang = (str(data.get('lang') or 'en').split('-')[0].lower())[:8]
+        if ack_lang not in bmc._HW_CONSENT_TEXT:
+            ack_lang = 'en'
+        rec = {
+            'enabled': True,
+            'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': bmc.HW_CONSENT_VERSION,
+            'ack_lang': ack_lang,
+        }
+        settings['hardware_monitoring'] = rec
+        save_server_settings(settings)
+        # Durable, attributed non-repudiation record of the acknowledgement.
+        log_audit(usr, 'hardware_monitoring.enabled',
+                  'In-band hardware monitoring enabled; acknowledged compliance '
+                  'warning v%d [%s]' % (bmc.HW_CONSENT_VERSION, ack_lang))
+        return jsonify(rec)
+
+    return jsonify({
+        'error': 'Must acknowledge the current compliance warning to enable',
+        'code': 'ACK_REQUIRED',
+        'current_version': bmc.HW_CONSENT_VERSION,
+    }), 400
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/hardware', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_hardware_api(cluster_id, node):
+    """Hardware health for one node (sensors/power/FRU/SEL rollup). Prefers in-band
+    ipmitool; falls back to a configured out-of-band Redfish endpoint (#609 phase 3).
+
+    Refuses with CONSENT_REQUIRED until at least one source is enabled + acknowledged.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # the host's hardware, which no pool or guest grant covers
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.core import bmc, redfish
+    inband_ok, _ = _hw_consent_state()
+    redfish_ok, _ = _redfish_consent_state()
+    if not (inband_ok or redfish_ok):
+        return jsonify({
+            'error': 'Hardware monitoring is not enabled',
+            'code': 'CONSENT_REQUIRED',
+            'current_version': bmc.HW_CONSENT_VERSION,
+        }), 403
+    result = redfish.read_node_hardware(cluster_managers[cluster_id], cluster_id, node,
+                                        inband_ok=inband_ok, redfish_ok=redfish_ok)
+    return jsonify(result)
+
+
+# ── Out-of-band Redfish consent (#609 phase 3) ────────────────────────────────
+# A SEPARATE, sharper opt-in from the in-band one (its own versioned warning with
+# an enforced 5s delay). Same non-repudiation contract: the ack (with the language
+# the admin saw) is written to the audit log.
+
+@bp.route('/api/hardware-monitoring/redfish-consent', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_redfish_consent():
+    """Redfish consent status + the versioned out-of-band warning (?lang=...)."""
+    from pegaprox.core import bmc
+    enabled, ack = _redfish_consent_state()
+    return jsonify({
+        'enabled': enabled,
+        'acknowledged_by': ack.get('acknowledged_by'),
+        'acknowledged_at': ack.get('acknowledged_at'),
+        'ack_version': ack.get('ack_version'),
+        'ack_lang': ack.get('ack_lang'),
+        'current_version': bmc.REDFISH_CONSENT_VERSION,
+        'warning': bmc.redfish_consent_warning(request.args.get('lang')),
+    })
+
+
+@bp.route('/api/hardware-monitoring/redfish-consent', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_redfish_consent():
+    """Enable/disable out-of-band Redfish monitoring. Enabling requires the current
+    warning version to be acknowledged; the acknowledgement + language are audited."""
+    from pegaprox.api.helpers import load_server_settings, save_server_settings
+    from pegaprox.core import bmc
+    data = request.get_json(silent=True) or {}
+    usr = request.session.get('user', 'admin')
+    settings = load_server_settings() or {}
+
+    if data.get('enabled') is False:
+        settings['hardware_monitoring_redfish'] = {
+            'enabled': False, 'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(), 'ack_version': 0,
+        }
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring_redfish.disabled',
+                  'Out-of-band Redfish hardware monitoring disabled')
+        return jsonify({'enabled': False})
+
+    if data.get('acknowledge') is True and _hw_int(data.get('ack_version')) == bmc.REDFISH_CONSENT_VERSION:
+        ack_lang = (str(data.get('lang') or 'en').split('-')[0].lower())[:8]
+        if ack_lang not in bmc._REDFISH_CONSENT_TEXT:
+            ack_lang = 'en'
+        rec = {
+            'enabled': True, 'acknowledged_by': usr,
+            'acknowledged_at': datetime.now().isoformat(),
+            'ack_version': bmc.REDFISH_CONSENT_VERSION, 'ack_lang': ack_lang,
+        }
+        settings['hardware_monitoring_redfish'] = rec
+        save_server_settings(settings)
+        log_audit(usr, 'hardware_monitoring_redfish.enabled',
+                  'Out-of-band Redfish hardware monitoring enabled; acknowledged '
+                  'compliance warning v%d [%s]' % (bmc.REDFISH_CONSENT_VERSION, ack_lang))
+        return jsonify(rec)
+
+    return jsonify({'error': 'Must acknowledge the current compliance warning to enable',
+                    'code': 'ACK_REQUIRED',
+                    'current_version': bmc.REDFISH_CONSENT_VERSION}), 400
+
+
+# ── Per-node BMC (Redfish) endpoint config (#609 phase 3) ─────────────────────
+# admin.settings only; the password is stored encrypted and NEVER returned to the
+# browser (masked as ********). Configuring an endpoint requires Redfish consent.
+
+def _require_redfish_consent():
+    from pegaprox.core import bmc
+    enabled, _ = _redfish_consent_state()
+    if not enabled:
+        return jsonify({'error': 'Out-of-band (Redfish) monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.REDFISH_CONSENT_VERSION}), 403
+    return None
+
+
+@bp.route('/api/clusters/<cluster_id>/bmc-endpoints', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def list_bmc_endpoints_api(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    return jsonify({'endpoints': get_db().list_bmc_endpoints(cluster_id)})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['GET'])
+@require_auth(perms=['admin.settings'])
+def get_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    ep = get_db().get_bmc_endpoint(cluster_id, node, decrypt=False)
+    if not ep:
+        return jsonify({'configured': False})
+    ep['configured'] = True
+    ep['password'] = '********' if ep.pop('has_password', False) else ''
+    return jsonify(ep)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def set_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    consent_err = _require_redfish_consent()
+    if consent_err is not None:
+        return consent_err
+    from pegaprox.core import redfish
+    data = request.get_json(silent=True) or {}
+    host = (data.get('host') or '').strip()
+    base, why = redfish._validate_host(host)
+    if base is None:
+        return jsonify({'error': why or 'invalid BMC host'}), 400
+    user = (data.get('user') or '').strip()[:128]
+    verify_ssl = bool(data.get('verify_ssl'))
+    enabled = data.get('enabled', True)
+    pw = data.get('password')
+    # keep the existing password when the UI submits the mask (never overwrite with ****).
+    # NS Aug 2026 (Aikido pentest) — only when the host is unchanged: the 5-min collector
+    # auto-connects (Basic auth) to whatever host is stored, so a masked password paired with a
+    # changed host would exfil the saved secret to a caller-chosen box. Same guard the /test route has.
+    if pw in (None, '', '********'):
+        existing = get_db().get_bmc_endpoint(cluster_id, node)
+        if host == ((existing or {}).get('host') or '').strip():
+            pw = (existing or {}).get('password', '')
+        else:
+            return jsonify({'error': 'A full password is required when changing the BMC host.'}), 400
+        if not pw:
+            return jsonify({'error': 'BMC password required'}), 400
+    if len(str(pw)) > 512:
+        return jsonify({'error': 'BMC password too long'}), 400
+    get_db().save_bmc_endpoint(cluster_id, node, host, user, str(pw),
+                               verify_ssl=verify_ssl, enabled=bool(enabled))
+    usr = request.session.get('user', 'admin')
+    log_audit(usr, 'hardware_monitoring_redfish.endpoint_set',
+              f'BMC/Redfish endpoint set for node {node} (host={host}, verify_ssl={verify_ssl})',
+              cluster=getattr(getattr(cluster_managers.get(cluster_id), 'config', None), 'name', cluster_id))
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_bmc_endpoint_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    removed = get_db().delete_bmc_endpoint(cluster_id, node)
+    if removed:
+        usr = request.session.get('user', 'admin')
+        log_audit(usr, 'hardware_monitoring_redfish.endpoint_removed',
+                  f'BMC/Redfish endpoint removed for node {node}')
+    return jsonify({'success': True, 'removed': removed})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bmc-endpoint/test', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def test_bmc_endpoint_api(cluster_id, node):
+    """Live read the stored (or posted) BMC endpoint over Redfish to validate it.
+    Returns {available, health?, reason?} — read-only, no config change."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    bad, code = _reject_bad_node(node)
+    if bad is not None: return bad, code
+    consent_err = _require_redfish_consent()
+    if consent_err is not None:
+        return consent_err
+    from pegaprox.core import redfish
+    data = request.get_json(silent=True) or {}
+    stored = get_db().get_bmc_endpoint(cluster_id, node) or {}
+    host = (data.get('host') or stored.get('host') or '').strip()
+    if not host:
+        return jsonify({'available': False, 'reason': 'no BMC host configured'}), 400
+    user = (data.get('user') or stored.get('user') or '').strip()
+    pw = data.get('password')
+    # SECURITY (pentest 2026-07-25): never pair the stored BMC secret with a caller-CHOSEN host.
+    # A masked/empty password falls back to the stored plaintext, but if the caller also overrode
+    # `host`, that credential would be sent (preemptive Basic-auth) to an arbitrary off-box host of
+    # their choosing = credential exfiltration. Only reuse the stored password when the host being
+    # tested IS the stored host; testing any other host must carry its own full password.
+    if pw in (None, '', '********'):
+        if host == (stored.get('host') or '').strip():
+            pw = stored.get('password', '')
+        else:
+            return jsonify({'available': False,
+                            'reason': 'a full password is required to test a host other than the stored one'}), 400
+    verify_ssl = bool(data.get('verify_ssl', stored.get('verify_ssl', False)))
+    res = redfish.read_node_bmc_redfish(host, user, str(pw or ''), verify_ssl=verify_ssl, timeout=8)
+    return jsonify({'available': res.get('available', False),
+                    'health': res.get('health'), 'reason': res.get('reason'),
+                    'source': 'redfish'})
+
+
+@bp.route('/api/clusters/<cluster_id>/hardware/health', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_hardware_health_api(cluster_id):
+    """Cluster-wide degraded-hardware rollup from the cached per-node BMC health
+    (#609 phase 2). Cache-only — no SSH on the request; the 5-min metrics collector
+    populates the cache. Consent-gated like the per-node read."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    from pegaprox.core import bmc
+    inband_ok, _ = _hw_consent_state()
+    redfish_ok, _ = _redfish_consent_state()
+    if not (inband_ok or redfish_ok):   # #609 phase 3 — a Redfish-only deployment must not 403
+        return jsonify({'error': 'Hardware monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.HW_CONSENT_VERSION}), 403
+    mgr = cluster_managers[cluster_id]
+    # in-band BMC is proxmox-only; non-proxmox managers don't have the rollup helper.
+    rollup = getattr(mgr, 'get_cluster_hw_rollup', None)
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox' or not callable(rollup):
+        return jsonify({'health': 'unknown', 'available': False, 'checked': 0,
+                        'counts': {'ok': 0, 'warning': 0, 'critical': 0}, 'degraded': []})
+    return jsonify(rollup())
+
+
+# ipmitool one-click install (#609 step 3). Fully static script — no user-controlled
+# input reaches the shell (unlike the StarWind installer there is no repo/key URL), so
+# no SSRF/url-allowlist is needed. Read-only in-band IPMI (local KCS, no BMC creds).
+# Gated behind the SAME compliance acknowledgement as the read path: the install
+# MUTATES the node (package + IPMI kernel modules) so it must not run before the
+# warning is acknowledged. admin.settings + audited + idempotent + bounded-parallel.
+IPMITOOL_INSTALL_SCRIPT = """#!/usr/bin/env bash
+# PegaProx (#609) — install ipmitool for in-band hardware monitoring on this node.
+set -uo pipefail
+if command -v ipmitool >/dev/null 2>&1; then
+    ver="$(ipmitool -V 2>/dev/null | head -1 || echo ipmitool)"
+    echo "PP_OK already_installed $ver"; exit 0
+fi
+if ! command -v apt-get >/dev/null 2>&1; then echo 'PP_ERR no-apt-get'; exit 3; fi
+# a fixed log path in /tmp is a symlink target like any other; mktemp -d gives us a
+# 0700 directory nobody else can have pre-created
+PP_LOGDIR="$(mktemp -d /tmp/pp-ipmitool-XXXXXXXX)" || exit 4
+trap 'rm -rf "$PP_LOGDIR"' EXIT
+apt-get update -o Acquire::Retries=2 >"$PP_LOGDIR/apt.log" 2>&1 || true
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y ipmitool >>"$PP_LOGDIR/apt.log" 2>&1; then
+    echo 'PP_ERR apt-install-failed'; exit 5
+fi
+command -v ipmitool >/dev/null 2>&1 || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
+ver="$(ipmitool -V 2>/dev/null | head -1 || echo ipmitool)"
+echo "PP_OK installed $ver"
+"""
+
+
+@bp.route('/api/clusters/<cluster_id>/hardware/ipmitool/install', methods=['POST'])
+@require_auth(perms=['admin.settings'])  # root apt-install on nodes -> admin-only, like starlvm
+def install_ipmitool_api(cluster_id):
+    """Install ipmitool on cluster node(s) over SSH for in-band hardware monitoring.
+
+    Body (optional): {nodes: [names]} — defaults to all cluster nodes. Idempotent
+    per node (skips if ipmitool present). Requires the hardware-monitoring feature
+    to be enabled (compliance acknowledged) first — the install changes the node.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'ipmitool install is Proxmox-only'}), 400
+
+    # consent gate — do not mutate a node before the warning is acknowledged
+    from pegaprox.core import bmc
+    enabled, _ack = _hw_consent_state()
+    if not enabled:
+        return jsonify({'error': 'Hardware monitoring is not enabled',
+                        'code': 'CONSENT_REQUIRED',
+                        'current_version': bmc.HW_CONSENT_VERSION}), 403
+
+    raw_nodes = (request.get_json(silent=True) or {}).get('nodes') or []
+    if not isinstance(raw_nodes, list):
+        return jsonify({'error': 'nodes must be a list of node names'}), 400
+    # validate each entry BEFORE set() — a dict/list entry would raise in set()
+    for n in raw_nodes:
+        bad, code = _reject_bad_node(n)
+        if bad is not None:
+            return bad, code
+    only = set(raw_nodes)
+    nodes = _cluster_node_names(mgr)
+    if only:
+        nodes = [n for n in nodes if n in only]
+    if not nodes:
+        return jsonify({'error': 'No nodes found in cluster'}), 404
+
+    def _install_one(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'success': False, 'error': 'no SSH-reachable IP'}
+        ssh = None
+        try:
+            for attempt in range(3):
+                ssh = mgr._ssh_connect(node_ip)
+                if ssh:
+                    break
+                if attempt < 2:
+                    time.sleep(1.5)
+            if not ssh:
+                return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
+            out, _e = _ssh_run_script(ssh, IPMITOOL_INSTALL_SCRIPT, timeout=180)
+            last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
+            if 'PP_OK already_installed' in out:
+                return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
+            if 'PP_OK installed' in out:
+                return {'node': node, 'success': True, 'already_installed': False, 'detail': last}
+            return {'node': node, 'success': False, 'error': last or 'unexpected installer output'}
+        except Exception as e:
+            return {'node': node, 'success': False, 'error': safe_error(e, 'install failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _install_one for n in nodes}, max_concurrent=8, timeout=200)
+    results = [res_map.get(n) or {'node': n, 'success': False, 'error': 'timed out'} for n in nodes]
+    installed = sum(1 for r in results if r.get('success'))
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'hardware_monitoring.ipmitool_install',
+              f"ipmitool install: {installed}/{len(nodes)} node(s)",
+              cluster=mgr.config.name)
+    return jsonify({
+        'success': installed == len(nodes),
+        'installed': installed,
+        'total': len(nodes),
+        'results': results,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['PUT'])
+@require_auth(perms=['node.network'])
+def update_node_network_api(cluster_id, node, iface):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    result = mgr.update_node_network(node, iface, request.json or {})
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network', methods=['POST'])
+@require_auth(perms=['node.network'])
+def create_node_network_api(cluster_id, node):
+    """Create a new network interface"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    iface = data.get('iface', '')
+    iface_type = data.get('type', 'bridge')
+    
+    if not iface:
+        return jsonify({'error': 'Interface name required'}), 400
+    
+    config = {k: v for k, v in data.items() if k not in ['iface', 'type']}
+    result = mgr.create_node_network(node, iface, iface_type, config)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network/<iface>', methods=['DELETE'])
+@require_auth(perms=['node.network'])
+def delete_node_network_api(cluster_id, node, iface):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    result = mgr.delete_node_network(node, iface)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network', methods=['PUT'])
+@require_auth(perms=['node.network'])
+def apply_node_network_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    result = mgr.apply_node_network(node)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/network', methods=['DELETE'])
+@require_auth(perms=['node.network'])
+def revert_node_network_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    result = mgr.revert_node_network(node)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/networks', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_cluster_networks_api(cluster_id):
+    """NS: Mar 2026 - Cluster-wide network overview with VM assignments"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    # decided before the walk, which fires one config read per guest
+    try:
+        mine = caller_guest_nodes(cluster_id)
+    except Exception as e:
+        logging.error(f"[API] cannot read the caller's guests on {_sl(cluster_id)}: {e}")
+        return jsonify({'error': 'Cannot read your guests on this cluster - check the server logs'}), 503
+    got = mgr.get_cluster_networks()
+    if mine is None:
+        return jsonify(got)
+    return jsonify(_networks_for_confined(cluster_id, got, mine))
+
+
+def _networks_for_confined(cluster_id, got, mine):
+    """The /networks answer for a caller confined to some guests: the guests they may see,
+    the nodes in `mine` (where those run) and the bridges there. `got` is the manager's
+    30 s cache that every caller is served from, so the cut is made of copies."""
+    if not isinstance(got, dict):
+        return got   # XCP-ng: the pool's networks with counts, no guest and no node in them
+    nets = [n for n in got.get('networks') or [] if isinstance(n, dict)]
+    stores = [s for s in got.get('storage_assignments') or [] if isinstance(s, dict)]
+    rows = [r for x in nets + stores for r in x.get('vms') or [] if isinstance(r, dict)]
+    # one pass over every guest the answer names, not one per bridge or storage
+    allowed = {(r.get('vmid'), r.get('type')) for r in scope_vm_rows(cluster_id, rows)}
+
+    def theirs(vms):
+        return [r for r in vms or [] if isinstance(r, dict) and (r.get('vmid'), r.get('type')) in allowed]
+
+    out = []
+    for n in nets:
+        vms = theirs(n.get('vms'))
+        nodes = [x for x in n.get('nodes') or [] if x in mine]
+        if not vms and not nodes:
+            continue
+        row = dict(n, vms=vms, nodes=nodes)
+        # the settings of a bridge are those of the first node that listed it
+        if (n.get('nodes') or [None])[0] not in mine:
+            row.update(cidr='', address='', gateway='', bridge_ports='', comments='')
+        out.append(row)
+    kept = []
+    for s in stores:
+        vms = theirs(s.get('vms'))
+        if vms:
+            kept.append(dict(s, vms=vms))
+    return dict(got, networks=out, storage_assignments=kept)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_dns_api(cluster_id, node):
+    # NS Jul 2026 (CodeAnt re-scan auth-bypass/IDOR) — cluster-scoped route was missing the tenant gate
+    ok, err = check_cluster_access(cluster_id)
+    if not ok:
+        return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    read = getattr(manager, 'get_node_dns', None)
+    if not callable(read):
+        return jsonify({'error': 'DNS settings are not available for this cluster type'}), 501
+    # MK Oct 2026 (#1163) - a read that failed is not a node without DNS. It goes out as a
+    # 502, a 401/403 of Proxmox VE with the stored-credentials wording of #1142
+    result = read(node)
+    if isinstance(result, dict) and result.get('error'):
+        status = result.get('upstream_status')
+        if status in UPSTREAM_AUTH_STATUSES:
+            return upstream_failure(status, 'reading the DNS settings needs Sys.Audit on the node'
+                                    if status == 403 else '')
+        return jsonify({'error': result['error'], 'upstream_status': status}), 502
+    return jsonify(result)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/dns', methods=['PUT'])
+@require_auth(perms=['node.network'])
+def update_node_dns_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    result = mgr.update_node_dns(node, request.json or {})
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/hosts', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_hosts_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    hosts = cluster_managers[cluster_id].get_node_hosts(node)
+    if hosts is None:
+        return jsonify({'error': 'Could not read hosts file from node'}), 502
+    return jsonify({'data': hosts})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/hosts', methods=['POST'])
+@require_auth(perms=['node.network'])
+def update_node_hosts_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    result = mgr.update_node_hosts(node, data.get('data', ''))
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/time', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_time_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    _nerr = require_guest_node(cluster_id, node)
+    if _nerr:
+        return _nerr
+    
+    got = cluster_managers[cluster_id].get_node_time(node)
+    return unread_failure(got, f'the time settings of node {node}') or jsonify(got)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/time', methods=['PUT'])
+@require_auth(perms=['node.network'])
+def update_node_time_api(cluster_id, node):
+    """Update node timezone"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    result = mgr.update_node_time(node, data.get('timezone', 'UTC'))
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/syslog', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_syslog_api(cluster_id, node):
+    """Get node system log"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # MK Oct 2026 - the host journal: sshd logins, other accounts, every guest on the node.
+    # Not for a caller confined to a pool or a few guests, like the node-level task logs.
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    start = request.args.get('start', 0, type=int)
+    limit = bounded_limit(request.args.get('limit'), 500, 5000)
+    got = manager.get_node_syslog(node, start, limit)
+    return unread_failure(got, f'the system log of node {node}') or jsonify(got)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_certificates_api(cluster_id, node):
+    """Get node certificates"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    got = manager.get_node_certificates(node)
+    return unread_failure(got, f'the certificates of node {node}') or jsonify(got)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/renew', methods=['POST'])
+@require_auth(perms=['node.network'])
+def renew_node_certificate_api(cluster_id, node):
+    """Renew node certificate"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    force = request.json.get('force', False) if request.json else False
+    result = manager.renew_node_certificate(node, force)
+    
+    if result['success']:
+        return jsonify(result)
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/custom', methods=['POST'])
+@require_auth(perms=['node.network'])
+def upload_node_certificate_api(cluster_id, node):
+    """Upload custom certificate to node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    data = request.json or {}
+    
+    certificates = data.get('certificates', '')
+    key = data.get('key', '')
+    restart = data.get('restart', True)
+    force = data.get('force', False)
+    
+    if not certificates or not key:
+        return jsonify({'error': 'Certificate and key are required'}), 400
+    
+    result = manager.upload_node_certificate(node, certificates, key, restart, force)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/certificates/custom', methods=['DELETE'])
+@require_auth(perms=['node.network'])
+def delete_node_certificate_api(cluster_id, node):
+    """Delete custom certificate from node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    restart = request.args.get('restart', 'true').lower() == 'true'
+    result = mgr.delete_node_certificate(node, restart)
+    
+    if result['success']:
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/replication', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_node_replication_api(cluster_id, node):
+    """Get replication jobs for node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    # sec (audit): node-level twin of the scoped cluster replication list ('guest' keys the VM)
+    return jsonify(scope_vm_rows(cluster_id, manager.get_node_replication(node), vmid_key='guest'))
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_tasks_api(cluster_id, node):
+    """Get task history for node, optionally filtered by vmid"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    start = request.args.get('start', 0, type=int)
+    limit = bounded_limit(request.args.get('limit'), 50, 1000)
+    errors = request.args.get('errors', 'false').lower() == 'true'
+    vmid = request.args.get('vmid', None, type=int)
+    
+    tasks = manager.get_node_tasks(node, start, limit * 3 if vmid else limit, errors)  # Get more if filtering
+    # MK Nov 2026 - before the scoping below, which hands on a plain list
+    failed = unread_failure(tasks, f'the task list of node {node}')
+    if failed:
+        return failed
+
+    # sec (private disclosure Sep 2026 — audit): node-level twin of the confined cluster task log —
+    # a scoped caller could read every VM's task history here instead. Confine the same way; admins
+    # and plain cluster-wide operators keep the full history.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        def _task_vmid(t):
+            for k in ('vmid', 'id'):
+                try:
+                    return int(t.get(k))
+                except (TypeError, ValueError):
+                    continue
+            return None
+        _scoped = []
+        for t in (tasks or []):
+            _v = _task_vmid(t)
+            if _v is not None and _ucav(_au, cluster_id, _v, 'vm.view'):
+                _scoped.append(t)
+        tasks = _scoped
+
+    # Filter by vmid if specified
+    if vmid and tasks:
+        filtered = [t for t in tasks if t.get('id') == str(vmid) or str(vmid) in str(t.get('upid', ''))]
+        return jsonify(filtered[:limit])
+    
+    return jsonify(tasks)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>/log', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_task_log_api(cluster_id, node, upid):
+    """Get log for a specific task
+
+    NS: Fixed Dec 2025 - frontend expects { log: "..." } format
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    # MK Oct 2026 - a task id has no slash; anything else goes nowhere near the URL
+    if not task_ref_ok(getattr(manager, 'cluster_type', 'proxmox'), node, upid):
+        return jsonify({'error': 'Invalid node or task id'}), 400
+
+    # sec (private disclosure Sep 2026 — audit): the UPID names a guest (PVE field 6). A scoped
+    # caller must not read the task log of a VM outside their grant — the DELETE/cancel sibling
+    # already gates on exactly this. Non-guest (node-level) logs are not for a scoped caller.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        _p = str(upid).split(':')
+        _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+        if _tvmid is None or not _ucav(_au, cluster_id, int(_tvmid), 'vm.view'):
+            return jsonify({'error': 'Access denied to this task'}), 403
+
+    start = request.args.get('start', 0, type=int)
+    limit = bounded_limit(request.args.get('limit'), 500, 5000)
+
+    log_lines = manager.get_node_task_log(node, upid, start, limit)
+    # Join lines into a single string for display
+    log_text = '\n'.join(log_lines) if log_lines else ''
+
+    # MK Oct 2026 - lines as well, for a reader that tails the log with ?start= and has to
+    # count what it got (an empty line joins away in the text)
+    return jsonify({'log': log_text, 'lines': log_lines or []})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/tasks/<path:upid>/status', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_task_status_api(cluster_id, node, upid):
+    """Status of one task as Proxmox has it: {status, exitstatus, ...}
+
+    MK Oct 2026 - the live backup pane asked this route every 2 s before it existed. A scoped
+    caller reads the status of their own guests' tasks only, like the log next to it.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    manager = cluster_managers[cluster_id]
+    if not task_ref_ok(getattr(manager, 'cluster_type', 'proxmox'), node, upid):
+        return jsonify({'error': 'Invalid node or task id'}), 400
+
+    from pegaprox.utils.auth import build_authz_user as _bau
+    from pegaprox.utils.rbac import user_can_access_vm as _ucav
+    _au = _bau(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_au, cluster_id):
+        _p = str(upid).split(':')
+        _tvmid = _p[6] if len(_p) > 6 and _p[6].isdigit() else None
+        if _tvmid is None or not _ucav(_au, cluster_id, int(_tvmid), 'vm.view'):
+            return jsonify({'error': 'Access denied to this task'}), 403
+
+    read = getattr(manager, 'get_task_status', None)
+    status = read(node, upid) if callable(read) else None
+    if not isinstance(status, dict):
+        return jsonify({'error': 'Task status could not be read'}), 502
+    return jsonify({k: status.get(k) for k in ('status', 'exitstatus', 'type', 'id', 'node',
+                                                'starttime', 'pid', 'upid') if k in status})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_subscription_api(cluster_id, node):
+    """Get node subscription status"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # hands the key unmasked, the aggregate in datacenter.py masks it
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    manager = cluster_managers[cluster_id]
+    got = manager.get_node_subscription(node)
+    return unread_failure(got, f'the subscription of node {node}') or jsonify(got)
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def update_node_subscription_api(cluster_id, node):
+    """Update subscription key - admin only"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    result = mgr.update_node_subscription(node, data.get('key', ''))
+    
+    if result['success']:
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'subscription.updated', f"Subscription key updated for {node}", cluster=mgr.config.name)
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def check_node_subscription_api(cluster_id, node):
+    """Refresh subscription status - admin only"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    data = request.json or {}
+    result = mgr.check_node_subscription(node, bool(data.get('force', False)))
+
+    if result['success']:
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'subscription.checked', f"Subscription checked for {node}", cluster=mgr.config.name)
+        return jsonify({'message': 'Subscription check started', 'data': result.get('data')})
+    return jsonify({'error': result['error']}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/subscription', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def delete_node_subscription_api(cluster_id, node):
+    """Delete subscription key - admin only"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+
+    mgr = cluster_managers[cluster_id]
+    result = mgr.delete_node_subscription(node)
+
+    if result['success']:
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'subscription.deleted', f"Subscription key deleted for {node}", cluster=mgr.config.name)
+        return jsonify({'message': result['message']})
+    return jsonify({'error': result['error']}), 500
+
+
+# =============================================================================
+# SMBIOS Auto-Configurator Feature
+# MK: Automatically sets SMBIOS data on new VMs for Windows licensing etc.
+# MK: this was surprisingly tricky to get right, proxmox smbios format is picky
+# =============================================================================
+
+# NS 2026-04-24 — sudo detection is shared across SMBIOS helpers. We query once per
+# SSH connection and cache on the client object so every helper sees the same answer.
+def _ssh_sudo_prefix(ssh):
+    """Returns '' when the SSH login user is already root, 'sudo -n ' otherwise.
+    Cached on the ssh object so we don't re-query for every command."""
+    cached = getattr(ssh, '_pegaprox_sudo_prefix', None)
+    if cached is not None:
+        return cached
+    try:
+        stdin, stdout, _ = ssh.exec_command('id -u', timeout=10)
+        uid = _read_capped(stdout).strip()
+        prefix = '' if uid == '0' else 'sudo -n '
+    except Exception:
+        prefix = ''
+    try:
+        ssh._pegaprox_sudo_prefix = prefix
+    except Exception:
+        pass
+    return prefix
+
+
+def _ssh_run_script(ssh, script, timeout=180):
+    """Run a script on the node WITHOUT ever writing it to a file.
+
+    The installers used to land on a fixed path - /tmp/pegaprox-starlvm-install.sh and
+    friends - and then run it as root. /tmp is world-writable and sticky, and sticky only
+    stops you deleting somebody else's file, not creating a symlink under a name nobody has
+    taken yet. So any local account on a managed node could point that name at, say,
+    /etc/cron.d/x, wait for an operator to click install, and have root write their content.
+    The same went for the apt log each script redirected into a fixed /tmp path.
+
+    Piping over stdin removes the artifact entirely: no path, nothing to pre-create, nothing
+    to clean up afterwards. Base64 so quoting, newlines and heredocs inside the script
+    survive the shell. MK Sep 2026
+    """
+    import base64 as _b64
+    prefix = _ssh_sudo_prefix(ssh)
+    enc = _b64.b64encode(script.encode('utf-8')).decode('ascii')
+    runner = 'sudo -n bash' if prefix else 'bash'
+    full = f"echo {enc} | base64 -d | {runner}"
+    stdin, stdout, stderr = ssh.exec_command(full, timeout=timeout)
+    out = _read_capped(stdout)
+    rc = stdout.channel.recv_exit_status()
+    err = _read_capped(stderr).strip()
+    if rc != 0:
+        raise RuntimeError(f"script failed (rc={rc}): {err or out[:200] or 'no output'}")
+    return out, err
+
+
+def _ssh_run_checked(ssh, cmd, timeout=30):
+    """Run a command via SSH, raise on non-zero exit. NS Apr 2026 — used to be
+    scattered all over with `stdout.read()` and no check, which silently swallowed
+    systemctl failures during smbios deploy (#317 aftermath).
+    NS 2026-04-24 — auto-prefix with sudo when login isn't root (pegaprox@pam)."""
+    prefix = _ssh_sudo_prefix(ssh)
+    # Wrap multi-line / redirect commands through `sudo bash -c` via base64 so
+    # `>` and heredocs work. Single-token commands just get a plain prefix.
+    if prefix and (cmd.lstrip().startswith(('cat ', 'sh -c', 'bash -c')) or ' > ' in cmd or '\n' in cmd):
+        import base64 as _b64
+        enc = _b64.b64encode(cmd.encode('utf-8')).decode('ascii')
+        full = f"echo {enc} | base64 -d | sudo -n bash"
+    else:
+        full = f"{prefix}{cmd}"
+    stdin, stdout, stderr = ssh.exec_command(full, timeout=timeout)
+    out = _read_capped(stdout)
+    rc = stdout.channel.recv_exit_status()
+    err = _read_capped(stderr).strip()
+    if rc != 0:
+        raise RuntimeError(f"`{cmd}` failed (rc={rc}): {err or out[:200] or 'no output'}")
+    return out, err
+
+
+def _ssh_write_file(ssh, path, content, mode=None):
+    """Write file via SSH. Works for both root and non-root (pegaprox@pam + sudo) logins.
+
+    Strategy:
+      - root login: SFTP direct (fastest), fall back to `cat >`
+      - non-root login: upload to /tmp first (no sudo needed), then `sudo mv` into place.
+        SFTP-writing to /etc via sudo is a mess because paramiko's SFTP runs as the
+        login user — we bypass by staging in /tmp.
+    NS 2026-04-24 — pegaprox@pam + NOPASSWD sudo deployments
+    """
+    import os
+    prefix = _ssh_sudo_prefix(ssh)
+    parent = os.path.dirname(path)
+    q_parent = shlex.quote(parent)
+    q_path = shlex.quote(path)
+
+    # mkdir first — mkdir -p is a no-op if the dir exists already
+    stdin, stdout, stderr = ssh.exec_command(f"{prefix}mkdir -p {q_parent}")
+    rc = stdout.channel.recv_exit_status()
+    if rc != 0:
+        err = _read_capped(stderr).strip()
+        raise RuntimeError(f"mkdir -p {parent} failed (rc={rc}): {err or 'permission denied?'}")
+
+    if not prefix:
+        # root login — original simple SFTP path
+        try:
+            sftp = ssh.open_sftp()
+            with sftp.file(path, 'w') as f:
+                f.write(content)
+            if mode is not None:
+                sftp.chmod(path, mode)
+            sftp.close()
+        except (IOError, OSError) as e:
+            logging.warning(f"SFTP write to {path} failed ({e}), falling back to exec_command")
+            stdin, stdout, stderr = ssh.exec_command(f"cat > {q_path}")
+            stdin.write(content)
+            stdin.channel.shutdown_write()
+            rc = stdout.channel.recv_exit_status()
+            if rc != 0:
+                err = _read_capped(stderr).strip()
+                raise RuntimeError(f"write {path} failed (rc={rc}): {err or 'unknown'}")
+            if mode is not None:
+                _ssh_run_checked(ssh, f"chmod {oct(mode)[2:]} {q_path}")
+    else:
+        # non-root — stage in /tmp, then sudo-mv into place
+        import uuid as _uuid
+        tmp_path = f"/tmp/pegaprox-stage-{_uuid.uuid4().hex[:12]}"
+        q_tmp = shlex.quote(tmp_path)
+        try:
+            sftp = ssh.open_sftp()
+            with sftp.file(tmp_path, 'w') as f:
+                f.write(content)
+            sftp.close()
+        except (IOError, OSError) as e:
+            logging.warning(f"SFTP stage to {tmp_path} failed ({e}), using stdin pipe")
+            stdin, stdout, stderr = ssh.exec_command(f"cat > {q_tmp}")
+            stdin.write(content); stdin.channel.shutdown_write()
+            rc = stdout.channel.recv_exit_status()
+            if rc != 0:
+                raise RuntimeError(f"staging {tmp_path} failed (rc={rc})")
+        # Move to final location as root, set mode if requested
+        mv_cmd = f"sudo -n mv {q_tmp} {q_path}"
+        if mode is not None:
+            mv_cmd += f" && sudo -n chmod {oct(mode)[2:]} {q_path}"
+        stdin, stdout, stderr = ssh.exec_command(mv_cmd)
+        rc = stdout.channel.recv_exit_status()
+        if rc != 0:
+            err = _read_capped(stderr).strip()
+            # best-effort cleanup so /tmp doesn't stay littered on failure
+            try: ssh.exec_command(f"rm -f {q_tmp}")
+            except Exception: pass
+            raise RuntimeError(f"sudo mv → {path} failed (rc={rc}): {err or 'permission denied?'}")
+
+    # Verify — file actually on disk with non-zero size
+    stdin, stdout, stderr = ssh.exec_command(f"{prefix}test -s {q_path}")
+    if stdout.channel.recv_exit_status() != 0:
+        raise RuntimeError(f"Write verification failed: {path} missing or empty")
+
+SMBIOS_SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
+"""
+SMBIOS Auto-Configurator for Proxmox VE
+Deployed by PegaProx - automatically configures SMBIOS for new VMs
+
+Runs as a systemd service, monitors for new VMs and sets SMBIOS data.
+"""
+
+import subprocess
+import time
+import os
+import random
+from datetime import datetime
+
+# Configuration - set by PegaProx when deployed
+MANUFACTURER = "{manufacturer}"
+PRODUCT = "{product}"
+VERSION = "{version}"
+FAMILY = "{family}"
+
+# Paths
+LOG_FILE = "/var/log/pegaprox-smbios.log"
+PROCESSED_VMS_FILE = "/var/lib/pegaprox-smbios-processed.txt"  # keeps track of what we already did
+
+def log_message(message):
+    """write to log file, nothing fancy"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{{timestamp}}] {{message}}"
+    # line by line under systemd, not in blocks minutes later
+    print(log_entry, flush=True)
+    try:
+        with open(LOG_FILE, 'a') as f:
+            f.write(log_entry + "\\n")
+    except:
+        pass  # if we cant log, oh well
+
+def get_all_vms():
+    """read vmids from /etc/pve/.vmlist instead of spawning qm list (way cheaper)"""
+    try:
+        import json as _json
+        with open('/etc/pve/.vmlist', 'r') as f:
+            data = _json.load(f)
+        return [str(vmid) for vmid, info in data.get('ids', {{}}).items() if info.get('type') == 'qemu']
+    except Exception as e:
+        log_message(f"Error reading vmlist: {{e}}")
+        return []
+
+def load_processed_vms():
+    """Load already processed VMs"""
+    if os.path.exists(PROCESSED_VMS_FILE):
+        with open(PROCESSED_VMS_FILE, 'r') as f:
+            return set(f.read().splitlines())
+    return set()
+
+def save_processed_vm(vmid):
+    """Mark VM as processed"""
+    with open(PROCESSED_VMS_FILE, 'a') as f:
+        f.write(f"{{vmid}}\\n")
+
+def get_current_smbios(vmid):
+    """read smbios from conf file directly - no perl overhead.
+
+    Section-aware: `qm set` on a RUNNING vm writes into the conf's
+    [PENDING] section (applied at the next vm start), so a pending
+    smbios1 line must win over the main-section value. Without this
+    the daemon never sees its own previous stamp and re-writes smbios1
+    on every poll cycle. smbios1 lines inside any OTHER bracketed
+    section (e.g. snapshot sections) are stale snapshots of old config
+    and are ignored.
+    """
+    try:
+        conf_path = f"/etc/pve/qemu-server/{{vmid}}.conf"
+        if not os.path.exists(conf_path):
+            return None
+        main_val = None
+        pending_val = None
+        section = 'main'
+        with open(conf_path, 'r') as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith('[') and s.endswith(']'):
+                    section = 'pending' if s == '[PENDING]' else 'other'
+                    continue
+                if s.startswith('smbios1:'):
+                    val = s.split(':', 1)[1].strip()
+                    if section == 'pending':
+                        pending_val = val
+                    elif section == 'main':
+                        main_val = val
+        return pending_val if pending_val is not None else main_val
+    except:
+        return None
+
+def parse_smbios_string(smbios_str):
+    """Parse SMBIOS string into dictionary"""
+    params = {{}}
+    if not smbios_str:
+        return params
+    for part in smbios_str.split(','):
+        if '=' in part:
+            key, value = part.split('=', 1)
+            params[key.strip()] = value.strip()
+    return params
+
+def needs_smbios_update(vmid):
+    """Check if VM needs SMBIOS configuration. Logs nothing: the re-create check runs it
+    for every configured VM on every cycle"""
+    smbios_str = get_current_smbios(vmid)
+    if not smbios_str:
+        return True
+    
+    params = parse_smbios_string(smbios_str)
+    relevant_params = {{k: v for k, v in params.items() if k != 'uuid'}}
+    
+    if not relevant_params:
+        return True
+    
+    if ('manufacturer' in params or 'product' in params or 
+        'version' in params or 'serial' in params or 'family' in params):
+        return False
+    
+    return True
+
+def generate_unique_serial():
+    """Generate unique serial number"""
+    timestamp = datetime.now().strftime("%y%m%d%H%M%S")
+    random_part = random.randint(1000, 9999)
+    return f"PVE{{timestamp}}{{random_part}}"
+
+def set_smbios(vmid):
+    """Set SMBIOS configuration"""
+    current_smbios_str = get_current_smbios(vmid)
+    current_params = parse_smbios_string(current_smbios_str) if current_smbios_str else {{}}
+    uuid_value = current_params.get('uuid', '')
+    serial = generate_unique_serial()
+    
+    smbios_parts = [
+        f"manufacturer={{MANUFACTURER}}",
+        f"product={{PRODUCT}}",
+        f"version={{VERSION}}",
+        f"serial={{serial}}",
+    ]
+    if uuid_value:
+        smbios_parts.append(f"uuid={{uuid_value}}")
+    smbios_parts.append(f"family={{FAMILY}}")
+    
+    smbios_string = ",".join(smbios_parts)
+    cmd = ['qm', 'set', vmid, '-smbios1', smbios_string]
+    
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+        log_message(f"Set SMBIOS for VM {{vmid}} | Serial: {{serial}}")
+        return True
+    except subprocess.CalledProcessError as e:
+        log_message(f"Error setting SMBIOS for VM {{vmid}}: {{e.stderr if e.stderr else e}}")
+        return False
+
+def check_vm_exists(vmid):
+    """Check if VM config exists on this node"""
+    return os.path.exists(f"/etc/pve/qemu-server/{{vmid}}.conf")
+
+def cleanup_processed_list(processed):
+    """Remove VMs that no longer exist"""
+    current_vms = set(get_all_vms())
+    removed_vms = processed - current_vms
+    
+    if removed_vms:
+        for vmid in removed_vms:
+            log_message(f"VM {{vmid}} no longer exists, removing from tracking")
+            processed.remove(vmid)
+        with open(PROCESSED_VMS_FILE, 'w') as f:
+            for vmid in processed:
+                f.write(f"{{vmid}}\\n")
+    return processed
+
+def main():
+    log_message("=== PegaProx SMBIOS Auto-Configurator started ===")
+    log_message(f"Config: {{MANUFACTURER}} | {{PRODUCT}} | {{VERSION}} | {{FAMILY}}")
+    
+    processed = load_processed_vms()
+    cleanup_counter = 0
+    
+    while True:
+        try:
+            cleanup_counter += 1
+            if cleanup_counter >= 30:
+                processed = cleanup_processed_list(processed)
+                cleanup_counter = 0
+            
+            current_vms = get_all_vms()
+
+            for vmid in current_vms:
+                if vmid not in processed:
+                    if check_vm_exists(vmid):
+                        if needs_smbios_update(vmid):
+                            log_message(f"Configuring SMBIOS for new VM {{vmid}}")
+                            if set_smbios(vmid):
+                                save_processed_vm(vmid)
+                                processed.add(vmid)
+                        else:
+                            save_processed_vm(vmid)
+                            processed.add(vmid)
+                elif vmid in processed and check_vm_exists(vmid) and needs_smbios_update(vmid):
+                    # VM was deleted + recreated with same ID
+                    log_message(f"VM {{vmid}} re-created, reconfiguring SMBIOS")
+                    set_smbios(vmid)
+            
+            time.sleep(30)
+            
+        except KeyboardInterrupt:
+            log_message("=== SMBIOS Auto-Configurator stopped ===")
+            break
+        except Exception as e:
+            log_message(f"Error: {{e}}")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    main()
+'''
+
+SMBIOS_SERVICE_TEMPLATE = '''[Unit]
+Description=PegaProx SMBIOS Auto-Configurator
+After=pve-cluster.service
+Wants=pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/pegaprox-smbios-autoconfig.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+'''
+
+@bp.route('/api/clusters/<cluster_id>/smbios-autoconfig', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_smbios_autoconfig(cluster_id):
+    """get smbios settings for the cluster, returns defaults if not configured yet"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    
+    try:
+        if cluster_id not in cluster_managers:
+            return jsonify({'error': 'Cluster not found'}), 404
+        
+        # defaults if nothing configured - NS: proxmox doesnt allow underscores so no spaces either
+        mgr = cluster_managers[cluster_id]
+        settings = getattr(mgr.config, 'smbios_autoconfig', None) or {
+            'enabled': False,
+            'manufacturer': 'Proxmox',
+            'product': 'PegaProxManagment',
+            'version': 'v1',
+            'family': 'ProxmoxVE'
+        }
+        
+        return jsonify(settings)
+    except Exception as e:
+        logging.error(f"Error getting SMBIOS config: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to get SMBIOS config')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/smbios-autoconfig', methods=['PUT'])
+@require_auth(perms=['admin.settings'])
+def update_smbios_autoconfig(cluster_id):
+    """save smbios settings - gets deployed to nodes when they click deploy"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    data = request.json or {}
+    mgr = cluster_managers[cluster_id]
+
+    # NS Feb 2026: Validate SMBIOS values to prevent template injection
+    for key in ['manufacturer', 'product', 'version', 'family']:
+        val = data.get(key, '')
+        if val and not re.match(r'^[a-zA-Z0-9 ._-]{1,64}$', val):
+            return jsonify({'error': f'Invalid {key}: only alphanumeric, spaces, dots, hyphens allowed (max 64 chars)'}), 400
+
+    # Update settings
+    mgr.config.smbios_autoconfig = {
+        'enabled': data.get('enabled', False),
+        'manufacturer': data.get('manufacturer', 'Proxmox'),
+        'product': data.get('product', 'Virtual Machine'),
+        'version': data.get('version', 'PVE8'),
+        'family': data.get('family', 'ProxmoxVE')
+    }
+    
+    # Save to database
+    db = get_db()
+    db.update_cluster(cluster_id, {'smbios_autoconfig': json.dumps(mgr.config.smbios_autoconfig)})
+    
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'smbios_autoconfig.updated', f"SMBIOS auto-config updated", cluster=mgr.config.name)
+    
+    return jsonify({'success': True, 'message': 'Settings saved'})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/status', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_smbios_autoconfig_status(cluster_id, node):
+    """Check if SMBIOS auto-config service is running on node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    
+    try:
+        # NS Apr 2026 (PR #324): one real resolver instead of 3 copies of the
+        # cluster/status hack. cluster/status can point at the corosync IP.
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'installed': False, 'running': False, 'error': f'Could not determine SSH-reachable IP for node {node}'})
+
+        ssh = mgr._ssh_connect(node_ip)
+        if not ssh:
+            return jsonify({'installed': False, 'running': False, 'error': 'SSH not available - check SSH key in cluster settings'})
+        
+        # Check if script exists
+        stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
+        installed = 'exists' in _read_capped(stdout)
+        
+        # Check if service is running
+        stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
+        status = _read_capped(stdout).strip()
+        running = status == 'active'
+        
+        # Get last log entries
+        stdin, stdout, stderr = ssh.exec_command('tail -5 /var/log/pegaprox-smbios.log 2>/dev/null || echo "No logs yet"')
+        logs = _read_capped(stdout).strip()
+        
+        ssh.close()
+        
+        return jsonify({
+            'installed': installed,
+            'running': running,
+            'status': status,
+            'logs': logs
+        })
+        
+    except Exception as e:
+        logging.error(f"Error checking SMBIOS autoconfig status: {e}")
+        return jsonify({'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')})
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/deploy', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def deploy_smbios_autoconfig(cluster_id, node):
+    """Deploy SMBIOS auto-config script to node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
+    
+    ssh = None
+    try:
+        # PR #324: resolve SSH-reachable mgmt IP via manager (not cluster/status)
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
+
+        # NS Apr 2026 - retry SSH 3x, transient failures shouldn't kill the whole deploy
+        for attempt in range(3):
+            ssh = mgr._ssh_connect(node_ip)
+            if ssh:
+                break
+            if attempt < 2:
+                time.sleep(1.5)
+        if not ssh:
+            return jsonify({'error': 'SSH connection failed after 3 attempts - check SSH key in cluster settings'}), 500
+
+        # Generate script with settings (defense-in-depth: strip quotes/backslashes - NS Feb 2026)
+        def _sanitize_smbios(val):
+            """Strip characters dangerous in Python string literals as defense-in-depth."""
+            return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
+        script = SMBIOS_SCRIPT_TEMPLATE.format(
+            manufacturer=_sanitize_smbios(settings.get('manufacturer', 'Proxmox')),
+            product=_sanitize_smbios(settings.get('product', 'PegaProxManagment')),
+            version=_sanitize_smbios(settings.get('version', 'v1')),
+            family=_sanitize_smbios(settings.get('family', 'ProxmoxVE'))
+        )
+
+        # Write script and service to node (SFTP with exec_command fallback) — raises on failure
+        _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
+        _ssh_write_file(ssh, '/etc/systemd/system/pegaprox-smbios-autoconfig.service', SMBIOS_SERVICE_TEMPLATE)
+
+        # clear processed list + enable/start. Each command is checked; a failed
+        # systemctl used to be swallowed and we'd return success anyway
+        _ssh_run_checked(ssh, 'rm -f /var/lib/pegaprox-smbios-processed.txt')
+        _ssh_run_checked(ssh, 'systemctl daemon-reload')
+        _ssh_run_checked(ssh, 'systemctl enable pegaprox-smbios-autoconfig')
+        _ssh_run_checked(ssh, 'systemctl restart pegaprox-smbios-autoconfig')
+
+        # confirm it actually became active (systemctl start/restart can succeed even when unit fails)
+        stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig')
+        active = _read_capped(stdout).strip()
+        stdout.channel.recv_exit_status()
+        if active != 'active':
+            # grab last log lines for context
+            stdin, stdout, stderr = ssh.exec_command('journalctl -u pegaprox-smbios-autoconfig -n 10 --no-pager 2>/dev/null | tail -10')
+            log_tail = _read_capped(stdout).strip()
+            raise RuntimeError(f"service not active (state={active}). Last log: {log_tail[:400]}")
+
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'smbios_autoconfig.deployed', f"SMBIOS auto-config deployed to {node}", cluster=mgr.config.name)
+
+        return jsonify({'success': True, 'message': f'SMBIOS Auto-Config deployed to {node}'})
+
+    except Exception as e:
+        logging.error(f"Error deploying SMBIOS autoconfig to {_sl(node)}: {e}")
+        return jsonify({'error': safe_error(e, 'SMBIOS deploy failed')}), 500
+    finally:
+        if ssh:
+            try: ssh.close()
+            except: pass
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig', methods=['DELETE'])
+@require_auth(perms=['admin.settings'])
+def remove_smbios_autoconfig(cluster_id, node):
+    """Remove SMBIOS auto-config from node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    
+    try:
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
+
+        ssh = mgr._ssh_connect(node_ip)
+        if not ssh:
+            return jsonify({'error': 'SSH connection failed - check SSH key in cluster settings'}), 500
+
+        # Stop and disable service, remove files. _ssh_run_checked handles sudo
+        # for pegaprox@pam deployments (NS 2026-04-24).
+        commands = [
+            'systemctl stop pegaprox-smbios-autoconfig 2>/dev/null || true',
+            'systemctl disable pegaprox-smbios-autoconfig 2>/dev/null || true',
+            'rm -f /etc/systemd/system/pegaprox-smbios-autoconfig.service',
+            'rm -f /opt/pegaprox-smbios-autoconfig.py',
+            'rm -f /var/lib/pegaprox-smbios-processed.txt',
+            'systemctl daemon-reload'
+        ]
+        for cmd in commands:
+            try:
+                _ssh_run_checked(ssh, cmd)
+            except RuntimeError as rerr:
+                # `|| true` lines stay silent; only bubble hard failures on the unconditional ones
+                if cmd.endswith('|| true'):
+                    continue
+                logging.warning(f"SMBIOS remove: `{cmd}` → {rerr}")
+        
+        ssh.close()
+        
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, 'smbios_autoconfig.removed', f"SMBIOS auto-config removed from {node}", cluster=mgr.config.name)
+        
+        return jsonify({'success': True, 'message': f'SMBIOS Auto-Config removed from {node}'})
+        
+    except Exception as e:
+        logging.error(f"Error removing SMBIOS autoconfig: {e}")
+        return jsonify({'error': safe_error(e, 'SMBIOS removal failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/smbios-autoconfig/control', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def control_smbios_autoconfig(cluster_id, node):
+    """Start/Stop/Rescan SMBIOS auto-config service on node"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    data = request.get_json() or {}
+    action = data.get('action')  # 'start', 'stop', 'restart', 'rescan'
+    
+    if action not in ['start', 'stop', 'restart', 'rescan']:
+        return jsonify({'error': 'Invalid action. Use start, stop, restart, or rescan'}), 400
+    
+    mgr = cluster_managers[cluster_id]
+    
+    try:
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return jsonify({'error': f'Could not determine SSH-reachable IP for node {node}'}), 502
+
+        ssh = mgr._ssh_connect(node_ip)
+        if not ssh:
+            return jsonify({'error': 'SSH connection failed'}), 500
+
+        # NS: rescan = nuke the processed list and restart, forces re-check of all VMs
+        if action == 'rescan':
+            cmd = 'rm -f /var/lib/pegaprox-smbios-processed.txt && systemctl restart pegaprox-smbios-autoconfig'
+        else:
+            cmd = f'systemctl {action} pegaprox-smbios-autoconfig'
+
+        err_output = ''
+        try:
+            _ssh_run_checked(ssh, cmd)
+        except RuntimeError as rerr:
+            err_output = str(rerr)
+
+        ssh.close()
+
+        if err_output and 'not found' in err_output.lower():
+            return jsonify({'error': 'Service not installed on this node'}), 404
+        if err_output:
+            return jsonify({'error': err_output}), 500
+        
+        usr = getattr(request, 'session', {}).get('user', 'system')
+        log_audit(usr, f'smbios_autoconfig.{action}', f"SMBIOS auto-config {action} on {node}", cluster=mgr.config.name)
+        
+        return jsonify({'success': True, 'message': f'Service {action}ed on {node}'})
+        
+    except Exception as e:
+        logging.error(f"Error controlling SMBIOS autoconfig: {e}")
+        return jsonify({'error': safe_error(e, 'SMBIOS service control failed')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/smbios-autoconfig/status-all', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_smbios_autoconfig_status_all(cluster_id):
+    """Get SMBIOS auto-config status for ALL nodes in cluster"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    
+    try:
+        # #198: get nodes with online/offline status
+        node_status = {}
+        try:
+            node_status = mgr.get_node_status() or {}
+        except:
+            pass
+        node_names = list(node_status.keys()) if node_status else []
+        if not node_names:
+            try:
+                nodes = mgr.get_nodes()
+                node_names = [n.get('node', n.get('name', '')) for n in nodes if n]
+            except:
+                node_names = []
+
+        if not node_names:
+            return jsonify({'error': 'No nodes available'}), 400
+
+        # PR #324: _get_node_ip() per node -- cluster/status returns the
+        # corosync ring IP on separate-VLAN setups which we can't reach via SSH
+        results = {}
+
+        for node_name in node_names:
+            if not node_name:
+                continue
+
+            # #198: skip offline nodes early
+            ns = node_status.get(node_name, {})
+            if ns.get('offline') or ns.get('status') == 'offline':
+                results[node_name] = {'installed': False, 'running': False, 'error': 'Node offline'}
+                continue
+
+            try:
+                node_ip = mgr._get_node_ip(node_name)
+                if not node_ip:
+                    results[node_name] = {'installed': False, 'running': False, 'error': 'Could not determine node IP'}
+                    continue
+
+                ssh = mgr._ssh_connect(node_ip, retries=1)
+                if not ssh:
+                    results[node_name] = {'installed': False, 'running': False, 'error': 'SSH not available'}
+                    continue
+                
+                try:
+                    # Check if script exists
+                    stdin, stdout, stderr = ssh.exec_command('test -f /opt/pegaprox-smbios-autoconfig.py && echo exists')
+                    installed = 'exists' in _read_capped(stdout)
+                    
+                    # Check if service is running
+                    stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig 2>/dev/null || echo inactive')
+                    status = _read_capped(stdout).strip()
+                    running = status == 'active'
+                    
+                    results[node_name] = {
+                        'installed': installed,
+                        'running': running,
+                        'status': status
+                    }
+                finally:
+                    ssh.close()
+                    
+            except Exception as e:
+                results[node_name] = {'installed': False, 'running': False, 'error': safe_error(e, 'Failed to get node status')}
+        
+        return jsonify(results)
+        
+    except Exception as e:
+        logging.error(f"Error getting SMBIOS autoconfig status: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to get SMBIOS status')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/smbios-autoconfig/deploy-all', methods=['POST'])
+@require_auth(perms=['admin.settings'])
+def deploy_smbios_autoconfig_all(cluster_id):
+    """Deploy SMBIOS auto-config script to ALL nodes in cluster"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    mgr = cluster_managers[cluster_id]
+    settings = getattr(mgr.config, 'smbios_autoconfig', None) or {}
+    
+    # Get all nodes in cluster. PR #324: we no longer pre-pin IPs from
+    # cluster/status (that's the corosync ring IP on VLAN setups) --
+    # each node gets resolved via _get_node_ip inside the loop.
+    nodes = []
+    try:
+        cluster_host, cluster_port = mgr.host, mgr.api_port
+        status_url = f"https://{cluster_host}:{cluster_port}/api2/json/cluster/status"
+        r = mgr._create_session().get(status_url, timeout=10)
+        if r.status_code == 200:
+            for item in r.json().get('data', []):
+                if item.get('type') == 'node':
+                    nodes.append(item.get('name'))
+        else:
+            # Single node cluster - just use cluster host
+            nodes = [mgr.config.host.split('.')[0]]
+    except Exception as e:
+        logging.error(f"Error getting cluster nodes: {e}")
+        return jsonify({'error': f'Could not get cluster nodes: {e}'}), 500
+
+    if not nodes:
+        return jsonify({'error': 'No nodes found in cluster'}), 404
+    
+    results = []
+    def _sanitize_smbios_val(val):
+        """Strip characters dangerous in Python string literals as defense-in-depth."""
+        return re.sub(r'[^a-zA-Z0-9 ._-]', '', str(val))[:64]
+    script = SMBIOS_SCRIPT_TEMPLATE.format(
+        manufacturer=_sanitize_smbios_val(settings.get('manufacturer', 'Proxmox')),
+        product=_sanitize_smbios_val(settings.get('product', 'PegaProxManagment')),
+        version=_sanitize_smbios_val(settings.get('version', 'v1')),
+        family=_sanitize_smbios_val(settings.get('family', 'ProxmoxVE'))
+    )
+
+    for node in nodes:
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            results.append({'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP'})
+            continue
+        ssh = None
+        try:
+            # NS: Staggered connections to prevent SSH server overload
+            if results:  # Not the first node
+                time.sleep(1.0)
+
+            # retry transient SSH failures before giving up
+            for attempt in range(3):
+                ssh = mgr._ssh_connect(node_ip)
+                if ssh:
+                    break
+                if attempt < 2:
+                    time.sleep(1.5)
+            if not ssh:
+                results.append({'node': node, 'success': False, 'error': 'SSH connection failed after 3 attempts'})
+                continue
+
+            # Write script and service - _ssh_write_file now raises on failure
+            _ssh_write_file(ssh, '/opt/pegaprox-smbios-autoconfig.py', script, 0o755)
+            _ssh_write_file(ssh, '/etc/systemd/system/pegaprox-smbios-autoconfig.service', SMBIOS_SERVICE_TEMPLATE)
+
+            # NS: clear processed list + checked systemctl commands
+            _ssh_run_checked(ssh, 'rm -f /var/lib/pegaprox-smbios-processed.txt')
+            _ssh_run_checked(ssh, 'systemctl daemon-reload')
+            _ssh_run_checked(ssh, 'systemctl enable pegaprox-smbios-autoconfig')
+            _ssh_run_checked(ssh, 'systemctl restart pegaprox-smbios-autoconfig')
+
+            # verify active
+            stdin, stdout, stderr = ssh.exec_command('systemctl is-active pegaprox-smbios-autoconfig')
+            active = _read_capped(stdout).strip()
+            stdout.channel.recv_exit_status()
+            if active != 'active':
+                raise RuntimeError(f"service not active (state={active})")
+
+            results.append({'node': node, 'success': True})
+
+        except Exception as e:
+            results.append({'node': node, 'success': False, 'error': safe_error(e, 'SMBIOS deploy failed')})
+        finally:
+            if ssh:
+                try: ssh.close()
+                except: pass
+    
+    success_count = sum(1 for r in results if r['success'])
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'smbios_autoconfig.deployed_all', f"SMBIOS auto-config deployed to {success_count}/{len(nodes)} nodes", cluster=mgr.config.name)
+    
+    return jsonify({
+        'success': success_count == len(nodes),
+        'message': f'Deployed to {success_count}/{len(nodes)} nodes',
+        'results': results
+    })
+
+
+# =============================================================================
+# StarWind "starlvm" SAN plugin install
+# MK: one-click install of the StarWind x Proxmox SAN Integration plugin (the
+# custom `starlvm` storage type — thin snapshots on a shared SAN LUN) across the
+# cluster. We deliberately do NOT run StarWind's own installer script: it falls
+# back to an UNSIGNED (trusted=yes) apt repo if its signed-repo test hiccups. We
+# build a SIGNED deb822 source ourselves (key over HTTPS, Signed-By) so apt
+# enforces the signature on install — no unsigned fallback. Repo/key are
+# admin-overridable for air-gapped mirrors. Per-node, idempotent, bounded-parallel.
+# =============================================================================
+
+STARWIND_REPO_DEFAULT = 'http://repo.starwind.com/proxmox/'
+STARWIND_KEY_DEFAULT = 'https://repo.starwind.com/keys/repo_public.key'
+
+# these strings land inside a root-run bash script, so keep the charset tight
+def _safe_repo_url(u, default):
+    u = (u or '').strip() or default
+    if len(u) > 300 or not re.match(r'^https?://[A-Za-z0-9._~:/\-]+$', u):
+        raise ValueError(f'unsafe repo/key url: {u[:60]}')
+    # NS Jul 2026 (CodeAnt SSRF) — this URL is curl'd / apt-fetched inside a ROOT bash script on
+    # the node; the charset check alone still allows internal/metadata IPs. Gate it (allow_private
+    # keeps internal package mirrors working; cloud-metadata endpoints stay blocked).
+    from pegaprox.utils.url_security import is_safe_outbound_url
+    _ok, _why = is_safe_outbound_url(u, allowed_schemes=('http', 'https'), allow_private=True)
+    if not _ok:
+        raise ValueError(f'repo/key url rejected by SSRF guard: {_why}')
+    return u
+
+STARLVM_INSTALL_SCRIPT = """#!/usr/bin/env bash
+# PegaProx — install the StarWind x Proxmox SAN plugin (starlvm) on this node.
+set -uo pipefail
+REPO_URL='__REPO_URL__'
+KEY_URL='__KEY_URL__'
+FORCE='__FORCE__'
+KEYRING='/usr/share/keyrings/starwind-proxmox.gpg'
+SRC='/etc/apt/sources.list.d/starwind-proxmox.sources'
+
+pv="$(pveversion 2>/dev/null | grep -oE 'pve-manager/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+if [ -z "${pv:-}" ]; then echo 'PP_ERR not-a-proxmox-node'; exit 3; fi
+if [ "$pv" -ge 9 ]; then PKG='starwind-proxmox-plugin-pve9'; SUITE='trixie'; else PKG='starwind-proxmox-plugin'; SUITE='master'; fi
+
+# idempotent: skip if already there (unless forced)
+if [ "$FORCE" != '1' ] && dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q 'install ok installed'; then
+    ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null || echo '?')"
+    echo "PP_OK already_installed $PKG $ver pve$pv"; exit 0
+fi
+
+command -v curl >/dev/null 2>&1 || { echo 'PP_ERR curl-missing'; exit 3; }
+command -v gpg  >/dev/null 2>&1 || { echo 'PP_ERR gpg-missing'; exit 3; }
+
+# key over HTTPS, dearmored into its own keyring
+if ! curl -fsSL "$KEY_URL" | gpg --dearmor --yes --output "$KEYRING" 2>/dev/null; then
+    echo 'PP_ERR key-fetch-failed'; exit 4
+fi
+chmod 0644 "$KEYRING"
+
+# SIGNED deb822 source — we never write trusted=yes
+cat > "$SRC" <<EOF
+Types: deb
+URIs: ${REPO_URL}
+Suites: ${SUITE}
+Components: main
+Signed-By: ${KEYRING}
+EOF
+
+# scrub any legacy unsigned config a previous StarWind install may have left
+rm -f /etc/apt/sources.list.d/starwind-proxmox.list /etc/apt/trusted.gpg.d/starwind-proxmox.gpg 2>/dev/null || true
+
+PP_LOGDIR="$(mktemp -d /tmp/pp-starlvm-XXXXXXXX)" || exit 4
+trap 'rm -rf "$PP_LOGDIR"' EXIT
+apt-get update -o Acquire::Retries=2 >"$PP_LOGDIR/apt.log" 2>&1 || true
+# on PVE9 drop the old bookworm package (StarWind's documented 8->9 upgrade step)
+if [ "$pv" -ge 9 ]; then DEBIAN_FRONTEND=noninteractive apt-get remove -y starwind-proxmox-plugin >/dev/null 2>&1 || true; fi
+
+# apt refuses an unverifiable Signed-By source, so this is the real security gate
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$PKG" >>"$PP_LOGDIR/apt.log" 2>&1; then
+    echo 'PP_ERR apt-install-failed'; exit 5
+fi
+
+# register the custom storage plugin with PVE
+systemctl restart pvedaemon pveproxy >/dev/null 2>&1 || true
+
+dpkg-query -W -f='${Status}' "$PKG" 2>/dev/null | grep -q 'install ok installed' || { echo 'PP_ERR not-installed-after-apt'; exit 6; }
+[ -f /usr/share/perl5/PVE/Storage/Custom/StarLvmPlugin.pm ] || { echo 'PP_ERR plugin-pm-missing'; exit 6; }
+ver="$(dpkg-query -W -f='${Version}' "$PKG" 2>/dev/null || echo '?')"
+echo "PP_OK installed $PKG $ver pve$pv"
+"""
+
+STARLVM_STATUS_SCRIPT = """set -uo pipefail
+pv="$(pveversion 2>/dev/null | grep -oE 'pve-manager/[0-9]+' | grep -oE '[0-9]+' | head -1 || true)"
+pm='no'; [ -f /usr/share/perl5/PVE/Storage/Custom/StarLvmPlugin.pm ] && pm='yes'
+inst='no'; pkg='none'; ver='none'
+for p in starwind-proxmox-plugin-pve9 starwind-proxmox-plugin; do
+    if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+        inst='yes'; pkg="$p"; ver="$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"; break
+    fi
+done
+echo "PP_STATUS installed=$inst pkg=$pkg ver=$ver pm=$pm pve=${pv:-?}"
+"""
+
+
+def _cluster_node_names(mgr):
+    """Node short-names from cluster/status; falls back to the config host for single-node."""
+    try:
+        r = mgr._create_session().get(f"https://{mgr.host}:{mgr.api_port}/api2/json/cluster/status", timeout=10)
+        if r.status_code == 200:
+            names = [it.get('name') for it in r.json().get('data', []) if it.get('type') == 'node']
+            if names:
+                return names
+    except Exception as e:
+        logging.warning(f"[starlvm] node enumerate failed: {e}")
+    return [mgr.config.host.split('.')[0]]
+
+
+@bp.route('/api/clusters/<cluster_id>/storage/starlvm/install', methods=['POST'])
+@require_auth(perms=['admin.settings'])  # MK: root apt-install on every node + caller-overridable repo/key → admin-only (not node.maintenance, which tenant_operator holds)
+def install_starlvm_plugin(cluster_id):
+    """Install the StarWind SAN plugin (starlvm storage type) on cluster nodes over SSH.
+
+    Body (all optional): {repo_url, key_url, force: bool, nodes: [names]}.
+    Signed deb822 source only — no unsigned fallback. Idempotent per node."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'StarWind plugin install is Proxmox-only'}), 400
+
+    body = request.get_json(silent=True) or {}
+    # MK Sep 2026 - the key URL is the TRUST ANCHOR for a root apt-install on every node
+    # in the cluster, so overriding it is "run my code as root here", not a setting. The
+    # SSRF guard below decides where the request may go, not whose key it fetches.
+    # admin.settings is an admin-only builtin, which means a non-admin only ever holds it
+    # through a hand-built custom role - a delegation of settings, and nobody delegates
+    # settings meaning to hand over the hypervisors. The default StarWind repo stays open
+    # to that delegate; pointing it somewhere else is the global admin's call.
+    from pegaprox.utils.auth import build_authz_user as _bau
+    _caller = _bau(request.session.get('user', ''), request.session)
+    from pegaprox.utils.rbac import acts_as_admin
+    if not acts_as_admin(_caller) and (body.get('repo_url') or body.get('key_url')):
+        return jsonify({'error': 'Only a global admin can install from a repository or '
+                                 'signing key other than the default'}), 403
+    try:
+        repo_url = _safe_repo_url(body.get('repo_url'), STARWIND_REPO_DEFAULT)
+        key_url = _safe_repo_url(body.get('key_url'), STARWIND_KEY_DEFAULT)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    force = '1' if body.get('force') else '0'
+    only = set(body.get('nodes') or [])
+
+    script = (STARLVM_INSTALL_SCRIPT
+              .replace('__REPO_URL__', repo_url)
+              .replace('__KEY_URL__', key_url)
+              .replace('__FORCE__', force))
+
+    nodes = _cluster_node_names(mgr)
+    if only:
+        nodes = [n for n in nodes if n in only]
+    if not nodes:
+        return jsonify({'error': 'No nodes found in cluster'}), 404
+
+    def _install_one(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'success': False, 'error': 'no SSH-reachable IP'}
+        ssh = None
+        try:
+            for attempt in range(3):
+                ssh = mgr._ssh_connect(node_ip)
+                if ssh:
+                    break
+                if attempt < 2:
+                    time.sleep(1.5)
+            if not ssh:
+                return {'node': node, 'success': False, 'error': 'SSH connect failed after 3 tries'}
+            out, _e = _ssh_run_script(ssh, script, timeout=200)
+            last = (out or '').strip().splitlines()[-1] if (out or '').strip() else ''
+            if 'PP_OK already_installed' in out:
+                return {'node': node, 'success': True, 'already_installed': True, 'detail': last}
+            if 'PP_OK installed' in out:
+                return {'node': node, 'success': True, 'already_installed': False, 'detail': last}
+            return {'node': node, 'success': False, 'error': last or 'unexpected installer output'}
+        except Exception as e:
+            return {'node': node, 'success': False, 'error': safe_error(e, 'install failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _install_one for n in nodes}, max_concurrent=8, timeout=240)
+    results = [res_map.get(n) or {'node': n, 'success': False, 'error': 'timed out'} for n in nodes]
+    installed = sum(1 for r in results if r.get('success'))
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    log_audit(usr, 'storage.starlvm_install',
+              f"StarWind SAN plugin install: {installed}/{len(nodes)} nodes (repo={repo_url})",
+              cluster=mgr.config.name)
+    return jsonify({
+        'success': installed == len(nodes),
+        'installed': installed,
+        'total': len(nodes),
+        'results': results,
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/storage/starlvm/status', methods=['GET'])
+@require_auth(perms=['storage.view'])
+def starlvm_plugin_status(cluster_id):
+    """Per-node install state of the StarWind starlvm plugin (read-only probe)."""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # MK Nov 2026 - an SSH probe of every node of the cluster: not for a confined caller,
+    # and refused before the first connection
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'proxmox':
+        return jsonify({'error': 'Proxmox-only'}), 400
+
+    import base64 as _b64
+    enc = _b64.b64encode(STARLVM_STATUS_SCRIPT.encode('utf-8')).decode('ascii')
+
+    def _probe(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'reachable': False}
+        ssh = None
+        try:
+            ssh = mgr._ssh_connect(node_ip)
+            if not ssh:
+                return {'node': node, 'reachable': False}
+            # read-only, no sudo needed (dpkg-query / file test are world-readable)
+            _in, _out, _err = ssh.exec_command(f"echo {enc} | base64 -d | bash", timeout=20)
+            out = _out.read().decode('utf-8', errors='replace')
+            _out.channel.recv_exit_status()
+            d = {}
+            for tok in out.split():
+                if '=' in tok:
+                    k, v = tok.split('=', 1)
+                    d[k] = v
+            return {
+                'node': node,
+                'reachable': True,
+                'installed': d.get('installed') == 'yes',
+                'package': None if d.get('pkg', 'none') == 'none' else d.get('pkg'),
+                'version': None if d.get('ver', 'none') == 'none' else d.get('ver'),
+                'plugin_file': d.get('pm') == 'yes',
+                'pve_major': d.get('pve'),
+            }
+        except Exception as e:
+            return {'node': node, 'reachable': False, 'error': safe_error(e, 'probe failed')}
+        finally:
+            if ssh:
+                try: ssh.close()
+                except Exception: pass
+
+    nodes = _cluster_node_names(mgr)
+    from pegaprox.utils.concurrent import run_per_node
+    res_map = run_per_node({n: _probe for n in nodes}, max_concurrent=8, timeout=60)
+    results = [res_map.get(n) or {'node': n, 'reachable': False} for n in nodes]
+    return jsonify({
+        'nodes': results,
+        'installed_all': bool(results) and all(r.get('installed') for r in results),
+    })
+
+
+# =============================================================================
+# Custom Scripts Feature
+# MK: Run custom .sh/.py scripts on cluster nodes with permission control
+# =============================================================================
+
+@bp.route('/api/clusters/<cluster_id>/scripts', methods=['GET'])
+@require_auth(perms=['admin.scripts'])
+def get_custom_scripts(cluster_id):
+    """Get all custom scripts for a cluster (excludes soft-deleted)"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # NS Oct 2026 - the scripts run on every node, so reading them and their output is for
+    # whoever may write and run them: not a caller confined to some guests (#1024)
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    try:
+        db = get_db()
+        # Ensure table exists with soft delete support
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS custom_scripts (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                type TEXT DEFAULT 'bash',
+                content TEXT NOT NULL,
+                target_nodes TEXT DEFAULT 'all',
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                last_status TEXT,
+                last_output TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                created_by TEXT,
+                deleted_at TEXT,
+                deleted_by TEXT
+            )
+        ''')
+        # Add columns if they don't exist (migration for existing tables)
+        try:
+            db.execute('ALTER TABLE custom_scripts ADD COLUMN deleted_at TEXT')
+        except: pass
+        try:
+            db.execute('ALTER TABLE custom_scripts ADD COLUMN deleted_by TEXT')
+        except: pass
+        try:
+            db.execute('ALTER TABLE custom_scripts ADD COLUMN created_by TEXT')
+        except: pass
+        try:
+            db.execute('ALTER TABLE custom_scripts ADD COLUMN last_output TEXT')
+        except: pass
+        
+        # Only return non-deleted scripts
+        scripts = db.query(
+            'SELECT * FROM custom_scripts WHERE cluster_id = ? AND deleted_at IS NULL ORDER BY name',
+            (cluster_id,)
+        )
+        return jsonify([dict(s) for s in scripts] if scripts else [])
+    except Exception as e:
+        logging.error(f"Error loading scripts: {e}")
+        return jsonify({'error': safe_error(e, 'Failed to load scripts')}), 500
+
+
+# Cleanup job for permanently deleting scripts after 20 days
+def cleanup_deleted_scripts():
+    """Permanently delete scripts that have been soft-deleted for 20+ days"""
+    try:
+        db = get_db()
+        cutoff = (datetime.now() - timedelta(days=20)).isoformat()
+        deleted = db.query(
+            'SELECT id, name, cluster_id, deleted_by FROM custom_scripts WHERE deleted_at IS NOT NULL AND deleted_at < ?',
+            (cutoff,)
+        )
+        for script in deleted:
+            db.execute('DELETE FROM custom_scripts WHERE id = ?', (script['id'],))
+            log_audit('system', 'script.purged', f"Permanently deleted script '{script['name']}' after 20-day retention", cluster=script['cluster_id'])
+        if deleted:
+            logging.info(f"Purged {len(deleted)} scripts after 20-day retention period")
+    except Exception as e:
+        logging.error(f"Error cleaning up deleted scripts: {e}")
+
+
+def cleanup_orphaned_excluded_vms():
+    """Remove excluded VM entries for VMs that no longer exist
+    
+    MK: This runs daily to clean up stale entries from balancing_excluded_vms
+    when VMs are deleted through other means (e.g. directly in Proxmox UI)
+    """
+    try:
+        db = get_db()
+        cursor = db.conn.cursor()
+        
+        # Get all excluded VM entries
+        cursor.execute('SELECT cluster_id, vmid FROM balancing_excluded_vms')
+        excluded_entries = cursor.fetchall()
+        
+        if not excluded_entries:
+            return
+        
+        removed_count = 0
+        
+        for entry in excluded_entries:
+            cluster_id = entry['cluster_id']
+            vmid = entry['vmid']
+            
+            # Check if cluster still exists and is connected
+            if cluster_id not in cluster_managers:
+                # Cluster no longer exists, remove entry
+                cursor.execute(
+                    'DELETE FROM balancing_excluded_vms WHERE cluster_id = ? AND vmid = ?',
+                    (cluster_id, vmid)
+                )
+                removed_count += 1
+                continue
+            
+            mgr = cluster_managers[cluster_id]
+            if not mgr.is_connected:
+                continue  # Skip if we can't verify
+            
+            # Check if VM still exists
+            try:
+                vms = mgr.get_vm_resources()
+                # MK Sep 2026 - an enumeration that FAILS does not raise here, it answers
+                # with an empty list: XcpngManager.get_vms returns [] when _api() is
+                # unavailable, and the Proxmox one does the same when the session is gone.
+                # Read literally that means "every VM on this cluster is gone", and the very
+                # next line deletes the exclusions for all of them - the operator's
+                # deliberate do-not-balance list, wiped by a connection blip. A cluster that
+                # genuinely holds zero VMs has no exclusions worth cleaning either, so
+                # skipping on empty costs nothing and only ever defers a stale row by a day.
+                if not vms:
+                    logging.debug(
+                        f"[CLEANUP] {cluster_id} enumerated no VMs - leaving its exclusions "
+                        "alone rather than treating that as 'they all went away'")
+                    continue
+                vm_exists = any(vm.get('vmid') == vmid for vm in vms)
+                
+                if not vm_exists:
+                    cursor.execute(
+                        'DELETE FROM balancing_excluded_vms WHERE cluster_id = ? AND vmid = ?',
+                        (cluster_id, vmid)
+                    )
+                    removed_count += 1
+                    logging.info(f"Removed orphaned excluded VM entry: cluster={cluster_id}, vmid={vmid}")
+            except Exception as e:
+                logging.debug(f"Could not verify VM {vmid} in cluster {cluster_id}: {e}")
+        
+        if removed_count > 0:
+            db.conn.commit()
+            logging.info(f"[CLEANUP] Removed {removed_count} orphaned excluded VM entries")
+            
+    except Exception as e:
+        logging.error(f"Error cleaning up orphaned excluded VMs: {e}")
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts', methods=['POST'])
+@require_auth(perms=['admin.scripts'])
+def create_custom_script(cluster_id):
+    """Create a new custom script - requires admin.scripts permission"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    data = request.json or {}
+    
+    if not data.get('name') or not data.get('content'):
+        return jsonify({'error': 'Name and content required'}), 400
+    
+    script_type = data.get('type', 'bash')
+    if script_type not in ['bash', 'python']:
+        return jsonify({'error': 'Type must be bash or python'}), 400
+    
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    db = get_db()
+    script_id = str(uuid.uuid4())[:8]
+    
+    db.execute('''
+        INSERT INTO custom_scripts (id, cluster_id, name, description, type, content, target_nodes, enabled, created_at, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        script_id,
+        cluster_id,
+        data.get('name'),
+        data.get('description', ''),
+        script_type,
+        data.get('content'),
+        data.get('target_nodes', 'all'),
+        1 if data.get('enabled', True) else 0,
+        datetime.now().isoformat(),
+        usr
+    ))
+    
+    # Get cluster name for audit log
+    cluster_name = cluster_managers.get(cluster_id, {})
+    if hasattr(cluster_name, 'config'):
+        cluster_name = cluster_name.config.name
+    else:
+        cluster_name = cluster_id
+    
+    log_audit(usr, 'script.created', f"Created script '{data.get('name')}' (ID: {script_id}, Type: {script_type})", cluster=cluster_name)
+    
+    return jsonify({'success': True, 'id': script_id})
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/<script_id>', methods=['PUT'])
+@require_auth(perms=['admin.scripts'])
+def update_custom_script(cluster_id, script_id):
+    """Update a custom script - requires admin.scripts permission"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    data = request.json or {}
+    db = get_db()
+    
+    # Check script exists and not deleted
+    script = db.query_one('SELECT * FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NULL', (script_id, cluster_id))
+    if not script:
+        return jsonify({'error': 'Script not found'}), 404
+    
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    
+    db.execute('''
+        UPDATE custom_scripts SET
+            name = ?,
+            description = ?,
+            type = ?,
+            content = ?,
+            target_nodes = ?,
+            enabled = ?,
+            updated_at = ?
+        WHERE id = ? AND cluster_id = ?
+    ''', (
+        data.get('name', script['name']),
+        data.get('description', script['description']),
+        data.get('type', script['type']),
+        data.get('content', script['content']),
+        data.get('target_nodes', script['target_nodes']),
+        1 if data.get('enabled', script['enabled']) else 0,
+        datetime.now().isoformat(),
+        script_id,
+        cluster_id
+    ))
+    
+    # Get cluster name for audit log
+    cluster_name = cluster_managers.get(cluster_id, {})
+    if hasattr(cluster_name, 'config'):
+        cluster_name = cluster_name.config.name
+    else:
+        cluster_name = cluster_id
+    
+    log_audit(usr, 'script.updated', f"Updated script '{data.get('name', script['name'])}' (ID: {script_id})", cluster=cluster_name)
+    
+    return jsonify({'success': True})
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/<script_id>', methods=['DELETE'])
+@require_auth(perms=['admin.scripts'])
+def delete_custom_script(cluster_id, script_id):
+    """Soft-delete a custom script - will be permanently deleted after 20 days"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    db = get_db()
+    
+    # Check script exists
+    script = db.query_one('SELECT * FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NULL', (script_id, cluster_id))
+    if not script:
+        return jsonify({'error': 'Script not found'}), 404
+    
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    
+    # Soft delete - mark as deleted but keep for 20 days
+    db.execute('''
+        UPDATE custom_scripts SET deleted_at = ?, deleted_by = ? WHERE id = ? AND cluster_id = ?
+    ''', (datetime.now().isoformat(), usr, script_id, cluster_id))
+    
+    # Get cluster name for audit log
+    cluster_name = cluster_managers.get(cluster_id, {})
+    if hasattr(cluster_name, 'config'):
+        cluster_name = cluster_name.config.name
+    else:
+        cluster_name = cluster_id
+    
+    log_audit(usr, 'script.deleted', f"Soft-deleted script '{script['name']}' (ID: {script_id}) - will be purged in 20 days", cluster=cluster_name)
+    
+    return jsonify({'success': True, 'message': 'Script marked for deletion. Will be permanently removed in 20 days.'})
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/<script_id>/run', methods=['POST'])
+@require_auth(perms=['admin.scripts'])
+def run_custom_script(cluster_id, script_id):
+    """Run a custom script on target nodes - REQUIRES PASSWORD CONFIRMATION
+    
+    This is a sensitive operation that executes arbitrary code on nodes.
+    Password confirmation is required to prevent accidental or unauthorized execution.
+    """
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    
+    # SECURITY: Require password confirmation before running any script
+    data = request.json or {}
+    password = data.get('password')
+    
+    if not password:
+        return jsonify({'error': 'Password confirmation required to run scripts'}), 401
+    
+    # Verify password against current user
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    users = load_users()
+    user_data = users.get(usr)
+    
+    if not user_data:
+        return jsonify({'error': 'User not found'}), 401
+    
+    # Check password
+    stored_salt = user_data.get('password_salt', '')
+    stored_hash = user_data.get('password_hash', '')
+    if not stored_salt or not stored_hash or not verify_password(password, stored_salt, stored_hash):
+        cluster_name = cluster_managers[cluster_id].config.name if cluster_id in cluster_managers else cluster_id
+        log_audit(usr, 'script.run_denied', f"Failed password verification for script execution (ID: {script_id})", cluster=cluster_name)
+        return jsonify({'error': 'Invalid password'}), 401
+    
+    db = get_db()
+    script = db.query_one('SELECT * FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NULL', (script_id, cluster_id))
+    
+    if not script:
+        return jsonify({'error': 'Script not found'}), 404
+    
+    if not script['enabled']:
+        return jsonify({'error': 'Script is disabled'}), 400
+    
+    mgr = cluster_managers[cluster_id]
+    
+    # Get cluster name for audit log
+    cluster_name = mgr.config.name if hasattr(mgr, 'config') else cluster_id
+    
+    # Get target nodes (PR #324: IP resolution moved into the per-node loop
+    # via _get_node_ip -- cluster/status IPs can be corosync ring addresses).
+    target_nodes = script['target_nodes']
+    nodes_to_run = []
+
+    try:
+        cluster_host, cluster_port = mgr.host, mgr.api_port
+        status_url = f"https://{cluster_host}:{cluster_port}/api2/json/cluster/status"
+        r = mgr._create_session().get(status_url, timeout=10)
+        if r.status_code == 200:
+            for item in r.json().get('data', []):
+                if item.get('type') == 'node':
+                    node_name = item.get('name')
+                    if target_nodes == 'all' or node_name in target_nodes.split(','):
+                        nodes_to_run.append(node_name)
+    except Exception as e:
+        logging.error(f"Error getting cluster nodes: {e}")
+        return jsonify({'error': f'Could not get cluster nodes: {e}'}), 500
+    
+    if not nodes_to_run:
+        return jsonify({'error': 'No target nodes found'}), 404
+    
+    # Log the execution attempt BEFORE running
+    log_audit(usr, 'script.execution_started', f"Starting execution of script '{script['name']}' (ID: {script_id}) on {len(nodes_to_run)} nodes: {', '.join(nodes_to_run)}", cluster=cluster_name)
+    
+    script_ext = '.py' if script['type'] == 'python' else '.sh'
+    interpreter = 'python3' if script['type'] == 'python' else 'bash'
+
+    # NS Apr 2026 — was a serial `for node in nodes_to_run` loop. With 15-node
+    # clusters that meant up to 15 × 300s timeout = 75 min worst-case for one
+    # script run. Now bounded-parallel via run_per_node (default 8 workers).
+    # IMPORTANT: HA paths are completely separate (manager.py _ssh_run_command_*)
+    # and DO NOT go through this helper — HA latency is unaffected.
+    def _exec_on_node(node):
+        node_ip = mgr._get_node_ip(node)
+        if not node_ip:
+            return {'node': node, 'success': False, 'error': 'Could not determine SSH-reachable IP', 'output': ''}
+        try:
+            ssh = mgr._ssh_connect(node_ip)
+            if not ssh:
+                return {'node': node, 'success': False, 'error': 'SSH connection failed', 'output': ''}
+
+            # MK Sep 2026 - the name used to be /tmp/pegaprox_script_<id><ext>, and the id
+            # comes straight out of the script library, so anyone with a local account on the
+            # node could work it out and pre-create it as a symlink. SFTP follows one, and
+            # this write runs as root and then chmods the result 0755. A random name per run
+            # closes it; the id stays in the audit log where it belongs.
+            script_path = f'/tmp/pegaprox_script_{uuid.uuid4().hex}{script_ext}'
+            sftp = ssh.open_sftp()
+            with sftp.file(script_path, 'w') as f:
+                f.write(script['content'])
+            sftp.chmod(script_path, 0o755)
+            sftp.close()
+
+            stdin, stdout, stderr = ssh.exec_command(f'{interpreter} {script_path} 2>&1', timeout=300)
+            output = _read_capped(stdout)
+            exit_code = stdout.channel.recv_exit_status()
+
+            ssh.exec_command(f'rm -f {script_path}')
+            ssh.close()
+
+            return {
+                'node': node,
+                'success': exit_code == 0,
+                'exit_code': exit_code,
+                'output': output[:10000] if output else ''
+            }
+        except Exception as e:
+            return {'node': node, 'success': False, 'error': str(e), 'output': ''}
+
+    from pegaprox.utils.concurrent import run_per_node
+    # Per-cluster cap of 8 workers — keeps total connections bounded even if
+    # multiple clusters run scripts at once, AND leaves headroom for HA SSH
+    # which goes through the separate untracked path.
+    raw = run_per_node(
+        {n: _exec_on_node for n in nodes_to_run},
+        max_concurrent=8,
+        timeout=320,  # script timeout is 300, give the wrapper a small slack
+    )
+    # Preserve original input order in results list
+    results = []
+    all_output = []
+    for node in nodes_to_run:
+        r = raw.get(node) or {'node': node, 'success': False, 'error': 'Timed out or no result', 'output': ''}
+        results.append(r)
+        if r.get('output'):
+            all_output.append(f"=== {node} (exit: {r.get('exit_code', '?')}) ===\n{r['output']}\n")
+        elif r.get('error'):
+            all_output.append(f"=== {node} ===\n{r['error']}\n")
+    
+    # Update last run info with output
+    success_count = sum(1 for r in results if r['success'])
+    status = 'success' if success_count == len(nodes_to_run) else ('partial' if success_count > 0 else 'failed')
+    combined_output = '\n'.join(all_output)[:50000]  # Limit stored output
+    
+    db.execute('''
+        UPDATE custom_scripts SET last_run = ?, last_status = ?, last_output = ? WHERE id = ?
+    ''', (datetime.now().isoformat(), status, combined_output, script_id))
+    
+    # Detailed audit log of execution result
+    log_audit(usr, 'script.executed', f"Script '{script['name']}' completed: {success_count}/{len(nodes_to_run)} nodes succeeded ({status})", cluster=cluster_name)
+    
+    return jsonify({
+        'success': success_count == len(nodes_to_run),
+        'message': f'Ran on {success_count}/{len(nodes_to_run)} nodes',
+        'status': status,
+        'results': results
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/<script_id>/output', methods=['GET'])
+@require_auth(perms=['admin.scripts'])
+def get_script_output(cluster_id, script_id):
+    """Get the last execution output of a script"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    db = get_db()
+    script = db.query_one('SELECT name, last_run, last_status, last_output FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NULL', (script_id, cluster_id))
+    
+    if not script:
+        return jsonify({'error': 'Script not found'}), 404
+    
+    return jsonify({
+        'name': script['name'],
+        'last_run': script['last_run'],
+        'last_status': script['last_status'],
+        'output': script['last_output'] or 'No output available'
+    })
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/deleted', methods=['GET'])
+@require_auth(perms=['admin.scripts'])
+def get_deleted_scripts(cluster_id):
+    """Get list of soft-deleted scripts (pending permanent deletion)"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+
+    try:
+        db = get_db()
+        scripts = db.query(
+            '''SELECT id, name, description, type, deleted_at, deleted_by, 
+               datetime(deleted_at, '+20 days') as purge_date
+               FROM custom_scripts 
+               WHERE cluster_id = ? AND deleted_at IS NOT NULL 
+               ORDER BY deleted_at DESC''',
+            (cluster_id,)
+        )
+        return jsonify([dict(s) for s in scripts] if scripts else [])
+    except Exception as e:
+        return jsonify({'error': safe_error(e, 'Failed to load deleted scripts')}), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/scripts/<script_id>/restore', methods=['POST'])
+@require_auth(perms=['admin.scripts'])
+def restore_deleted_script(cluster_id, script_id):
+    """Restore a soft-deleted script before it's permanently purged"""
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    
+    db = get_db()
+    script = db.query_one('SELECT * FROM custom_scripts WHERE id = ? AND cluster_id = ? AND deleted_at IS NOT NULL', (script_id, cluster_id))
+    
+    if not script:
+        return jsonify({'error': 'Deleted script not found'}), 404
+    
+    usr = getattr(request, 'session', {}).get('user', 'system')
+    
+    db.execute('''
+        UPDATE custom_scripts SET deleted_at = NULL, deleted_by = NULL WHERE id = ? AND cluster_id = ?
+    ''', (script_id, cluster_id))
+    
+    # Get cluster name for audit log
+    cluster_name = cluster_managers.get(cluster_id, {})
+    if hasattr(cluster_name, 'config'):
+        cluster_name = cluster_name.config.name
+    else:
+        cluster_name = cluster_id
+    
+    log_audit(usr, 'script.restored', f"Restored deleted script '{script['name']}' (ID: {script_id})", cluster=cluster_name)
+
+    return jsonify({'success': True, 'message': f"Script '{script['name']}' restored"})
+
+
+# ──────────────────────────────────────────
+# XCP-ng specific: PIFs, bonds, guest metrics, pool HA
+# ──────────────────────────────────────────
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/pifs', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_pifs_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # host network configuration, as /network above
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_host_pifs'):
+        return jsonify([])
+    return jsonify(mgr.get_host_pifs(node))
+
+
+@bp.route('/api/clusters/<cluster_id>/nodes/<node>/bonds', methods=['GET'])
+@require_auth(perms=['node.view'])
+def get_node_bonds_api(cluster_id, node):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_bonds'):
+        return jsonify([])
+    return jsonify(mgr.get_bonds(node))
+
+
+@bp.route('/api/clusters/<cluster_id>/ha', methods=['GET'])
+@require_auth(perms=['cluster.view'])
+def get_pool_ha_api(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_ha_status'):
+        return jsonify({'enabled': False})
+    from pegaprox.api.clusters import ha_status_answer
+    return ha_status_answer(cluster_id, mgr)
+
+
+@bp.route('/api/clusters/<cluster_id>/ha/enable', methods=['POST'])
+@require_auth(perms=['ha.config'])
+def enable_pool_ha_api(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
+        return jsonify({'error': 'Only supported for XCP-ng pools'}), 400
+    data = request.get_json(silent=True) or {}
+    result = mgr.enable_pool_ha(
+        heartbeat_srs=data.get('heartbeat_srs'),
+        host_failures_to_tolerate=int(data.get('host_failures_to_tolerate', 1))
+    )
+    if result.get('success'):
+        return jsonify(result)
+    return jsonify(result), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/ha/disable', methods=['POST'])
+@require_auth(perms=['ha.config'])
+def disable_pool_ha_api(cluster_id):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    _cerr = require_unconfined(cluster_id)
+    if _cerr:
+        return _cerr
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if getattr(mgr, 'cluster_type', 'proxmox') != 'xcpng':
+        return jsonify({'error': 'Only supported for XCP-ng pools'}), 400
+    result = mgr.disable_pool_ha()
+    if result.get('success'):
+        return jsonify(result)
+    return jsonify(result), 500
+
+
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/ha-priority', methods=['PUT'])
+@require_auth(perms=['vm.config'])
+def set_vm_ha_priority_api(cluster_id, vmid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # sec-audit 2026-08-17 (BOLA/CWE-639): cluster reach != per-VM grant.
+    # Re-check the explicit VM-ACL/pool scope before this state-changing write.
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session['user'], request.session)
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.config'):
+        return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'set_vm_ha_restart_priority'):
+        return jsonify({'error': 'Not supported for this cluster type'}), 400
+    data = request.get_json(silent=True) or {}
+    priority = data.get('priority', '')
+    if priority not in ('restart', 'best-effort', ''):
+        return jsonify({'error': 'Invalid priority. Use: restart, best-effort, or empty string'}), 400
+    result = mgr.set_vm_ha_restart_priority(vmid, priority)
+    if result.get('success'):
+        return jsonify(result)
+    return jsonify(result), 500
+
+
+# guest metrics (works for XCP-ng, Proxmox uses qemu-guest-agent differently)
+@bp.route('/api/clusters/<cluster_id>/vms/<int:vmid>/guest-metrics', methods=['GET'])
+@require_auth(perms=['vm.view'])
+def get_vm_guest_metrics_api(cluster_id, vmid):
+    ok, err = check_cluster_access(cluster_id)
+    if not ok: return err
+    # sec-audit 2026-08-17 (BOLA/CWE-639): cluster reach != per-VM grant.
+    # Enforce VM-ACL/pool scope before serving guest-agent data (IPs, hostname).
+    from pegaprox.utils.auth import build_authz_user
+    from pegaprox.utils.rbac import user_can_access_vm
+    user = build_authz_user(request.session['user'], request.session)
+    if not user_can_access_vm(user, cluster_id, int(vmid), 'vm.view'):
+        return jsonify({'error': 'Access denied: you do not have permission for this VM'}), 403
+    if cluster_id not in cluster_managers:
+        return jsonify({'error': 'Cluster not found'}), 404
+    mgr = cluster_managers[cluster_id]
+    if not hasattr(mgr, 'get_guest_metrics'):
+        return jsonify({})
+    return jsonify(mgr.get_guest_metrics(None, vmid))

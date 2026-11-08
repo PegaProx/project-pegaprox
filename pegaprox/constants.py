@@ -1,0 +1,265 @@
+# -*- coding: utf-8 -*-
+"""
+PegaProx Constants - Layer 0
+No pegaprox imports allowed in this file.
+"""
+
+import os
+from pathlib import Path
+
+# Version
+PEGAPROX_VERSION = "1.4.1"
+PEGAPROX_BUILD = "2026.10.24"
+
+# File Paths & Directories
+# MK Sep 2026 (#826): both directories are resolvable from the environment.
+# They used to be relative to the working directory, which is /opt/PegaProx, /var/lib/
+# pegaprox or /app depending on how you installed - so "keep the state somewhere else"
+# meant moving the whole install. Everything below derives from CONFIG_DIR, so setting
+# it here is enough; read it before anything is joined onto it.
+#   PEGAPROX_CONFIG_DIR - database, master key, settings, TLS pair, branding
+#   PEGAPROX_LOG_DIR    - the per-cluster log files
+# Unset or blank keeps today's relative paths, which is what every install has.
+def _dir_from_env(var, default):
+    raw = os.environ.get(var, '')
+    return raw.strip() if isinstance(raw, str) and raw.strip() else default
+
+
+CONFIG_DIR = _dir_from_env('PEGAPROX_CONFIG_DIR', 'config')
+# parents=True because a moved path is typically nested (/srv/state/pegaprox/config)
+# and mkdir would otherwise fail on the very first start.
+Path(CONFIG_DIR).mkdir(parents=True, exist_ok=True)
+try:
+    os.chmod(CONFIG_DIR, 0o700)
+except Exception:
+    pass
+
+DATABASE_FILE = os.path.join(CONFIG_DIR, 'pegaprox.db')
+
+# Legacy configuration files (kept for migration)
+CONFIG_FILE = os.path.join(CONFIG_DIR, 'clusters.json')
+CONFIG_FILE_ENCRYPTED = os.path.join(CONFIG_DIR, 'clusters.enc')
+KEY_FILE = os.path.join(CONFIG_DIR, '.pegaprox.key')
+USERS_FILE_ENCRYPTED = os.path.join(CONFIG_DIR, 'users.enc')
+AUDIT_LOG_FILE = os.path.join(CONFIG_DIR, 'audit.log')
+AUDIT_LOG_FILE_ENCRYPTED = os.path.join(CONFIG_DIR, 'audit.log.enc')
+SESSIONS_FILE = os.path.join(CONFIG_DIR, 'sessions.json')
+SESSIONS_FILE_ENCRYPTED = os.path.join(CONFIG_DIR, 'sessions.enc')
+SERVER_SETTINGS_FILE = os.path.join(CONFIG_DIR, 'server_settings.json')
+ADMIN_INITIALIZED_FILE = os.path.join(CONFIG_DIR, '.admin_initialized')
+# created by hand on the server to run the setup wizard on an install that holds
+# configuration but no account any more (#991); the setup removes it
+SETUP_REOPEN_FILE = os.path.join(CONFIG_DIR, 'reopen_setup')
+ALERTS_CONFIG_FILE = os.path.join(CONFIG_DIR, 'alerts.json')
+SCHEDULED_TASKS_FILE = os.path.join(CONFIG_DIR, 'scheduled_tasks.json')
+VM_TAGS_FILE = os.path.join(CONFIG_DIR, 'vm_tags.json')
+AFFINITY_RULES_FILE = os.path.join(CONFIG_DIR, 'affinity_rules.json')
+MIGRATION_HISTORY_FILE = os.path.join(CONFIG_DIR, 'migration_history.json')
+CUSTOM_ROLES_FILE = os.path.join(CONFIG_DIR, 'custom_roles.json')
+ESXI_CONFIG_FILE = os.path.join(CONFIG_DIR, 'esxi_storages.json')
+STORAGE_CLUSTERS_FILE = os.path.join(CONFIG_DIR, 'storage_clusters.json')
+
+# MK 2026-06-01 — SSL certs and customer branding assets used to live under
+# 'ssl/' and 'images/' which both sit in the Docker image layer. On
+# `docker compose pull` the container gets recreated → image layer reset →
+# uploaded certs and login backgrounds vanish. config/ is the only volume
+# mounted by default (Dockerfile:41), so persistent uploads go in
+# config/ssl/ and config/branding/ now. Legacy paths kept as read-only
+# fallbacks + one-time migration runs further down.
+SSL_CERT_FILE = os.path.join(CONFIG_DIR, 'ssl', 'cert.pem')
+SSL_KEY_FILE = os.path.join(CONFIG_DIR, 'ssl', 'key.pem')
+SSL_CERT_FILE_LEGACY = 'ssl/cert.pem'
+SSL_KEY_FILE_LEGACY = 'ssl/key.pem'
+BRANDING_DIR = os.path.join(CONFIG_DIR, 'branding')
+LOG_DIR = _dir_from_env('PEGAPROX_LOG_DIR', 'logs')   # #826
+
+# MK May 2026 (#357 SeeJayEmm): expose log level + per-cluster file-handler
+# behaviour via env vars so operators shipping logs to a central collector
+# can mute the local file path. Falsy/unset = current defaults.
+#   PEGAPROX_LOG_LEVEL        — root + app logger level (DEBUG/INFO/WARNING/...)
+#   PEGAPROX_FILE_LOG_LEVEL   — level for the per-cluster logs/<id>.log handler
+#   PEGAPROX_DISABLE_FILE_LOG — '1'/'true' to skip attaching the FileHandler
+import logging as _logging
+import math as _math
+def _parse_log_level(s: str, default):
+    if not isinstance(s, str) or not s.strip():
+        return default
+    lvl = getattr(_logging, s.strip().upper(), None)
+    return lvl if isinstance(lvl, int) else default
+LOG_LEVEL = _parse_log_level(os.environ.get('PEGAPROX_LOG_LEVEL', ''), None)
+FILE_LOG_LEVEL = _parse_log_level(os.environ.get('PEGAPROX_FILE_LOG_LEVEL', ''), _logging.DEBUG)
+FILE_LOG_DISABLED = os.environ.get('PEGAPROX_DISABLE_FILE_LOG', '').strip().lower() in ('1', 'true', 'yes', 'on')
+WEB_DIR = 'web'
+SSL_DIR = os.path.join(CONFIG_DIR, 'ssl')  # MK 2026-06-01: was 'ssl/' (image layer)
+SSL_DIR_LEGACY = 'ssl'
+STATIC_DIR = 'static'
+IMAGES_DIR = 'images'
+# MK Oct 2026 (#1134): the image sets it to config/plugins, so a plugin's config.json
+# lives in the volume and outlasts a new image. Unset keeps plugins/ in the working dir.
+PLUGINS_DIR = _dir_from_env('PEGAPROX_PLUGINS_DIR', 'plugins')
+
+# MK Aug 2026 (#633): the block below runs at IMPORT time, so any process that
+# just imports pegaprox.* under a different user runs it as that user. A root-run
+# helper (a test runner, in the reported case) created config/ssl and copied the
+# certs there as root, the service started as its own user, could not read them,
+# and the old startup path answered that by serving cleartext on the TLS port.
+# So: only touch config/ when we own it, i.e. when files we create there would
+# belong to its owner anyway. Nothing here is load-bearing for a foreign user -
+# main() creates what it needs before generating a cert.
+def _config_owned_by_us():
+    try:
+        return os.stat(CONFIG_DIR).st_uid == os.geteuid()
+    except OSError:
+        return True      # not there yet, we are the one creating it
+
+
+CONFIG_OWNED_BY_US = _config_owned_by_us()
+
+# Ensure directories exist
+Path(LOG_DIR).mkdir(parents=True, exist_ok=True)   # #826: a moved log path is usually nested
+Path(PLUGINS_DIR).mkdir(parents=True, exist_ok=True)
+Path(WEB_DIR).mkdir(exist_ok=True)
+if CONFIG_OWNED_BY_US:
+    Path(SSL_DIR).mkdir(parents=True, exist_ok=True)
+    Path(BRANDING_DIR).mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SSL_DIR, 0o700)
+    except Exception:
+        pass
+
+# One-time migration: legacy 'ssl/cert.pem' / 'images/login_bg.*' → config/
+# Runs every startup but only when the legacy file exists AND the persistent
+# location is empty. Once migrated, the legacy file is left in place as a
+# read-only fallback so a misconfigured downgrade doesn't lose certs.
+def _migrate_to_config():
+    import shutil
+    if not CONFIG_OWNED_BY_US:
+        # a foreign user would leave root-owned certs behind and lock the service
+        # out of its own config/ssl (#633)
+        return
+    try:
+        for src, dst in ((SSL_CERT_FILE_LEGACY, SSL_CERT_FILE),
+                         (SSL_KEY_FILE_LEGACY, SSL_KEY_FILE)):
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+                try:
+                    os.chmod(dst, 0o600)
+                except Exception:
+                    pass
+        # login background: images/login_bg.<ext> → config/branding/login_bg.<ext>
+        for ext in ('.png', '.jpg', '.jpeg', '.webp', '.svg'):
+            src = os.path.join('images', 'login_bg' + ext)
+            dst = os.path.join(BRANDING_DIR, 'login_bg' + ext)
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy2(src, dst)
+    except Exception:
+        # never let migration kill the import — log-only at app boot would be
+        # nicer but constants.py runs pre-logging setup.
+        pass
+_migrate_to_config()
+
+# Session configuration
+# NS: 28800 was originally 36000 (10h) but we had to reduce it after the Traunstein pen-test
+SESSION_TIMEOUT = 28800  # 8 hours
+
+# Brute force protection defaults
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_TIME = 300  # 5 minutes
+LOGIN_ATTEMPT_WINDOW = 600  # 10 minutes
+
+# Audit
+AUDIT_RETENTION_DAYS = 90
+
+# Rate limiting
+# MK: started at 600 but that was too aggressive for large clusters with 100+ VMs polling
+API_RATE_LIMIT = int(os.environ.get('PEGAPROX_API_RATE_LIMIT', 1200))
+API_RATE_WINDOW = int(os.environ.get('PEGAPROX_API_RATE_WINDOW', 60))
+
+# SSH
+SSH_MAX_CONCURRENT = int(os.environ.get('PEGAPROX_SSH_MAX_CONCURRENT', 25))
+
+# Task user cache TTL
+TASK_USER_CACHE_TTL = 86400
+
+# Max audit log size
+MAX_AUDIT_LOG_SIZE = 10000
+
+# SSE Token TTL
+SSE_TOKEN_TTL = 600
+
+# GitHub URLs
+GITHUB_VERSION_URL = "https://raw.githubusercontent.com/PegaProx/project-pegaprox/main/version.json"
+GITHUB_REPO_URL = "https://github.com/PegaProx/project-pegaprox"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/PegaProx/project-pegaprox/main"
+# NS: auto-generated by GitHub, no manual release needed
+GITHUB_ARCHIVE_URL = "https://github.com/PegaProx/project-pegaprox/archive/refs/heads/main.tar.gz"
+
+# Mirror - updates.pegaprox.com mirrors the GitHub repo
+MIRROR_RAW_URL = "https://updates.pegaprox.com"
+MIRROR_VERSION_URL = "https://updates.pegaprox.com/version.json"
+MIRROR_ARCHIVE_URL = "https://updates.pegaprox.com/archive/main.tar.gz"
+
+# Predictive engine tuning - MK Mar 2026
+# decay factor for WMA, calibrated against 48h test on Traunstein prod cluster
+PREDICTIVE_WMA_DECAY = 0.7
+PREDICTIVE_COMPOSITE_WEIGHT = (0.6, 0.4)  # cpu, mem
+PREDICTIVE_OVERSHOOT_FACTOR = 1.15  # compensate for bursty workloads
+PREDICTIVE_ENGINE_TAG = 'pega-wma-v2'
+
+# MK Sep 2026 — how long the VNC relay's reader may sit in one recv before it releases the
+# pve_ws lock for a writer. The #713 lock funnels SSL_read and SSL_write through one mutex so
+# they can't splice a TLS record, and this slice is what keeps the reader from starving the
+# writer. It started at 50ms, which is also the worst-case delay an outbound pointer or key
+# event inherits on an idle screen — that is the mouse jitter people reported on 1.1.0, since
+# an idle desktop sends no framebuffer traffic to cut the wait short. 10ms is below the
+# threshold where pointer motion reads as steady, and costs only more timed-out wakeups
+# (~100/s per OPEN CONSOLE — a human-bounded number, unrelated to how many guests exist).
+VNC_PVE_RECV_SLICE = float(os.environ.get('PEGAPROX_VNC_RECV_SLICE', '0.01'))
+
+# MK Sep 2026 (#647) — how long to keep asking where a guest ended up after an HA
+# migrate task reported failure. `ha-manager migrate` returns once the CRM has the
+# request, not once the guest has moved, so an immediate look-up answers "still on the
+# source" for a migration that is about to succeed. 90s covers the reported gap with
+# room to spare; a real failure pays it once, on a path that is already the exception.
+def _bounded_float_env(name, default, lo, hi):
+    """Read a float from the environment without letting a typo take the app down.
+
+    MK Sep 2026 — a bare float(os.environ.get(...)) raises at IMPORT time, so
+    PEGAPROX_HA_MIGRATE_SETTLE=90s (or an empty value from a half-written unit file)
+    stops PegaProx from starting at all rather than doing something sensible. And the
+    poll interval is slept on inside a loop: a 0 there turns a 90-second settle window
+    into ninety seconds of hammering /cluster/resources as fast as the API answers.
+    Fall back on garbage, clamp on out-of-range, say so either way.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == '':
+        return default
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        _logging.warning(f"[config] {name}={raw!r} is not a number — using {default}")
+        return default
+    # float('nan') parses happily, and every comparison against NaN is False — so it
+    # walks straight through the range check below and comes out the other side intact.
+    # A NaN settle window makes `time.time() + val` NaN too, which makes the loop's
+    # `time.time() >= deadline` false forever: the evacuation never returns and polls
+    # the cluster until the process dies. That check clamps inf and -inf fine on its own;
+    # NaN is the one it cannot see, so this takes all three and says so in the log.
+    if not _math.isfinite(val):
+        _logging.warning(f"[config] {name}={raw!r} is not a finite number — using {default}")
+        return default
+    if val < lo or val > hi:
+        clamped = min(max(val, lo), hi)
+        _logging.warning(f"[config] {name}={val} outside {lo}..{hi} — using {clamped}")
+        return clamped
+    return val
+
+
+HA_MIGRATE_SETTLE_SECONDS = _bounded_float_env('PEGAPROX_HA_MIGRATE_SETTLE', 90.0, 0.0, 3600.0)
+HA_MIGRATE_SETTLE_POLL = _bounded_float_env('PEGAPROX_HA_MIGRATE_SETTLE_POLL', 3.0, 0.5, 60.0)
+
+# MK Oct 2026 (#713) - a write to PVE on a console relay gets its own deadline. It used to
+# inherit VNC_PVE_RECV_SLICE above, so any write that could not drain within 10ms - a full
+# send buffer, or a hub busy elsewhere for that long - timed out halfway. What that does to
+# the stream is in vnc_polling.write_with_deadline.
+VNC_PVE_SEND_TIMEOUT = _bounded_float_env('PEGAPROX_VNC_SEND_TIMEOUT', 10.0, 1.0, 120.0)

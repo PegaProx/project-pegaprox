@@ -1,0 +1,1643 @@
+# site recovery failover orchestrator
+# NS Mar 2026 - handles planned, emergency, test failovers and auto-heartbeat
+
+import functools
+import json
+import logging
+import threading
+import time
+import uuid
+import requests
+from contextlib import contextmanager
+from datetime import datetime
+
+from pegaprox.core.db import get_db
+from pegaprox.core import ha, transfer_net
+from pegaprox.background import sr_boot_shots
+from pegaprox.globals import cluster_managers
+from pegaprox.utils.audit import log_audit
+from pegaprox.utils.realtime import broadcast_sse
+from pegaprox.utils.sanitization import sanitize_log_message as _sl  # MK #338693885 (Aikido CWE-117): plan name is request-body-controlled → strip CR/LF before any log/audit/SSE line
+from pegaprox.utils.sanitization import redact_url
+
+logger = logging.getLogger('pegaprox.site_recovery')
+
+# MK Oct 2026 - the plans a worker of this process is on, and the ones asked to stop. A
+# cancel used to write 'ready' only: the worker went on with the next guest, and with the
+# plan 'ready' a second failover or a failback started over it
+# Each entry belongs to the worker greenlet that made it: one finishing (its webhook can
+# take 30 s after the plan reads ready again) removes its own entry only, and a stop asked
+# of the plan reaches the worker that runs it now.
+_live = {}             # plan_id -> {'kind': planned|emergency|failback|test|cleanup, 'owner', 'stop'}
+_live_lock = threading.Lock()
+
+
+def run_alive(plan_id):
+    """What a worker of this process runs for the plan, None when nothing does."""
+    with _live_lock:
+        entry = _live.get(plan_id)
+        return entry['kind'] if entry else None
+
+
+def ask_to_stop(plan_id):
+    """The plan's worker stops before its next guest. False when none runs."""
+    with _live_lock:
+        entry = _live.get(plan_id)
+        if entry is None:
+            return False
+        entry['stop'] = True
+        return True
+
+
+def _stopping(plan_id):
+    from greenlet import getcurrent
+    with _live_lock:
+        entry = _live.get(plan_id)
+        return bool(entry and entry['owner'] is getcurrent() and entry['stop'])
+
+
+def hold_plan(plan_id, kind, owner):
+    """The plan for a worker that is about to start, before it runs: False when another
+    holds it. Taken where the worker is spawned, so a second start or a cancel in between
+    sees it at once, not only once the worker got its first turn."""
+    with _live_lock:
+        if plan_id in _live:
+            return False
+        _live[plan_id] = {'kind': kind, 'owner': owner, 'stop': False}
+        return True
+
+
+def hand_plan_to(plan_id, holder, owner):
+    with _live_lock:
+        entry = _live.get(plan_id)
+        if entry is not None and entry['owner'] is holder:
+            entry['owner'] = owner
+
+
+def let_go_of_plan(plan_id, owner):
+    with _live_lock:
+        if (_live.get(plan_id) or {}).get('owner') is owner:
+            del _live[plan_id]
+
+
+@contextmanager
+def _running(plan_id, kind):
+    from greenlet import getcurrent
+    me = getcurrent()
+    with _live_lock:
+        held = _live.get(plan_id)
+        if held is not None and held['owner'] is me:
+            # held for it when it was spawned; a cancel since then still counts
+            held['kind'] = kind
+        else:
+            _live[plan_id] = {'kind': kind, 'owner': me, 'stop': False}
+    try:
+        yield
+    finally:
+        with _live_lock:
+            if (_live.get(plan_id) or {}).get('owner') is me:
+                del _live[plan_id]
+
+
+def _on_the_plan(kind=None):
+    """A worker is on its plan (the first argument) while it runs. kind names it; None
+    takes the failover type it was given."""
+    def wrap(fn):
+        @functools.wraps(fn)
+        def run(plan_id, *args, **kwargs):
+            what = kind or (args[0] if args else kwargs.get('failover_type', 'planned'))
+            with _running(plan_id, what):
+                return fn(plan_id, *args, **kwargs)
+        run.plan_kind = kind
+        return run
+    return wrap
+
+_heartbeat_running = False
+
+
+def _create_event(plan_id, event_type, triggered_by='system'):
+    event_id = str(uuid.uuid4())[:8]
+    now = datetime.utcnow().isoformat()
+    db = get_db()
+    db.execute('''INSERT INTO site_recovery_events (id, plan_id, event_type, status, started_at, triggered_by)
+        VALUES (?, ?, ?, 'running', ?, ?)''', (event_id, plan_id, event_type, now, triggered_by))
+    return event_id
+
+
+def _complete_event(event_id, status, details=None):
+    now = datetime.utcnow().isoformat()
+    db = get_db()
+    db.execute('UPDATE site_recovery_events SET status = ?, completed_at = ?, details = ? WHERE id = ?',
+               (status, now, json.dumps(details or {}), event_id))
+
+
+def _fire_webhook(url):
+    """Call pre/post failover webhook, don't block on failure"""
+    if not url:
+        return
+    try:
+        # NS May 2026 — SSRF guard: failover webhooks are admin-set; refuse
+        # internal/metadata targets so a misconfig doesn't ping AWS metadata.
+        try:
+            from pegaprox.utils.url_security import resolve_and_pin_url, SsrfError
+            # GHSA-hmcf-9q7f-vx35 — pin the vetted IP so requests can't re-resolve to an internal
+            # address (http pinned; verified https stays a hostname so its TLS cert check applies).
+            url = resolve_and_pin_url(url, allowed_schemes=('https', 'http'))
+        except SsrfError as guard_err:
+            logger.warning(f"[SR] webhook URL rejected: {guard_err}")
+            return
+        # M-8: don't follow a 30x to an internal host (the guard above only
+        # validates the first hop).
+        # MK Sep 2026 - nothing here reads the response, but without stream=True requests
+        # downloads the whole body anyway. The URL is operator-configured and the guard
+        # above only decides where it may point, not what comes back, so a webhook that
+        # answers with a gigabyte would take the failover worker with it. Ask for the
+        # headers, then close.
+        _wh = requests.post(url, json={'event': 'site_recovery',
+                                       'timestamp': datetime.utcnow().isoformat()},
+                            timeout=30, allow_redirects=False, stream=True)
+        _wh.close()
+    except Exception as e:
+        # MK Sep 2026 - a Slack or Teams webhook URL has no userinfo: the secret IS the
+        # path, and this printed the whole thing on every failure. The exception text can
+        # carry it too, so both go through the redactor.
+        logger.warning(f"[SR] Webhook failed: {redact_url(url)} - {redact_url(str(e))}")
+
+
+# NS 2026-04-24 — pre-flight validation. Real-world cause of most "Site Recovery failed
+# at 50%" reports: storage/bridge mappings reference names that don't exist on the
+# target. Proxmox returns HTTP 500 mid-migration with a useless error. We now check
+# before we start.
+def _reverse_mapping(mapping, kind):
+    """Flip a {source: target} plan mapping for a failback run.
+
+    A plan is authored in one direction, so replaying it backwards with the forward
+    map puts every VM on the DR site's storage/bridge names — on the production
+    cluster. Two sources pointing at the same target can't be reversed unambiguously,
+    so say so rather than pick one. Returns (reversed, issues).
+    """
+    reversed_map, ambiguous = {}, set()
+    for src, tgt in (mapping or {}).items():
+        if not tgt:
+            continue
+        if tgt in reversed_map and reversed_map[tgt] != src:
+            ambiguous.add(tgt)
+        reversed_map[tgt] = src
+    issues = [{'severity': 'error',
+               'msg': f"{kind} mapping is not reversible for failback: "
+                      f"'{t}' is the target of more than one source"}
+              for t in sorted(ambiguous)]
+    return reversed_map, issues
+
+
+def validate_mappings(tgt_mgr, storage_map, net_map):
+    """Validate that the mapping targets actually exist on the target cluster.
+    Returns a list of {severity, msg} entries. Empty list = all good."""
+    issues = []
+    if not tgt_mgr:
+        issues.append({'severity': 'error', 'msg': 'Target cluster manager unavailable'})
+        return issues
+    if not getattr(tgt_mgr, 'is_connected', False):
+        issues.append({'severity': 'error', 'msg': 'Target cluster not connected — cannot validate mappings'})
+        return issues
+
+    # pick any online target node to query storage + network from
+    node_name = None
+    try:
+        ns = tgt_mgr.get_node_status() or {}
+        for n, info in ns.items():
+            if info.get('status') == 'online':
+                node_name = n; break
+    except Exception as e:
+        issues.append({'severity': 'warning', 'msg': f'Could not enumerate target nodes: {e}'})
+    if not node_name:
+        issues.append({'severity': 'error', 'msg': 'No online node on target cluster to validate mappings against'})
+        return issues
+
+    # storage existence check
+    try:
+        storages = tgt_mgr.get_storage_list(node_name) or []
+        stor_names = {s.get('storage') for s in storages if s.get('storage')}
+        for src, tgt in (storage_map or {}).items():
+            if not tgt:
+                issues.append({'severity': 'error', 'msg': f"Storage mapping '{src}' → (empty) — fill in the target storage"})
+            elif tgt not in stor_names:
+                issues.append({'severity': 'error',
+                               'msg': f"Target storage '{tgt}' (mapped from '{src}') does not exist on target cluster"})
+    except Exception as e:
+        issues.append({'severity': 'warning', 'msg': f'Storage validation failed: {e}'})
+
+    # network existence check
+    try:
+        nets = tgt_mgr.get_network_list(node_name) or []
+        net_names = set()
+        for n in nets:
+            name = n.get('iface') or n.get('name')
+            if name:
+                net_names.add(name)
+        for src, tgt in (net_map or {}).items():
+            if not tgt:
+                issues.append({'severity': 'error', 'msg': f"Network mapping '{src}' → (empty) — fill in the target bridge/vnet"})
+            elif tgt not in net_names:
+                issues.append({'severity': 'error',
+                               'msg': f"Target bridge '{tgt}' (mapped from '{src}') does not exist on target cluster"})
+    except Exception as e:
+        issues.append({'severity': 'warning', 'msg': f'Network validation failed: {e}'})
+
+    return issues
+
+
+def _broadcast_progress(plan_id, message, progress=None):
+    """Push realtime update to frontend"""
+    # MK May 2026 (#413) — broadcast_sse signature is (update_type, data, cluster_id=None);
+    # the single-dict call was crashing the SR background task with "missing 1 required
+    # positional argument: 'data'" the moment a Test/Planned failover hit progress emit.
+    broadcast_sse('site_recovery', {'plan_id': plan_id, 'message': message, 'progress': progress})
+
+
+def _get_plan(plan_id):
+    db = get_db()
+    row = db.query_one('SELECT * FROM site_recovery_plans WHERE id = ?', (plan_id,))
+    if not row:
+        return None
+    plan = dict(row)
+    for k in ('network_mappings', 'storage_mappings'):
+        try:
+            plan[k] = json.loads(plan[k] or '{}')
+        except Exception:
+            plan[k] = {}
+    return plan
+
+
+def _get_plan_vms(plan_id):
+    db = get_db()
+    rows = db.query('SELECT * FROM site_recovery_vms WHERE plan_id = ? ORDER BY boot_group, vmid', (plan_id,))
+    return [dict(r) for r in rows] if rows else []
+
+
+def _group_vms_by_boot(vms):
+    """Group VMs by boot_group, returns sorted list of (group_num, [vms])"""
+    groups = {}
+    for vm in vms:
+        g = vm.get('boot_group', 0)
+        groups.setdefault(g, []).append(vm)
+    return sorted(groups.items())
+
+
+# MK: the actual migration logic delegates to the existing cross-cluster-migrate infra
+def _migrate_vm_cross_cluster(src_mgr, tgt_mgr, vmid, vm_type, storage_map, net_map, target_vmid=None):
+    """Migrate single VM from source to target using existing remote_migrate API.
+    vmid is the guest's VMID on the source of this run, target_vmid the one it takes on
+    the target (None: the same).
+    Returns (success: bool, error: str)"""
+    try:
+        # find VM's node on source
+        node_status = src_mgr.get_node_status()
+        vm_node = None
+        if node_status:
+            for node_name, ndata in node_status.items():
+                vms_on_node = src_mgr.get_vms(node_name) if hasattr(src_mgr, 'get_vms') else []
+                for v in vms_on_node:
+                    if v.get('vmid') == vmid:
+                        vm_node = node_name
+                        break
+                if vm_node:
+                    break
+
+        if not vm_node:
+            return False, f"VM {vmid} not found on source cluster"
+
+        # determine target storage — build PVE mapping format "source:target"
+        # MK: check if VM's current storage has a mapping, else use first available
+        # NS 2026-04-24: the old `except: pass` silently hid get_vm_config failures
+        # and dumped VMs onto whichever storage happened to be first in the map.
+        # Now we surface the reason + record it in the result so admins can see *why*
+        # the fallback kicked in.
+        target_storage = ''
+        fallback_reason = None
+        if storage_map:
+            try:
+                # MK Jul 2026 (#413) — get_vm_config returns {'success','config'};
+                # the flat scsiN/virtioN/rootfs keys live in config['raw']. The old
+                # code iterated the wrapper dict, so this remap NEVER matched and every
+                # cross-cluster failover silently fell back to the default storage.
+                _cfg_res = src_mgr.get_vm_config(vm_node, vmid, vm_type)
+                config = ((_cfg_res.get('config') or {}).get('raw') or {}) \
+                    if isinstance(_cfg_res, dict) and _cfg_res.get('success') else {}
+                if not config:
+                    fallback_reason = 'source config empty (API call returned no data)'
+                else:
+                    # build PVE mapping format: "src_stor:tgt_stor,src_stor2:tgt_stor2"
+                    mappings = []
+                    for k, v in (config or {}).items():
+                        if k.startswith(('scsi', 'virtio', 'ide', 'sata', 'rootfs', 'mp')) and isinstance(v, str) and ':' in v:
+                            src_stor = v.split(':')[0]
+                            if src_stor and src_stor != 'none' and src_stor in storage_map:
+                                mappings.append(f"{src_stor}:{storage_map[src_stor]}")
+                    if mappings:
+                        target_storage = ','.join(dict.fromkeys(mappings))  # dedupe
+                    else:
+                        unmapped = sorted({v.split(':')[0] for k, v in (config or {}).items()
+                                           if k.startswith(('scsi', 'virtio', 'ide', 'sata', 'rootfs', 'mp'))
+                                           and isinstance(v, str) and ':' in v}
+                                          - set(storage_map.keys()) - {'none'})
+                        fallback_reason = (f"VM uses storage(s) {unmapped} but no mapping exists"
+                                           if unmapped else 'no disk entries in VM config')
+            except Exception as _e:
+                fallback_reason = f'get_vm_config failed: {_e}'
+                logger.warning(f"[SR] _migrate_vm_cross_cluster({vmid}): storage-map lookup failed: {_e}")
+        if not target_storage:
+            if storage_map:
+                # deterministic fallback: sort mapping by source-storage name so repeat runs pick same target
+                fallback = sorted(storage_map.items())[0][1]
+            else:
+                fallback = 'local-lvm'
+            logger.warning(f"[SR] VM {vmid} falling back to storage '{fallback}'"
+                           + (f" ({fallback_reason})" if fallback_reason else ''))
+            target_storage = fallback
+
+        target_bridge = 'vmbr0'
+        if net_map:
+            # PVE remote_migrate uses colon separator (same as target-storage)
+            target_bridge = ','.join(f"{s}:{t}" for s, t in net_map.items())
+
+        # create temp token on target for migration auth
+        # fix (audit): the name used to be the fixed string 'pegaprox-sr', and the cleanup below
+        # deletes BY NAME after a one-hour grace. Two failovers running at once — or one
+        # starting while an earlier grace is still pending — meant the first cleanup revoked the
+        # token the second migration was still authenticating with. The xclb path already mints
+        # per-job names for the same reason; do the same here.
+        _sr_token_name = f"pegaprox-sr-{uuid.uuid4().hex[:8]}"
+        token_result = tgt_mgr.create_api_token(_sr_token_name)
+        if not token_result.get('success'):
+            return False, f"Failed to create API token on target: {token_result.get('error', 'unknown')}"
+
+        token_id = token_result['token_id']
+        token_value = token_result['token_value']
+
+        # get target fingerprint
+        # MK Oct 2026 - a target with a transfer network: a node's address there
+        xfer = transfer_net.migration_route(tgt_mgr)
+        if xfer and xfer['host']:
+            fp_result = {'success': True, 'fingerprint': xfer['fingerprint']}
+        else:
+            fp_result = tgt_mgr.get_cluster_fingerprint()
+        if not fp_result.get('success'):
+            tgt_mgr.delete_api_token(_sr_token_name)
+            return False, f"Failed to get target fingerprint: {fp_result.get('error', '')}"
+        transfer_net.report_fallback(xfer, logger)
+
+        fingerprint = fp_result['fingerprint']
+        target_host = xfer['host'] if xfer and xfer['host'] else tgt_mgr.host
+        if xfer and xfer['host']:
+            logger.info(f"[SR] VM {vmid} goes to {xfer['node']} at {target_host} (transfer network {xfer['network']})")
+
+        # build target endpoint string (Proxmox format)
+        target_endpoint = transfer_net.endpoint({'token_id': token_id, 'token_value': token_value},
+                                                target_host, fingerprint)
+
+        # execute migration
+        result = src_mgr.remote_migrate_vm(
+            node=vm_node, vmid=vmid, vm_type=vm_type,
+            target_endpoint=target_endpoint,
+            target_storage=target_storage,
+            target_bridge=target_bridge,
+            target_vmid=target_vmid or vmid,
+            online=True, delete_source=True
+        )
+
+        # cleanup token after a delay (migration is async)
+        def _delayed_cleanup():
+            time.sleep(3600)  # 1h grace - large disks (1TB+) need time
+            try:
+                tgt_mgr.delete_api_token(_sr_token_name)
+            except Exception:
+                pass
+
+        import gevent
+        # an hour later: the delete asks for the lease at its exit then (#625)
+        gevent.spawn(ha.as_job(_delayed_cleanup, f'token cleanup for {vmid}'))
+
+        if not result.get('success'):
+            return False, result.get('error', 'Migration failed')
+
+        # MK May 2026 (#413 layer 4) — remote_migrate_vm returns success the
+        # moment PVE accepts the task UPID, NOT when the underlying qmigrate
+        # actually finishes. A failover where the target already has the VMID
+        # (e.g. xcrepl pre-replicated it) submits fine then aborts mid-flight
+        # with "VM N already exists" — and the old code treated that as a clean
+        # planned_complete, which is how @blackshocks ended up with a Failback
+        # button on a migration that never actually moved the VM. Poll the
+        # UPID's PVE task status before declaring victory.
+        task_upid = result.get('task')
+        if not task_upid:
+            # successful submit without a UPID — extremely unusual but treat as
+            # opaque success (don't make this stricter than before for paths
+            # we don't fully understand)
+            return True, ''
+        try:
+            from pegaprox.api.vms import _wait_for_task
+        except Exception as _imp_err:
+            logger.warning(f"[SR] _wait_for_task import failed, falling back to submit-only success: {_imp_err}")
+            return True, ''
+        ok, detail = _wait_for_task(src_mgr, task_upid, timeout=3600, poll=5)
+        if not ok:
+            err = f"Migration task aborted on PVE: {detail}"
+            # hint for the most common cause we can identify from the detail string
+            if detail and 'already exists' in detail.lower():
+                err += " (target VMID already in use — likely a replication-pre-seeded VM; consider Emergency Failover instead of Planned)"
+            logger.error(f"[SR] {err} (vmid {vmid}, task {task_upid})")
+            return False, err
+        return True, ''
+
+    except Exception as e:
+        logger.error(f"[SR] Migration error for VM {vmid}: {e}")
+        return False, str(e)
+
+
+def _source_vm_is_running(src_mgr, vmid):
+    """(running, checked) for the source guest.
+
+    MK Sep 2026 - emergency failover starts the replica on the target while the source is
+    presumed gone. If the source is in fact still up, both guests now run with the same
+    identity on the same replicated disks, and whichever the storage believes last wins.
+
+    The important half is what happens when we CANNOT look: that is the network partition,
+    which is the case emergency failover exists for. Refusing there would block the one
+    scenario the feature is for, so unreachable means proceed - loudly. Only a source we
+    can see AND that is still running gets refused, because that is not an emergency, it
+    is a planned failover somebody clicked the wrong button for.
+
+    Returns (running, checked). checked=False means we could not tell.
+    """
+    if not src_mgr or not getattr(src_mgr, 'is_connected', False):
+        return False, False
+    try:
+        res = src_mgr._api_get(
+            f"https://{src_mgr.host}:{src_mgr.api_port}/api2/json/cluster/resources",
+            params={'type': 'vm'})
+        if res.status_code != 200:
+            return False, False
+        for r in res.json().get('data', []):
+            if int(r.get('vmid', 0)) == int(vmid):
+                return r.get('status') == 'running', True
+        return False, True          # gone from the source entirely: nothing to collide with
+    except Exception as e:
+        logger.debug(f"[SR] could not read source state for {vmid}: {e}")
+        return False, False
+
+
+def _start_replicated_vm(tgt_mgr, vmid, vm_type='qemu'):
+    """Start a replicated VM on target (emergency failover).
+    The VM should already exist on target from replication.
+    Returns (success, error)
+    NS Apr 2026: was calling non-existent start_vm() — use vm_action('start')
+    Also check cluster/resources directly instead of per-node get_vms (faster + reliable)"""
+    try:
+        # find target node for the VM via cluster resources (one call vs N)
+        try:
+            res = tgt_mgr._api_get(
+                f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/resources",
+                params={'type': 'vm'}
+            )
+            if res.status_code != 200:
+                return False, f"Cannot list target VMs (HTTP {res.status_code})"
+            target_node = None
+            current_status = None
+            for r in res.json().get('data', []):
+                if int(r.get('vmid', 0)) == int(vmid):
+                    target_node = r.get('node')
+                    current_status = r.get('status')
+                    break
+            if not target_node:
+                return False, f"VM {vmid} not found on target cluster (not replicated?)"
+        except Exception as e:
+            return False, f"Failed to locate target VM: {e}"
+
+        # if already running (e.g. from previous failover), treat as success
+        if current_status == 'running':
+            return True, ''
+
+        result = tgt_mgr.vm_action(target_node, int(vmid), vm_type, 'start')
+        if result.get('success'):
+            return True, ''
+        return False, result.get('error', 'start failed')
+    except Exception as e:
+        return False, str(e)
+
+
+def _target_vmid_exists(tgt_mgr, vmid):
+    """MK Jul 2026 (#413) — is this VMID already present on the target cluster?
+    Used to fast-detect a replication-pre-seeded target before launching a qmigrate
+    that can only abort (PVE can't reconcile an existing target VMID)."""
+    try:
+        res = tgt_mgr._api_get(
+            f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/resources",
+            params={'type': 'vm'}
+        )
+        if res.status_code != 200:
+            return False
+        for r in res.json().get('data', []):
+            if int(r.get('vmid', 0)) == int(vmid):
+                return True
+    except Exception as e:
+        logger.debug(f"[SR] target-VMID existence probe failed: {e}")
+    return False
+
+
+def _replicas_kept(plan):
+    """{vmid: [(job id, replica VMID)]} of the replication jobs between the plan's clusters."""
+    kept = {}
+    rows = get_db().query('SELECT id, vmid, target_vmid FROM cross_cluster_replications '
+                          'WHERE source_cluster = ? AND target_cluster = ?',
+                          (plan.get('source_cluster'), plan.get('target_cluster'))) or []
+    for r in rows:
+        try:
+            vmid = int(r['vmid'])
+            kept.setdefault(vmid, []).append((r['id'], int(r['target_vmid'] or 0) or vmid))
+        except (TypeError, ValueError):
+            continue
+    return kept
+
+
+def replica_vmids(plan, vms):
+    """{vmid: (VMID of the guest's replica on the plan's target, None), or (None, why not)}.
+
+    MK Nov 2026 - an emergency failover starts the replica and a test clones it, and a
+    replication job can keep the replica under a VMID of its own (its target_vmid). Both
+    went by the guest's VMID, which on the target is another guest or none. In order: the
+    plan row's target_vmid, the linked replication job, the guest's jobs between the plan's
+    clusters. Jobs that disagree leave it open, and so does a job table that cannot be read:
+    a guess here starts somebody else's guest."""
+    out, kept, unread = {}, None, None
+    for vm in vms:
+        vmid = int(vm['vmid'])
+        named = vm.get('target_vmid')
+        if named:
+            # nothing writes the column, so only a hand edit puts something odd there
+            try:
+                named = int(named)
+            except (TypeError, ValueError):
+                named = 0
+            out[vmid] = (named, None) if named > 0 else (None, 'the plan names no valid VMID for its replica')
+            continue
+        if kept is None and unread is None:
+            try:
+                kept = _replicas_kept(plan)
+            except Exception as e:
+                unread = str(e)
+                logger.error(f"[SR] replication jobs of plan '{_sl(plan.get('name') or '')}' unreadable: {e}")
+        if unread is not None:
+            out[vmid] = (None, f"the VMID of its replica is unknown, the replication jobs "
+                               f"could not be read: {unread}")
+            continue
+        jobs = kept.get(vmid, [])
+        linked = [there for job_id, there in jobs if job_id == vm.get('replication_job_id')]
+        seen = sorted(set(linked or [there for _, there in jobs]))
+        if len(seen) > 1:
+            out[vmid] = (None, f"its replication jobs keep replicas under VMIDs "
+                               f"{', '.join(str(v) for v in seen)} - link the one to use in the plan")
+        else:
+            out[vmid] = (seen[0] if seen else vmid, None)
+    return out
+
+
+def _dr_vmid_of(vm):
+    """The VMID a failed-over guest has on the DR site, where its failover put it. A mark
+    from before failed_over_vmid comes from a run that used the guest's own."""
+    return int(vm.get('failed_over_vmid') or 0) or int(vm['vmid'])
+
+
+def _mark_before_the_vmid(vm):
+    """An emergency mark from before failed_over_vmid: its run started the guest's own VMID."""
+    return vm.get('failed_over') == 'emergency' and not vm.get('failed_over_vmid')
+
+
+def _old_mark_refusal(vm, replica, dr_id):
+    """Why a failback cannot take the guest from where an emergency mark from before
+    failed_over_vmid puts it, None when it can. replica is replica_vmids' answer for it.
+
+    MK Nov 2026 - that run started the guest's own VMID on the DR site. Where the replica is
+    kept under another one, it started another guest or none, and what runs under the
+    guest's VMID there is nothing to bring home, nor a reason to remove the copy at home."""
+    if not _mark_before_the_vmid(vm) or replica is None:
+        return None
+    vmid = int(vm['vmid'])
+    there, why = replica
+    if there == vmid:
+        return None
+    head = (f"VMID {vmid} on '{dr_id}' may be another guest: the emergency failover of this one "
+            f"ran before PegaProx kept the VMID it started")
+    if why:
+        return f"{head}, and {why}"
+    return (f"{head}, and its replica is kept as {there}. Check which copy is current, then take "
+            f"the guest out of the plan and add it again.")
+
+
+def _disconnect_test_nics(tgt_mgr, node, vmid, vm_type='qemu'):
+    """MK Jul 2026 (#413) — bring a Test-Failover clone up with every NIC
+    'unplugged' (link_down=1) so the isolated test can't collide with production
+    IPs on the live network. QEMU-only (link_down is a KVM NIC property); a no-op
+    for LXC. Runs while the clone is still stopped, so it boots disconnected.
+
+    MK Sep 2026 - used to return a bare count, and the caller threw it away and started the
+    clone regardless. A count cannot tell "this guest has no NICs" from "we could not read
+    its config", and both came back as 0 - so the one failure mode that matters, a test
+    clone coming up with live NICs as a twin of a running production VM, looked exactly
+    like success. Returns {'ok', 'disconnected', 'total', 'unsupported', 'error'} now and
+    the caller treats not-ok as a reason not to start.
+    """
+    if vm_type != 'qemu':
+        # link_down is a KVM NIC property; there is no equivalent for a container here.
+        return {'ok': True, 'disconnected': 0, 'total': 0, 'unsupported': True, 'error': ''}
+    try:
+        res = tgt_mgr.get_vm_config(node, int(vmid), vm_type)
+    except Exception as e:
+        logger.warning(f"[SR] link-down: cannot read config for test VM {vmid}: {e}")
+        return {'ok': False, 'disconnected': 0, 'total': 0, 'unsupported': False,
+                'error': f'config unreadable: {e}'}
+    # get_vm_config returns {'success': True, 'config': parsed}; the flat netN
+    # keys live in config['raw'] (parsed itself only has grouped sections).
+    if not isinstance(res, dict) or not res.get('success'):
+        _why = res.get('error') if isinstance(res, dict) else res
+        logger.warning(f"[SR] link-down: get_vm_config failed for test VM {vmid}: {_why}")
+        return {'ok': False, 'disconnected': 0, 'total': 0, 'unsupported': False,
+                'error': f'config unavailable: {_why}'}
+    cfg = res.get('config') or {}
+    raw = cfg.get('raw', cfg)
+    nics = [k for k in raw.keys() if k.startswith('net') and k[3:].isdigit()]
+    n, failed = 0, []
+    for key in nics:
+        try:
+            r = tgt_mgr.toggle_network_link(node, int(vmid), key, True)
+            if not isinstance(r, dict) or r.get('success', True) is not False:
+                n += 1
+            else:
+                failed.append(f"{key}: {r.get('error')}")
+                logger.warning(f"[SR] link-down: {key} on test VM {vmid} failed: {r.get('error')}")
+        except Exception as e:
+            failed.append(f"{key}: {e}")
+            logger.warning(f"[SR] link-down: {key} on test VM {vmid} raised: {e}")
+    if n:
+        logger.info(f"[SR] Test VM {vmid}: {n} of {len(nics)} NIC(s) disconnected (link_down)")
+    return {'ok': not failed, 'disconnected': n, 'total': len(nics),
+            'unsupported': False, 'error': '; '.join(failed)}
+
+
+def _mark_guest(vm, kind, send=False, dr_vmid=None):
+    """Record where a plan guest is now: kind is the failover that moved it, '' home again,
+    dr_vmid its VMID on the DR site, which the failback brings it home from.
+    With send the members of an automatic group get it at once (ha.send_on)."""
+    get_db().execute('UPDATE site_recovery_vms SET failed_over = ?, failed_over_at = ?, failed_over_vmid = ? '
+                     'WHERE id = ?',
+                     (kind, datetime.utcnow().isoformat() if kind else '', (dr_vmid or vm['vmid']) if kind else None,
+                      vm['id']))
+    if send:
+        ha.send_on(f"where guest {vm.get('vmid')} of a recovery plan is")
+
+
+def _home_vmid_in_use(vm, dr_mgr, dr_id, home_id):
+    """Why a failback cannot bring the guest home under its VMID, which is in use there.
+
+    An emergency failover leaves the source copy where it was, and that copy is the older
+    one only while the guest runs on the DR site. The mark goes in before the start (#625),
+    so it can outlive a start that never happened: a guest that does not run there may be
+    the one at home, and its copy there is nothing to remove."""
+    vmid = vm['vmid']
+    if vm.get('failed_over') != 'emergency':
+        return f"VMID {vmid} is in use on '{home_id}', the guest cannot come back under its id"
+    # on the DR site it is the replica it started, under that one's VMID
+    dr_vmid = _dr_vmid_of(vm)
+    there = f"'{dr_id}'" + (f" as {dr_vmid}" if dr_vmid != int(vmid) else '')
+    running, checked = _source_vm_is_running(dr_mgr, dr_vmid)
+    if running:
+        return (f"VMID {vmid} still exists on '{home_id}': the copy the emergency "
+                f"failover left there is older than the guest running on "
+                f"{there}. Remove it on '{home_id}', then fail this guest back.")
+    seen = 'does not run' if checked else 'cannot be seen running'
+    return (f"VMID {vmid} exists on '{home_id}' and the guest {seen} on {there}: its emergency "
+            f"failover may not have started it there. Check which copy is current before you "
+            f"remove either.")
+
+
+@_on_the_plan()
+def execute_failover(plan_id, failover_type='planned', authorized_vmids=None, only_vmids=None):
+    """Main failover orchestrator. Runs in greenlet.
+
+    failover_type: 'planned', 'emergency', 'failback'
+    only_vmids: the guests an operator picked for this run; None is the whole plan.
+    """
+    plan = _get_plan(plan_id)
+    if not plan:
+        logger.error(f"[SR] Plan {plan_id} not found")
+        return
+
+    event_id = _create_event(plan_id, failover_type)
+    vms = _get_plan_vms(plan_id)
+    # MK Sep 2026 - the route authorized a VM list and then spawned us, and we read the
+    # list again from the database. Anything added in between - by a second request, or by
+    # the same caller racing their own approval - was acted on without ever being
+    # authorized. Work on the intersection with what was actually approved. None means an
+    # internal caller (the scheduler) that has no per-request authorization to carry.
+    if authorized_vmids is not None:
+        _approved = {str(v) for v in authorized_vmids}
+        _before = len(vms)
+        vms = [v for v in vms if str(v.get('vmid')) in _approved]
+        if len(vms) != _before:
+            logger.warning(f"[SR] plan {plan_id}: {_before - len(vms)} VM(s) were added "
+                           f"after authorization and are excluded from this failover")
+    if only_vmids is not None:
+        _picked = {str(v) for v in only_vmids}
+        vms = [v for v in vms if str(v.get('vmid')) in _picked]
+    results = {}
+    # MK Oct 2026 - a plan can be failed over guest by guest. A failover moves the guests
+    # still at the source and a failback the ones failed over; a guest already where this
+    # run would put it is listed as skipped, not started or migrated a second time
+    going_home = failover_type == 'failback'
+    for vm in [v for v in vms if bool(v.get('failed_over')) != going_home]:
+        results[str(vm['vmid'])] = {'success': True, 'skipped': True, 'error': '', 'vm_name': vm.get('vm_name', ''),
+                                    'reason': 'not failed over' if going_home else 'failed over already'}
+    vms = [v for v in vms if bool(v.get('failed_over')) == going_home]
+    boot_groups = _group_vms_by_boot(vms)
+    failed = cancelled = False
+
+    logger.info(f"[SR] Starting {failover_type} failover for plan '{_sl(plan['name'])}' ({len(vms)} VMs, {len(boot_groups)} boot groups)")
+    _broadcast_progress(plan_id, f"Starting {failover_type} failover...", 0)
+
+    # pre-webhook
+    _fire_webhook(plan.get('pre_failover_webhook'))
+
+    # determine source/target based on type
+    if failover_type == 'failback':
+        # reverse: target becomes source, source becomes target
+        src_id = plan['target_cluster']
+        tgt_id = plan['source_cluster']
+    else:
+        src_id = plan['source_cluster']
+        tgt_id = plan['target_cluster']
+
+    src_mgr = cluster_managers.get(src_id)
+    tgt_mgr = cluster_managers.get(tgt_id)
+
+    net_map = plan.get('network_mappings', {})
+    stor_map = plan.get('storage_mappings', {})
+
+    reverse_issues = []
+    if failover_type == 'failback':
+        # the direction swap above is only half of it — the mappings are stored
+        # source→target and have to be read the other way round on the way home,
+        # or the VMs come back onto the DR site's storage and bridge names
+        stor_map, _si = _reverse_mapping(stor_map, 'Storage')
+        net_map, _ni = _reverse_mapping(net_map, 'Network')
+        reverse_issues = _si + _ni
+
+    # NS 2026-04-24 — pre-flight: catch bad mappings BEFORE we start moving VMs.
+    # A typo like `local-lvm` → `local-lvmm` used to fail silently mid-migration
+    # with a Proxmox 500; now we fail fast with a clear message.
+    preflight_issues = validate_mappings(tgt_mgr, stor_map, net_map) if failover_type != 'emergency' else []
+    preflight_issues = reverse_issues + preflight_issues
+    preflight_errors = [i for i in preflight_issues if i.get('severity') == 'error']
+    if preflight_errors:
+        msg = '; '.join(i['msg'] for i in preflight_errors[:3])
+        logger.error(f"[SR] Pre-flight failed for plan '{_sl(plan['name'])}': {msg}")
+        _broadcast_progress(plan_id, f"Pre-flight failed: {msg}", 100)
+        _complete_event(event_id, 'failed', {'preflight_issues': preflight_issues, 'aborted': 'before any VM moved'})
+        db = get_db()
+        db.execute("UPDATE site_recovery_plans SET status = 'failed', updated_at = ? WHERE id = ?",
+                   (datetime.utcnow().isoformat(), plan_id))
+        return
+
+    # MK Oct 2026 - a target with a transfer network the migrations cannot use: said up
+    # front here, each guest's log line and the audit say it again
+    if failover_type != 'emergency' and tgt_mgr is not None and vms:
+        try:
+            _xfer = transfer_net.migration_route(tgt_mgr)
+            if _xfer and not _xfer['host']:
+                _broadcast_progress(plan_id, _xfer['note'], 0)
+        except Exception as e:
+            logger.debug(f"[SR] transfer network of {tgt_id} not read: {e}")
+
+    total_vms = len(vms)
+    completed = 0
+    # MK Nov 2026 - an emergency failover starts each guest's replica, under the VMID the
+    # replica has on the target. A failback asks the same for a mark from before that VMID
+    # was kept (_old_mark_refusal)
+    if failover_type == 'emergency':
+        replicas = replica_vmids(plan, vms)
+    elif going_home:
+        replicas = replica_vmids(plan, [v for v in vms if _mark_before_the_vmid(v)])
+    else:
+        replicas = {}
+
+    for group_idx, (group_num, group_vms) in enumerate(boot_groups):
+        logger.info(f"[SR] Boot group {group_num} ({len(group_vms)} VMs)")
+        _broadcast_progress(plan_id, f"Boot group {group_num}...", int(completed / total_vms * 100))
+
+        for vm in group_vms:
+            vmid = vm['vmid']
+            vm_type = vm.get('vm_type', 'qemu')
+            vm_name = vm.get('vm_name', f'VM {vmid}')
+            if cancelled or _stopping(plan_id):
+                # the guest before this one finished its step; this one is not begun
+                cancelled = True
+                results[str(vmid)] = {'success': False, 'cancelled': True, 'vm_name': vm_name,
+                                      'error': 'not started: the run was cancelled'}
+                continue
+
+            # what refuses the guest before anything is written or asked; reads only
+            err = None
+            # its VMID on the DR site: the replica's for an emergency failover, where its
+            # failover put it for a failback, its own for a planned migration
+            dr_vmid = _dr_vmid_of(vm) if going_home else vmid
+            if failover_type == 'emergency':
+                dr_vmid, why = replicas[int(vmid)]
+                if why:
+                    err = f"not started: {why}"
+                    logger.error(f"[SR] refusing emergency start of {_sl(vm_name)} ({vmid}): {why}")
+                else:
+                    _running, _checked = _source_vm_is_running(src_mgr, vmid)
+                    if _running:
+                        err = ("source guest is still running - this is not an "
+                               "emergency; stop it or use planned failover")
+                        logger.error(f"[SR] refusing emergency start of {_sl(vm_name)} ({vmid}): "
+                                     f"the source is reachable and the guest is running")
+                    elif not _checked:
+                        logger.warning(f"[SR] source state for {vmid} could not be verified "
+                                       f"(cluster unreachable) - starting the replica anyway, "
+                                       f"which is what emergency failover is for")
+            elif not src_mgr or not src_mgr.is_connected:
+                err = "Source cluster not connected"
+            else:
+                # MK Jul 2026 (#413) - fast pre-flight: a target VMID already
+                # present (pre-seeded by replication) can't be reconciled by
+                # qmigrate, which would only abort after a long transfer. Detect
+                # it up front and point the operator at Emergency Failover, which
+                # starts the already-replicated target, instead of churning.
+                _tgt_vmid = vm.get('target_vmid') or vmid
+                if going_home:
+                    # home it takes its own VMID again; _tgt_vmid names one on the DR site
+                    err = _old_mark_refusal(vm, replicas.get(int(vmid)), src_id)
+                    if err is None and tgt_mgr and _target_vmid_exists(tgt_mgr, vmid):
+                        err = _home_vmid_in_use(vm, src_mgr, src_id, tgt_id)
+                    if err:
+                        logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
+                elif tgt_mgr and _target_vmid_exists(tgt_mgr, _tgt_vmid):
+                    err = (f"Target VMID {_tgt_vmid} already exists on '{tgt_id}' "
+                           f"(likely pre-seeded by replication). Live/planned migration "
+                           f"cannot reconcile an existing VMID - use Emergency Failover "
+                           f"to start the replicated target instead.")
+                    logger.warning(f"[SR] {_sl(vm_name)} ({vmid}): {err}")
+
+            # MK Oct 2026 (#625) - the mark goes in before the step and to the members at
+            # once, so the confirm round below carries it: a leader gone right after the
+            # start leaves the next one a mark that holds the guest's replication
+            # (HELD_JOB_SQL), not a replica its next run stops and purges. A mark left
+            # behind by a step that did not happen only holds that replication. A failback
+            # clears it after its step for the same reason
+            marked = False
+            if err is None and not going_home:
+                try:
+                    _mark_guest(vm, failover_type, send=True, dr_vmid=dr_vmid)
+                    marked = True
+                except Exception as e:
+                    err = f"not started: could not record that the guest moves: {e}"
+            if err is not None:
+                ok = False
+            # before each guest's start or migration (design 5.2, #625)
+            elif not ha.confirm_step(f'site recovery of {_sl(vm_name)} ({vmid})'):
+                ok, err = False, 'not started: this instance does not hold the lease of its group'
+            elif failover_type == 'emergency':
+                # source is down - start replicated VM on target
+                logger.info(f"[SR] Emergency: starting {_sl(vm_name)} ({vmid}) on target"
+                            + (f" as {dr_vmid}" if dr_vmid != vmid else ''))
+                _broadcast_progress(plan_id, f"Starting {_sl(vm_name)} on target...", int(completed / total_vms * 100))
+                ok, err = _start_replicated_vm(tgt_mgr, dr_vmid, vm_type)
+            else:
+                # planned or failback - live migrate; a failback takes the guest from its
+                # VMID on the DR site back to its own
+                here, there = (dr_vmid, vmid) if going_home else (vmid, vmid)
+                logger.info(f"[SR] Migrating {_sl(vm_name)} ({here}"
+                            + (f" as {there}" if there != here else '') + f"): {src_id} → {tgt_id}")
+                _broadcast_progress(plan_id, f"Migrating {_sl(vm_name)}...", int(completed / total_vms * 100))
+                ok, err = _migrate_vm_cross_cluster(src_mgr, tgt_mgr, here, vm_type, stor_map, net_map, there)
+
+            results[str(vmid)] = {'success': ok, 'error': err, 'vm_name': vm_name, 'dr_vmid': dr_vmid}
+            if not ok:
+                logger.error(f"[SR] Failed for {_sl(vm_name)}: {err}")
+                failed = True
+                if marked:
+                    # it did not move; the next etag tick takes this to the members
+                    try:
+                        _mark_guest(vm, '')
+                    except Exception as e:
+                        logger.error(f"[SR] could not take back the failover mark of {_sl(vm_name)} ({vmid}): {e}")
+            else:
+                logger.info(f"[SR] {_sl(vm_name)} OK")
+                if going_home:
+                    # at once, not at the end: a run cut short still knows which guests moved
+                    try:
+                        _mark_guest(vm, '', send=True)
+                    except Exception as e:
+                        logger.error(f"[SR] could not record where {_sl(vm_name)} ({vmid}) is now: {e}")
+
+            completed += 1
+
+        # wait boot_delay before next group (use first VM's delay in group)
+        if group_idx < len(boot_groups) - 1 and not cancelled:
+            delay = group_vms[0].get('boot_delay', 30)
+            if delay > 0:
+                logger.info(f"[SR] waiting {delay}s before next boot group")
+                _broadcast_progress(plan_id, f"Waiting {delay}s before next group...", int(completed / total_vms * 100))
+                # a second at a time, so a cancel does not wait out the delay
+                until = time.monotonic() + delay
+                while time.monotonic() < until and not _stopping(plan_id):
+                    time.sleep(min(1.0, until - time.monotonic()))
+
+    # done; a cancelled run leaves the plan ready, as the cancel did before, with what it
+    # moved marked per guest
+    final_status = 'failed' if failed else 'completed'
+    _complete_event(event_id, 'cancelled' if cancelled else final_status, results)
+
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    db.execute("UPDATE site_recovery_plans SET status = ?, last_failover = ?, updated_at = ? WHERE id = ?",
+               ('ready' if cancelled else final_status, now, now, plan_id))
+    if cancelled:
+        final_status = 'cancelled'
+
+    _fire_webhook(plan.get('post_failover_webhook'))
+    _broadcast_progress(plan_id, f"Failover {final_status}", 100)
+
+    log_audit('system', f'site_recovery.{failover_type}_complete',
+              f"Plan '{_sl(plan['name'])}' {failover_type} {final_status}: {completed}/{total_vms} VMs"
+              + (f", {len(results) - completed} skipped" if len(results) > completed else ''))
+
+    logger.info(f"[SR] Failover {final_status} for '{_sl(plan['name'])}': {sum(1 for r in results.values() if r['success'])}/{total_vms} succeeded")
+
+
+@_on_the_plan('test')
+def execute_test_failover(plan_id, console_vmids=None, authorized_vmids=None):
+    """Clone replicated VMs on target, start in test mode.
+    VMs stay running until user triggers cleanup.
+
+    console_vmids: the plan's guests the caller may see the console of. Each clone that
+    started gets a boot screenshot for the evidence if its guest is among them
+    (sr_boot_shots.py); None takes none.
+    authorized_vmids: the guests the route authorized, as for execute_failover."""
+    plan = _get_plan(plan_id)
+    if not plan:
+        return
+
+    event_id = _create_event(plan_id, 'test')
+    vms = _get_plan_vms(plan_id)
+    # NS Oct 2026 - a guest added to the plan after the route checked it is not cloned and
+    # started here, the same hold execute_failover keeps
+    if authorized_vmids is not None:
+        _approved = {str(v) for v in authorized_vmids}
+        _before = len(vms)
+        vms = [v for v in vms if str(v.get('vmid')) in _approved]
+        if len(vms) != _before:
+            logger.warning(f"[SR] plan {plan_id}: {_before - len(vms)} VM(s) were added "
+                           f"after authorization and are excluded from this test")
+    tgt_mgr = cluster_managers.get(plan['target_cluster'])
+    results = {}
+    test_vmids = []
+    booted = []
+
+    logger.info(f"[SR] Test failover for '{_sl(plan['name'])}' ({len(vms)} VMs)")
+    _broadcast_progress(plan_id, "Starting test failover...", 0)
+
+    # MK May 2026 (#413) — guard against tgt_mgr=None so the loop body
+    # surfaces a useful error instead of an AttributeError under `except Exception`.
+    if tgt_mgr is None:
+        for vm in vms:
+            results[str(vm['vmid'])] = {'success': False,
+                                        'error': f"Target cluster '{plan['target_cluster']}' not connected / not configured in PegaProx"}
+        logger.error(f"[SR] Test failover: target cluster '{plan['target_cluster']}' unreachable; aborting plan '{_sl(plan['name'])}'")
+    replicas = replica_vmids(plan, vms) if tgt_mgr is not None else {}
+
+    for i, vm in enumerate(vms):
+        if tgt_mgr is None:
+            break
+        vmid = vm['vmid']
+        vm_name = vm.get('vm_name', f'VM {vmid}')
+        if _stopping(plan_id):
+            # what is cloned stays for the cleanup, nothing more is cloned
+            results[str(vmid)] = {'success': False, 'cancelled': True, 'vm_name': vm_name,
+                                  'error': 'not cloned: the test was cancelled'}
+            continue
+        # MK May 2026 (#413) — site_recovery_vms has a `target_vmid` column for
+        # asymmetric VMID mappings (xcrepl that renumbers, manual restore to a
+        # new ID, etc). Prefer it when the operator filled it in; fall back to
+        # the source vmid which is the common case (PVE qmigrate preserves the
+        # ID). Either way, log which one we're looking for so the next debug
+        # bundle tells us exactly why a detection failed.
+        # MK Nov 2026 - nothing writes that column; the VMID a replication job keeps the
+        # replica under counts as well (replica_vmids)
+        target_vmid, why = replicas[int(vmid)]
+        if why:
+            results[str(vmid)] = {'success': False, 'error': f"not cloned: {why}"}
+            logger.warning(f"[SR] Test failover: {_sl(vm_name)} ({vmid}) not cloned: {why}")
+            continue
+        _broadcast_progress(plan_id, f"Cloning {_sl(vm_name)}...", int(i / len(vms) * 100))
+
+        try:
+            # find the replicated VM on target and clone it
+            node_status = tgt_mgr.get_node_status() or {}
+            logger.info(f"[SR] Test failover: searching for VM {target_vmid} (source vmid={vmid}) on "
+                        f"target cluster {plan['target_cluster']} across nodes {list(node_status.keys())}")
+            found = False
+            for node_name in node_status:
+                try:
+                    tgt_vms = tgt_mgr.get_vms(node_name) if hasattr(tgt_mgr, 'get_vms') else []
+                    all_vmids = [v.get('vmid') for v in tgt_vms]
+                    logger.info(f"[SR] Test failover: node {node_name} has {len(tgt_vms)} VMs: {all_vmids}")
+                    for v in tgt_vms:
+                        if v.get('vmid') == target_vmid:
+                            # find free VMID for test clone — base off the target vmid we found
+                            test_vmid = target_vmid + 90000
+                            while test_vmid in all_vmids:
+                                test_vmid += 1
+                            vtype = vm.get('vm_type', 'qemu')
+                            # #709 — a full clone of a (possibly running) LXC is only allowed FROM a
+                            # snapshot. Take a throwaway snapshot on the replica, clone from it, wait
+                            # for the clone task to finish reading it, then drop the snapshot. (Also
+                            # closes the pre-existing start-before-clone-done race on the LXC path.)
+                            _temp_snap = None
+                            if vtype == 'lxc':
+                                _snapn = f"srtest{test_vmid}"
+                                _snr = tgt_mgr.create_snapshot(node_name, target_vmid, vtype, _snapn,
+                                                               description='PegaProx SR test-failover (temporary)')
+                                if isinstance(_snr, dict) and _snr.get('success'):
+                                    _temp_snap = _snapn
+                                    try:
+                                        if _snr.get('task'):
+                                            tgt_mgr._wait_for_task(node_name, _snr['task'], timeout=300)
+                                    except Exception:
+                                        pass
+                                else:
+                                    logger.warning(f"[SR] Test failover: temp snapshot on CT {target_vmid} failed "
+                                                   f"({_snr.get('error') if isinstance(_snr, dict) else _snr}); trying a direct clone")
+                            clone_result = tgt_mgr.clone_vm(node_name, target_vmid, vtype,
+                                                            newid=test_vmid, name=f"SR-TEST-{vm_name}",
+                                                            snapname=_temp_snap)
+                            # clone_vm returns dict {success, error, data(task)?} OR truthy legacy value
+                            clone_ok = clone_result.get('success') if isinstance(clone_result, dict) else bool(clone_result)
+                            if _temp_snap:
+                                try:
+                                    _cupid = clone_result.get('data') if isinstance(clone_result, dict) else None
+                                    if clone_ok and _cupid:
+                                        tgt_mgr._wait_for_task(node_name, _cupid, timeout=600)
+                                except Exception:
+                                    pass
+                                try:
+                                    tgt_mgr.delete_snapshot(node_name, target_vmid, vtype, _temp_snap)
+                                except Exception as _de:
+                                    logger.warning(f"[SR] Test failover: couldn't delete temp snapshot "
+                                                   f"{_temp_snap} on CT {target_vmid}: {_de}")
+                            if clone_ok:
+                                test_vmids.append({'vmid': test_vmid, 'vm_type': vtype})
+                                # MK Jul 2026 (#413) — optionally disconnect every NIC
+                                # BEFORE start so the test clone can't grab a live IP.
+                                _iso = None
+                                if plan.get('test_disconnect_nics'):
+                                    _iso = _disconnect_test_nics(tgt_mgr, node_name, test_vmid, vtype)
+                                    if not _iso.get('ok'):
+                                        # The operator asked for isolation. Starting anyway is
+                                        # the one outcome a TEST failover must never produce:
+                                        # a clone of a running production guest, on its network,
+                                        # with its addresses. Leave it stopped and say why.
+                                        logger.error(
+                                            f"[SR] Test failover: NIC isolation failed for test VM "
+                                            f"{test_vmid} ({_iso.get('error')}) - leaving it stopped")
+                                        results[str(vmid)] = {
+                                            'success': False, 'test_vmid': test_vmid,
+                                            'error': f"cloned OK but NIC isolation failed, not started: "
+                                                     f"{_iso.get('error')}"}
+                                        found = True
+                                        break
+                                    if _iso.get('unsupported'):
+                                        logger.warning(
+                                            f"[SR] Test failover: NIC isolation was requested but "
+                                            f"link_down does not exist for {vtype} - test CT "
+                                            f"{test_vmid} starts on the live network")
+                                # NS Apr 2026: was start_vm() which doesn't exist — use vm_action
+                                start_res = tgt_mgr.vm_action(node_name, test_vmid, vtype, 'start')
+                                if start_res.get('success'):
+                                    results[str(vmid)] = {'success': True, 'test_vmid': test_vmid}
+                                    booted.append(sr_boot_shots.booted(vm, test_vmid, vtype, node_name))
+                                else:
+                                    results[str(vmid)] = {'success': False, 'test_vmid': test_vmid,
+                                                          'error': f"cloned OK but start failed: {start_res.get('error', 'unknown')}"}
+                            else:
+                                err = clone_result.get('error', 'Clone failed') if isinstance(clone_result, dict) else 'Clone failed'
+                                results[str(vmid)] = {'success': False, 'error': err}
+                            found = True
+                            break
+                except Exception as e:
+                    logger.warning(f"[SR] Test failover: exception probing node {node_name} for VM {target_vmid}: {e}")
+                    continue
+                if found:
+                    break
+            if not found:
+                results[str(vmid)] = {'success': False,
+                                      'error': f"VM not found on target (looked for vmid {target_vmid} on nodes {list(node_status.keys())})"}
+                logger.warning(f"[SR] Test failover: VM {target_vmid} not found on target {plan['target_cluster']}")
+        except Exception as e:
+            results[str(vmid)] = {'success': False, 'error': str(e)}
+
+    # NS 2026-04-24 — track ok/failed/total so "6 out of 10 VMs cloned" is visible
+    # to admins. Old code marked the whole test as "completed" if even one VM worked.
+    ok_count = sum(1 for r in results.values() if r.get('success'))
+    failed_count = sum(1 for r in results.values() if not r.get('success'))
+    total = len(results)
+    if total == 0:
+        event_status = 'failed'
+    elif failed_count == 0:
+        event_status = 'completed'
+    elif ok_count == 0:
+        event_status = 'failed'
+    else:
+        event_status = 'partial'
+
+    summary = {
+        'results': results,
+        'test_vmids': test_vmids,
+        'counts': {'ok': ok_count, 'failed': failed_count, 'total': total},
+    }
+    # MK Oct 2026 - the event is complete before the boot screenshots: the outcome is
+    # decided without them, and a cleanup started while they are taken finds the clones
+    shots = sr_boot_shots.pending(booted)
+    if shots:
+        summary['screenshots'] = shots
+    _complete_event(event_id, event_status, summary)
+    if shots:
+        _broadcast_progress(plan_id, f"Taking boot screenshots of {len(booted)} test VM(s)...", 95)
+        shots = sr_boot_shots.run(tgt_mgr, plan_id, event_id, booted, console_vmids)
+
+    db = get_db()
+    now = datetime.utcnow().isoformat()
+    if event_status == 'failed':
+        db.execute("UPDATE site_recovery_plans SET status = 'failed', last_test = ?, updated_at = ? WHERE id = ?", (now, now, plan_id))
+        _broadcast_progress(plan_id, f"Test failover failed — 0/{total} VMs cloned.", 100)
+    else:
+        db.execute("UPDATE site_recovery_plans SET last_test = ?, updated_at = ? WHERE id = ?", (now, now, plan_id))
+        # keep status as 'testing' until cleanup
+        if event_status == 'partial':
+            _broadcast_progress(plan_id, f"Test partial: {ok_count}/{total} cloned, {failed_count} failed. Review events + cleanup.", 100)
+        else:
+            _broadcast_progress(plan_id, f"Test failover complete: {ok_count}/{total} cloned. Cleanup when ready.", 100)
+
+    ok = sum(1 for r in results.values() if r.get('success'))
+    log_audit('system', 'site_recovery.test_complete',
+              f"Test failover for '{_sl(plan['name'])}': {ok}/{len(vms)} VMs cloned"
+              + (f", boot screenshots: {shots['taken']} taken, {shots['failed']} failed, "
+                 f"{shots['skipped']} skipped" if shots else ''))
+    logger.info(f"[SR] Test failover complete for '{_sl(plan['name'])}': {len(test_vmids)} clones created")
+
+
+@_on_the_plan('cleanup')
+def cleanup_test(plan_id):
+    """Stop and delete test clone VMs"""
+    plan = _get_plan(plan_id)
+    if not plan:
+        return
+
+    tgt_mgr = cluster_managers.get(plan['target_cluster'])
+    if not tgt_mgr:
+        return
+
+    # find last test event with test_vmids
+    db = get_db()
+    event = db.query_one(
+        "SELECT id, details FROM site_recovery_events WHERE plan_id = ? AND event_type = 'test' ORDER BY started_at DESC LIMIT 1",
+        (plan_id,))
+    if not event:
+        return
+
+    try:
+        details = json.loads(event['details'] or '{}')
+    except Exception:
+        details = {}
+
+    test_vmids = details.get('test_vmids', [])
+    # NS Oct 2026 - the clones this cleanup could not remove; whatever else was listed is
+    # gone now and taken off the event, so a later cleanup cannot purge a guest that
+    # reused one of those VMIDs (#1055)
+    left = []
+
+    for entry in test_vmids:
+        # LW: entry can be dict {vmid, vm_type} or int (legacy)
+        if isinstance(entry, dict):
+            test_vmid = entry.get('vmid', 0)
+            vtype = entry.get('vm_type', 'qemu')
+        else:
+            test_vmid = entry
+            vtype = 'qemu'
+        try:
+            # NS Apr 2026: locate test VM via cluster resources (was iterating all nodes)
+            looked = False
+            try:
+                res = tgt_mgr._api_get(
+                    f"https://{tgt_mgr.host}:{tgt_mgr.api_port}/api2/json/cluster/resources",
+                    params={'type': 'vm'}
+                )
+                target_node = None
+                current_status = None
+                current_name = ''
+                if res.status_code == 200:
+                    looked = True
+                    for r in res.json().get('data', []):
+                        if int(r.get('vmid', 0)) == int(test_vmid):
+                            target_node = r.get('node')
+                            current_status = r.get('status')
+                            current_name = str(r.get('name') or '')
+                            break
+            except Exception:
+                target_node = None
+                current_status = None
+            if not looked:
+                left.append(entry)
+                continue
+
+            # the clone is named SR-TEST-<guest>; under any other name the VMID was taken
+            # by another guest since and is not ours to remove
+            if target_node and not current_name.startswith('SR-TEST-'):
+                logger.warning(f"[SR] VMID {test_vmid} now belongs to '{_sl(current_name)}', "
+                               f"not a test clone - left alone")
+                continue
+
+            if target_node:
+                try:
+                    # NS: was stop_vm/delete_vm — use vm_action; ignore "already stopped" errors
+                    if current_status == 'running':
+                        tgt_mgr.vm_action(target_node, test_vmid, vtype, 'stop', force=True)
+                        time.sleep(3)
+                    gone = tgt_mgr.delete_vm(target_node, test_vmid, vtype, purge=True)
+                    if isinstance(gone, dict) and not gone.get('success'):
+                        left.append(entry)
+                        continue
+                    logger.info(f"[SR] Cleaned up test VM {test_vmid}")
+                    continue  # go to next test_vmid entry
+                except Exception:
+                    left.append(entry)
+                    continue
+        except Exception as e:
+            left.append(entry)
+            logger.warning(f"[SR] Cleanup failed for test VM {test_vmid}: {e}")
+
+    if left != test_vmids:
+        details['test_vmids'] = left
+        db.execute('UPDATE site_recovery_events SET details = ? WHERE id = ?',
+                   (json.dumps(details), event['id']))
+
+    # only a plan in test: one a failover took over meanwhile keeps its state
+    db.execute("UPDATE site_recovery_plans SET status = 'ready', updated_at = ? WHERE id = ? "
+               "AND status NOT IN ('running', 'cancelling')",
+               (datetime.utcnow().isoformat(), plan_id))
+
+    log_audit('system', 'site_recovery.test_cleanup_complete',
+              f"Cleaned up {len(test_vmids)} test VMs for plan '{_sl(plan['name'])}'")
+    _broadcast_progress(plan_id, "Test cleanup complete", 100)
+
+
+# ---- Replication of a failed-over guest ----
+
+# MK Oct 2026 - once a failover started or migrated a guest onto the target, the replica
+# IS the guest. The next run of its replication job would stop it and replace it with a
+# copy of the old source, or write deltas into its disks. So a job waits while a plan has
+# its guest failed over - linked by replication_job_id, or the same guest between the same
+# two clusters - and runs again after the failback; the plan's other guests replicate as
+# before. A condition on the job row `r`, both halves on an index, so the scheduler's one
+# query per tick stays one query at 10k jobs.
+HELD_JOB_SQL = (
+    "(EXISTS (SELECT 1 FROM site_recovery_vms v WHERE v.replication_job_id = r.id "
+    "AND v.failed_over > '') "
+    "OR EXISTS (SELECT 1 FROM site_recovery_vms v JOIN site_recovery_plans p ON p.id = v.plan_id "
+    "WHERE v.vmid = r.vmid AND v.failed_over > '' AND p.source_cluster = r.source_cluster "
+    "AND p.target_cluster = r.target_cluster))")
+
+
+def replication_held_by(job, db=None):
+    """The name of the plan that has this replication job's guest failed over, else None."""
+    try:
+        vmid = int(job.get('vmid'))
+    except (TypeError, ValueError):
+        vmid = -1
+    row = (db or get_db()).query_one(
+        "SELECT p.name FROM site_recovery_vms v JOIN site_recovery_plans p ON p.id = v.plan_id "
+        "WHERE v.failed_over > '' AND (v.replication_job_id = ? OR (v.vmid = ? "
+        "AND p.source_cluster = ? AND p.target_cluster = ?)) LIMIT 1",
+        (job.get('id') or None, vmid, job.get('source_cluster') or '', job.get('target_cluster') or ''))
+    return row['name'] if row else None
+
+
+def replay_failover_state():
+    """The guests' marks a database from before owes (db.replay_sr_failover_state), worked
+    out where this instance acts and sent on: from recover_orphan_runs at the start, and
+    by the replication scheduler before it picks its first jobs. A no-op once done, and
+    on a member. Returns how many guests it marked, None for no replay."""
+    if not ha.is_active():
+        return None
+    marked = get_db().replay_sr_failover_state()
+    if marked:
+        ha.send_on('the failover marks of the recovery plans')
+    return marked
+
+
+# ---- Auto-Failover Heartbeat ----
+
+_last_fail_times = {}  # plan_id -> first_fail_timestamp
+_cooldowns = {}  # plan_id -> cooldown_until_timestamp
+_missing_source_logged = set()  # plan_ids we've already warned about, so the loop doesn't spam
+
+
+def _heartbeat_check():
+    """Check all plans with auto_failover enabled.
+    If source cluster unreachable for failover_timeout seconds, trigger emergency failover."""
+    db = get_db()
+    plans = db.query("SELECT * FROM site_recovery_plans WHERE auto_failover = 1 AND status = 'ready'")
+    if not plans:
+        return
+
+    now = time.time()
+
+    for row in plans:
+        plan = dict(row)
+        plan_id = plan['id']
+
+        # respect cooldown
+        if plan_id in _cooldowns and now < _cooldowns[plan_id]:
+            continue
+
+        src_mgr = cluster_managers.get(plan['source_cluster'])
+        if src_mgr is None:
+            # "not configured in PegaProx" is not "the site is down", and folding the two
+            # together is dangerous in one direction only: deleting the source cluster (or
+            # leaving a plan pointing at an id that no longer exists) looked exactly like an
+            # outage, and failover_timeout seconds later this started every replica at the DR
+            # site while production was still serving. Hold until a manager exists to ask.
+            _last_fail_times.pop(plan_id, None)
+            if plan_id not in _missing_source_logged:
+                _missing_source_logged.add(plan_id)
+                logger.warning(f"[SR] Heartbeat: plan '{_sl(plan['name'])}' names source cluster "
+                               f"'{_sl(plan['source_cluster'])}', which is not configured here — "
+                               f"auto-failover held")
+            continue
+        _missing_source_logged.discard(plan_id)
+        src_reachable = bool(src_mgr.is_connected)
+
+        if src_reachable:
+            # clear failure tracking
+            _last_fail_times.pop(plan_id, None)
+            continue
+
+        # source unreachable
+        if plan_id not in _last_fail_times:
+            _last_fail_times[plan_id] = now
+            logger.warning(f"[SR] Heartbeat: source '{plan['source_cluster']}' unreachable for plan '{_sl(plan['name'])}'")
+            continue
+
+        elapsed = now - _last_fail_times[plan_id]
+        timeout = plan.get('failover_timeout', 120)
+
+        if elapsed >= timeout:
+            # MK Sep 2026 - "I cannot reach the source" and "the source is down" are not the
+            # same statement, and starting the replicas on the strength of the first one is
+            # how you get two copies of a guest writing to their own disks. We cannot fence
+            # the source: it is unreachable, that is the whole premise. What we CAN do is
+            # notice when the problem is at our end - if this management plane cannot reach
+            # ANY cluster right now, the far more likely explanation is our own network, and
+            # the source is sitting there running happily.
+            _others = [cid for cid in cluster_managers
+                       if cid not in (plan['source_cluster'], plan.get('target_cluster'))]
+            if _others:
+                _any_other_up = any(
+                    getattr(cluster_managers.get(cid), 'is_connected', False) for cid in _others)
+                if not _any_other_up:
+                    logger.error(
+                        f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}': this server "
+                        f"cannot reach any of its {len(_others)} other cluster(s) either, so the "
+                        f"source is probably up and we are the ones isolated. Starting the "
+                        f"replicas now would run the same guests twice.")
+                    log_audit('system', 'site_recovery.auto_failover_blocked',
+                              f"Auto-failover for '{_sl(plan['name'])}' blocked: management "
+                              f"plane is isolated from every cluster")
+                    _cooldowns[plan_id] = now + 300
+                    continue
+            # the target has to be reachable too - failing over into a cluster we cannot talk
+            # to accomplishes nothing and leaves the plan in 'running'
+            _tgt_mgr = cluster_managers.get(plan.get('target_cluster'))
+            if _tgt_mgr is not None and not getattr(_tgt_mgr, 'is_connected', False):
+                logger.error(f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}': the "
+                             f"target cluster is not reachable either")
+                _cooldowns[plan_id] = now + 300
+                continue
+
+            # NS Apr 2026: before auto-failover, verify every VM in plan has a healthy recent
+            # replication. Otherwise we'd start VMs that were never copied, or worse, stale copies.
+            vms = [dict(r) for r in (db.query("SELECT * FROM site_recovery_vms WHERE plan_id = ?",
+                                               (plan_id,)) or [])]
+            # a guest failed over already is not started again (execute_failover passes it
+            # over) and its replication is held, so only the others are weighed
+            waiting = [vm for vm in vms if not vm.get('failed_over')]
+            if vms and not waiting:
+                _last_fail_times.pop(plan_id, None)
+                continue
+            blockers = []
+            for vm in waiting:
+                repl_id = (vm.get('replication_job_id') or '').strip()
+                if not repl_id:
+                    blockers.append(f"VM {vm['vmid']} has no replication job linked")
+                    continue
+                repl = db.query_one(
+                    "SELECT enabled, last_status, last_run FROM cross_cluster_replications WHERE id = ?",
+                    (repl_id,)
+                )
+                if not repl:
+                    blockers.append(f"VM {vm['vmid']}: replication job {repl_id} not found")
+                elif not repl['enabled']:
+                    blockers.append(f"VM {vm['vmid']}: replication disabled")
+                elif repl['last_status'] != 'ok':
+                    blockers.append(f"VM {vm['vmid']}: last replication status={repl['last_status'] or 'never ran'}")
+
+            if blockers:
+                logger.error(f"[SR] BLOCKING auto-failover for '{_sl(plan['name'])}' — replication unhealthy: {'; '.join(blockers[:5])}")
+                log_audit('system', 'site_recovery.auto_failover_blocked',
+                          f"Auto-failover BLOCKED for '{_sl(plan['name'])}': {'; '.join(blockers[:5])}")
+                _last_fail_times.pop(plan_id, None)
+                _cooldowns[plan_id] = now + 600  # shorter cooldown — admin may fix replication
+                continue
+
+            # MK Oct 2026 - not while a worker of this process is still on the plan: a
+            # cancelled run reads ready again before its post webhook is through. Before the
+            # cooldown and the outage clock are touched, so the next pass after it takes over
+            if run_alive(plan_id):
+                logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' waits: a run of it is still under way")
+                continue
+
+            logger.error(f"[SR] AUTO-FAILOVER triggered for '{_sl(plan['name'])}' after {int(elapsed)}s")
+            down_since = _last_fail_times.pop(plan_id, None)
+            _cooldowns[plan_id] = now + 3600  # 1h cooldown
+
+            # trigger emergency failover — atomic status transition via WHERE status='ready'
+            try:
+                import gevent
+                now_iso = datetime.utcnow().isoformat()
+                # UPDATE .. WHERE status='ready' means we only proceed if noone else flipped it first
+                cur = db.conn.cursor()
+                cur.execute(
+                    "UPDATE site_recovery_plans SET status = 'running', updated_at = ? WHERE id = ? AND status = 'ready'",
+                    (now_iso, plan_id)
+                )
+                db.conn.commit()
+                if cur.rowcount != 1:
+                    logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' skipped — status changed concurrently")
+                    continue
+                # NS: use crash-safe wrapper so a greenlet crash sets status to 'failed'
+                from pegaprox.api.site_recovery import _safe_spawn_failover
+                if _safe_spawn_failover(execute_failover, plan_id, 'emergency') is False:
+                    # taken between the check above and here: as if the check had seen it
+                    db.execute("UPDATE site_recovery_plans SET status = 'ready' WHERE id = ? AND status = 'running'",
+                               (plan_id,))
+                    _cooldowns.pop(plan_id, None)
+                    if down_since is not None:
+                        _last_fail_times[plan_id] = down_since
+                    logger.info(f"[SR] Auto-failover for '{_sl(plan['name'])}' waits: a run of it is still under way")
+                    continue
+                log_audit('system', 'site_recovery.auto_failover',
+                          f"Auto-failover triggered for '{_sl(plan['name'])}' - source unreachable for {int(elapsed)}s")
+            except Exception as e:
+                logger.error(f"[SR] Auto-failover spawn failed: {e}")
+
+
+def heartbeat_loop():
+    """Background loop for auto-failover heartbeat monitoring"""
+    global _heartbeat_running
+    _heartbeat_running = True
+    logger.info("[SR] Heartbeat monitor started")
+
+    while _heartbeat_running:
+        try:
+            # no auto-failover from a standby: it has no managers to fail over with, and
+            # two instances deciding the same failover is the worst case there is
+            if ha.is_active():
+                _heartbeat_check()
+        except Exception as e:
+            logger.error(f"[SR] Heartbeat error: {e}")
+        time.sleep(30)
+
+
+def recover_orphan_runs():
+    """One-shot cleanup of in-flight rows left over from a previous PegaProx
+    process. Without this, `site_recovery_events` rows that were `status=running`
+    when the service crashed/restarted stay that way forever — and the matching
+    `site_recovery_plans.status` keeps showing 'running' / 'testing' in the UI,
+    which is what @blackshocks hit on #413 ("tasks still visible after reboot").
+
+    Run once at app startup, just before the heartbeat loop spawns. Best-effort
+    — if the DB isn't ready yet we log and move on; the heartbeat will reconcile
+    on its next pass.
+
+    MK May 2026 (#413).
+    """
+    # MK Sep 2026 (#625) - a standby resets nothing. The plan rows are the active's
+    # and come back with the next sync; events left from a time as active are
+    # cleaned up at the restart that promotes this instance again.
+    if not ha.is_active():
+        return
+    try:
+        db = get_db()
+    except Exception as e:
+        logger.warning(f"[SR] orphan-cleanup: DB not ready ({e}); skipping")
+        return
+    try:
+        replay_failover_state()
+    except Exception as e:
+        # the replication scheduler tries again before it picks a job
+        logger.error(f"[SR] could not replay the failover marks of the recovery plans: {e}")
+
+    now = datetime.utcnow().isoformat()
+    aborted_events = 0
+    reset_plans = 0
+    try:
+        # Events that were mid-run when the previous process died. completed_at
+        # is the actual "did this finish?" signal — status alone is insufficient
+        # because completed rows can be 'failed' too.
+        ev_rows = db.query(
+            "SELECT id, plan_id, event_type FROM site_recovery_events "
+            "WHERE status = 'running' AND (completed_at IS NULL OR completed_at = '')"
+        ) or []
+        for row in ev_rows:
+            details = json.dumps({
+                'reason': 'pegaprox_restart',
+                'note': 'event was in flight when the service restarted; auto-aborted at boot',
+            })
+            db.execute(
+                "UPDATE site_recovery_events SET status = 'aborted', "
+                "completed_at = ?, details = ? WHERE id = ?",
+                (now, details, row['id']),
+            )
+            aborted_events += 1
+
+        # Plans whose status is mid-state. If the heartbeat or operator wants
+        # to run it again, the state machine needs them back in 'failed' (which
+        # then transitions to 'ready' on a manual reset).
+        plan_rows = db.query(
+            "SELECT id, name, status FROM site_recovery_plans "
+            "WHERE status IN ('running', 'testing', 'cancelling')"
+        ) or []
+        for row in plan_rows:
+            db.execute(
+                "UPDATE site_recovery_plans SET status = 'failed', updated_at = ? WHERE id = ?",
+                (now, row['id']),
+            )
+            reset_plans += 1
+        # a test whose boot screenshots the restart cut short: the test had finished
+        cut_short = sr_boot_shots.mark_interrupted()
+        if cut_short:
+            logger.warning(f"[SR] orphan-cleanup at boot: the boot screenshots of {cut_short} "
+                           f"test failover(s) were cut short by the restart")
+    except Exception as e:
+        logger.error(f"[SR] orphan-cleanup query failed: {e}")
+        return
+
+    if aborted_events or reset_plans:
+        logger.warning(
+            f"[SR] orphan-cleanup at boot: aborted {aborted_events} stuck event(s), "
+            f"reset {reset_plans} plan(s) from running/testing → failed"
+        )
+        # Audit-log so an admin reading the audit feed sees what got rolled back.
+        try:
+            log_audit(
+                user='system',
+                action='site_recovery.boot_cleanup',
+                details=f"aborted={aborted_events} events, reset={reset_plans} plans",
+                ip_address='127.0.0.1',
+            )
+        except Exception as e:
+            logger.debug(f"[SR] orphan-cleanup audit-log failed (non-fatal): {e}")
+    else:
+        logger.info("[SR] orphan-cleanup at boot: nothing to do")
+
+
+def start_heartbeat():
+    import gevent
+    # MK May 2026 (#413): clean up any in-flight rows from the previous process
+    # before the heartbeat starts so the UI doesn't keep showing aborted runs
+    # as active.
+    try:
+        if ha.acting_process() and not ha.is_active():
+            # MK Oct 2026 (#625) - automatic failover: this process leads and may not
+            # act yet (the takeover wait). The reset writes plan rows, so it waits
+            ha.when_active(recover_orphan_runs, 'sr-orphan-cleanup')
+        else:
+            recover_orphan_runs()
+    except Exception as e:
+        logger.error(f"[SR] orphan-cleanup wrapper crashed: {e}")
+    gevent.spawn(heartbeat_loop)
+
+
+def stop_heartbeat():
+    global _heartbeat_running
+    _heartbeat_running = False

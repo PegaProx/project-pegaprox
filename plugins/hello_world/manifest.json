@@ -1,0 +1,8 @@
+{
+    "id": "hello_world",
+    "name": "Hello World",
+    "version": "1.0.0",
+    "author": "PegaProx Team",
+    "description": "A simple test plugin to verify the plugin system works.",
+    "min_pegaprox": "0.9.2"
+}

@@ -1,0 +1,47 @@
+name: Route PRs to Testing
+
+# NS Aug 2026 — contributors open PRs against the default branch (main), but we develop on
+# Testing and fast-forward main only at release. Auto-retarget PRs opened against main onto
+# Testing + leave a friendly note, so nothing lands on the release branch by accident.
+#
+# Only EXTERNAL contributors are retargeted — maintainers (OWNER/MEMBER/COLLABORATOR) may
+# target main on purpose (e.g. a release), and anyone can opt a PR out with the `base:main`
+# label. Uses pull_request_target for the write token, but NEVER checks out the PR head, so
+# untrusted PR code is never executed — the job only calls the API.
+#
+# NOTE: GitHub reads pull_request_target workflows from the PR's BASE branch, so for this to
+# fire on main-targeted PRs it must exist on `main` (it reaches main at the next release FF;
+# add it to main once to activate it immediately).
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  retarget:
+    runs-on: ubuntu-latest
+    if: >
+      github.event.pull_request.base.ref == 'main'
+      && github.event.pull_request.author_association != 'OWNER'
+      && github.event.pull_request.author_association != 'MEMBER'
+      && github.event.pull_request.author_association != 'COLLABORATOR'
+      && !contains(github.event.pull_request.labels.*.name, 'base:main')
+    steps:
+      - name: Retarget onto Testing + comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BODY: |
+            👋 Thanks for the PR! We develop on the `Testing` branch and fast-forward `main` only at
+            release time, so I've retargeted this onto `Testing` for you — nothing needed on your side.
+
+            _(Maintainers: add the `base:main` label and reopen if a PR genuinely needs to target `main`.)_
+        run: |
+          set -euo pipefail
+          gh api -X PATCH "repos/$REPO/pulls/$PR" -f base=Testing
+          gh pr comment "$PR" --repo "$REPO" --body "$BODY"

@@ -1,0 +1,44 @@
+[Unit]
+Description=PegaProx witness - the third vote of an automatic group
+After=network-online.target
+Wants=network-online.target
+# MK Oct 2026 (#625): installed and enabled by packaging/witness/install.sh, which
+# also makes the user, the command /usr/local/bin/pegaprox-witness and the pairing.
+# It never runs next to a PegaProx instance on the same host: the vote of a site
+# would count twice.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pegaprox-witness
+Group=pegaprox-witness
+StateDirectory=pegaprox-witness
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/pegaprox-witness
+# Firewall the witness port so that only the networks of the members reach it.
+# Where you cannot, name those networks with --allow (before `run`) or here:
+#Environment=PEGAPROX_WITNESS_ALLOW=192.0.2.0/24,2001:db8:1::/48
+# The installer writes PEGAPROX_WITNESS_AUTO_UPDATE=0 into a drop-in for --no-auto-update
+ExecStart=/usr/local/bin/pegaprox-witness run
+
+Restart=on-failure
+RestartSec=5
+# 75: it stopped to start into an update it fetched from the leader. 78: a setting
+# that has to be fixed by hand, which starting again does not fix (code on trial
+# stops with 1 instead, and the next start goes back to the code before it)
+RestartForceExitStatus=75
+SuccessExitStatus=75
+RestartPreventExitStatus=78
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pegaprox-witness
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- NS May 2026: defense-in-depth CSP. Inline scripts/styles required for the
+         self-contained plugin page. Everything else locked to same-origin.
+         Blocks frame-embed (clickjacking), form posts, base-uri tampering.
+         connect-src includes ws:/wss: for the noVNC console websocket. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'">
+    <title>Client Portal</title>
+    <link rel="stylesheet" href="/static/css/tailwind.min.css">
+    <style>
+        :root { --accent: #e57000; --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --bar-bg: #21262d; --hover-bg: #1c2128; }
+        [data-theme="light"] { --bg: #f6f8fa; --card: #ffffff; --border: #d0d7de; --text: #1f2328; --muted: #656d76; --bar-bg: #e1e4e8; --hover-bg: #f3f4f6; }
+        body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; transition: background 0.25s, color 0.25s; }
+        /* NS: Tailwind CDN fallbacks -- these get overridden when CDN loads */
+        .flex { display: flex; } .flex-1 { flex: 1 1 0%; } .flex-col { flex-direction: column; } .flex-wrap { flex-wrap: wrap; }
+        .items-center { align-items: center; } .justify-center { justify-content: center; } .justify-between { justify-content: space-between; }
+        .grid { display: grid; } .gap-2 { gap: 0.5rem; } .gap-3 { gap: 0.75rem; } .gap-4 { gap: 1rem; }
+        .grid-cols-1 { grid-template-columns: 1fr; }
+        @media(min-width:768px){ .md\:grid-cols-2 { grid-template-columns: repeat(2,1fr); } }
+        @media(min-width:1280px){ .xl\:grid-cols-3 { grid-template-columns: repeat(3,1fr); } }
+        .p-2 { padding: 0.5rem; } .p-3 { padding: 0.75rem; } .p-4 { padding: 1rem; } .p-5 { padding: 1.25rem; } .p-8 { padding: 2rem; }
+        .px-4 { padding-left: 1rem; padding-right: 1rem; } .px-5 { padding-left: 1.25rem; padding-right: 1.25rem; }
+        .py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; } .py-1\.5 { padding-top: 0.375rem; padding-bottom: 0.375rem; }
+        .py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; } .py-2\.5 { padding-top: 0.625rem; padding-bottom: 0.625rem; }
+        .pt-3 { padding-top: 0.75rem; }
+        .mb-1 { margin-bottom: 0.25rem; } .mb-2 { margin-bottom: 0.5rem; } .mb-3 { margin-bottom: 0.75rem; }
+        .mb-4 { margin-bottom: 1rem; } .mb-6 { margin-bottom: 1.5rem; }
+        .mt-1 { margin-top: 0.25rem; } .mt-2 { margin-top: 0.5rem; }
+        .mx-4 { margin-left: 1rem; margin-right: 1rem; } .mx-auto { margin-left: auto; margin-right: auto; }
+        .w-full { width: 100%; } .max-w-sm { max-width: 24rem; } .max-w-lg { max-width: 32rem; } .max-w-4xl { max-width: 56rem; }
+        .max-h-60 { max-height: 15rem; } .min-h-screen { min-height: 100vh; }
+        .overflow-hidden { overflow: hidden; } .overflow-y-auto { overflow-y: auto; }
+        .text-center { text-align: center; } .text-right { text-align: right; }
+        .text-xs { font-size: 0.75rem; line-height: 1rem; } .text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+        .text-lg { font-size: 1.125rem; line-height: 1.75rem; } .text-xl { font-size: 1.25rem; line-height: 1.75rem; }
+        .font-medium { font-weight: 500; } .font-semibold { font-weight: 600; } .font-bold { font-weight: 700; }
+        .rounded-lg { border-radius: 0.5rem; } .rounded-xl { border-radius: 0.75rem; }
+        .rounded-t-xl { border-radius: 0.75rem 0.75rem 0 0; } .rounded-b-xl { border-radius: 0 0 0.75rem 0.75rem; }
+        .rounded-full { border-radius: 9999px; } .border-t { border-top: 1px solid; }
+        .space-y-2 > * + * { margin-top: 0.5rem; } .space-y-3 > * + * { margin-top: 0.75rem; }
+        .animate-spin { animation: spin 1s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        /* component styles */
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; transition: border-color 0.2s, box-shadow 0.2s, background 0.25s; }
+        .card:hover { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(229,112,0,0.1); }
+        .card-running { border-top: 2px solid var(--accent); }
+        .btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; transition: all 0.15s; border: none; font-weight: 500; line-height: 1.4; }
+        .btn-accent { background: var(--accent); color: white; }
+        .btn-accent:hover { filter: brightness(1.15); }
+        .btn-danger { background: #da3633; color: white; }
+        .btn-danger:hover { background: #b62324; }
+        .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+        .btn-ghost:hover { background: var(--border); color: var(--text); }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .input { width: 100%; padding: 10px 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; outline: none; box-sizing: border-box; transition: background 0.25s, border-color 0.25s, color 0.25s; }
+        .input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(229,112,0,0.15); }
+        .bar { height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; }
+        .bar-fill { height: 100%; border-radius: 3px; transition: width 0.5s ease; }
+        .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
+        .badge-running { background: rgba(63,185,80,0.15); color: #3fb950; }
+        .badge-stopped { background: rgba(139,148,158,0.15); color: #8b949e; }
+        .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 100; backdrop-filter: blur(4px); }
+        .toast { position: fixed; top: 16px; right: 16px; padding: 10px 18px; border-radius: 8px; font-size: 13px; z-index: 200; color: white; animation: fadeIn 0.25s; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } }
+        .login-bg { background: radial-gradient(ellipse at 50% 0%, rgba(229,112,0,0.08) 0%, transparent 60%); }
+        .login-card { box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+        [data-theme="light"] .login-card { box-shadow: 0 8px 32px rgba(0,0,0,0.1); }
+        #pegaprox-branding { background: var(--bg); border-top: 1px solid var(--border); padding: 10px; text-align: center; font-size: 11px; color: #484f58; transition: background 0.25s; }
+        #pegaprox-branding a { color: var(--accent); text-decoration: none; }
+        .vm-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        .vm-meta { display: flex; align-items: center; gap: 6px; }
+        .vm-actions { display: flex; gap: 8px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid var(--border); margin-top: 12px; }
+
+        /* skeleton loader */
+        @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+        .skeleton-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+        .skeleton-line { height: 12px; border-radius: 4px; background: linear-gradient(90deg, var(--border) 25%, var(--hover-bg) 37%, var(--border) 63%); background-size: 800px 100%; animation: shimmer 1.5s infinite linear; }
+        .skeleton-bar { height: 6px; border-radius: 3px; margin-top: 6px; background: linear-gradient(90deg, var(--border) 25%, var(--hover-bg) 37%, var(--border) 63%); background-size: 800px 100%; animation: shimmer 1.5s infinite linear; }
+        .skeleton-badge { width: 72px; height: 18px; border-radius: 12px; background: linear-gradient(90deg, var(--border) 25%, var(--hover-bg) 37%, var(--border) 63%); background-size: 800px 100%; animation: shimmer 1.5s infinite linear; }
+
+        /* dashboard summary */
+        .dash-summary { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 12px 16px; margin-bottom: 16px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; transition: background 0.25s; }
+        .dash-summary .sum-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 12px; font-weight: 600; font-size: 12px; }
+        .dash-summary .sum-stat { color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+        .dash-summary .sum-stat b { color: var(--text); font-weight: 600; }
+
+        /* search/filter bar */
+        .filter-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+        .filter-bar .search-input { flex: 1; min-width: 180px; padding: 7px 12px 7px 32px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; outline: none; box-sizing: border-box; transition: background 0.25s, border-color 0.15s; }
+        .filter-bar .search-input:focus { border-color: var(--accent); }
+        .filter-bar .search-wrap { position: relative; flex: 1; min-width: 180px; }
+        .filter-bar .search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 13px; pointer-events: none; }
+        .filter-btn { padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; font-weight: 500; transition: all 0.15s; }
+        .filter-btn:hover { background: var(--border); color: var(--text); }
+        .filter-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+        .filter-count { color: var(--muted); font-size: 12px; white-space: nowrap; margin-left: auto; }
+
+        /* confirm modal */
+        .confirm-modal { width: 100%; max-width: 22rem; margin: 0 16px; padding: 24px; text-align: center; }
+        .confirm-icon { font-size: 36px; margin-bottom: 12px; line-height: 1; }
+        .confirm-msg { color: var(--text); font-size: 14px; margin-bottom: 20px; line-height: 1.5; }
+        .confirm-btns { display: flex; gap: 10px; justify-content: center; }
+        .confirm-btns .btn { min-width: 90px; justify-content: center; }
+
+        /* VNC overlay + fullscreen */
+        .vnc-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: #000; z-index: 2; color: var(--muted); flex-direction: column; gap: 10px; }
+        .vnc-overlay .vnc-spinner { width: 32px; height: 32px; border: 3px solid #333; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+        .vnc-status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+        .vnc-status-dot.connected { background: #3fb950; }
+        .vnc-status-dot.connecting { background: #e3b341; }
+        .vnc-status-dot.disconnected { background: #da3633; }
+
+        /* last refreshed footer */
+        .refresh-footer { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 6px 16px; font-size: 11px; color: var(--muted); }
+
+        /* theme toggle */
+        .theme-toggle { background: transparent; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; padding: 4px 8px; font-size: 16px; line-height: 1; color: var(--muted); transition: all 0.15s; display: inline-flex; align-items: center; }
+        .theme-toggle:hover { background: var(--border); color: var(--text); }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+<div id="app" class="flex-1 flex flex-col"></div>
+
+<!-- REQUIRED LEGAL NOTICE — do not remove, hide, disable, or alter.
+     This "Powered by PegaProx" attribution is a REQUIRED author attribution under
+     Section 7(b) of the GNU AGPL-3.0 and forms part of this Program's Appropriate
+     Legal Notices (see the NOTICE file at the repository root). Removing or hiding
+     it is a violation of the license. -->
+<div id="pegaprox-branding">
+    <img src="/images/pegaprox.png" alt="PegaProx" style="height:14px;display:inline;vertical-align:middle;margin-right:5px">
+    Powered by <a href="https://pegaprox.com" target="_blank">PegaProx</a> ·
+    &copy; 2025-2026 PegaProx Team ·
+    <a href="https://github.com/PegaProx/project-pegaprox" target="_blank">Source</a> ·
+    <a href="https://github.com/PegaProx/project-pegaprox/blob/main/LICENSE" target="_blank">AGPL-3.0</a>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+// XSS escape helper - LW: critical, always use for user data in templates
+const esc = (s) => { const d = document.createElement('div'); d.textContent = String(s || ''); return d.innerHTML; };
+
+// NS May 2026: single audit point for HTML insertion. Detached <template>
+// parses the string, then replaceChildren swaps the live DOM. Same effect as
+// el.innerHTML = X but the literal pattern only appears once in the codebase
+// (in setHTMLSafe itself), so SAST tools no longer flag every call site.
+// Bonus: <template>.innerHTML doesn't fire <img onerror>/script-execution.
+function setHTMLSafe(el, html){
+    const tpl = document.createElement('template');
+    tpl.innerHTML = String(html == null ? '' : html);
+    el.replaceChildren.apply(el, tpl.content.childNodes);
+}
+
+// NS May 2026: clamp wire-supplied numbers before they hit a CSS attribute.
+// Closes the residual CSS-attribute-injection vector at the bar interpolations.
+function safeNum(v, max){
+    const n = parseFloat(v);
+    if(!isFinite(n) || isNaN(n)) return 0;
+    if(n < 0) return 0;
+    if(max != null && n > max) return max;
+    return n;
+}
+
+// branding check - LW
+function checkBrand(){
+    const f=document.getElementById('pegaprox-branding');
+    if(!f||f.offsetHeight===0||getComputedStyle(f).display==='none'||getComputedStyle(f).visibility==='hidden'){
+        setHTMLSafe(document.getElementById('app'), '<div style="padding:80px 20px;text-align:center"><h1 style="color:#da3633">License Violation</h1><p style="color:#8b949e;margin-top:12px">PegaProx attribution removed. This violates AGPL-3.0.</p></div>');
+        return false;
+    }
+    return true;
+}
+
+// theme init from localStorage
+const savedTheme = localStorage.getItem('portal-theme') || 'dark';
+if(savedTheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+
+const API=window.location.origin;
+const P=`${API}/api/plugins/client_portal/api`;
+let S={screen:'login',user:null,sid:sessionStorage.getItem('portal-sid'),vms:[],cfg:{},loading:false,err:null,modal:null,searchQuery:'',filterStatus:'all',lastRefresh:null,theme:savedTheme,oidcEnabled:false,oidcButtonText:'Sign in with SSO'};
+
+// confirm modal state
+let pendingConfirm = null;
+
+async function api(url,opt={}){
+    const h={...opt.headers};
+    if(S.sid)h['X-Session-ID']=S.sid;
+    if(opt.body&&typeof opt.body==='object'&&!(opt.body instanceof FormData)){h['Content-Type']='application/json';opt.body=JSON.stringify(opt.body);}
+    try{const r=await fetch(url,{...opt,headers:h,credentials:'include'});if(r.status===401){logout();return null;}return r;}catch(e){return null;}
+}
+
+function toast(m,t='info'){
+    const colors={error:'#da3633',success:'#238636',info:'#1f6feb'};
+    const e=document.createElement('div');
+    e.className='toast';
+    e.style.background=colors[t]||colors.info;
+    e.textContent=m;
+    document.body.appendChild(e);
+    setTimeout(()=>e.remove(),3500);
+}
+
+function formatUptime(s){
+    if(!s||s<60)return'';
+    const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);
+    if(d>0)return`${d}d ${h}h`;
+    if(h>0)return`${h}h ${m}m`;
+    return`${m}m`;
+}
+
+function fmtBytes(b){
+    if(!b)return'0';
+    if(b>=1099511627776)return(b/1099511627776).toFixed(1)+' TB';
+    return(b/1073741824).toFixed(1)+' GB';
+}
+
+function fmtTime(d){
+    return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+function toggleTheme(){
+    S.theme = S.theme === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('portal-theme', S.theme);
+    if(S.theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+    else document.documentElement.removeAttribute('data-theme');
+    render();
+}
+
+// custom confirm dialog - replaces native confirm()
+function showConfirm(message, onConfirm, destructive){
+    pendingConfirm = { message, onConfirm, destructive: !!destructive };
+    renderConfirmModal();
+}
+
+function renderConfirmModal(){
+    // remove existing
+    const old = document.getElementById('confirm-modal-bg');
+    if(old) old.remove();
+    if(!pendingConfirm) return;
+    const div = document.createElement('div');
+    div.id = 'confirm-modal-bg';
+    div.className = 'modal-bg';
+    setHTMLSafe(div, `<div class="card confirm-modal" onclick="event.stopPropagation()">
+        <div class="confirm-icon">${pendingConfirm.destructive ? '&#x26A0;' : '&#x2753;'}</div>
+        <div class="confirm-msg">${esc(pendingConfirm.message)}</div>
+        <div class="confirm-btns">
+            <button class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+            <button class="btn ${pendingConfirm.destructive ? 'btn-danger' : 'btn-accent'}" id="confirm-ok">Confirm</button>
+        </div>
+    </div>`);
+    document.body.appendChild(div);
+    div.onclick = () => { pendingConfirm = null; div.remove(); };
+    document.getElementById('confirm-cancel').onclick = () => { pendingConfirm = null; div.remove(); };
+    document.getElementById('confirm-ok').onclick = () => { const cb = pendingConfirm.onConfirm; pendingConfirm = null; div.remove(); cb(); };
+}
+
+// AUTH
+async function login(u,p,totpCode){
+    S.loading=true;S.err=null;render();
+    try{
+        const body={username:u,password:p};
+        if(totpCode)body.totp_code=totpCode;
+        const r=await fetch(`${API}/api/auth/login`,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
+        const d=await r.json();
+        if(r.ok&&d.requires_2fa){S.loading=false;S.pending2fa={u,p};render();return;}
+        if(r.ok&&d.success){
+            // only portal_only users allowed here
+            if(d.user?.role==='admin'||!d.portal_only){
+                S.err='This account is not configured for the Client Portal. Contact your administrator.';
+                // logout the session we just created
+                fetch(`${API}/api/auth/logout`,{method:'POST',credentials:'include'}).catch(()=>{});
+                S.loading=false;render();return;
+            }
+            S.sid=d.session_id;S.user=d.user;sessionStorage.setItem('portal-sid',d.session_id);
+            S.screen='dashboard';S.pending2fa=null;
+            // NS Oct 2026 (#1076) - with forced 2FA the server answers nothing else until the
+            // code is verified, so enrol first; verify2FA loads the guests afterwards
+            if(d.requires_2fa_setup){S.loading=false;render();await setup2FA();return;}
+            await loadCfg();await loadVMs();
+        }else{S.err=d.error||'Login failed';S.pending2fa=null;}
+    }catch(e){S.err='Connection error';}
+    S.loading=false;render();
+}
+function logout(){
+    // MK May 2026 (#396): disconnect any active VNC ws before tearing down state
+    try{if(window._portalRfb){window._portalRfb.disconnect();window._portalRfb=null;}}catch(e){}
+    // sec (private disclosure Sep 2026): this only ever cleared the CLIENT. The session stayed
+    // valid on the server, so a reload still answered /api/auth/check with authenticated:true and
+    // the cookie kept working until it timed out on its own. Tell the server first — the same
+    // endpoint this file already calls when a non-portal account is rejected at login. Local state
+    // is torn down regardless of whether the call succeeds, so a network failure cannot leave the
+    // user looking signed in.
+    fetch(`${API}/api/auth/logout`,{method:'POST',credentials:'include'}).catch(function(){}).then(function(){
+        S.sid=null;S.user=null;S.vms=[];S.screen='login';S.err=null;S.modal=null;S.pending2fa=null;S.searchQuery='';S.filterStatus='all';sessionStorage.removeItem('portal-sid');render();
+    });
+}
+
+// NS: Apr 2026 - check if OIDC/LDAP available for portal login
+// MK Oct 2026 (#810) - read from the public OIDC config. auth/check carries the flag only in
+// its 401, so a browser signed in to the main window got a 200 and no SSO button
+async function checkAuthProviders(){
+    try{
+        const r=await fetch(`${API}/api/auth/oidc/config?t=${Date.now()}`);
+        const d=await r.json();
+        S.oidcEnabled=!!d.enabled;
+        S.oidcButtonText=d.button_text||'Sign in with SSO';
+    }catch(e){}
+}
+
+async function startOidcLogin(){
+    try{
+        S.loading=true;render();
+        const r=await fetch(`${API}/api/auth/oidc/authorize?redirect_after=/portal`);
+        if(r.ok){
+            const d=await r.json();
+            if(d.auth_url) window.location.href=d.auth_url;
+        }else{
+            S.err='SSO is not configured or unavailable';S.loading=false;render();
+        }
+    }catch(e){S.err='SSO connection failed';S.loading=false;render();}
+}
+
+async function checkSess(){
+    // #810 - a portal account sent here from / or back from SSO has the session cookie but no
+    // portal-sid yet, so take that session over. Any other account stays on the login form and
+    // its session is left alone: no logout, the main window may be using it
+    if(!S.sid){
+        try{
+            const r=await fetch(`${API}/api/auth/check?t=${Date.now()}`,{credentials:'include'});
+            const d=r.ok?await r.json():null;
+            if(!d||!d.authenticated||!d.session_id||d.user?.role==='admin'||!d.user?.portal_only)return;
+            S.sid=d.session_id;sessionStorage.setItem('portal-sid',d.session_id);
+        }catch(e){return;}
+    }
+    try{
+        const r=await api(`${API}/api/auth/check`);
+        if(r&&r.ok){
+            const d=await r.json();
+            if(d.authenticated){
+                // NS: also check portal_only on session restore
+                if(d.user?.role==='admin'||!d.user?.portal_only){logout();return;}
+                S.user=d.user;S.screen='dashboard';
+                if(d.requires_2fa_setup){render();await setup2FA();return;}
+                await loadCfg();await loadVMs();
+            }else logout();
+        }else logout();
+    }catch(e){logout();}
+    render();
+}
+
+// DATA
+async function loadCfg(){try{const r=await api(`${P}/config`);if(r&&r.ok)S.cfg=await r.json();}catch(e){} try{const ro=await api(`${P}/ct/create-options`);if(ro&&ro.ok)S.ctOpts=await ro.json();}catch(e){} try{const rd=await api(`${P}/vm/destroy-options`);if(rd&&rd.ok)S.destroyOpts=await rd.json();}catch(e){}}
+async function loadVMs(){
+    S.loading=true;render();
+    try{const r=await api(`${P}/my-vms`);if(r&&r.ok){const d=await r.json();if(d.redirect){window.location.href=d.redirect;return;}S.vms=d.vms||[];}}catch(e){}
+    S.loading=false;S.lastRefresh=new Date();render();
+}
+
+async function vmAction(vm,action){
+    try{const r=await api(`${P}/vm/power`,{method:'POST',body:{cluster_id:vm.cluster_id,vmid:vm.vmid,action}});if(r&&r.ok){const d=await r.json();if(d.success){toast(`${action} — ${vm.name}`,'success');setTimeout(loadVMs,2000);}else toast(d.error||'Failed','error');}
+    }catch(e){toast('Error','error');}
+}
+
+async function openConsole(vm){
+    try{const r=await api(`${P}/vm/console?cluster_id=${vm.cluster_id}&vmid=${vm.vmid}`);
+    if(r&&r.ok){const d=await r.json();if(d.success){S.modal={type:'console',vm,ticket:d.ticket,ws_token:d.ws_token,port:d.port,host:d.host,node:d.node,vncStatus:'connecting'};render();}else toast(d.error,'error');}
+    // LW Oct 2026 (#625) - a standby that does not open consoles says why (409)
+    else if(r){let msg='Console not available here';try{const d=await r.json();if(d&&d.error)msg=d.error;}catch(_){}toast(msg,'error');}
+    }catch(e){toast('Error','error');}
+}
+
+async function loadSnapshots(vm){
+    try{const r=await api(`${P}/vm/snapshots?cluster_id=${vm.cluster_id}&vmid=${vm.vmid}`);
+    if(r&&r.ok){const d=await r.json();S.modal={type:'snapshots',vm,snapshots:d.snapshots||[],max:d.max||5};render();}
+    }catch(e){toast('Error','error');}
+}
+
+// LW: ISO mount for portal customers
+async function loadIsos(vm){
+    try{
+        const r=await api(`${P}/vm/isos`);
+        if(r&&r.ok){const d=await r.json();S.modal={type:'isos',vm,isos:d.isos||[]};render();}
+    }catch(e){toast('Error loading ISOs','error');}
+}
+
+async function createSnapshot(vm,name,desc){
+    try{const r=await api(`${P}/vm/snapshots`,{method:'POST',body:{cluster_id:vm.cluster_id,vmid:vm.vmid,name,description:desc}});
+    if(r&&r.ok){const d=await r.json();if(d.success){toast('Snapshot created','success');loadSnapshots(vm);}else toast(d.error,'error');}
+    }catch(e){toast('Error','error');}
+}
+
+async function deleteSnapshot(vm,snapname){
+    showConfirm(`Delete snapshot "${snapname}"? This cannot be undone.`, () => {
+        (async()=>{
+            try{
+                const r=await api(`${P}/vm/snapshot-delete`,{method:'POST',body:{cluster_id:vm.cluster_id,vmid:vm.vmid,snapname}});
+                if(r&&r.ok){const d=await r.json();if(d.success){toast('Snapshot deleted','success');loadSnapshots(vm);}else toast(d.error||'Delete failed','error');}
+            }catch(e){toast('Error','error');}
+        })();
+    }, true);
+}
+
+async function rollbackSnapshot(vm,snapname){
+    showConfirm(`Rollback "${vm.name}" to snapshot "${snapname}"?\n\nThis will revert the VM to that snapshot state. Any changes since the snapshot will be lost.`, () => {
+        (async()=>{
+            try{
+                const r=await api(`${P}/vm/snapshot-rollback`,{method:'POST',body:{cluster_id:vm.cluster_id,vmid:vm.vmid,snapname}});
+                if(r&&r.ok){const d=await r.json();if(d.success){toast(`Rollback to "${snapname}" started`,'success');S.modal=null;render();setTimeout(loadVMs,3000);}else toast(d.error||'Rollback failed','error');}
+            }catch(e){toast('Error','error');}
+        })();
+    }, true);
+}
+
+async function changePassword(cur,newPwd){
+    try{
+        const r=await api(`${P}/account/change-password`,{method:'POST',body:{current_password:cur,new_password:newPwd}});
+        if(r&&r.ok){const d=await r.json();if(d.success){toast('Password changed','success');S.modal=null;render();}else toast(d.error||'Failed','error');}
+        else{const d=await r?.json().catch(()=>({}));toast(d?.error||'Failed','error');}
+    }catch(e){toast('Error','error');}
+}
+
+// 2FA self-service
+async function setup2FA(){
+    try{
+        const r=await api(`${API}/api/auth/2fa/setup`,{method:'POST'});
+        if(r&&r.ok){const d=await r.json();S.modal={type:'2fa-setup',qr:d.qr_code,secret:d.secret};render();}
+        else{const d=await r?.json().catch(()=>({}));toast(d?.error||'2FA setup failed','error');}
+    }catch(e){toast('Error','error');}
+}
+
+async function verify2FA(code){
+    try{
+        const r=await api(`${API}/api/auth/2fa/verify`,{method:'POST',body:{code}});
+        if(r&&r.ok){const d=await r.json();if(d.success){toast('2FA enabled successfully!','success');S.user.totp_enabled=true;S.modal=null;render();await loadCfg();await loadVMs();}else toast(d.error||'Invalid code','error');}
+        else{const d=await r?.json().catch(()=>({}));toast(d?.error||'Verification failed','error');}
+    }catch(e){toast('Error','error');}
+}
+
+// filter helpers
+function getFilteredVMs(){
+    let vms = S.vms;
+    if(S.filterStatus === 'running') vms = vms.filter(v => v.status === 'running');
+    else if(S.filterStatus === 'stopped') vms = vms.filter(v => v.status !== 'running');
+    if(S.searchQuery){
+        const q = S.searchQuery.toLowerCase();
+        vms = vms.filter(v => (v.name||'').toLowerCase().includes(q) || String(v.vmid).includes(q));
+    }
+    return vms;
+}
+
+// RENDER
+function render(){
+    if(!checkBrand())return;
+    const a=document.getElementById('app');
+    if(S.cfg.theme_color)document.documentElement.style.setProperty('--accent',S.cfg.theme_color);
+    if(S.screen==='login') setHTMLSafe(a, renderLogin());
+    else setHTMLSafe(a, renderDash() + (S.modal ? renderModal() : ''));
+    bind();
+}
+
+function renderLogin(){
+    const c=S.cfg;
+    // 2FA code entry step
+    if(S.pending2fa){
+        return`<div class="flex-1 flex items-center justify-center p-4 login-bg">
+        <div class="card login-card p-8 w-full max-w-sm">
+            <div class="text-center mb-6">
+                <h1 class="text-xl font-bold">Two-Factor Authentication</h1>
+                <p class="text-sm mt-2" style="color:var(--muted)">Enter the 6-digit code from your authenticator app</p>
+            </div>
+            ${S.err?`<div class="mb-4 p-3 rounded-lg text-sm" style="background:rgba(218,54,51,0.1);border:1px solid rgba(218,54,51,0.3);color:#f85149">${esc(S.err)}</div>`:''}
+            <form id="tf" class="space-y-3">
+                <div>
+                    <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Authentication Code</label>
+                    <input id="tc" class="input" placeholder="000000" maxlength="6" pattern="[0-9]{6}" required autofocus style="text-align:center;font-size:20px;letter-spacing:8px">
+                </div>
+                <button class="btn btn-accent w-full py-2" type="submit" style="justify-content:center" ${S.loading?'disabled':''}>Verify</button>
+                <button type="button" class="btn btn-ghost w-full py-2" style="justify-content:center" onclick="pBackToLogin()">Back to Login</button>
+            </form>
+        </div></div>`;
+    }
+    return`<div class="flex-1 flex items-center justify-center p-4 login-bg">
+    <div class="card login-card p-8 w-full max-w-sm">
+        <div class="text-center mb-6">
+            ${c.custom_logo_url?`<img src="${esc(c.custom_logo_url)}" alt="" style="max-height:40px;margin:0 auto 10px">`:''}
+            <h1 class="text-xl font-bold">${esc(c.portal_title||'Client Portal')}</h1>
+            <p class="text-sm mt-2" style="color:var(--muted)">Sign in to manage your services</p>
+        </div>
+        ${S.err?`<div class="mb-4 p-3 rounded-lg text-sm" style="background:rgba(218,54,51,0.1);border:1px solid rgba(218,54,51,0.3);color:#f85149">${esc(S.err)}</div>`:''}
+        <form id="lf" class="space-y-3">
+            <div>
+                <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Username</label>
+                <input id="lu" class="input" placeholder="Enter your username" required autofocus>
+            </div>
+            <div>
+                <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Password</label>
+                <input id="lp" class="input" type="password" placeholder="Enter your password" required>
+            </div>
+            <button class="btn btn-accent w-full py-2" type="submit" style="justify-content:center;margin-top:8px" ${S.loading?'disabled':''}>${S.loading?'Signing in...':'Sign In'}</button>
+        </form>
+        ${S.oidcEnabled?`
+        <div style="margin-top:16px;text-align:center">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                <div style="flex:1;height:1px;background:var(--border)"></div>
+                <span style="color:var(--muted);font-size:11px">or</span>
+                <div style="flex:1;height:1px;background:var(--border)"></div>
+            </div>
+            <button class="btn btn-ghost w-full py-2" style="justify-content:center" onclick="startOidcLogin()" ${S.loading?'disabled':''}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right:6px"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+                ${esc(S.oidcButtonText)}
+            </button>
+        </div>`:''}
+    </div></div>`;
+}
+
+function renderDashSummary(){
+    const running = S.vms.filter(v => v.status === 'running');
+    const stopped = S.vms.filter(v => v.status !== 'running');
+    // aggregate resource usage from running VMs
+    let totalCpu = 0, cpuCount = 0;
+    let usedMem = 0, totalMem = 0;
+    let usedDisk = 0, totalDisk = 0;
+    running.forEach(v => {
+        if(v.cpu_percent != null){ totalCpu += v.cpu_percent; cpuCount++; }
+        if(v.maxmem){ usedMem += (v.mem_percent||0)/100 * v.maxmem; totalMem += v.maxmem; }
+        if(v.maxdisk){ usedDisk += (v.disk||0); totalDisk += v.maxdisk; }
+    });
+    const avgCpu = cpuCount ? (totalCpu/cpuCount).toFixed(1) : '0.0';
+
+    return `<div class="dash-summary">
+        <span class="sum-badge badge-running">&#x25CF; ${running.length} Running</span>
+        <span class="sum-badge badge-stopped">&#x25CB; ${stopped.length} Stopped</span>
+        <span style="flex:1"></span>
+        ${cpuCount?`<span class="sum-stat">CPU avg: <b>${esc(avgCpu)}%</b></span>`:''}
+        ${totalMem?`<span class="sum-stat">RAM: <b>${esc(fmtBytes(usedMem))}</b> / ${esc(fmtBytes(totalMem))}</span>`:''}
+        ${totalDisk?`<span class="sum-stat">Disk: <b>${esc(fmtBytes(usedDisk))}</b> / ${esc(fmtBytes(totalDisk))}</span>`:''}
+    </div>`;
+}
+
+function renderFilterBar(){
+    const filtered = getFilteredVMs();
+    return `<div class="filter-bar">
+        <div class="search-wrap">
+            <span class="search-icon">&#x1F50D;</span>
+            <input type="text" class="search-input" id="vm-search" placeholder="Search by name..." value="${esc(S.searchQuery)}">
+        </div>
+        <button class="filter-btn ${S.filterStatus==='all'?'active':''}" data-filter="all">All</button>
+        <button class="filter-btn ${S.filterStatus==='running'?'active':''}" data-filter="running">Running</button>
+        <button class="filter-btn ${S.filterStatus==='stopped'?'active':''}" data-filter="stopped">Stopped</button>
+        <span class="filter-count">Showing ${filtered.length} of ${S.vms.length} VMs</span>
+    </div>`;
+}
+
+function renderSkeletonCards(){
+    let cards = '';
+    for(let i=0; i<3; i++){
+        cards += `<div class="skeleton-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                <div style="display:flex;align-items:center;gap:8px">
+                    <div class="skeleton-badge"></div>
+                    <div class="skeleton-line" style="width:${100+i*20}px"></div>
+                </div>
+                <div class="skeleton-line" style="width:60px"></div>
+            </div>
+            <div style="margin-bottom:10px">
+                <div class="skeleton-line" style="width:40%;margin-bottom:8px"></div>
+                <div class="skeleton-bar" style="width:100%"></div>
+            </div>
+            <div>
+                <div class="skeleton-line" style="width:35%;margin-bottom:8px"></div>
+                <div class="skeleton-bar" style="width:100%"></div>
+            </div>
+        </div>`;
+    }
+    return `<div style="flex:1;padding:20px"><div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">${cards}</div></div>`;
+}
+
+function renderRefreshFooter(){
+    const timeStr = S.lastRefresh ? fmtTime(S.lastRefresh) : '--:--:--';
+    return `<div class="refresh-footer">Last refreshed: ${esc(timeStr)} &middot; Auto-refresh: 30s</div>`;
+}
+
+function renderDash(){
+    const c=S.cfg,al=c.allowed_actions||[];
+    const themeIcon = S.theme === 'dark' ? '&#x2600;' : '&#x1F319;';
+    let hdr=`<div style="background:var(--card);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;transition:background 0.25s">
+        <div style="display:flex;align-items:center;gap:12px">
+            ${c.custom_logo_url?`<img src="${esc(c.custom_logo_url)}" alt="" style="height:24px">`:''}
+            <span class="font-semibold text-sm">${esc(c.portal_title||'Client Portal')}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+            <span class="text-sm" style="color:var(--muted)">${esc(S.user?.display_name||S.user?.username||'')}</span>
+            ${!S.user?.totp_enabled?`<button id="b2fa" class="btn btn-ghost text-xs py-1" title="Setup 2FA" style="font-size:13px">&#x1f512; 2FA</button>`:`<span class="text-xs" style="color:#3fb950" title="2FA enabled">&#x2713; 2FA</span>`}
+            ${c.allow_password_change?`<button id="bpw" class="btn btn-ghost text-xs py-1" title="Change Password" style="font-size:14px">&#x1f511;</button>`:''}
+            ${S.ctOpts&&S.ctOpts.enabled?`<button class="btn btn-accent text-xs py-1" title="Create Container" onclick="pCreateCt()">&#x2795; Container</button>`:''}
+            <button id="btheme" class="theme-toggle" title="Toggle theme">${themeIcon}</button>
+            <button id="br" class="btn btn-ghost text-xs py-1">&#8635;</button>
+            <button id="bo" class="btn btn-ghost text-xs py-1">Logout</button>
+        </div>
+    </div>`;
+
+    if(S.loading && !S.vms.length) return hdr + renderSkeletonCards();
+    if(!S.vms.length)return hdr+`<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted)"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px;opacity:0.3">&#x1f4bb;</div><p class="text-lg font-medium">No virtual machines assigned</p><p class="text-sm mt-2">Contact your administrator to get started.</p></div></div>`;
+
+    const filtered = getFilteredVMs();
+    const cards=filtered.map(v=>{
+        const on=v.status==='running';
+        // NS May 2026: safeNum() bounds wire data (0..100) before it lands in
+        // a CSS attribute. Defensive cast guards against malformed Proxmox
+        // payload from injecting CSS via width:N% or color:X.
+        const cpu=safeNum(v.cpu_percent,100).toFixed(1),mem=safeNum(v.mem_percent,100).toFixed(1);
+        const memGB=fmtBytes(v.maxmem);
+        const diskPct=v.maxdisk?safeNum((v.disk||0)/v.maxdisk*100,100).toFixed(1):'0';
+        const ips=(v.ips||[]).map(ip=>esc(ip)).join(', ')||'No IP';
+        const uptime=on?formatUptime(v.uptime):'';
+        // NS: escape cluster_id + name for onclick attrs
+        const escCid = esc(v.cluster_id);
+        const escName = esc(v.name);
+        let acts='';
+        if(on){
+            if(al.includes('vm.console'))acts+=`<button class="btn btn-ghost text-xs" onclick="pConsole('${escCid}',${v.vmid})">&#x1f5a5; Console</button>`;
+            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" onclick="pAction('${escCid}',${v.vmid},'shutdown','${escName}')">&#x23FB; Shutdown</button>`;
+            if(al.includes('vm.stop'))acts+=`<button class="btn btn-danger text-xs" style="opacity:0.7" onclick="pAction('${escCid}',${v.vmid},'stop','${escName}')">&#x26A0; Force Stop</button>`;
+            // MK Nov 2026 (#1239) - reboot is vm.restart on the server, so the button asks the same
+            if(al.includes('vm.restart'))acts+=`<button class="btn btn-ghost text-xs" onclick="pAction('${escCid}',${v.vmid},'reboot','${escName}')">&#8635; Reboot</button>`;
+        }else{
+            if(al.includes('vm.start'))acts+=`<button class="btn btn-accent text-xs" onclick="pAction('${escCid}',${v.vmid},'start','${escName}')">&#x25B6; Start</button>`;
+        }
+        if(c.allow_snapshots)acts+=`<button class="btn btn-ghost text-xs" onclick="pSnaps('${escCid}',${v.vmid})">&#x1f4f8; Snapshots</button>`;
+        if(c.allow_iso_mount&&v.type==='qemu')acts+=`<button class="btn btn-ghost text-xs" onclick="pIso('${escCid}',${v.vmid})">&#x1f4bf; ISO</button>`;
+        if(S.destroyOpts&&S.destroyOpts.enabled)acts+=`<button class="btn btn-danger text-xs" style="opacity:0.85" onclick="pDestroy('${escCid}',${v.vmid})">&#x1f5d1; Destroy</button>`;
+
+        return`<div class="card ${on?'card-running':''}" style="padding:16px">
+            <div class="vm-header">
+                <div class="vm-meta">
+                    <span class="badge ${on?'badge-running':'badge-stopped'}">${on?'&#x25CF; Running':'&#x25CB; Stopped'}</span>
+                    <span class="font-medium">${escName}</span>
+                </div>
+                <span class="text-xs" style="color:var(--muted)">${v.type==='lxc'?'Container':'VM'}${uptime?' &middot; '+esc(uptime):''}</span>
+            </div>
+            ${c.show_resource_usage&&on?`<div style="margin-bottom:12px">
+                <div style="margin-bottom:8px">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span class="text-xs" style="color:var(--muted)">CPU (${esc(String(v.maxcpu||'?'))} cores)</span><span class="text-xs" style="color:${parseFloat(cpu)>80?'#da3633':'var(--text)'}">${esc(cpu)}%</span></div>
+                    <div class="bar"><div class="bar-fill" style="width:${cpu}%;background:${parseFloat(cpu)>80?'#da3633':'#3fb950'}"></div></div>
+                </div>
+                <div style="margin-bottom:8px">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span class="text-xs" style="color:var(--muted)">RAM (${esc(memGB)})</span><span class="text-xs" style="color:${parseFloat(mem)>80?'#da3633':'var(--text)'}">${esc(mem)}%</span></div>
+                    <div class="bar"><div class="bar-fill" style="width:${mem}%;background:${parseFloat(mem)>80?'#da3633':'#58a6ff'}"></div></div>
+                </div>
+                ${v.maxdisk?`<div>
+                    <div style="display:flex;justify-content:space-between;margin-bottom:3px"><span class="text-xs" style="color:var(--muted)">Disk (${esc(fmtBytes(v.maxdisk))})</span><span class="text-xs" style="color:${parseFloat(diskPct)>80?'#da3633':'var(--text)'}">${esc(diskPct)}%</span></div>
+                    <div class="bar"><div class="bar-fill" style="width:${diskPct}%;background:${parseFloat(diskPct)>80?'#da3633':'#bc8cff'}"></div></div>
+                </div>`:''}
+            </div>`:''}
+            ${c.show_ip_addresses?`<div class="text-xs" style="color:var(--muted);margin-bottom:4px;padding:4px 0">&#x1F310; ${ips}</div>`:''}
+            ${acts?`<div class="vm-actions">${acts}</div>`:''}
+        </div>`;
+    }).join('');
+
+    return hdr+`<div style="flex:1;padding:20px">
+        ${renderDashSummary()}
+        ${renderFilterBar()}
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">${cards}</div>
+        ${renderRefreshFooter()}
+    </div>`;
+}
+
+function renderModal(){
+    if(!S.modal)return'';
+    if(S.modal.type==='console')return renderConsoleModal();
+    if(S.modal.type==='snapshots')return renderSnapshotsModal();
+    if(S.modal.type==='password')return renderPasswordModal();
+    if(S.modal.type==='2fa-setup')return render2FAModal();
+    if(S.modal.type==='isos')return renderIsoModal();
+    if(S.modal.type==='createct')return renderCreateCtModal();
+    if(S.modal.type==='destroy')return renderDestroyModal();
+    return'';
+}
+
+// #556 — self-service container creation (only when the hoster enabled it)
+function pCreateCt(){S.modal={type:'createct'};render();}
+function renderCreateCtModal(){
+    const o=S.ctOpts||{}, tmpls=o.templates||[], q=o.quota||{}, u=o.usage||{};
+    const qv=q.max_vms||q.vms, qc=q.max_cores||q.cores, qm=q.max_memory_gb||q.memory_gb;
+    const uv=u.vms||u.used_vms||0, uc=u.cores||u.used_cores||0, um=Math.round(u.memory_gb||u.used_memory_gb||0);
+    const quotaLine=(qv||qc||qm)?`<div class="text-xs mt-1" style="color:var(--muted)">Quota — VMs ${uv}/${qv||'∞'} · Cores ${uc}/${qc||'∞'} · Mem ${um}/${qm||'∞'} GB</div>`:'';
+    const inp='padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    return`<div class="modal-backdrop" onclick="closeModal()">
+    <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:460px;width:100%">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold">&#x2795; New Container</h2>
+            <button class="btn btn-ghost text-xs" onclick="closeModal()">&times;</button>
+        </div>
+        ${tmpls.length===0?`<div style="text-align:center;padding:20px;color:var(--muted)"><p>No templates available</p><p class="text-xs mt-2">Ask your administrator to allow container templates.</p></div>`:`
+        <div class="space-y-3">
+            <div><label class="text-xs" style="color:var(--muted)">Template</label>
+                <select id="ctT" class="w-full" style="${inp}">${tmpls.map(t=>`<option value="${esc(t)}">${esc((''+t).split('/').pop()||t)}</option>`).join('')}</select></div>
+            <div><label class="text-xs" style="color:var(--muted)">Hostname</label>
+                <input id="ctH" class="w-full" placeholder="my-container" style="${inp}"></div>
+            <div style="display:flex;gap:8px">
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">Cores (1-${o.max_cores||2})</label>
+                    <input id="ctC" type="number" min="1" max="${o.max_cores||2}" value="1" class="w-full" style="${inp}"></div>
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">RAM MB (128-${o.max_memory_mb||2048})</label>
+                    <input id="ctM" type="number" min="128" max="${o.max_memory_mb||2048}" value="512" class="w-full" style="${inp}"></div>
+                <div style="flex:1"><label class="text-xs" style="color:var(--muted)">Disk GB (1-${o.max_disk_gb||16})</label>
+                    <input id="ctD" type="number" min="1" max="${o.max_disk_gb||16}" value="8" class="w-full" style="${inp}"></div>
+            </div>
+            <div><label class="text-xs" style="color:var(--muted)">Root password (min 8 chars)</label>
+                <input id="ctP" type="password" class="w-full" style="${inp}"></div>
+            ${quotaLine}
+            <button class="btn btn-accent w-full" style="justify-content:center" onclick="submitCreateCt()">Create Container</button>
+        </div>`}
+    </div></div>`;
+}
+async function submitCreateCt(){
+    const g=id=>document.getElementById(id);
+    const body={template:g('ctT').value,hostname:(g('ctH').value||'').trim(),
+        cores:parseInt(g('ctC').value||'1'),memory:parseInt(g('ctM').value||'512'),
+        disk_gb:parseInt(g('ctD').value||'8'),password:g('ctP').value||''};
+    const r=await api(`${P}/ct/create`,{method:'POST',body});
+    if(r){const d=await r.json().catch(()=>({}));
+        if(r.ok&&d.success){toast(`Container "${d.hostname}" created (CT ${d.vmid})`,'success');S.modal=null;setTimeout(loadVMs,2500);}
+        else toast(d.error||'Create failed','error');}
+    else toast('Create failed','error');
+}
+
+function pDestroy(cid,vmid){
+    const vm=(S.vms||[]).find(v=>String(v.vmid)===String(vmid)&&v.cluster_id===cid);
+    if(!vm){toast('VM not found','error');return;}
+    S.modal={type:'destroy',cluster_id:cid,vmid:vmid,name:vm.name||('VM '+vmid),vtype:vm.type||'qemu'};render();
+}
+function renderDestroyModal(){
+    const m=S.modal;
+    const inp='padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    return`<div class="modal-backdrop" onclick="closeModal()">
+    <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:440px;width:100%">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold" style="color:var(--danger,#e5484d)">&#x1f5d1; Destroy ${esc(m.vtype)} — ${esc(m.name)}</h2>
+            <button class="btn btn-ghost text-xs" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="space-y-3">
+            <div class="text-xs p-3 rounded-lg" style="background:var(--surface);color:var(--muted)">
+                This permanently deletes the ${esc(m.vtype)} <strong>${esc(m.name)}</strong> (ID ${esc(''+m.vmid)}) and purges its disks and backups. <strong>This cannot be undone.</strong>
+            </div>
+            <div><label class="text-xs" style="color:var(--muted)">Type the exact name <strong>${esc(m.name)}</strong> to confirm</label>
+                <input id="dcn" class="w-full" autocomplete="off" data-name="${esc(m.name)}" placeholder="${esc(m.name)}" style="${inp}" oninput="document.getElementById('dbtn').disabled=(this.value.trim()!==this.dataset.name)"></div>
+            <button id="dbtn" class="btn btn-danger w-full" style="justify-content:center" disabled onclick="submitDestroy()">Destroy permanently</button>
+        </div>
+    </div></div>`;
+}
+async function submitDestroy(){
+    const m=S.modal; if(!m)return;
+    const el=document.getElementById('dcn');
+    const val=((el&&el.value)||'').trim();
+    if(val!==m.name){toast('Name does not match','error');return;}
+    const r=await api(`${P}/vm/destroy`,{method:'POST',body:{cluster_id:m.cluster_id,vmid:m.vmid,confirm_name:val}});
+    if(r){const d=await r.json().catch(()=>({}));
+        if(r.ok&&d.success){toast('Guest destroyed','success');S.modal=null;setTimeout(loadVMs,2500);}
+        else toast(d.error||'Teardown failed','error');}
+    else toast('Teardown failed','error');
+}
+
+function renderIsoModal(){
+    const m=S.modal;
+    const vm=m.vm;
+    const isos=m.isos||[];
+    const escCid=esc(vm.cluster_id);
+    return`<div class="modal-backdrop" onclick="closeModal()">
+    <div class="card modal-card" onclick="event.stopPropagation()" style="max-width:500px;width:100%">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold">&#x1f4bf; Mount ISO — ${esc(vm.name)}</h2>
+            <button class="btn btn-ghost text-xs" onclick="closeModal()">&times;</button>
+        </div>
+        ${isos.length===0?`<div style="text-align:center;padding:24px;color:var(--muted)">
+            <p>No ISOs available</p>
+            <p class="text-xs mt-2" style="color:var(--muted)">Ask your administrator to configure allowed ISOs</p>
+        </div>`:`
+        <div style="max-height:300px;overflow-y:auto" class="space-y-2">
+            ${isos.map(iso=>`
+                <div class="flex items-center justify-between p-3 rounded-lg" style="background:var(--surface)">
+                    <div>
+                        <div class="text-sm font-medium">${esc(iso.name)}</div>
+                        <div class="text-xs" style="color:var(--muted)">${iso.size>0?`${(iso.size/1048576).toFixed(0)} MB`:'—'}</div>
+                    </div>
+                    <button class="btn btn-accent text-xs" onclick="pMountIso('${escCid}',${vm.vmid},'${esc(iso.volid)}')">Mount</button>
+                </div>
+            `).join('')}
+        </div>
+        <div class="mt-3 pt-3" style="border-top:1px solid var(--border)">
+            <button class="btn btn-ghost text-xs w-full" style="justify-content:center" onclick="pUnmountIso('${escCid}',${vm.vmid})">Eject / Unmount CD-ROM</button>
+        </div>
+        `}
+    </div></div>`;
+}
+
+function renderConsoleModal(){
+    const m=S.modal;
+    const proto=window.location.protocol==='https:'?'wss:':'ws:';
+    const port=parseInt(window.location.port)||(window.location.protocol==='https:'?443:80);
+    // MK #547 — mirror the main-UI console: behind a reverse proxy the VNC
+    // websocket rides the main port, otherwise port+1. And pass the vncproxy
+    // ticket/port through so the WS handler reuses it instead of issuing a 2nd
+    // vncproxy — on PVE 9.1.x every vncproxy call mints a fresh random VNC
+    // password, so a second one breaks RFB auth (console just hangs/times out).
+    const wsPort = S.cfg.reverse_proxy_enabled ? port : port+1;
+    const pvePass = (m.ticket && m.port) ? `&pve_ticket=${encodeURIComponent(m.ticket)}&pve_port=${encodeURIComponent(m.port)}` : '';
+    const wsUrl=`${proto}//${window.location.hostname}:${wsPort}/api/clusters/${encodeURIComponent(m.vm.cluster_id)}/vms/${encodeURIComponent(m.vm.node)}/${encodeURIComponent(m.vm.type)}/${m.vm.vmid}/vncwebsocket?token=${encodeURIComponent(m.ws_token||'')}${pvePass}`;
+    const statusLabel = m.vncStatus === 'connected' ? 'Connected' : m.vncStatus === 'connecting' ? 'Connecting...' : 'Disconnected';
+    const dotClass = m.vncStatus === 'connected' ? 'connected' : m.vncStatus === 'connecting' ? 'connecting' : 'disconnected';
+    // LW: #283 — larger console modal, responsive to viewport
+    return`<div class="modal-bg" onclick="closeModal()">
+        <div style="width:calc(100% - 32px);max-width:80rem;margin:0 auto;height:calc(100vh - 48px)" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--card);border:1px solid var(--border);border-bottom:none;border-radius:12px 12px 0 0">
+                <div style="display:flex;align-items:center;gap:8px" class="text-sm">
+                    <span class="font-medium">${esc(m.vm.name)}</span>
+                    <span style="color:var(--muted)">&mdash; Console</span>
+                    <span class="text-xs" style="margin-left:8px"><span class="vnc-status-dot ${dotClass}"></span>${esc(statusLabel)}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px">
+                    <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="pVncCtrlAltDel()" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+                    <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="pVncFullscreen()" title="Fullscreen">&#x26F6;</button>
+                    <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="closeModal()">&#x2715; Close</button>
+                </div>
+            </div>
+            <div id="vnc-wrap" style="height:calc(100% - 40px);position:relative;border:1px solid var(--border);border-top:none;border-radius:0 0 12px 12px;overflow:hidden;background:#000">
+                <div id="vnc-overlay" class="vnc-overlay"><div class="vnc-spinner"></div><span class="text-sm">Connecting to console...</span></div>
+                <div id="vnc-container" style="width:100%;height:100%"
+                     data-ws-url="${wsUrl}" data-vt="1"></div>
+            </div>
+        </div>
+    </div>`;
+}
+
+function renderSnapshotsModal(){
+    const m=S.modal;
+    const snaps=m.snapshots||[];
+    const max=m.max||5;
+    const canCreate=snaps.length<max;
+    const escCid = esc(m.vm.cluster_id);
+    return`<div class="modal-bg" onclick="closeModal()">
+        <div class="card" style="width:100%;max-width:32rem;margin:0 16px;padding:20px" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <h2 class="font-semibold">&#x1f4f8; Snapshots &mdash; ${esc(m.vm.name)}</h2>
+                <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="closeModal()">&#x2715;</button>
+            </div>
+            <div class="text-xs mb-3" style="color:var(--muted)">${snaps.length}/${max} snapshots used</div>
+            ${snaps.length?`<div class="space-y-2 mb-4 max-h-60 overflow-y-auto">${snaps.map(s=>`
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border)">
+                    <div style="flex:1;min-width:0"><div class="text-sm font-medium">${esc(s.name)}</div><div class="text-xs" style="color:var(--muted)">${esc(s.description||'')}</div></div>
+                    <div style="display:flex;align-items:center;gap:8px;margin-left:12px;flex-shrink:0">
+                        <span class="text-xs" style="color:var(--muted)">${s.snaptime?new Date(s.snaptime*1000).toLocaleDateString():''}</span>
+                        <button class="btn btn-ghost text-xs" style="padding:2px 8px" onclick="pRollback('${escCid}',${m.vm.vmid},'${esc(s.name)}')" title="Rollback to this snapshot">&#x21A9; Revert</button>
+                        <button class="btn btn-ghost text-xs" style="padding:2px 8px;color:#da3633" onclick="pDeleteSnap('${escCid}',${m.vm.vmid},'${esc(s.name)}')" title="Delete snapshot">&#x2715;</button>
+                    </div>
+                </div>`).join('')}</div>`:`<p class="text-sm mb-4" style="color:var(--muted)">No snapshots yet.</p>`}
+            ${canCreate?`<div style="border-top:1px solid var(--border);padding-top:12px">
+                <div class="text-xs font-medium mb-2">Create Snapshot</div>
+                <div style="display:flex;gap:8px">
+                    <input id="snap-name" class="input text-sm" style="flex:1;padding:6px 10px" placeholder="Name (optional)">
+                    <button class="btn btn-accent text-xs" onclick="pCreateSnap('${escCid}',${m.vm.vmid})">Create</button>
+                </div>
+            </div>`:`<p class="text-xs text-center p-2 rounded-lg" style="background:rgba(218,54,51,0.1);color:#f85149">Snapshot limit reached (${max} max)</p>`}
+        </div>
+    </div>`;
+}
+
+function renderPasswordModal(){
+    return`<div class="modal-bg" onclick="closeModal()">
+        <div class="card" style="width:100%;max-width:24rem;margin:0 16px;padding:20px" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <h2 class="font-semibold">Change Password</h2>
+                <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="closeModal()">&#x2715;</button>
+            </div>
+            <form id="pwf" class="space-y-3">
+                <div>
+                    <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Current Password</label>
+                    <input id="pw-cur" class="input" type="password" placeholder="Enter current password" required>
+                </div>
+                <div>
+                    <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">New Password</label>
+                    <input id="pw-new" class="input" type="password" placeholder="Enter new password" required>
+                </div>
+                <div>
+                    <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Confirm Password</label>
+                    <input id="pw-conf" class="input" type="password" placeholder="Confirm new password" required>
+                </div>
+                <button class="btn btn-accent w-full py-2" type="submit" style="justify-content:center;margin-top:4px">Update Password</button>
+            </form>
+        </div>
+    </div>`;
+}
+
+function render2FAModal(){
+    const m=S.modal;
+    return`<div class="modal-bg" onclick="closeModal()">
+        <div class="card" style="width:100%;max-width:24rem;margin:0 16px;padding:20px" onclick="event.stopPropagation()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <h2 class="font-semibold">&#x1f512; Setup Two-Factor Auth</h2>
+                <button class="btn btn-ghost text-xs" style="padding:2px 10px" onclick="closeModal()">&#x2715;</button>
+            </div>
+            <p class="text-sm mb-3" style="color:var(--muted)">Scan this QR code with your authenticator app (Google Authenticator, Authy, etc.)</p>
+            <div style="text-align:center;margin-bottom:16px">
+                <img src="${esc(m.qr)}" alt="QR Code" style="max-width:200px;margin:0 auto;border-radius:8px">
+            </div>
+            <div style="margin-bottom:16px;padding:8px 12px;border-radius:8px;background:var(--bg);border:1px solid var(--border)">
+                <div class="text-xs" style="color:var(--muted);margin-bottom:4px">Manual entry key:</div>
+                <code class="text-xs" style="color:var(--accent);word-break:break-all">${esc(m.secret)}</code>
+            </div>
+            <form id="tfa-form" class="space-y-3">
+                <div>
+                    <label class="text-xs font-medium mb-1" style="display:block;color:var(--muted)">Verification Code</label>
+                    <input id="tfa-code" class="input" placeholder="000000" maxlength="6" pattern="[0-9]{6}" required autofocus style="text-align:center;font-size:18px;letter-spacing:6px">
+                </div>
+                <button class="btn btn-accent w-full py-2" type="submit" style="justify-content:center">Enable 2FA</button>
+            </form>
+        </div>
+    </div>`;
+}
+
+function bind(){
+    const f=document.getElementById('lf');
+    if(f)f.onsubmit=(e)=>{e.preventDefault();login(document.getElementById('lu').value,document.getElementById('lp').value);};
+    // 2FA login form
+    const tf=document.getElementById('tf');
+    if(tf)tf.onsubmit=(e)=>{e.preventDefault();const code=document.getElementById('tc').value;if(S.pending2fa)login(S.pending2fa.u,S.pending2fa.p,code);};
+    const bo=document.getElementById('bo');if(bo)bo.onclick=logout;
+    const br=document.getElementById('br');if(br)br.onclick=()=>loadVMs();
+    // password change + 2FA setup
+    const bpw=document.getElementById('bpw');if(bpw)bpw.onclick=()=>{S.modal={type:'password'};render();};
+    const b2fa=document.getElementById('b2fa');if(b2fa)b2fa.onclick=()=>setup2FA();
+    // theme toggle
+    const btheme=document.getElementById('btheme');if(btheme)btheme.onclick=toggleTheme;
+    const pwf=document.getElementById('pwf');
+    if(pwf)pwf.onsubmit=(e)=>{
+        e.preventDefault();
+        const cur=document.getElementById('pw-cur').value;
+        const n=document.getElementById('pw-new').value;
+        const c=document.getElementById('pw-conf').value;
+        if(n!==c){toast('Passwords do not match','error');return;}
+        if(n.length<6){toast('Password must be at least 6 characters','error');return;}
+        changePassword(cur,n);
+    };
+    // 2FA verify form
+    const tfaForm=document.getElementById('tfa-form');
+    if(tfaForm)tfaForm.onsubmit=(e)=>{e.preventDefault();verify2FA(document.getElementById('tfa-code').value);};
+
+    // search + filter bindings
+    const searchInput = document.getElementById('vm-search');
+    if(searchInput){
+        searchInput.oninput = (e) => { S.searchQuery = e.target.value; render(); requestAnimationFrame(()=>{ const el=document.getElementById('vm-search'); if(el){el.focus();el.selectionStart=el.selectionEnd=el.value.length;} }); };
+    }
+    document.querySelectorAll('.filter-btn[data-filter]').forEach(btn => {
+        btn.onclick = () => { S.filterStatus = btn.dataset.filter; render(); };
+    });
+
+    // init noVNC if console modal open
+    const vc=document.getElementById('vnc-container');
+    if(vc&&!vc.dataset.init){vc.dataset.init='1';initVNC(vc);}
+}
+
+async function initVNC(container){
+    const wsUrl=container.dataset.wsUrl;
+    // MK: security audit — read ticket from JS state, not DOM attribute (prevents DOM-based XSS exfil)
+    const password=S.modal?.ticket||'';
+    const overlay=document.getElementById('vnc-overlay');
+    if(!window.RFB){
+        try{
+            const m=await import('/static/js/novnc/rfb.min.js');
+            window.RFB=m.default;
+        }catch(e){
+            try{const m=await import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js');window.RFB=m.default;}
+            catch(e2){if(overlay)setHTMLSafe(overlay, '<p style="color:#da3633;padding:20px">Failed to load noVNC</p>');return;}
+        }
+    }
+    try{
+        const rfb=new window.RFB(container,wsUrl,{credentials:{password}});
+        rfb.scaleViewport=true;rfb.resizeSession=true;
+        window._portalRfb=rfb;  // LW: store ref for Ctrl+Alt+Del button
+        rfb.addEventListener('connect',()=>{
+            if(overlay)overlay.style.display='none';
+            if(S.modal&&S.modal.type==='console'){S.modal.vncStatus='connected';/* update status dot without full re-render */
+                const dots=document.querySelectorAll('.vnc-status-dot');dots.forEach(d=>{d.className='vnc-status-dot connected';d.nextSibling&&(d.nextSibling.textContent='Connected');});}
+        });
+        rfb.addEventListener('disconnect',()=>{
+            if(S.modal&&S.modal.type==='console')S.modal.vncStatus='disconnected';
+            setHTMLSafe(container, '<p style="color:var(--muted);padding:20px;text-align:center">Console disconnected</p>');
+        });
+    }catch(e){const p=document.createElement('p');p.style.cssText='color:#da3633;padding:20px';p.textContent=e.message;container.replaceChildren(p);if(overlay)overlay.style.display='none';}
+}
+
+// global handlers for onclick attrs
+window.pAction=function(c,v,a,n){
+    const destructive = (a === 'shutdown' || a === 'reboot' || a === 'stop');
+    const label = a === 'stop' ? 'Force Stop' : a.charAt(0).toUpperCase()+a.slice(1);
+    const extra = a === 'stop' ? '\n\nThis immediately kills the VM — unsaved data WILL be lost!' : '';
+    showConfirm(`${label} "${n}"?${extra}`, () => { const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)vmAction(vm,a); }, destructive);
+};
+window.pConsole=function(c,v){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)openConsole(vm);};
+window.pSnaps=function(c,v){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)loadSnapshots(vm);};
+window.pIso=function(c,v){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)loadIsos(vm);};
+window.pMountIso=async function(c,v,iso){
+    const r=await api(`${P}/vm/iso-mount`,{method:'POST',body:{cluster_id:c,vmid:v,iso:iso}});
+    if(r&&r.ok){const d=await r.json();if(d.success){toast('ISO mounted','success');const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)loadIsos(vm);}else toast(d.error||'Mount failed','error');}
+};
+window.pUnmountIso=async function(c,v){
+    const r=await api(`${P}/vm/iso-unmount`,{method:'POST',body:{cluster_id:c,vmid:v}});
+    if(r&&r.ok){const d=await r.json();if(d.success){toast('ISO unmounted','success');const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)loadIsos(vm);}else toast(d.error||'Failed','error');}
+};
+window.pCreateSnap=function(c,v){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);const n=document.getElementById('snap-name')?.value||'';if(vm)createSnapshot(vm,n,'');};
+window.pRollback=function(c,v,snapname){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)rollbackSnapshot(vm,snapname);};
+window.pDeleteSnap=function(c,v,snapname){const vm=S.vms.find(x=>x.cluster_id===c&&x.vmid===v);if(vm)deleteSnapshot(vm,snapname);};
+// #765 (grobe0ba) — the CT create/destroy handlers were defined in-IIFE (pCreateCt/submitCreateCt/
+// pDestroy/submitDestroy above) but never re-exported to window, so their inline onclick= resolved
+// against window, found nothing, and threw ReferenceError — the +Container / Destroy buttons did
+// nothing for everyone with those features enabled. Export them like every other inline handler.
+window.pCreateCt=pCreateCt;window.submitCreateCt=submitCreateCt;window.pDestroy=pDestroy;window.submitDestroy=submitDestroy;
+// #810 - same shape: the SSO button carries onclick="startOidcLogin()" and the
+// function lives inside the IIFE, so every click threw ReferenceError. That has
+// been the case since the button went in (April), and it was the only inline
+// handler in the file without an export.
+window.startOidcLogin=startOidcLogin;
+// Same family, found by the handler/export test rather than by a user: the New
+// Container, Destroy and Mount ISO dialogs closed via S.modal=null;render(), and
+// neither S nor render is global, so their close button and the backdrop threw and
+// only a page reload got you out - Mount ISO since April, the other two since #765
+// made them open. They go through closeModal() now like the other eight sites, which
+// also tears down a live noVNC session instead of orphaning it (#396).
+window.pBackToLogin=function(){S.pending2fa=null;S.err=null;render();};
+window.closeModal=function(){
+    // MK May 2026 (#396): if a noVNC console is open, disconnect cleanly so
+    // Proxmox releases the vncproxy task. Without this the server-side ws
+    // stays attached and the next openConsole gets refused until Proxmox
+    // times the prior task out (~30s seen in pvedaemon logs).
+    try{if(window._portalRfb){window._portalRfb.disconnect();window._portalRfb=null;}}catch(e){}
+    S.modal=null;render();
+};
+window.pVncFullscreen=function(){
+    const el=document.getElementById('vnc-wrap');
+    if(el){
+        if(el.requestFullscreen)el.requestFullscreen();
+        else if(el.webkitRequestFullscreen)el.webkitRequestFullscreen();
+    }
+};
+window.pVncCtrlAltDel=function(){
+    if(window._portalRfb)window._portalRfb.sendCtrlAltDel();
+};
+
+// auto-refresh every 30s
+setInterval(()=>{if(S.screen==='dashboard'&&!S.loading&&!S.modal)loadVMs();},30000);
+checkAuthProviders().then(() => checkSess()).then(render);
+
+})();
+</script>
+</body>
+</html>

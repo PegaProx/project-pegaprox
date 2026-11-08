@@ -1,0 +1,6909 @@
+        // ═══════════════════════════════════════════════
+        // PegaProx - Node Modals
+        // NodeShell terminal, NodeModal, ConsoleModal
+        // ═══════════════════════════════════════════════
+        function getNodeProxmoxUrl(nodeIp = '', nodeName = '') {
+            if (!nodeIp || !nodeName) return null;
+            return `https://${nodeIp.trim()}:8006/#v1:0:=${encodeURIComponent(`node/${nodeName}`)}:4:=aptrepositories:=contentIso:::9::`;
+        }
+
+        // LW Oct 2026 (#1163) - the DNS read keeps why it failed. Mapped to {} like the other
+        // system reads, a refused read looked like a node without DNS, with a form that would
+        // have saved the blanks over the real servers. { dns: null } is a failed read, dnsError
+        // the server's reason ('' when the request got no answer at all).
+        async function readNodeDns(res) {
+            const body = res ? await res.json().catch(() => null) : null;
+            if (res && res.ok && body && typeof body === 'object' && !Array.isArray(body)) return { dns: body, dnsError: null };
+            const said = body && typeof body.error === 'string' ? body.error : '';
+            return { dns: null, dnsError: said || (res ? `HTTP ${res.status}` : '') };
+        }
+
+        // LW Nov 2026 - PVE answers disks/lvm as a tree, { leaf, children: [{ name, size, free,
+        // children: [pv...] }] }, and every reader here wants a list of { vg, size, free }. Read
+        // as a list it was always empty: no volume group in either layout and none to pick when
+        // creating a thin pool.
+        function nodeLvmVgs(raw) {
+            if (Array.isArray(raw)) return raw;
+            const kids = raw && typeof raw === 'object' && Array.isArray(raw.children) ? raw.children : [];
+            return kids.filter(vg => vg && typeof vg === 'object')
+                .map(vg => ({ vg: vg.name, size: vg.size, free: vg.free, pvs: Array.isArray(vg.children) ? vg.children : [] }));
+        }
+
+        // disks/lvmthin carries used and lv_size in bytes (metadata_used / metadata_size beside them);
+        // usage is the share of the data used, in percent, left out when the read has no numbers
+        function nodeThinPools(raw) {
+            if (!Array.isArray(raw)) return [];
+            return raw.map(tp => {
+                if (!tp || typeof tp !== 'object') return tp;
+                const used = Number(tp.used), size = Number(tp.lv_size);
+                const usage = size > 0 && Number.isFinite(used) && tp.used !== null && tp.used !== '' ? Math.round(used / size * 1000) / 10 : undefined;
+                return usage === undefined ? tp : { ...tp, usage };
+            });
+        }
+
+        // Node Shell Terminal Component using xterm.js with SSH
+        function NodeShellTerminal({ node, clusterId, addToast, onStatus }) {
+            const { t } = useTranslation();
+            const terminalRef = useRef(null);
+            const initRef = useRef(false);
+            const [status, setStatus] = useState('loading');
+            const [showLogin, setShowLogin] = useState(false);
+            const [nodeInfo, setNodeInfo] = useState({});
+            const [sshPort, setSshPort] = useState(null);
+            // LW Oct 2026 (#1143) - no host here any more: the server logs in on the node's
+            // own address and ignored a typed one anyway, the dialog only shows it
+            const [credentials, setCredentials] = useState({ 
+                username: 'root', 
+                password: '',
+                privateKey: '',
+                authMethod: 'password',  // 'password' or 'key'
+            });
+            const wsRef = useRef(null);
+            const termRef = useRef(null);
+            const statusRef = useRef('loading');
+            const { sessionId, reverseProxyEnabled } = useAuth();
+
+            // Keep statusRef in sync
+            useEffect(() => {
+                statusRef.current = status;
+            }, [status]);
+
+            // LW Nov 2026 - Corporate Redesigned's bar above the terminal shows the session's state, where it
+            // logs in and as whom (CrNodeShell, cr_nodemisc.js); nothing else passes onStatus
+            const sentUserRef = useRef('');
+            useEffect(() => {
+                if (onStatus) onStatus({ status, ip: nodeInfo.ip || '', port: sshPort, user: sentUserRef.current });
+            }, [status, nodeInfo.ip, sshPort]);
+
+            // NS May 2026 — staging area for credentials submitted before the
+            // WS finished opening. Air-gap users hit this when the dialog
+            // shows up before the handshake (which is now intentional).
+            const pendingCredsRef = useRef(null);
+
+            const _flushAuth = (authData) => {
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(JSON.stringify(authData));
+                    pendingCredsRef.current = null;
+                    setShowLogin(false);
+                    setStatus('connecting');
+                    if (termRef.current) {
+                        const method = authData.privateKey ? '(SSH Key)' : '';
+                        termRef.current.write(`\r\n${t('shellConnectingAs')} ${authData.username}@${authData.host || node} ${method}...\r\n`);
+                    }
+                    return true;
+                }
+                return false;
+            };
+
+            const sendCredentials = () => {
+                sentUserRef.current = credentials.username || '';
+                const authData = {
+                    username: credentials.username,
+                    password: credentials.authMethod === 'password' ? credentials.password : '',
+                    privateKey: credentials.authMethod === 'key' ? credentials.privateKey : '',
+                    host: nodeInfo.ip || '',
+                };
+                // If WS already open, send now. Otherwise queue and let the
+                // onopen handler flush as soon as the handshake completes.
+                if (!_flushAuth(authData)) {
+                    pendingCredsRef.current = authData;
+                    if (termRef.current) {
+                        termRef.current.write(`\r\n\x1b[33m${t('waitingForWsConnection')}\x1b[0m\r\n`);
+                    }
+                    setStatus('connecting');
+                    setShowLogin(false);
+                }
+            };
+
+            useEffect(() => {
+                if (initRef.current) return;
+                initRef.current = true;
+                
+                if (!terminalRef.current) return;
+
+                let term = null;
+                let ws = null;
+                let fitAddon = null;
+                let cleanup = false;
+                let handleResize = null;
+                let boxWatch = null;
+
+                const loadTerminal = async () => {
+                    try {
+                        // LW May 2026 — local-first xterm assets; CDN fallback only when air-gap is off
+                        const _airGap = (() => {
+                            try { return localStorage.getItem('pegaprox-air-gap') === '1'; }
+                            catch (_) { return false; }
+                        })();
+
+                        if (!document.getElementById('xterm-css')) {
+                            const link = document.createElement('link');
+                            link.id = 'xterm-css';
+                            link.rel = 'stylesheet';
+                            link.href = '/static/css/xterm.min.css';
+                            link.onerror = () => {
+                                if (_airGap) { console.error('[air-gap] xterm css missing; refusing CDN'); return; }
+                                link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css';
+                            };
+                            document.head.appendChild(link);
+                        }
+
+                        if (!window.Terminal) {
+                            await new Promise((resolve, reject) => {
+                                const script = document.createElement('script');
+                                script.src = '/static/js/xterm.min.js';
+                                script.onload = resolve;
+                                script.onerror = () => {
+                                    if (_airGap) {
+                                        console.error('[air-gap] xterm.js missing; refusing CDN');
+                                        reject(new Error('xterm missing in air-gap mode'));
+                                        return;
+                                    }
+                                    script.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js';
+                                    if (SRI_HASHES['xterm@5.3.0']) {
+                                        script.integrity = SRI_HASHES['xterm@5.3.0'];
+                                        script.crossOrigin = 'anonymous';
+                                    }
+                                    script.onload = resolve;
+                                    script.onerror = reject;
+                                };
+                                document.head.appendChild(script);
+                            });
+                        }
+
+                        if (!window.FitAddon) {
+                            await new Promise((resolve, reject) => {
+                                const script = document.createElement('script');
+                                script.src = '/static/js/xterm-addon-fit.min.js';
+                                script.onload = resolve;
+                                script.onerror = () => {
+                                    if (_airGap) {
+                                        console.error('[air-gap] xterm-addon-fit missing; refusing CDN');
+                                        reject(new Error('xterm-addon-fit missing in air-gap mode'));
+                                        return;
+                                    }
+                                    script.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js';
+                                    if (SRI_HASHES['xterm-addon-fit@0.8.0']) {
+                                        script.integrity = SRI_HASHES['xterm-addon-fit@0.8.0'];
+                                        script.crossOrigin = 'anonymous';
+                                    }
+                                    script.onload = resolve;
+                                    script.onerror = reject;
+                                };
+                                document.head.appendChild(script);
+                            });
+                        }
+
+                        if (cleanup) return;
+
+                        // Create terminal
+                        term = new window.Terminal({
+                            cursorBlink: true,
+                            fontSize: 14,
+                            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                            theme: {
+                                background: '#1a1a2e',
+                                foreground: '#e4e4e7',
+                                cursor: '#e4e4e7',
+                            }
+                        });
+                        termRef.current = term;
+
+                        fitAddon = new window.FitAddon.FitAddon();
+                        term.loadAddon(fitAddon);
+                        term.open(terminalRef.current);
+                        // not on a terminal the tab already disposed again (fit throws there)
+                        setTimeout(() => !cleanup && fitAddon && fitAddon.fit(), 50);  // idk why 50ms but it works
+
+                        setStatus('connecting');
+                        term.write(`${t('connectingToServer')}\r\n`);
+                        
+                        // First, try to get the node IP via API
+                        let nodeIp = '';
+                        try {
+                            term.write('Ermittle Node-IP...\r\n');
+                            const ipResponse = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ip`, { credentials: 'include', headers: { 'X-Session-ID': sessionId }
+                            });
+                            if (ipResponse.ok) {
+                                const ipData = await ipResponse.json();
+                                // the connection host stands in there when the node's own
+                                // address is unknown, and the shell does not open on it (#1143)
+                                nodeIp = /_fallback$/.test(ipData.source || '') ? '' : (ipData.ip || '');
+                                if (nodeIp) {
+                                    term.write(`Node-IP: ${nodeIp} (${ipData.source})\r\n`);
+                                }
+                            }
+                        } catch (e) {
+                            console.log('Could not fetch node IP:', e);
+                            term.write(`\x1b[33m${t('ipFetchFailed')}: ${e.message}\x1b[0m\r\n`);
+                        }
+
+                        // NS May 2026 — show the SSH auth dialog as soon as we
+                        // know (or fail to know) the node IP, NOT when the
+                        // WebSocket sends `need_credentials`. Air-gap deployments
+                        // were hitting silent WS handshake failures (self-signed
+                        // cert on port +2 not yet trusted, or reverse-proxy not
+                        // forwarding the secondary port) — the prior flow gated
+                        // the form on a server message that never arrived, so
+                        // the user just saw a blank terminal with no way to
+                        // enter credentials. Proactive form ⇒ always visible.
+                        setNodeInfo({ node, ip: nodeIp || '' });
+                        setShowLogin(true);
+                        setStatus('login');
+
+                        // NS: Mar 2026 - get short-lived WS token instead of exposing session in URL
+                        let wsToken = '';
+                        try {
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include', headers: { 'X-Session-ID': sessionId } });
+                            if (tokenResp.ok) {
+                                const tokenData = await tokenResp.json();
+                                wsToken = tokenData.token;
+                            }
+                        } catch(e) {
+                            console.warn('WS token fetch failed, falling back');
+                        }
+                        // LW Oct 2026 (#1143) - closed while the two lookups ran: open no session
+                        // that nothing shows and nothing closes
+                        if (cleanup) return;
+
+                        // Connect WebSocket - Shell runs on main port + 2 (unless reverse proxy port set)
+                        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
+                        
+                        let sshPortNum = reverseProxyEnabled ? mainPort : mainPort + 2;
+                        if (reverseProxyEnabled) {
+                            console.log(`Using main port for SSH (Reverse Proxy Enabled): ${sshPortNum}`);
+                        }
+
+                        setSshPort(sshPortNum);
+                        // no ?ip= any more: the server resolves the node and would not take one (#1143)
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${sshPortNum}/api/clusters/${clusterId}/nodes/${node}/shellws?token=${encodeURIComponent(wsToken)}`;
+                        
+                        term.write(`${t('connectingWs')} (Port ${sshPortNum})...\r\n`);
+                        // NS: Mar 2026 - don't log wsUrl, contains session token
+                        
+                        ws = new WebSocket(wsUrl);
+                        wsRef.current = ws;
+                        
+                        ws.onopen = () => {
+                            console.log('SSH WebSocket connected');
+                            term.write(`${t('wsConnected')}\r\n`);
+                            // NS May 2026 — if the user already submitted creds
+                            // while we were still handshaking, send them now.
+                            if (pendingCredsRef.current) {
+                                _flushAuth(pendingCredsRef.current);
+                            }
+                        };
+
+                        ws.onmessage = (event) => {
+                            const data = event.data;
+                            
+                            // Check for JSON status messages
+                            if (typeof data === 'string') {
+                                // Try to parse as JSON
+                                if (data.startsWith('{')) {
+                                    try {
+                                        const msg = JSON.parse(data);
+                                        // console.log('ws msg:', msg);  // very spammy
+                                        
+                                        if (msg.status === 'need_credentials') {
+                                            // NS May 2026 — dialog may already be visible (we open
+                                            // it proactively after IP fetch). Refresh metadata.
+                                            // LW Oct 2026 (#1143) - the server's address is the
+                                            // one the shell logs in at, so it replaces ours
+                                            setNodeInfo({ node: msg.node, ip: msg.ip || '' });
+                                            setShowLogin(true);
+                                            setStatus('login');
+                                            return;
+                                        } else if (msg.status === 'connecting') {
+                                            term.write(`${t('sshConnecting')}\r\n`);
+                                            return;
+                                        } else if (msg.status === 'connected') {
+                                            setStatus('connected');
+                                            statusRef.current = 'connected';
+                                            term.clear();
+                                            // the PTY starts at 120x40, tell it the real size
+                                            if (handleResize) handleResize();
+                                            return;
+                                        } else if (msg.status === 'error') {
+                                            term.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`);
+                                            // a refusal before the login (no address for the node, say)
+                                            // stays readable instead of under the open dialog
+                                            setShowLogin(false);
+                                            setStatus('error');
+                                            // Show login again on auth failure
+                                            if (msg.message.includes('Login') || msg.message.includes('auth') || msg.message.includes('Host')) {
+                                                setTimeout(() => {
+                                                    setShowLogin(true);
+                                                    setStatus('login');
+                                                }, 1500);
+                                            }
+                                            return;
+                                        }
+                                    } catch (e) {
+                                        // Not valid JSON, write to terminal
+                                        term.write(data);
+                                    }
+                                } else {
+                                    // Regular string data
+                                    term.write(data);
+                                }
+                            } else if (data instanceof ArrayBuffer) {
+                                term.write(new TextDecoder().decode(data));
+                            } else if (data instanceof Blob) {
+                                data.arrayBuffer().then(buf => {
+                                    term.write(new TextDecoder().decode(buf));
+                                });
+                            }
+                        };
+
+                        ws.onerror = (err) => {
+                            console.error('WebSocket error:', err);
+                            if (!cleanup) {
+                                const isHttps = window.location.protocol === 'https:';
+                                const displayPort = sshPort || sshPortNum;
+                                
+                                // Get translated messages
+                                const errorTitle = t('wsConnectionFailed');
+                                const certTitle = t('certInstructions');
+                                const step1 = t('certStep1');
+                                const step2 = t('certStep2');
+                                const step3 = t('certStep3');
+                                const checkLogs = t('checkServerLogs');
+                                
+                                term.write('\r\n\x1b[31m═══════════════════════════════════════════\x1b[0m\r\n');
+                                term.write(`\x1b[31m  ${errorTitle}\x1b[0m\r\n`);
+                                term.write('\x1b[31m═══════════════════════════════════════════\x1b[0m\r\n\r\n');
+                                
+                                if (isHttps) {
+                                    term.write(`\x1b[33m⚠️  ${certTitle}\x1b[0m\r\n\r\n`);
+                                    term.write(`\x1b[36m${step1}\x1b[0m\r\n`);
+                                    term.write(`   \x1b[4mhttps://${window.location.hostname}:${displayPort}/\x1b[0m\r\n\r\n`);
+                                    term.write(`\x1b[36m${step2}\x1b[0m\r\n\r\n`);
+                                    term.write(`\x1b[36m${step3}\x1b[0m\r\n\r\n`);
+                                } else {
+                                    term.write(`\x1b[90m${checkLogs}\x1b[0m\r\n`);
+                                }
+                                setStatus('error');
+                            }
+                        };
+
+                        ws.onclose = (event) => {
+                            console.log('WebSocket closed:', event.code, event.reason);
+                            if (!cleanup) {
+                                // Different messages based on close code
+                                let msg = t('connectionClosed');
+                                if (event.code === 1006) {
+                                    msg = t('connectionLostUnexpected');
+                                } else if (event.code === 1011) {
+                                    msg = 'Server-Fehler';
+                                } else if (event.reason) {
+                                    msg = event.reason;
+                                }
+                                term.write(`\r\n\x1b[33m${msg}\x1b[0m\r\n`);
+                                term.write(`\x1b[90m(${t('switchTabToReconnect') || 'Switch tab and back to reconnect'})\x1b[0m\r\n`);
+                                setStatus('disconnected');
+                            }
+                        };
+
+                        // Terminal input -> WebSocket (only when connected)
+                        term.onData((data) => {
+                            if (ws && ws.readyState === WebSocket.OPEN && statusRef.current === 'connected') {
+                                ws.send(data);
+                            }
+                        });
+
+                        // handle resize
+                        // LW Oct 2026 (#1143) - also when only the box changes: fullscreen of the
+                        // panel around it resizes no window. The PTY hears of a new size once.
+                        let sentSize = '';
+                        handleResize = () => {
+                            if (fitAddon && term) {
+                                try { fitAddon.fit(); } catch (e) { return; }
+                                const size = `${term.cols}x${term.rows}`;
+                                if (ws && ws.readyState === WebSocket.OPEN && statusRef.current === 'connected' && size !== sentSize) {
+                                    sentSize = size;
+                                    ws.send(JSON.stringify({
+                                        type: 'resize',
+                                        cols: term.cols,
+                                        rows: term.rows
+                                    }));
+                                }
+                            }
+                        };
+                        window.addEventListener('resize', handleResize);
+                        if (window.ResizeObserver && terminalRef.current) {
+                            boxWatch = new ResizeObserver(() => handleResize && handleResize());
+                            boxWatch.observe(terminalRef.current);
+                        }
+
+                    } catch (err) {
+                        console.error('Terminal error:', err);
+                        setStatus('error');
+                    }
+                };
+
+                loadTerminal();
+
+                return () => {
+                    cleanup = true;
+                    if (handleResize) window.removeEventListener('resize', handleResize);
+                    handleResize = null;
+                    if (boxWatch) boxWatch.disconnect();
+                    if (ws) ws.close();
+                    if (term) term.dispose();
+                };
+            }, [node, clusterId]);
+
+            return(
+                <div className="w-full h-full relative">
+                    <div ref={terminalRef} className="w-full h-full" />
+                    
+                    {/* Loading overlay */}
+                    {status === 'loading' && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                            <div className="text-center">
+                                <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-2"></div>
+                                <span className="text-gray-400">Lade Terminal...</span>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Login form overlay - use fixed for reliable centering */}
+                    {showLogin && (
+                        <div data-shell-login className="fixed inset-0 flex items-center justify-center bg-black/90 z-[100] p-4">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md shadow-2xl max-h-[85vh] overflow-y-auto">
+                                <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                                    <Icons.Terminal />
+                                    SSH Login - {nodeInfo.node}
+                                </h3>
+                                
+                                {/* Host/IP - LW Oct 2026 (#1143) shown, not chosen: the server
+                                    opens the shell on the node's own address */}
+                                <div className="mb-4">
+                                    <label className="block text-gray-400 text-sm mb-1">
+                                        Host / IP
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={nodeInfo.ip || ''}
+                                        readOnly
+                                        data-shell-host
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-400 focus:outline-none font-mono cursor-default"
+                                        placeholder={t('nodeShellAddressFromServer')}
+                                    />
+                                </div>
+                                
+                                {/* Auth method tabs */}
+                                <div className="flex mb-4 bg-proxmox-dark rounded-lg p-1">
+                                    <button
+                                        onClick={() => setCredentials({...credentials, authMethod: 'password'})}
+                                        className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                                            credentials.authMethod === 'password'
+                                                ? 'bg-proxmox-orange text-white'
+                                                : 'text-gray-400 hover:text-white'
+                                        }`}
+                                    >
+                                        <Icons.Key className="inline w-4 h-4 mr-1" />
+                                        Password
+                                    </button>
+                                    <button
+                                        onClick={() => setCredentials({...credentials, authMethod: 'key'})}
+                                        className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-colors ${
+                                            credentials.authMethod === 'key'
+                                                ? 'bg-proxmox-orange text-white'
+                                                : 'text-gray-400 hover:text-white'
+                                        }`}
+                                    >
+                                        <Icons.FileKey className="inline w-4 h-4 mr-1" />
+                                        SSH Key
+                                    </button>
+                                </div>
+                                
+                                <div className="space-y-3">
+                                    <div>
+                                        <label className="block text-gray-400 text-sm mb-1">Username</label>
+                                        <input
+                                            type="text"
+                                            value={credentials.username}
+                                            onChange={(e) => setCredentials({...credentials, username: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none"
+                                            placeholder="root"
+                                        />
+                                    </div>
+                                    
+                                    {credentials.authMethod === 'password' ? (
+                                        <div>
+                                            <label className="block text-gray-400 text-sm mb-1">Password</label>
+                                            <input
+                                                type="password"
+                                                value={credentials.password}
+                                                onChange={(e) => setCredentials({...credentials, password: e.target.value})}
+                                                onKeyDown={(e) => e.key === 'Enter' && credentials.password && sendCredentials()}
+                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none"
+                                                placeholder="••••••••"
+                                            />
+                                        </div>
+                                    ) : (
+                                        <>
+                                            <div>
+                                                <label className="block text-gray-400 text-sm mb-1">
+                                                    Private Key
+                                                    <span className="text-gray-500 ml-1 text-xs">(id_rsa, id_ed25519, etc.)</span>
+                                                </label>
+                                                
+                                                {/* File upload area */}
+                                                <div 
+                                                    className="mb-2 border-2 border-dashed border-proxmox-border rounded-lg p-4 text-center cursor-pointer hover:border-proxmox-orange transition-colors"
+                                                    onClick={() => document.getElementById('ssh-key-file-input').click()}
+                                                    onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-proxmox-orange'); }}
+                                                    onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('border-proxmox-orange'); }}
+                                                    onDrop={(e) => {
+                                                        e.preventDefault();
+                                                        e.currentTarget.classList.remove('border-proxmox-orange');
+                                                        const file = e.dataTransfer.files[0];
+                                                        if (file) {
+                                                            const reader = new FileReader();
+                                                            reader.onload = (ev) => setCredentials({...credentials, privateKey: ev.target.result});
+                                                            reader.readAsText(file);
+                                                        }
+                                                    }}
+                                                >
+                                                    <div className="w-8 h-8 mx-auto mb-2 text-gray-500">
+                                                        <svg className="w-full h-full" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                                                        </svg>
+                                                    </div>
+                                                    <span className="text-gray-400 text-sm">{t('dropKeyFileHere') || 'Drop key file here or click'}</span>
+                                                    <input
+                                                        id="ssh-key-file-input"
+                                                        type="file"
+                                                        className="hidden"
+                                                        onChange={(e) => {
+                                                            const file = e.target.files[0];
+                                                            if (file) {
+                                                                const reader = new FileReader();
+                                                                reader.onload = (ev) => setCredentials({...credentials, privateKey: ev.target.result});
+                                                                reader.readAsText(file);
+                                                            }
+                                                        }}
+                                                    />
+                                                </div>
+                                                
+                                                {/* Textarea for paste/edit */}
+                                                <textarea
+                                                    value={credentials.privateKey}
+                                                    onChange={(e) => setCredentials({...credentials, privateKey: e.target.value})}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none font-mono text-xs resize-y"
+                                                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAA...&#10;-----END OPENSSH PRIVATE KEY-----"
+                                                    rows={8}
+                                                    style={{minHeight: '120px'}}
+                                                />
+                                                {credentials.privateKey && (
+                                                    <p className="text-xs text-green-400 mt-1">
+                                                        ✓ {t('keyLoaded') || 'Key loaded'} ({credentials.privateKey.split('\n').length} {t('lines') || 'lines'})
+                                                    </p>
+                                                )}
+                                            </div>
+                                            <div>
+                                                <label className="block text-gray-400 text-sm mb-1">
+                                                    {t('keyPassphrase') || 'Key Passphrase'} <span className="text-gray-500">({t('optional') || 'optional'})</span>
+                                                </label>
+                                                <input
+                                                    type="password"
+                                                    value={credentials.password}
+                                                    onChange={(e) => setCredentials({...credentials, password: e.target.value})}
+                                                    onKeyDown={(e) => e.key === 'Enter' && credentials.privateKey && sendCredentials()}
+                                                    className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white focus:border-proxmox-orange focus:outline-none"
+                                                    placeholder={t('ifKeyEncrypted') || 'If key is encrypted...'}
+                                                />
+                                            </div>
+                                        </>
+                                    )}
+                                    
+                                    <div className="flex gap-2 pt-2">
+                                        <button
+                                            onClick={() => {
+                                                setShowLogin(false);
+                                                setStatus('disconnected');
+                                                if (wsRef.current) wsRef.current.close();
+                                                if (termRef.current) termRef.current.write('\r\n\x1b[33mCancelled\x1b[0m\r\n');
+                                            }}
+                                            className="flex-1 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-500 transition-colors"
+                                        >
+                                            {t('cancel') || 'Cancel'}
+                                        </button>
+                                        <button
+                                            onClick={sendCredentials}
+                                            disabled={credentials.authMethod === 'password' ? !credentials.password : !credentials.privateKey}
+                                            className="flex-1 py-2 bg-proxmox-orange text-white rounded-lg hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            {t('connect') || 'Connect'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // LW Oct 2026 (#1143) - the node shell tab with its fullscreen. Fullscreen used to mount
+        // a second NodeShellTerminal on top: a second WebSocket and SSH login, the credentials
+        // asked again, no scrollback, and the first session left open underneath. Now the one
+        // terminal's box fills the window, as that overlay did, and the terminal refits itself
+        // to it (ResizeObserver). Not the browser's fullscreen: that keeps Escape for itself,
+        // and a shell needs it (vim, less). Escape stays the shell's, the button leaves.
+        function NodeShellPanel({ node, clusterId, addToast }) {
+            const { t } = useTranslation();
+            const [full, setFull] = useState(false);
+
+            // same tree in both states, so React keeps the terminal and its session
+            return (
+                <div data-node-shell={full ? 'window' : 'tab'}
+                    className={full ? 'fixed inset-0 z-[70] bg-black flex flex-col' : 'h-full flex flex-col'}>
+                    <div className={full ? 'flex items-center justify-between px-4 py-2 bg-proxmox-dark border-b border-proxmox-border' : 'flex items-center justify-between mb-4'}>
+                        <div className="flex items-center gap-3">
+                            <Icons.Terminal />
+                            <span className="text-white font-medium">{full ? `${node} - Shell` : 'Node Shell'}</span>
+                        </div>
+                        <button
+                            onClick={() => setFull(f => !f)}
+                            data-node-shell-toggle
+                            title={full ? t('exitFullscreen') : t('fullscreen')}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 hover:text-white text-sm"
+                        >
+                            {full ? <Icons.Minimize /> : <Icons.Maximize />}
+                            {full ? t('exitFullscreen') : t('fullscreen')}
+                        </button>
+                    </div>
+                    <div className={full ? 'flex-1 bg-black overflow-hidden' : 'flex-1 bg-black rounded-lg border border-proxmox-border overflow-hidden min-h-[400px]'}
+                        style={full ? { minHeight: 0 } : undefined}>
+                        <NodeShellTerminal node={node} clusterId={clusterId} addToast={addToast} />
+                    </div>
+                </div>
+            );
+        }
+
+        // NS May 2026 — Proxmox termproxy terminal (xterm.js native).
+        // Connects directly via PVE's built-in termproxy — no second SSH login.
+        // The PegaProx session is already authorized to act as the cluster
+        // user, so the backend WS proxy fetches a termproxy ticket and does
+        // the `user:ticket\n` handshake on our behalf.
+        //
+        // Wire protocol:
+        //   client → server: raw xterm input as text
+        //                    {type:'resize',cols,rows} as JSON for resize
+        //   server → client: raw TTY bytes (already framed by PVE → server)
+        //                    {status:'connected'|'error', ...} for control
+        function PveTermProxyTerminal({ vm, clusterId, addToast }) {
+            const { t } = useTranslation();
+            const containerRef = useRef(null);
+            const initRef = useRef(false);
+            const [status, setStatus] = useState('loading');
+            const wsRef = useRef(null);
+            const termRef = useRef(null);
+            const { sessionId, reverseProxyEnabled } = useAuth();
+
+            useEffect(() => {
+                if (initRef.current || !containerRef.current) return;
+                initRef.current = true;
+                let term = null, ws = null, fitAddon = null, cleanup = false;
+
+                const _airGap = (() => {
+                    try { return localStorage.getItem('pegaprox-air-gap') === '1'; }
+                    catch (_) { return false; }
+                })();
+
+                const loadXterm = async () => {
+                    if (!document.getElementById('xterm-css')) {
+                        const link = document.createElement('link');
+                        link.id = 'xterm-css'; link.rel = 'stylesheet';
+                        link.href = '/static/css/xterm.min.css';
+                        link.onerror = () => {
+                            if (!_airGap) link.href = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css';
+                        };
+                        document.head.appendChild(link);
+                    }
+                    if (!window.Terminal) {
+                        await new Promise((res, rej) => {
+                            const s = document.createElement('script');
+                            s.src = '/static/js/xterm.min.js';
+                            s.onload = res;
+                            s.onerror = () => {
+                                if (_airGap) { rej(new Error('xterm missing in air-gap mode')); return; }
+                                s.src = 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js';
+                                if (SRI_HASHES['xterm@5.3.0']) {
+                                    s.integrity = SRI_HASHES['xterm@5.3.0'];
+                                    s.crossOrigin = 'anonymous';
+                                }
+                                s.onload = res; s.onerror = rej;
+                            };
+                            document.head.appendChild(s);
+                        });
+                    }
+                    if (!window.FitAddon) {
+                        await new Promise((res, rej) => {
+                            const s = document.createElement('script');
+                            s.src = '/static/js/xterm-addon-fit.min.js';
+                            s.onload = res;
+                            s.onerror = () => {
+                                if (_airGap) { rej(new Error('xterm-addon-fit missing in air-gap mode')); return; }
+                                s.src = 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js';
+                                if (SRI_HASHES['xterm-addon-fit@0.8.0']) {
+                                    s.integrity = SRI_HASHES['xterm-addon-fit@0.8.0'];
+                                    s.crossOrigin = 'anonymous';
+                                }
+                                s.onload = res; s.onerror = rej;
+                            };
+                            document.head.appendChild(s);
+                        });
+                    }
+                };
+
+                const start = async () => {
+                    try {
+                        await loadXterm();
+                        if (cleanup) return;
+
+                        term = new window.Terminal({
+                            cursorBlink: true,
+                            fontSize: 14,
+                            fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+                            theme: { background: '#1a1a2e', foreground: '#e4e4e7', cursor: '#e4e4e7' },
+                        });
+                        termRef.current = term;
+                        fitAddon = new window.FitAddon.FitAddon();
+                        term.loadAddon(fitAddon);
+                        term.open(containerRef.current);
+                        setTimeout(() => fitAddon && fitAddon.fit(), 50);
+                        term.write(`${t('connectingWs') || 'Connecting'}...\r\n`);
+
+                        // Step 1: get PVE termproxy ticket via main app (server-side login)
+                        let termInfo = null;
+                        try {
+                            const r = await fetch(`${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termproxy`, {
+                                method: 'POST', credentials: 'include',
+                                headers: { 'X-Session-ID': sessionId },
+                            });
+                            if (!r.ok) {
+                                const e = await r.json().catch(() => ({}));
+                                throw new Error(e.error || `HTTP ${r.status}`);
+                            }
+                            termInfo = await r.json();
+                            if (!termInfo.success) throw new Error(termInfo.error || 'termproxy failed');
+                        } catch (e) {
+                            term.write(`\r\n\x1b[31mFailed to get termproxy ticket: ${e.message}\x1b[0m\r\n`);
+                            setStatus('error');
+                            return;
+                        }
+
+                        // Step 2: get short-lived WS token (avoids leaking session in URL)
+                        let wsToken = '';
+                        try {
+                            const r = await fetch(`${API_URL}/ws/token`, {
+                                method: 'POST', credentials: 'include',
+                                headers: { 'X-Session-ID': sessionId }
+                            });
+                            if (r.ok) wsToken = (await r.json()).token;
+                        } catch (_) {}
+
+                        // Step 3: open WS to standalone server (port +2)
+                        // Same server as /shellws — clean `websockets` lib, no flask-sock framing bug.
+                        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
+                        // MK 2026-06-11 (#539 markushergeth): this was gated on the
+                        // window.__pegaproxReverseProxy global, which isn't reliably set —
+                        // so behind a reverse proxy the term WS still went to main+2 (e.g.
+                        // :445) and Caddy/nginx couldn't route it. Key off reverseProxyEnabled
+                        // from the auth context like the VNC + node-shell paths already do.
+                        const sshPort = reverseProxyEnabled ? mainPort : (mainPort + 2);
+                        if (reverseProxyEnabled) console.log(`Using main port for Term (Reverse Proxy Enabled): ${sshPort}`);
+                        // NS 2026-06-05 (C-1): auth_ticket (cluster PVEAuthCookie) is
+                        // no longer passed through the browser — the WS server fetches
+                        // it server-side from the cluster context. Only the scoped
+                        // termproxy ticket travels here.
+                        const params = new URLSearchParams({
+                            token: wsToken,
+                            ticket: termInfo.ticket,
+                            port: String(termInfo.port),
+                            host: termInfo.host,
+                            user: termInfo.user || '',
+                        }).toString();
+                        const wsUrl = `${wsProto}//${window.location.hostname}:${sshPort}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/termwebsocket?${params}`;
+
+                        ws = new WebSocket(wsUrl);
+                        wsRef.current = ws;
+
+                        ws.onopen = () => { /* server will send 'connected' status JSON */ };
+                        ws.onmessage = (ev) => {
+                            const data = ev.data;
+                            // Try JSON status first
+                            if (typeof data === 'string' && data.length > 0 && data[0] === '{') {
+                                try {
+                                    const msg = JSON.parse(data);
+                                    if (msg.status === 'connected') {
+                                        setStatus('connected');
+                                        term.clear();
+                                        // initial resize
+                                        if (fitAddon && ws.readyState === WebSocket.OPEN) {
+                                            fitAddon.fit();
+                                            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+                                        }
+                                        return;
+                                    }
+                                    if (msg.status === 'error') {
+                                        term.write(`\r\n\x1b[31m${msg.message || 'Error'}\x1b[0m\r\n`);
+                                        setStatus('error');
+                                        return;
+                                    }
+                                } catch (_) { /* fall through, raw bytes */ }
+                            }
+                            // Raw TTY data → write to xterm
+                            if (typeof data === 'string') term.write(data);
+                            else if (data instanceof ArrayBuffer) term.write(new TextDecoder().decode(data));
+                            else if (data instanceof Blob) data.arrayBuffer().then(b => term.write(new TextDecoder().decode(b)));
+                        };
+                        ws.onerror = (ev) => {
+                            if (cleanup) return;
+                            console.error('[term] ws error:', ev);
+                            term.write('\r\n\x1b[31mWebSocket error\x1b[0m\r\n');
+                            setStatus('error');
+                        };
+                        ws.onclose = (ev) => {
+                            if (cleanup) return;
+                            // NS May 2026 — surface close code so debugging
+                            // a silent close (cert / route / auth) doesn't
+                            // require pulling browser devtools open every time.
+                            const code = ev && ev.code ? ev.code : '?';
+                            const reason = ev && ev.reason ? ` — ${ev.reason}` : '';
+                            term.write(`\r\n\x1b[33mSession ended (code ${code}${reason})\x1b[0m\r\n`);
+                            if (code === 1006) {
+                                term.write('\x1b[90m  → 1006 = abnormal closure. Likely route mismatch, untrusted cert, or backend exception.\x1b[0m\r\n');
+                            }
+                            setStatus('disconnected');
+                        };
+
+                        // Terminal input → PVE termproxy via server
+                        term.onData((d) => {
+                            if (ws.readyState === WebSocket.OPEN) ws.send(d);
+                        });
+                        const handleResize = () => {
+                            if (!fitAddon) return;
+                            fitAddon.fit();
+                            if (ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+                            }
+                        };
+                        window.addEventListener('resize', handleResize);
+                    } catch (err) {
+                        console.error('[term] startup error:', err);
+                        setStatus('error');
+                    }
+                };
+                start();
+                return () => {
+                    cleanup = true;
+                    if (ws) try { ws.close(); } catch (_) {}
+                    if (term) try { term.dispose(); } catch (_) {}
+                };
+            }, [vm.vmid, vm.node, vm.type, clusterId]);
+
+            return (
+                <div className="w-full h-full relative">
+                    <div ref={containerRef} className="w-full h-full" />
+                    {status === 'loading' && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/80">
+                            <div className="text-center">
+                                <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-2"></div>
+                                <span className="text-gray-400">{t('connectingWs') || 'Connecting'}…</span>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        // NS May 2026 — LXC container terminal modal. Uses Proxmox's built-in
+        // termproxy → no second login. Falls through to the same xterm.js the
+        // node shell uses, just over a different transport.
+        function LxcShellModal({ vm, clusterId, onClose, addToast }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout();
+            if (!vm || vm.type !== 'lxc') return null;
+            const title = vm.name ? `${vm.name} (CT ${vm.vmid})` : `CT ${vm.vmid}`;
+            return (
+                <div className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80"}>
+                    <div className={isCorporate
+                        ? "corp-vm-modal"
+                        : "w-full max-w-5xl h-[80vh] bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl overflow-hidden flex flex-col"}
+                        style={isCorporate ? {maxWidth: '1280px', width: '100%', height: '82vh', maxHeight: '82vh'} : undefined}>
+                        {isCorporate ? (
+                            <div className="corp-vm-modal-header">
+                                <div className="flex items-center gap-3 min-w-0 flex-1">
+                                    <Icons.Terminal className="w-5 h-5" style={{color: 'var(--corp-accent, #49afd9)'}} />
+                                    <div className="min-w-0">
+                                        <div className="corp-vm-modal-title truncate">{title}</div>
+                                        <div className="corp-vm-modal-meta">{t('lxcTerminal') || 'LXC Container Terminal'} · {vm.node}</div>
+                                    </div>
+                                </div>
+                                <div className="corp-vm-modal-actions">
+                                    <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex items-center justify-between px-4 py-3 border-b border-proxmox-border bg-proxmox-dark">
+                                <div className="flex items-center gap-3">
+                                    <Icons.Terminal />
+                                    <div>
+                                        <h2 className="font-semibold text-white">{title}</h2>
+                                        <p className="text-xs text-gray-400">{t('lxcTerminal') || 'LXC Container Terminal'} · {vm.node}</p>
+                                    </div>
+                                </div>
+                                <button onClick={onClose} className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400">
+                                    <Icons.X />
+                                </button>
+                            </div>
+                        )}
+                        <div className="flex-1 bg-black overflow-hidden" style={{minHeight: 0}}>
+                            <PveTermProxyTerminal vm={vm} clusterId={clusterId} addToast={addToast} />
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW May 2026 — SMART data viewer modal. Replaces the alert(JSON.stringify(...))
+        // call site that used to sit on every Disk row's SMART button. PVE returns
+        // one of two shapes from /nodes/<n>/disks/smart:
+        //   - SATA/SAS: { type: 'text'|'attributes', attributes: [...], health: 'PASSED' }
+        //   - NVMe:     { health, critical_warning, temperature, percentage_used, ... }
+        // We render both, with the raw blob in a collapsible <details> fallback.
+        function SmartModal({ modal, onClose, formatBytes }) {
+            const { t } = useTranslation();
+            const { disk, loading, data, error } = modal;
+            const health = data?.health || data?.attributes?.[0]?.health;
+            const isNvme = !!(data?.critical_warning !== undefined || data?.percentage_used !== undefined);
+            const attrs = Array.isArray(data?.attributes) ? data.attributes : [];
+
+            // LW: PVE returns 'PASSED' for SATA SMART, 'OK' for some SCSI/QEMU
+            // wrappers, 'FAILED' on actual fail. Anything else → yellow (unknown).
+            const healthUp = String(health || '').toUpperCase();
+            const healthColor = !health ? 'bg-gray-500/20 text-gray-400' :
+                                (healthUp === 'PASSED' || healthUp === 'OK') ? 'bg-green-500/20 text-green-400' :
+                                healthUp === 'FAILED' ? 'bg-red-500/20 text-red-400' :
+                                'bg-yellow-500/20 text-yellow-400';
+
+            // pick the few attribute IDs that operators actually look at first
+            // Reallocated_Sector_Ct, Current_Pending_Sector, Temperature_Celsius, Power_On_Hours,
+            // Wear_Leveling_Count (SSD), Media_Wearout_Indicator (Intel SSD), Reported_Uncorrect
+            const KEY_ATTRS = new Set(['5','187','188','190','194','197','198','233','177','231','202']);
+            const keyAttrs = attrs.filter(a => KEY_ATTRS.has(String(a.id)));
+            const otherAttrs = attrs.filter(a => !KEY_ATTRS.has(String(a.id)));
+
+            return (
+                <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                            <div>
+                                <h3 className="font-medium text-white flex items-center gap-2">
+                                    <Icons.Activity />
+                                    SMART — {disk.devpath}
+                                </h3>
+                                <div className="text-xs text-gray-500 mt-1">
+                                    {disk.model || 'Unknown model'}{disk.size ? ` · ${formatBytes(disk.size)}` : ''}{disk.serial ? ` · S/N ${disk.serial}` : ''}
+                                </div>
+                            </div>
+                            <button onClick={onClose} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                            {loading && (
+                                <div className="flex items-center justify-center h-32 text-gray-400">
+                                    <Icons.RotateCw className="w-5 h-5 animate-spin mr-2" />
+                                    {t('loading') || 'Loading…'}
+                                </div>
+                            )}
+
+                            {!loading && error && (
+                                <div className="bg-red-500/10 border border-red-500/30 rounded p-3 text-red-300 text-sm">
+                                    {t('smartFetchError') || 'Failed to fetch SMART data'}: {error}
+                                </div>
+                            )}
+
+                            {!loading && !error && data && (
+                                <>
+                                    <div className="flex items-center gap-4">
+                                        <span className="text-sm text-gray-400">{t('health') || 'Health'}</span>
+                                        <span className={`px-3 py-1 rounded text-sm font-medium ${healthColor}`}>
+                                            {health || 'N/A'}
+                                        </span>
+                                        {isNvme && <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-400">NVMe</span>}
+                                    </div>
+
+                                    {isNvme ? (
+                                        <table className="w-full text-sm">
+                                            <tbody>
+                                                {data.critical_warning !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400 w-1/3">Critical warning</td><td className="p-2 font-mono">{data.critical_warning}</td></tr>
+                                                )}
+                                                {data.temperature !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Temperature</td><td className="p-2 font-mono">{data.temperature} °C</td></tr>
+                                                )}
+                                                {data.percentage_used !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Wear used</td><td className="p-2 font-mono">{data.percentage_used}%</td></tr>
+                                                )}
+                                                {data.power_on_hours !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power-on hours</td><td className="p-2 font-mono">{data.power_on_hours} h</td></tr>
+                                                )}
+                                                {data.power_cycles !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Power cycles</td><td className="p-2 font-mono">{data.power_cycles}</td></tr>
+                                                )}
+                                                {data.unsafe_shutdowns !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Unsafe shutdowns</td><td className="p-2 font-mono">{data.unsafe_shutdowns}</td></tr>
+                                                )}
+                                                {data.media_errors !== undefined && (
+                                                    <tr className="border-t border-proxmox-border"><td className="p-2 text-gray-400">Media errors</td><td className="p-2 font-mono" style={{color: data.media_errors > 0 ? '#f87171' : ''}}>{data.media_errors}</td></tr>
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    ) : (
+                                        <>
+                                            {keyAttrs.length > 0 && (
+                                                <div>
+                                                    <div className="text-sm font-medium text-white mb-2">{t('keyAttributes') || 'Key attributes'}</div>
+                                                    <SmartAttrTable rows={keyAttrs} />
+                                                </div>
+                                            )}
+                                            {otherAttrs.length > 0 && (
+                                                <details>
+                                                    <summary className="cursor-pointer text-sm text-gray-400 hover:text-white py-1">
+                                                        {t('allAttributes') || 'All attributes'} ({otherAttrs.length})
+                                                    </summary>
+                                                    <div className="mt-2"><SmartAttrTable rows={otherAttrs} /></div>
+                                                </details>
+                                            )}
+                                            {!attrs.length && data?.type === 'text' && data?.text && (
+                                                <pre className="text-xs bg-proxmox-dark p-3 rounded overflow-x-auto whitespace-pre-wrap text-gray-300">{data.text}</pre>
+                                            )}
+                                        </>
+                                    )}
+
+                                    <details className="text-xs">
+                                        <summary className="cursor-pointer text-gray-500 hover:text-gray-300">Raw JSON</summary>
+                                        <pre className="mt-2 bg-proxmox-dark p-3 rounded overflow-x-auto text-gray-400">{JSON.stringify(data, null, 2)}</pre>
+                                    </details>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        function SmartAttrTable({ rows }) {
+            return (
+                <table className="w-full text-sm">
+                    <thead className="bg-proxmox-dark text-xs text-gray-400">
+                        <tr>
+                            <th className="text-left p-2">ID</th>
+                            <th className="text-left p-2">Attribute</th>
+                            <th className="text-right p-2">Value</th>
+                            <th className="text-right p-2">Worst</th>
+                            <th className="text-right p-2">Thresh</th>
+                            <th className="text-left p-2">Raw</th>
+                            <th className="text-left p-2">Flag</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((a, idx) => {
+                            // colour pending / reallocated counts when > 0
+                            const isCount = ['5','197','198'].includes(String(a.id));
+                            const rawNum = parseInt(a.raw || '0', 10);
+                            const danger = isCount && !isNaN(rawNum) && rawNum > 0;
+                            return (
+                                <tr key={a.id || idx} className="border-t border-proxmox-border">
+                                    <td className="p-2 text-gray-500 font-mono">{a.id}</td>
+                                    <td className="p-2 text-white">{a.name || a.attrname || '-'}</td>
+                                    <td className="p-2 text-right font-mono">{a.value ?? '-'}</td>
+                                    <td className="p-2 text-right font-mono text-gray-400">{a.worst ?? '-'}</td>
+                                    <td className="p-2 text-right font-mono text-gray-400">{a.threshold ?? a.thresh ?? '-'}</td>
+                                    <td className="p-2 font-mono" style={{color: danger ? '#f87171' : ''}}>{a.raw ?? '-'}</td>
+                                    <td className="p-2 text-xs text-gray-500">{a.flags || a.flag || ''}</td>
+                                </tr>
+                            );
+                        })}
+                    </tbody>
+                </table>
+            );
+        }
+
+        // LW Oct 2026 - one ZFS pool in full, from GET .../disks/zfs/<pool>: the devices with
+        // their state and error counts, the last scrub and the data errors. Modern opens it as
+        // a dialog over the node, Corporate as a panel under its pool table
+        function zfsTone(state) {
+            const s = String(state || '').toUpperCase();
+            if (s === 'ONLINE') return 'ok';
+            if (s === 'AVAIL' || s === 'INUSE') return 'idle';
+            if (s === 'DEGRADED') return 'warn';
+            return s ? 'bad' : 'none';
+        }
+
+        function ZfsPoolDetail({ clusterId, node, pool, corporate = false, onClose }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders } = useAuth();
+            const key = `${clusterId}/${node}/${pool}`;
+            const [view, setView] = useState({ key, loading: true, data: null, error: null });
+            const [reloads, setReloads] = useState(0);
+
+            useEffect(() => {
+                // an answer belongs to the pool it was asked for; a refresh keeps the last one up
+                let current = true;
+                setView(v => ({ key, loading: true, data: v.key === key ? v.data : null, error: null }));
+                const url = `${API_URL}/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node)}/disks/zfs/${encodeURIComponent(pool)}`;
+                fetch(url, { credentials: 'include', headers: getAuthHeaders() })
+                    .then(async res => {
+                        const body = await res.json().catch(() => ({}));
+                        if (!current) return;
+                        if (res.ok) setView({ key, loading: false, data: body, error: null });
+                        else setView({ key, loading: false, data: null, error: body.error || `HTTP ${res.status}` });
+                    })
+                    .catch(e => { if (current) setView({ key, loading: false, data: null, error: e.message || String(e) }); });
+                return () => { current = false; };
+            }, [key, reloads]);
+
+            const d = view.key === key ? view.data : null;
+            const tones = corporate
+                ? { ok: 'corp-badge corp-badge-online', warn: 'corp-badge corp-badge-maintenance', bad: 'corp-badge corp-badge-offline', idle: 'corp-badge corp-badge-stopped', none: '' }
+                : { ok: 'bg-green-500/20 text-green-400', warn: 'bg-yellow-500/20 text-yellow-400', bad: 'bg-red-500/20 text-red-400', idle: 'bg-gray-500/20 text-gray-400', none: '' };
+            const badge = (s) => s
+                ? <span data-zfs-state={s} className={corporate ? tones[zfsTone(s)] : `px-2 py-0.5 rounded text-xs font-medium ${tones[zfsTone(s)]}`}>{s}</span>
+                : null;
+            const red = corporate ? '#f54f47' : '#f87171';
+            const label = corporate ? 'text-[11px] mb-1' : 'text-xs text-gray-400 mb-1';
+            const labelStyle = corporate ? { color: 'var(--corp-text-secondary)' } : undefined;
+            const count = (n) => (n === null || n === undefined) ? '' : <span style={n > 0 ? { color: red, fontWeight: 600 } : undefined}>{n}</span>;
+
+            const scan = d ? d.scan || {} : {};
+            const scanKind = scan.kind === 'resilver' ? t('zfsResilver') : t('zfsScrub');
+            const scanSays = {
+                finished: 'zfsScanFinished', running: 'zfsScanRunning', paused: 'zfsScanPaused', canceled: 'zfsScanCanceled',
+            }[scan.state];
+            const scanLine = !scan.state || scan.state === 'none' ? t('zfsScanNone')
+                : scanSays ? t(scanSays).replace('{kind}', scanKind).replace('{when}', scan.when || '?')
+                : (scan.text || '-');
+
+            const rows = [];
+            const walk = (list, depth) => (list || []).forEach(v => { rows.push({ v, depth }); walk(v.children, depth + 1); });
+            if (d) walk(d.vdevs, 0);
+            const cell = corporate ? '' : 'p-2';
+
+            const body = (
+                <div className={corporate ? 'space-y-3 text-[12px]' : 'space-y-4 text-sm'} data-zfs-pool={pool}>
+                    {view.loading && !d && (
+                        <div className="flex items-center justify-center h-24 gap-2" style={labelStyle}>
+                            <Icons.RotateCw /> {t('loading')}
+                        </div>
+                    )}
+                    {view.error && (
+                        <div data-zfs-error className={corporate ? 'p-2' : 'bg-red-500/10 border border-red-500/30 rounded p-3 text-red-300'}
+                            style={corporate ? { color: red, border: '1px solid rgba(245,79,71,0.3)' } : undefined}>
+                            {t('zfsPoolUnreadable')}: {view.error}
+                        </div>
+                    )}
+                    {d && (
+                        <>
+                            <div className="flex items-center gap-3 flex-wrap">
+                                {badge(d.state)}
+                                {(d.devices || []).length > 0 && (
+                                    <span data-zfs-problems style={{ color: red }}>{t('zfsProblemDevices').replace('{n}', d.devices.length)}</span>
+                                )}
+                            </div>
+                            {d.status && (
+                                <div>
+                                    <div className={label} style={labelStyle}>{t('status')}</div>
+                                    <div data-zfs-status>{d.status}</div>
+                                </div>
+                            )}
+                            {d.action && (
+                                <div>
+                                    <div className={label} style={labelStyle}>{t('zfsPoolAction')}</div>
+                                    <div>{d.action}</div>
+                                </div>
+                            )}
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <div data-zfs-scan>
+                                    <div className={label} style={labelStyle}>{t('zfsLastScan')}</div>
+                                    <div title={scan.text || ''}>{scanLine}</div>
+                                    {scan.state === 'finished' && (
+                                        <div className={corporate ? 'mt-1' : 'mt-1 text-xs text-gray-400'} style={scan.errors > 0 ? { color: red } : labelStyle}>
+                                            {t('zfsScanResult').replace('{repaired}', scan.repaired || '0B').replace('{errors}', scan.errors ?? 0).replace('{duration}', scan.duration || '?')}
+                                        </div>
+                                    )}
+                                    {scan.state === 'running' && typeof scan.progress === 'number' && (
+                                        <div className="mt-2 flex items-center gap-2">
+                                            <div className="flex-1 h-2 rounded-full overflow-hidden" style={{ background: corporate ? 'var(--corp-surface-2)' : 'rgba(255,255,255,0.08)' }}>
+                                                <div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.max(0, Math.min(100, scan.progress))}%` }} />
+                                            </div>
+                                            <span className="text-xs" style={labelStyle}>{scan.progress}%</span>
+                                        </div>
+                                    )}
+                                </div>
+                                <div data-zfs-data-errors>
+                                    <div className={label} style={labelStyle}>{t('zfsDataErrors')}</div>
+                                    {d.data_errors
+                                        ? <div style={{ color: red }}>{d.data_errors}</div>
+                                        : <div style={{ color: corporate ? '#60b515' : '#4ade80' }}>{t('zfsNoDataErrors')}</div>}
+                                </div>
+                            </div>
+                            <div>
+                                <div className={label} style={labelStyle}>{t('zfsDevices')}</div>
+                                <div className="overflow-x-auto">
+                                    <table className={corporate ? 'corp-datagrid' : 'w-full text-sm'}>
+                                        <thead className={corporate ? '' : 'bg-proxmox-dark text-xs text-gray-400'}>
+                                            <tr>
+                                                <th className={corporate ? '' : 'text-left p-2'}>{t('name')}</th>
+                                                <th className={corporate ? '' : 'text-left p-2'}>{t('zfsColState')}</th>
+                                                <th className={corporate ? '' : 'text-right p-2'}>{t('zfsColRead')}</th>
+                                                <th className={corporate ? '' : 'text-right p-2'}>{t('zfsColWrite')}</th>
+                                                <th className={corporate ? '' : 'text-right p-2'}>{t('zfsColChecksum')}</th>
+                                                <th className={corporate ? '' : 'text-left p-2'}>{t('zfsColNote')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {rows.map(({ v, depth }, i) => (
+                                                <tr key={i} data-zfs-vdev={v.name} className={corporate ? '' : 'border-t border-proxmox-border'}>
+                                                    <td className={cell} style={{ paddingLeft: `${8 + depth * 16}px` }}>
+                                                        <span className="font-mono text-xs" style={!v.state ? labelStyle || { color: '#9ca3af' } : undefined}>{v.name}</span>
+                                                    </td>
+                                                    <td className={cell}>{badge(v.state)}</td>
+                                                    <td className={`${cell} text-right font-mono`}>{count(v.read)}</td>
+                                                    <td className={`${cell} text-right font-mono`}>{count(v.write)}</td>
+                                                    <td className={`${cell} text-right font-mono`}>{count(v.cksum)}</td>
+                                                    <td className={`${cell} text-xs`} style={labelStyle}>{v.msg}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                {d.truncated && <div className="mt-2 text-xs" style={labelStyle}>{t('zfsTruncated')}</div>}
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+
+            if (corporate) return (
+                <div data-zfs-panel className="mt-3" style={{ background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)' }}>
+                    <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: '1px solid var(--corp-border-medium)' }}>
+                        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text)' }}>ZFS {pool} <span style={labelStyle}>({node})</span></span>
+                        <div className="flex items-center gap-2">
+                            <button onClick={() => setReloads(n => n + 1)} disabled={view.loading} title={t('refresh')}
+                                className="px-2 py-1 text-[11px] flex items-center gap-1 disabled:opacity-40" style={{ color: '#49afd9', border: '1px solid #485764' }}>
+                                <Icons.RefreshCw /> {t('refresh')}
+                            </button>
+                            <button onClick={onClose} title={t('close')} className="px-2 py-1 text-[11px]" style={{ color: 'var(--corp-text-secondary)', border: '1px solid #485764' }}>
+                                <Icons.X />
+                            </button>
+                        </div>
+                    </div>
+                    <div className="p-3">{body}</div>
+                </div>
+            );
+            return (
+                <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+                    <div data-zfs-panel className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                            <div>
+                                <h3 className="font-medium text-white flex items-center gap-2">
+                                    <Icons.Database />
+                                    ZFS {pool}
+                                </h3>
+                                <div className="text-xs text-gray-500 mt-1">{node}</div>
+                            </div>
+                            <div className="flex items-center gap-1">
+                                <button onClick={() => setReloads(n => n + 1)} disabled={view.loading} title={t('refresh')}
+                                    className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white disabled:opacity-40">
+                                    <Icons.RefreshCw />
+                                </button>
+                                <button onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                            </div>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4">{body}</div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW Oct 2026 (#1137) - the QDevice of a cluster as GET /clusters/<id>/qdevice has it: what
+        // the QDevice daemon of each node PegaProx reaches says. Shows only, on every instance; the
+        // QNetd host is no Proxmox node, there is nothing of it to act on from here.
+        function qdeviceTone(q) {
+            const answered = ((q && q.nodes) || []).filter(n => n.answered);
+            // stale: the last read failed, what is kept says nothing about now
+            if (!q || !q.present || q.stale || !answered.length) return 'none';
+            const up = answered.filter(n => n.connected).length;
+            return up === answered.length ? 'ok' : up === 0 ? 'bad' : 'warn';
+        }
+        const QDEVICE_TONES = { ok: '#60b515', warn: '#efc006', bad: '#f54f47', none: '#728b9a' };
+
+        function qdeviceConnectedText(q, t) {
+            if (q && q.stale) return t('qdeviceStale');
+            const answered = ((q && q.nodes) || []).filter(n => n.answered);
+            return t('qdeviceConnectedOf').replace('{up}', answered.filter(n => n.connected).length).replace('{n}', answered.length);
+        }
+
+        function QdeviceDot({ q }) {
+            const { t } = useTranslation();
+            const tone = qdeviceTone(q);
+            return <span data-qdevice-dot={tone} title={qdeviceConnectedText(q, t)} className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: QDEVICE_TONES[tone] }} />;
+        }
+
+        function QdeviceDetail({ q, clusterName, corporate = false, onClose }) {
+            const { t } = useTranslation();
+            const d = q && q.present ? q : null;
+            const muted = corporate ? { color: 'var(--corp-text-secondary)' } : undefined;
+            const nodeState = (n) => {
+                if (!n.asked) return { tone: 'none', text: n.online ? t('qdeviceNotAsked') : t('offline') };
+                if (!n.answered) return { tone: 'none', text: n.error ? `${t('qdeviceNoAnswer')} (${n.error})` : t('qdeviceNoAnswer') };
+                if (!n.present) return { tone: 'bad', text: t('qdeviceNoDaemon') };
+                return { tone: n.connected ? 'ok' : 'bad', text: n.state || '-' };
+            };
+            const fields = d ? [
+                ['qnetd_host', t('qdeviceQnetdHost'), d.qnetd_host],
+                ['state', t('qdeviceState'), d.state],
+                ['model', t('qdeviceModel'), d.model],
+                ['algorithm', t('qdeviceAlgorithm'), d.algorithm],
+                ['tie_breaker', t('qdeviceTieBreaker'), d.tie_breaker],
+                ['last_poll', t('qdeviceLastPoll'), d.last_poll],
+                ['echo_reply', t('qdeviceEchoReply'), d.echo_reply],
+                ['answered_by', t('qdeviceAnsweredBy'), d.answered_by],
+            ] : [];
+            const readAt = d && d.read_at ? new Date(d.read_at) : null;
+            const readText = readAt && !isNaN(readAt.getTime()) ? `${t('qdeviceReadAt')} ${readAt.toLocaleTimeString()}` : '';
+            const note = (
+                <div data-qdevice-note className={corporate ? 'flex items-start gap-2 p-2 text-[12px]' : 'flex items-start gap-2 bg-blue-500/10 border border-blue-500/30 rounded p-3 text-sm text-gray-300'}
+                    style={corporate ? { border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)' } : undefined}>
+                    <Icons.Info />
+                    <span>{t('qdeviceNote')}</span>
+                </div>
+            );
+            const staleNote = d && d.stale ? (
+                <div data-qdevice-stale="" className={corporate ? 'p-2 text-[12px]' : 'bg-yellow-500/10 border border-yellow-500/30 rounded p-3 text-sm text-yellow-300'}
+                    style={corporate ? { border: '1px solid var(--color-warning)', color: 'var(--color-warning)' } : undefined}>
+                    {t('qdeviceStale')}
+                </div>
+            ) : null;
+            const rows = ((d && d.nodes) || []).map(n => {
+                const s = nodeState(n);
+                const cell = corporate ? '' : 'p-2';
+                return (
+                    <tr key={n.node} data-qdevice-node={n.node} className={corporate ? '' : 'border-t border-proxmox-border'}>
+                        <td className={cell}>
+                            {n.node}{n.api_host && <span className="ml-2 text-xs" style={muted || { color: '#9ca3af' }}>({t('qdeviceApiHost')})</span>}
+                        </td>
+                        <td className={cell}>
+                            <span className="flex items-center gap-2">
+                                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: QDEVICE_TONES[s.tone] }} />
+                                <span data-qdevice-node-state>{s.text}</span>
+                            </span>
+                        </td>
+                        <td className={`${cell} text-xs`} style={muted}>{n.last_poll || '-'}</td>
+                        <td className={`${cell} text-xs`} style={muted}>{n.echo_reply || '-'}</td>
+                    </tr>
+                );
+            });
+            const table = (
+                <div className="overflow-x-auto">
+                    <table className={corporate ? 'corp-datagrid' : 'w-full text-sm'}>
+                        <thead className={corporate ? '' : 'bg-proxmox-dark text-xs text-gray-400'}>
+                            <tr>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('node')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceState')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceLastPoll')}</th>
+                                <th className={corporate ? '' : 'text-left p-2'}>{t('qdeviceEchoReply')}</th>
+                            </tr>
+                        </thead>
+                        <tbody>{rows}</tbody>
+                    </table>
+                </div>
+            );
+
+            if (corporate) return (
+                <div className="space-y-0" data-qdevice-view="">
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{ background: 'var(--corp-header-bg)' }}>
+                        <div className="flex items-center gap-2">
+                            <button onClick={onClose} className="p-1 hover:text-white" style={{ color: 'var(--corp-text-secondary)' }} title={t('backToList')}>
+                                <Icons.ChevronLeft className="w-4 h-4" />
+                            </button>
+                            <span className="flex" style={{ color: '#49afd9' }}><Icons.Scale className="w-4 h-4" /></span>
+                            <span className="text-[14px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdeviceTitle')}</span>
+                            <span className="text-[12px]" style={muted}>{clusterName}</span>
+                            <QdeviceDot q={q} />
+                        </div>
+                        <span className="text-[11px]" style={{ color: 'var(--corp-text-muted)' }}>{readText}</span>
+                    </div>
+                    <div className="p-4 space-y-4">
+                        {note}
+                        {staleNote}
+                        {!d &&<div className="text-[13px]" style={muted}>{t('qdeviceNoDaemon')}</div>}
+                        {d && (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <div style={{ border: '1px solid var(--corp-border-medium)' }}>
+                                    <div className="px-3 py-2" style={{ background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)' }}>
+                                        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdeviceTitle')}</span>
+                                    </div>
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            {fields.map(([k, label, v]) => <tr key={k} data-qdevice-field={k}><td>{label}</td><td>{v || '-'}</td></tr>)}
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <div style={{ border: '1px solid var(--corp-border-medium)' }}>
+                                    <div className="px-3 py-2" style={{ background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)' }}>
+                                        <span className="text-[13px] font-medium" style={{ color: 'var(--color-text)' }}>{t('qdevicePerNode')}</span>
+                                    </div>
+                                    {table}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+            return (
+                <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+                    <div data-qdevice-view="" className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                            <div>
+                                <h3 className="font-medium text-white flex items-center gap-2">
+                                    <Icons.Scale />
+                                    {t('qdeviceTitle')}
+                                    <QdeviceDot q={q} />
+                                </h3>
+                                <div className="text-xs text-gray-500 mt-1">{clusterName}{readText ? ` - ${readText}` : ''}</div>
+                            </div>
+                            <button onClick={onClose} title={t('close')} className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"><Icons.X /></button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">
+                            {note}
+                            {staleNote}
+                            {!d &&<div className="text-gray-400">{t('qdeviceNoDaemon')}</div>}
+                            {d && (
+                                <>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {fields.map(([k, label, v]) => (
+                                            <div key={k} data-qdevice-field={k}>
+                                                <div className="text-xs text-gray-400 mb-1">{label}</div>
+                                                <div className="text-white">{v || '-'}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div>
+                                        <div className="text-xs text-gray-400 mb-1">{t('qdevicePerNode')}</div>
+                                        {table}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // Node Management Modal Component
+        // NS: Full node management - shell, network, disks, etc.
+        // Shell tab uses xterm.js (web terminal), pretty cool
+        // LW: I did the UI, Marcus handled the backend websocket stuff
+        function NodeModal({ node, clusterId, clusterType, onClose, addToast }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, haReadOnly, haConsolesElsewhere } = useAuth();  // NS: Fix - need auth!
+            const { isCorporate } = useLayout();
+            const [activeTab, setActiveTab] = useState('summary');
+            const [loading, setLoading] = useState(true);
+            const [data, setData] = useState({});
+            const isXcpng = clusterType === 'xcpng';
+
+            // NS: Disk creation modal state - Dec 2025
+            const [diskModal, setDiskModal] = useState({ open: false, type: null });
+            const [diskForm, setDiskForm] = useState({
+                device: '', name: '', vgname: '', thinpool: '',
+                devices: [], raidlevel: 'single', compression: 'on', ashift: 12,
+                filesystem: 'ext4', add_storage: true,
+                // XCP-ng SR fields
+                sr_type: 'nfs', server: '', path: '', nfsversion: '3',
+                target: '', iqn: '', scsi_id: '', port: '3260',
+                chap_user: '', chap_pass: '',
+            });
+            const [diskCreating, setDiskCreating] = useState(false);
+            const [perfTimeframe, setPerfTimeframe] = useState('hour'); // NS: For performance metrics
+            // LW May 2026 — SMART modal state (replaces ugly alert(JSON.stringify) call site)
+            const [smartModal, setSmartModal] = useState(null); // { disk, loading, data, error }
+            const [zfsPool, setZfsPool] = useState(null);  // the ZFS pool shown in full
+
+            const authHeaders = getAuthHeaders();  // NS: Get auth headers
+
+            // LW Oct 2026 - the performance charts zoom together, finer data for a narrow range
+            const perfFetch = u => fetch(u, { credentials: 'include', headers: authHeaders }).then(r => r.ok ? r.json() : null);
+            const perfZoom = useChartZoom({
+                preset: perfTimeframe, loaded: data.performance, resetKey: `${clusterId}/${node}`,
+                loadPreset: tf => perfFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf}`),
+                loadRange: (from, to) => perfFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`),
+            });
+            const perfNet = perfZoom.source('net_in', 'net_out');
+            const perfPsi = {
+                cpu: perfZoom.source('pressurecpusome', 'pressurecpufull'),
+                memory: perfZoom.source('pressurememorysome', 'pressurememoryfull'),
+                io: perfZoom.source('pressureiosome', 'pressureiofull'),
+            };
+
+            // LW: XCP-ng doesn't have Ceph, repos differ, subscription not applicable
+            const allTabs = isXcpng ? [
+                { id: 'summary', label: 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
+                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
+                { id: 'network', label: 'Network', icon: Icons.Network },
+                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'disks', label: t('storageRepos') || 'Storage', icon: Icons.HardDrive },
+                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
+            ] : [
+                { id: 'summary', label: 'Summary', icon: Icons.Activity },
+                { id: 'performance', label: 'Performance', icon: Icons.BarChart },
+                { id: 'shell', label: 'Shell', icon: Icons.Terminal },
+                { id: 'network', label: 'Network', icon: Icons.Network },
+                { id: 'system', label: 'System', icon: Icons.Cog },
+                { id: 'hardware', label: t('hardware') || 'Hardware', icon: Icons.Cpu },
+                { id: 'disks', label: 'Disks', icon: Icons.HardDrive },
+                { id: 'repos', label: 'Repositories', icon: Icons.Package },
+                { id: 'tasks', label: 'Tasks', icon: Icons.Play },
+                // LW Oct 2026 - what happened on this node, from the flight recorder
+                { id: 'timeline', label: t('tlTab'), icon: Icons.Clock },
+                { id: 'subscription', label: 'Subscription', icon: Icons.Shield },
+                { id: 'ceph', label: 'Ceph', icon: Icons.Database },
+            ];
+            // #625 v2 - a standby shows the node but changes nothing on it: every tab that can
+            // change something renders with its controls disabled. A forwarding standby
+            // changes it through the active, so only a read-only one locks them. The shell
+            // tab points to the shell on the active instead, unless this one serves users.
+            const tabs = allTabs;
+            const lockedTab = haReadOnly && !['summary', 'performance', 'tasks', 'timeline'].includes(activeTab);
+            // spread on the fieldsets around the parts that change the node; what only reads
+            // (Refresh, SMART) sits outside them and keeps working on a standby
+            const haLock = { disabled: lockedTab, 'data-ha-locked': lockedTab ? '' : undefined };
+
+            useEffect(() => { loadTabData(activeTab); }, [activeTab, perfTimeframe]);
+
+            const loadTabData = async (tab) => {
+                // LW Oct 2026 (#1143) - the shell loads nothing here, and the spinner in between
+                // unmounted its terminal right after it mounted: two sessions per visit
+                // the timeline loads itself (TimelineView)
+                if (tab === 'shell' || tab === 'timeline') return;
+                setLoading(true);
+                try {
+                    const endpoints = {
+                        summary: [`${API_URL}/clusters/${clusterId}/nodes/${node}/summary`],
+                        performance: [`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${perfTimeframe}`],
+                        network: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/network`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/netstats`,
+                        ],
+                        system: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/dns`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/hosts`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/temperature-history`,
+                        ],
+                        disks: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/lvm`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/lvmthin`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/zfs`,
+                        ],
+                        repos: [`${API_URL}/clusters/${clusterId}/nodes/${node}/repos`],
+                        tasks: [`${API_URL}/clusters/${clusterId}/nodes/${node}/tasks?limit=50`],
+                        subscription: [`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`],
+                        ceph: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/status`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/osd`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/mon`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/pool`,
+                        ],
+                    };
+                    const urls = endpoints[tab] || [];
+                    // LW Nov 2026 (#1218) - the status of each answer, so a refusal is not read as "nothing there"
+                    const statuses = [];
+                    // NS: Fixed - now using auth headers and credentials!
+                    const results = await Promise.all(urls.map((u, i) => u.endsWith('/dns')
+                        ? fetch(u, { credentials: 'include', headers: authHeaders }).catch(() => null).then(readNodeDns)
+                        : fetch(u, { credentials: 'include', headers: authHeaders }).then(r => { statuses[i] = r.status; return r.ok ? r.json() : null; }).catch(() => null)));
+
+                    const newData = { ...data };
+                    if (tab === 'summary') newData.summary = results[0];
+                    else if (tab === 'network') {
+                        newData.network = results[0];
+                        // MK: netstats may 502 if SSH path is unavailable; fall back to null
+                        newData.netstats = (results[1] && results[1].interfaces) ? results[1].interfaces : null;
+                    }
+                    else if (tab === 'system') {
+                        newData.dns = results[0].dns;
+                        newData.dnsError = results[0].dnsError;
+                        newData.hosts = typeof results[1]?.data === 'string' ? results[1].data : null;
+                        newData.time = results[2] || {};
+                        newData.syslog = results[3] || [];
+                        newData.certificates = results[4] || [];
+                        newData.clusterHealth = (results[5] && !results[5].error) ? results[5] : null;
+                        newData.sensors = (results[6] && Array.isArray(results[6].sensors)) ? results[6].sensors : null;
+                        newData.tempHistory = (results[7] && Array.isArray(results[7].series)) ? results[7].series : null;  // #601
+                    }
+                    else if (tab === 'disks') {
+                        newData.disks = results[0] || [];
+                        newData.lvm = nodeLvmVgs(results[1]);
+                        newData.lvmthin = nodeThinPools(results[2]);
+                        newData.zfs = results[3] || [];
+                    }
+                    else if (tab === 'performance') newData.performance = results[0] || {};
+                    else if (tab === 'repos') newData.repos = results[0]?.repositories || [];
+                    else if (tab === 'tasks') newData.tasks = results[0] || [];
+                    else if (tab === 'subscription') newData.subscription = results[0] || {};
+                    else if (tab === 'ceph') {
+                        // Ceph might not be installed - handle gracefully
+                        newData.ceph = {
+                            status: results[0],
+                            osd: results[1] || [],
+                            mon: results[2] || [],
+                            pools: results[3] || [],
+                            available: results[0] !== null,
+                            // an account confined to some guests is refused the cluster's Ceph: no "not installed"
+                            denied: statuses[0] === 403
+                        };
+                    }
+                    setData(newData);
+                } catch (e) { console.error(e); }
+                setLoading(false);
+            };
+
+            // NS: minified helpers for this component, dont judge me
+            const formatBytes = (b) => { if(!b)return'0 B';const k=1024,s=['B','KB','MB','GB','TB'],i=Math.floor(Math.log(b)/Math.log(k));return(b/Math.pow(k,i)).toFixed(1)+' '+s[i]; };
+            const formatUptime = (s) => { if(!s)return'0s';const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);return`${d}d ${h}h ${m}m`; };
+
+            const handleSave = async (endpoint, payload, msg) => {
+                try {
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/${endpoint}`, {
+                        credentials: 'include',
+                        method: endpoint.includes('hosts') ? 'POST' : 'PUT',
+                        headers: { 'Content-Type': 'application/json', ...authHeaders },
+                        body: JSON.stringify(payload)
+                    });
+                    addToast(res.ok ? msg : t('error') || 'Error', res.ok ? 'success' : 'error');
+                    if (res.ok) loadTabData(activeTab);
+                } catch (e) { addToast(t('error') || 'Error', 'error'); }
+            };
+            
+            // NS: Disk creation functions - Dec 2025
+            const unusedDisks = (data.disks || []).filter(d => d.used === 'unused' || !d.used);
+            
+            const openDiskModal = async (type) => {
+                setDiskForm({
+                    device: '', name: '', vgname: '', thinpool: '',
+                    devices: [], raidlevel: 'single', compression: 'on', ashift: 12,
+                    filesystem: 'ext4', add_storage: true,
+                    sr_type: 'nfs', server: '', path: '', nfsversion: '3',
+                    target: '', iqn: '', scsi_id: '', port: '3260',
+                    chap_user: '', chap_pass: '',
+                });
+                // NS: Make sure disk data is loaded before opening modal
+                if (!data.disks || data.disks.length === 0) {
+                    await loadTabData('disks');
+                }
+                setDiskModal({ open: true, type });
+            };
+            
+            const createDisk = async () => {
+                const { type } = diskModal;
+                let endpoint, body;
+                
+                if (type === 'lvm') {
+                    if (!diskForm.device || !diskForm.name) {
+                        addToast('Device and name required', 'error');
+                        return;
+                    }
+                    endpoint = 'disks/lvm';
+                    body = { device: diskForm.device, name: diskForm.name, add_storage: diskForm.add_storage };
+                } else if (type === 'lvmthin') {
+                    // NS: For LVM-thin, device = VG name where thin pool is created
+                    if (!diskForm.vgname || !diskForm.name) {
+                        addToast('Volume group and pool name required', 'error');
+                        return;
+                    }
+                    endpoint = 'disks/lvmthin';
+                    body = { device: diskForm.vgname, name: diskForm.name, add_storage: diskForm.add_storage };
+                } else if (type === 'zfs') {
+                    if (diskForm.devices.length === 0 || !diskForm.name) {
+                        addToast('Device(s) and name required', 'error');
+                        return;
+                    }
+                    endpoint = 'disks/zfs';
+                    body = { 
+                        devices: diskForm.devices, 
+                        name: diskForm.name, 
+                        raidlevel: diskForm.raidlevel,
+                        compression: diskForm.compression,
+                        ashift: diskForm.ashift,
+                        add_storage: diskForm.add_storage 
+                    };
+                } else if (type === 'directory') {
+                    if (!diskForm.device || !diskForm.name) {
+                        addToast('Device and name required', 'error');
+                        return;
+                    }
+                    endpoint = 'disks/directory';
+                    body = { device: diskForm.device, name: diskForm.name, filesystem: diskForm.filesystem, add_storage: diskForm.add_storage };
+                } else if (type === 'sr') {
+                    // XCP-ng SR creation
+                    if (!diskForm.name) {
+                        addToast('Name required', 'error');
+                        return;
+                    }
+                    endpoint = 'sr/create';
+                    body = { type: diskForm.sr_type, name: diskForm.name };
+                    if (diskForm.sr_type === 'nfs') {
+                        if (!diskForm.server || !diskForm.path) { addToast('NFS server and path required', 'error'); return; }
+                        body.server = diskForm.server;
+                        body.path = diskForm.path;
+                        body.nfsversion = diskForm.nfsversion;
+                    } else if (diskForm.sr_type === 'iscsi') {
+                        if (!diskForm.target || !diskForm.iqn || !diskForm.scsi_id) { addToast('Target, IQN and SCSI ID required', 'error'); return; }
+                        body.target = diskForm.target;
+                        body.iqn = diskForm.iqn;
+                        body.scsi_id = diskForm.scsi_id;
+                        body.port = diskForm.port || 3260;
+                        if (diskForm.chap_user) { body.chap_user = diskForm.chap_user; body.chap_pass = diskForm.chap_pass; }
+                    } else if (diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') {
+                        if (!diskForm.device) { addToast('Device required', 'error'); return; }
+                        body.device = diskForm.device;
+                    }
+                }
+
+                if (!endpoint) {
+                    addToast('Unknown storage type', 'error');
+                    return;
+                }
+                
+                setDiskCreating(true);
+                try {
+                    console.log('Creating disk:', endpoint, body);
+                    const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/${endpoint}`, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body)
+                    });
+                    const result = await res.json();
+                    console.log('Create disk response:', res.status, result);
+                    
+                    if (res.ok) {
+                        addToast(`${type.toUpperCase()} created successfully`, 'success');
+                        setDiskModal({ open: false, type: null });
+                        await loadTabData('disks');
+                    } else {
+                        addToast(result.error || 'Failed to create', 'error');
+                    }
+                } catch (e) {
+                    console.error('Error creating storage:', e);
+                    addToast('Error creating storage', 'error');
+                } finally {
+                    setDiskCreating(false);
+                }
+            };
+            
+            // Disk Create Modal Component
+            const DiskCreateModal = () => {
+                if (!diskModal.open) return null;
+                const { type } = diskModal;
+                
+                return (
+                    // NS Apr 2026 (#323): native <select> dropdowns in fixed-position modals
+                    // bubble click events up to the backdrop when an <option> is picked, which
+                    // used to close this modal immediately. Using onMouseDown + currentTarget
+                    // check so only actual backdrop drags trigger close.
+                    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70"
+                         onMouseDown={(e) => { if (e.target === e.currentTarget) setDiskModal({ open: false, type: null }); }}>
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-lg" onMouseDown={e => e.stopPropagation()}>
+                            <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                <h3 className="font-semibold text-white">
+                                    {type === 'sr' && (t('createSr') || 'Create Storage Repository')}
+                                    {type === 'lvm' && 'Create LVM Volume Group'}
+                                    {type === 'lvmthin' && 'Create LVM-Thin Pool'}
+                                    {type === 'zfs' && 'Create ZFS Pool'}
+                                    {type === 'directory' && 'Create Directory Storage'}
+                                </h3>
+                                <button onClick={() => setDiskModal({ open: false, type: null })} className="p-1 hover:bg-proxmox-dark rounded"><Icons.X /></button>
+                            </div>
+                            
+                            <div className="p-4 space-y-4">
+                                {/* XCP-ng SR Creation Form */}
+                                {type === 'sr' && (
+                                    <>
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('srType') || 'SR Type'} *</label>
+                                            <select value={diskForm.sr_type} onChange={e => setDiskForm({...diskForm, sr_type: e.target.value})}
+                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                <option value="nfs">NFS</option>
+                                                <option value="iscsi">iSCSI (LVM over iSCSI)</option>
+                                                <option value="lvm">Local LVM</option>
+                                                <option value="ext">Local EXT</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm text-gray-400 mb-1">{t('name')} *</label>
+                                            <input type="text" value={diskForm.name} onChange={e => setDiskForm({...diskForm, name: e.target.value})}
+                                                placeholder="my-storage" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                        </div>
+                                        {diskForm.sr_type === 'nfs' && (
+                                            <>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">NFS Server *</label>
+                                                        <input type="text" value={diskForm.server} onChange={e => setDiskForm({...diskForm, server: e.target.value})}
+                                                            placeholder="192.168.1.100" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">{t('nfsVersion') || 'NFS Version'}</label>
+                                                        <select value={diskForm.nfsversion} onChange={e => setDiskForm({...diskForm, nfsversion: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                            <option value="3">NFSv3</option>
+                                                            <option value="4">NFSv4</option>
+                                                            <option value="4.1">NFSv4.1</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">{t('exportPath') || 'Export Path'} *</label>
+                                                    <input type="text" value={diskForm.path} onChange={e => setDiskForm({...diskForm, path: e.target.value})}
+                                                        placeholder="/mnt/nfs/share" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                            </>
+                                        )}
+                                        {diskForm.sr_type === 'iscsi' && (
+                                            <>
+                                                <div className="grid grid-cols-2 gap-3">
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Target *</label>
+                                                        <input type="text" value={diskForm.target} onChange={e => setDiskForm({...diskForm, target: e.target.value})}
+                                                            placeholder="192.168.1.200" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-sm text-gray-400 mb-1">Port</label>
+                                                        <input type="number" value={diskForm.port} onChange={e => setDiskForm({...diskForm, port: e.target.value})}
+                                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">IQN *</label>
+                                                    <input type="text" value={diskForm.iqn} onChange={e => setDiskForm({...diskForm, iqn: e.target.value})}
+                                                        placeholder="iqn.2024-01.com.example:target" className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                                <div>
+                                                    <label className="block text-sm text-gray-400 mb-1">SCSI ID *</label>
+                                                    <input type="text" value={diskForm.scsi_id} onChange={e => setDiskForm({...diskForm, scsi_id: e.target.value})}
+                                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                </div>
+                                                <details className="group">
+                                                    <summary className="text-sm text-gray-400 cursor-pointer">CHAP Authentication</summary>
+                                                    <div className="mt-2 grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">CHAP User</label>
+                                                            <input type="text" value={diskForm.chap_user} onChange={e => setDiskForm({...diskForm, chap_user: e.target.value})}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-1">CHAP Password</label>
+                                                            <input type="password" value={diskForm.chap_pass} onChange={e => setDiskForm({...diskForm, chap_pass: e.target.value})}
+                                                                className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm" />
+                                                        </div>
+                                                    </div>
+                                                </details>
+                                            </>
+                                        )}
+                                        {(diskForm.sr_type === 'lvm' || diskForm.sr_type === 'ext') && (
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">Device *</label>
+                                                <select value={diskForm.device} onChange={e => setDiskForm({...diskForm, device: e.target.value})}
+                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm">
+                                                    <option value="">Select disk...</option>
+                                                    {(data.disks||[]).filter(d => !d.used).map(d => (
+                                                        <option key={d.devpath} value={d.devpath}>{d.devpath} - {formatBytes(d.size)} ({d.type})</option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+
+                                {/* Device Selection - for LVM, LVM-Thin (vg), Directory */}
+                                {(type === 'lvm' || type === 'directory') && (
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">Device *</label>
+                                        <select 
+                                            value={diskForm.device} 
+                                            onChange={e => setDiskForm({...diskForm, device: e.target.value})}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                        >
+                                            <option value="">Select disk...</option>
+                                            {unusedDisks.map(d => (
+                                                <option key={d.devpath} value={d.devpath}>
+                                                    {d.devpath} - {formatBytes(d.size)} ({d.type || 'hdd'})
+                                                </option>
+                                            ))}
+                                        </select>
+                                        {unusedDisks.length === 0 && (
+                                            <p className="text-xs text-yellow-400 mt-1">No unused disks available</p>
+                                        )}
+                                    </div>
+                                )}
+                                
+                                {/* VG Selection for LVM-Thin */}
+                                {type === 'lvmthin' && (
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">Volume Group *</label>
+                                        <select 
+                                            value={diskForm.vgname} 
+                                            onChange={e => setDiskForm({...diskForm, vgname: e.target.value})}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                        >
+                                            <option value="">Select VG...</option>
+                                            {Array.isArray(data.lvm) && data.lvm.map(v => (
+                                                <option key={v.vg} value={v.vg}>
+                                                    {v.vg} - {formatBytes(v.free)} free of {formatBytes(v.size)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                        {(!Array.isArray(data.lvm) || data.lvm.length === 0) && (
+                                            <p className="text-xs text-yellow-400 mt-1">
+                                                ⚠️ No LVM Volume Groups found. Create an LVM VG first before creating a thin pool.
+                                            </p>
+                                        )}
+                                    </div>
+                                )}
+                                
+                                {/* Multi-device Selection for ZFS */}
+                                {type === 'zfs' && (
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">Devices *</label>
+                                        <div className="space-y-1 max-h-32 overflow-y-auto bg-proxmox-dark border border-proxmox-border rounded p-2">
+                                            {unusedDisks.length > 0 ? unusedDisks.map(d => (
+                                                <label key={d.devpath} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-proxmox-hover p-1 rounded">
+                                                    <input 
+                                                        type="checkbox"
+                                                        checked={diskForm.devices.includes(d.devpath)}
+                                                        onChange={e => {
+                                                            if (e.target.checked) {
+                                                                setDiskForm({...diskForm, devices: [...diskForm.devices, d.devpath]});
+                                                            } else {
+                                                                setDiskForm({...diskForm, devices: diskForm.devices.filter(x => x !== d.devpath)});
+                                                            }
+                                                        }}
+                                                        className="rounded"
+                                                    />
+                                                    <span className="font-mono">{d.devpath}</span>
+                                                    <span className="text-gray-500">({formatBytes(d.size)}, {d.type || 'hdd'})</span>
+                                                </label>
+                                            )) : <p className="text-xs text-yellow-400">No unused disks available</p>}
+                                        </div>
+                                        {diskForm.devices.length > 0 && (
+                                            <p className="text-xs text-gray-500 mt-1">{diskForm.devices.length} disk(s) selected</p>
+                                        )}
+                                    </div>
+                                )}
+                                
+                                {/* Name */}
+                                <div>
+                                    <label className="block text-sm text-gray-400 mb-1">
+                                        {type === 'lvmthin' ? 'Pool Name *' : type === 'zfs' ? 'Pool Name *' : 'Name *'}
+                                    </label>
+                                    <input 
+                                        value={diskForm.name}
+                                        onChange={e => setDiskForm({...diskForm, name: e.target.value})}
+                                        placeholder={type === 'lvm' ? 'myvg' : type === 'lvmthin' ? 'data' : type === 'zfs' ? 'tank' : 'storage'}
+                                        className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                    />
+                                </div>
+                                
+                                {/* ZFS Options */}
+                                {type === 'zfs' && (
+                                    <>
+                                        <div className="grid grid-cols-3 gap-3">
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">RAID Level</label>
+                                                <select 
+                                                    value={diskForm.raidlevel}
+                                                    onChange={e => setDiskForm({...diskForm, raidlevel: e.target.value})}
+                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                                >
+                                                    <option value="single">Single</option>
+                                                    <option value="mirror">Mirror</option>
+                                                    <option value="raid10">RAID10</option>
+                                                    <option value="raidz">RAIDZ</option>
+                                                    <option value="raidz2">RAIDZ2</option>
+                                                    <option value="raidz3">RAIDZ3</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">Compression</label>
+                                                <select 
+                                                    value={diskForm.compression}
+                                                    onChange={e => setDiskForm({...diskForm, compression: e.target.value})}
+                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                                >
+                                                    <option value="on">On (LZ4)</option>
+                                                    <option value="off">Off</option>
+                                                    <option value="lz4">LZ4</option>
+                                                    <option value="zstd">ZSTD</option>
+                                                    <option value="gzip">GZIP</option>
+                                                    <option value="lzjb">LZJB</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-sm text-gray-400 mb-1">ashift</label>
+                                                <select 
+                                                    value={diskForm.ashift}
+                                                    onChange={e => setDiskForm({...diskForm, ashift: parseInt(e.target.value)})}
+                                                    className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                                >
+                                                    <option value={9}>9 (512B)</option>
+                                                    <option value={12}>12 (4K)</option>
+                                                    <option value={13}>13 (8K)</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <p className="text-xs text-gray-500">
+                                            ℹ️ Use ashift=12 for modern drives (4K sectors). Mirror needs 2+ disks, RAIDZ needs 3+, RAIDZ2 needs 4+.
+                                        </p>
+                                    </>
+                                )}
+                                
+                                {/* Directory Options */}
+                                {type === 'directory' && (
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-1">Filesystem</label>
+                                        <select 
+                                            value={diskForm.filesystem}
+                                            onChange={e => setDiskForm({...diskForm, filesystem: e.target.value})}
+                                            className="w-full bg-proxmox-dark border border-proxmox-border rounded p-2 text-sm"
+                                        >
+                                            <option value="ext4">ext4 (recommended)</option>
+                                            <option value="xfs">XFS</option>
+                                        </select>
+                                    </div>
+                                )}
+                                
+                                {/* Add to PVE Storage */}
+                                <label className="flex items-center gap-2 text-sm">
+                                    <input 
+                                        type="checkbox"
+                                        checked={diskForm.add_storage}
+                                        onChange={e => setDiskForm({...diskForm, add_storage: e.target.checked})}
+                                        className="rounded"
+                                    />
+                                    Add to Proxmox VE storage configuration
+                                </label>
+                            </div>
+                            
+                            <div className="p-4 border-t border-proxmox-border flex justify-end gap-2">
+                                <button 
+                                    onClick={() => setDiskModal({ open: false, type: null })}
+                                    disabled={diskCreating}
+                                    className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover disabled:opacity-50 rounded-lg text-sm"
+                                >
+                                    Cancel
+                                </button>
+                                <button 
+                                    onClick={createDisk}
+                                    disabled={
+                                        diskCreating ||
+                                        !diskForm.name || 
+                                        (type === 'lvm' && !diskForm.device) ||
+                                        (type === 'lvmthin' && !diskForm.vgname) ||
+                                        (type === 'zfs' && diskForm.devices.length === 0) ||
+                                        (type === 'directory' && !diskForm.device)
+                                    }
+                                    className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-sm text-white flex items-center gap-2"
+                                >
+                                    {diskCreating && <span className="animate-spin">⏳</span>}
+                                    {diskCreating ? 'Creating...' : 'Create'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80"}>
+                    <DiskCreateModal />
+                    <div
+                        className={isCorporate
+                            ? "corp-vm-modal"
+                            : "w-full max-w-6xl max-h-[90vh] bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl animate-scale-in overflow-hidden flex flex-col"}
+                        style={isCorporate ? {maxWidth: '1320px', width: '100%'} : undefined}
+                    >
+                        {isCorporate ? (
+                        <div className="corp-vm-modal-header">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <Icons.Server className="w-5 h-5" style={{color: isXcpng ? '#f97316' : '#60b515'}} />
+                                <div className="min-w-0">
+                                    <div className="corp-vm-modal-title truncate">{node}</div>
+                                    <div className="corp-vm-modal-meta">{isXcpng ? 'XCP-ng Host' : 'Proxmox Node'}</div>
+                                </div>
+                            </div>
+                            <div className="corp-vm-modal-actions">
+                                <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                    <Icons.X />
+                                </button>
+                            </div>
+                        </div>
+                        ) : (
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2 rounded-lg bg-green-500/10"><Icons.Server /></div>
+                                <div><h2 className="font-semibold text-white">{node}</h2><p className="text-xs text-gray-400">Proxmox Node</p></div>
+                            </div>
+                            <button onClick={onClose} className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400"><Icons.X /></button>
+                        </div>
+                        )}
+
+                        {isCorporate ? (
+                        <div className="corp-vm-modal-tabs">
+                            {tabs.map(tab => (
+                                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                                    className={`corp-vm-modal-tab${activeTab === tab.id ? ' active' : ''}`}>
+                                    <tab.icon style={{width: 14, height: 14}} />{tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        ) : (
+                        <div className="flex items-center gap-1 px-6 py-3 border-b border-proxmox-border bg-proxmox-dark/50 overflow-x-auto">
+                            {tabs.map(tab => (
+                                <button key={tab.id} onClick={() => setActiveTab(tab.id)}
+                                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${activeTab === tab.id ? 'bg-proxmox-orange text-white' : 'text-gray-400 hover:text-white hover:bg-proxmox-hover'}`}>
+                                    <tab.icon />{tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        )}
+
+                        <div className={isCorporate ? "corp-vm-modal-body" : "flex-1 overflow-y-auto p-6"}>
+                            {loading ? (
+                                <div className="flex items-center justify-center h-64"><div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full"></div></div>
+                            ) : (
+                                <>
+                                    {activeTab === 'summary' && data.summary && (
+                                        <div className="space-y-6">
+                                            <div className="grid grid-cols-4 gap-4">
+                                                {[
+                                                    { label: 'Status', value: data.summary.status, color: 'text-green-400' },
+                                                    { label: 'Uptime', value: formatUptime(data.summary.uptime), color: 'text-white' },
+                                                    { label: 'CPU', value: `${((data.summary.cpu||0)*100).toFixed(1)}%`, color: 'text-proxmox-orange' },
+                                                    { label: 'Load', value: (data.summary.loadavg||[]).join(', '), color: 'text-white' },
+                                                ].map((item, i) => (
+                                                    <div key={i} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="text-xs text-gray-500 mb-1">{item.label}</div>
+                                                        <div className={`text-lg font-semibold ${item.color}`}>{item.value}</div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <div className="grid grid-cols-3 gap-4">
+                                                {[
+                                                    { label: 'Memory', used: data.summary.memory?.used, total: data.summary.memory?.total, color: 'bg-proxmox-orange', ksm: data.summary.ksm?.shared },
+                                                    { label: 'Swap', used: data.summary.swap?.used, total: data.summary.swap?.total, color: 'bg-blue-500' },
+                                                    { label: 'Root FS', used: data.summary.rootfs?.used, total: data.summary.rootfs?.total, color: 'bg-green-500' },
+                                                ].map((item, i) => (
+                                                    <div key={i} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="text-sm font-medium text-white mb-3">{item.label}</div>
+                                                        <div className="space-y-2">
+                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">Used</span><span className="text-white">{formatBytes(item.used)}</span></div>
+                                                            <div className="flex justify-between text-sm"><span className="text-gray-400">Total</span><span className="text-white">{formatBytes(item.total)}</span></div>
+                                                            <div className="w-full bg-proxmox-hover rounded-full h-2">
+                                                                <div className={`${item.color} h-2 rounded-full`} style={{ width: `${((item.used||0)/(item.total||1))*100}%` }}></div>
+                                                            </div>
+                                                            {/* NS Apr 2026: KSM Sharing inside Memory card — always shown
+                                                                on PVE (matches native UI); hidden on XCP-ng where backend
+                                                                returns no ksm field */}
+                                                            {typeof item.ksm === 'number' && (
+                                                                <div className="flex justify-between text-sm pt-1" title="Kernel Same-page Merging: dedup across VM RAM (only active under memory pressure)">
+                                                                    <span className="text-gray-400">{t('ksmSharing') || 'KSM Sharing'}</span>
+                                                                    <span className={item.ksm > 0 ? 'text-purple-400 font-mono' : 'text-gray-500 font-mono'}>{formatBytes(item.ksm || 0)}</span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="text-sm font-medium text-white mb-3">System Info</div>
+                                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                                    <div><span className="text-gray-400">Kernel:</span><span className="ml-2 text-white font-mono">{data.summary.kversion}</span></div>
+                                                    <div><span className="text-gray-400">PVE:</span><span className="ml-2 text-white">{data.summary.pveversion}</span></div>
+                                                    <div><span className="text-gray-400">CPU:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.model}</span></div>
+                                                    <div><span className="text-gray-400">Cores:</span><span className="ml-2 text-white">{data.summary.cpuinfo?.cores} ({data.summary.cpuinfo?.cpus} CPUs)</span></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Performance Tab - NS: Added Jan 2026 */}
+                                    {activeTab === 'performance' && (
+                                        <div className="space-y-6">
+                                            {/* Timeframe Selector */}
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                                    <Icons.BarChart /> Performance Metrics
+                                                </h3>
+                                                <div className="flex items-center gap-2">
+                                                    <ChartZoomBar zoom={perfZoom} />
+                                                    {['hour', 'day', 'week', 'month', 'year'].map(tf => (
+                                                        <button
+                                                            key={tf}
+                                                            onClick={() => setPerfTimeframe(tf)}
+                                                            className={`px-3 py-1.5 rounded-lg text-sm ${perfTimeframe === tf 
+                                                                ? 'bg-proxmox-orange text-white' 
+                                                                : 'bg-proxmox-dark text-gray-400 hover:text-white'}`}
+                                                        >
+                                                            {tf.charAt(0).toUpperCase() + tf.slice(1)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            
+                                            {data.performance?.metrics ? (
+                                                <ChartZoomContext.Provider value={perfZoom}>
+                                                <div className="space-y-4">
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <LineChart
+                                                            {...perfZoom.series('cpu')}
+                                                            label="CPU Usage"
+                                                            color="#f97316"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                        <LineChart
+                                                            {...perfZoom.series('memory')}
+                                                            label="Memory Usage"
+                                                            color="#3b82f6"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                        <LineChart
+                                                            {...perfZoom.series('iowait')}
+                                                            label="IO Wait"
+                                                            color="#eab308"
+                                                            unit="%"
+                                                        />
+                                                        <LineChart
+                                                            {...perfZoom.series('loadavg')}
+                                                            label="Load Average"
+                                                            color="#22c55e"
+                                                            unit=""
+                                                        />
+                                                    </div>
+                                                    <LineChart
+                                                        datasets={[
+                                                            { label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4' },
+                                                            { label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6' }
+                                                        ]}
+                                                        timestamps={perfNet.timestamps}
+                                                        label="Network I/O"
+                                                        unit=" KB/s"
+                                                    />
+                                                    <div className="grid grid-cols-2 gap-4">
+                                                        <LineChart
+                                                            {...perfZoom.series('swap')}
+                                                            label="Swap Usage"
+                                                            color="#ec4899"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                        <LineChart
+                                                            {...perfZoom.series('rootfs')}
+                                                            label="Root FS Usage"
+                                                            color="#a855f7"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                    </div>
+
+                                                    {data.performance.metrics.pressurecpusome && (
+                                                        <LineChart
+                                                            datasets={[
+                                                                { label: 'Some', data: perfPsi.cpu.metrics.pressurecpusome, color: '#3b82f6' },
+                                                                { label: 'Full', data: perfPsi.cpu.metrics.pressurecpufull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={perfPsi.cpu.timestamps}
+                                                            label="CPU Pressure Stall"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                    )}
+                                                    {data.performance.metrics.pressurememorysome && (
+                                                        <LineChart
+                                                            datasets={[
+                                                                { label: 'Some', data: perfPsi.memory.metrics.pressurememorysome, color: '#22c55e' },
+                                                                { label: 'Full', data: perfPsi.memory.metrics.pressurememoryfull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={perfPsi.memory.timestamps}
+                                                            label="Memory Pressure Stall"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                    )}
+                                                    {data.performance.metrics.pressureiosome && (
+                                                        <LineChart
+                                                            datasets={[
+                                                                { label: 'Some', data: perfPsi.io.metrics.pressureiosome, color: '#eab308' },
+                                                                { label: 'Full', data: perfPsi.io.metrics.pressureiofull, color: '#ef4444' }
+                                                            ]}
+                                                            timestamps={perfPsi.io.timestamps}
+                                                            label="IO Pressure Stall"
+                                                            unit="%"
+                                                            yMin={0}
+                                                            yMax={100}
+                                                        />
+                                                    )}
+
+                                                    {data.performance.timestamps?.length > 0 && (
+                                                        <div className="text-xs text-gray-500 text-center mt-2">
+                                                            {formatTime(perfZoom.range ? perfZoom.range.from : data.performance.timestamps[0])} - {formatTime(perfZoom.range ? perfZoom.range.to : data.performance.timestamps[data.performance.timestamps.length - 1])}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                </ChartZoomContext.Provider>
+                                            ) : (
+                                                <div className="text-center text-gray-500 py-12">
+                                                    <Icons.BarChart className="mx-auto mb-3 w-12 h-12 opacity-50" />
+                                                    <p>No performance data available</p>
+                                                    <p className="text-sm mt-1">Try refreshing or selecting a different timeframe</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}
+
+                                    {activeTab === 'shell' && !haConsolesElsewhere && (
+                                        <NodeShellPanel node={node} clusterId={clusterId} addToast={addToast} />
+                                    )}
+
+                                    {activeTab === 'network' && (
+                                        <fieldset {...haLock} className="contents">
+                                        <div className="space-y-4">
+                                            {/* Action Buttons */}
+                                            <div className="flex items-center gap-3 flex-wrap">
+                                                <div className="relative">
+                                                    <button 
+                                                        onClick={() => setData({...data, showCreateMenu: !data.showCreateMenu})}
+                                                        className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white text-sm hover:bg-orange-600"
+                                                    >
+                                                        <Icons.Plus />
+                                                        Create
+                                                    </button>
+                                                    {data.showCreateMenu && (
+                                                        <div className="absolute top-full left-0 mt-1 bg-proxmox-card border border-proxmox-border rounded-lg shadow-xl z-10 min-w-[160px]">
+                                                            {['bridge', 'bond', 'vlan', 'OVSBridge', 'OVSBond', 'OVSIntPort'].map(ifaceType => (
+                                                                <button key={ifaceType} onClick={() => {
+                                                                    // NS May 2026 — autostart:1 mirrors the checkbox default; without
+                                                                    // it the state stayed undefined and the payload was missing the
+                                                                    // field, so PVE silently created the iface with autostart=0.
+                                                                    setData({...data, showCreateMenu: false, editIface: { type: ifaceType, iface: '', isNew: true, autostart: 1 }});
+                                                                }} className="w-full px-4 py-2 text-left text-sm text-gray-300 hover:bg-proxmox-hover hover:text-white">
+                                                                    Linux {ifaceType.charAt(0).toUpperCase() + ifaceType.slice(1)}
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                <button 
+                                                    onClick={async () => {
+                                                        try {
+                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT', credentials: 'include', headers: authHeaders });
+                                                            if (res.ok) { addToast(t('networkChangesApplied') || 'Network changes applied'); loadTabData('network'); }
+                                                            else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
+                                                        } catch (e) { addToast(t('error') || 'Error', 'error'); }
+                                                    }}
+                                                    className="px-4 py-2 bg-green-600 rounded-lg text-white text-sm hover:bg-green-700"
+                                                >
+                                                    Apply Configuration
+                                                </button>
+                                                <button 
+                                                    onClick={async () => {
+                                                        if (!confirm(t('discardUnappliedChanges'))) return;
+                                                        try {
+                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
+                                                            if (res.ok) { addToast(t('changesReverted') || 'Changes reverted'); loadTabData('network'); }
+                                                            else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
+                                                        } catch (e) { addToast(t('error') || 'Error', 'error'); }
+                                                    }}
+                                                    className="px-4 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-gray-300 text-sm hover:text-white"
+                                                >
+                                                    Revert
+                                                </button>
+                                            </div>
+
+                                            {/* Interface List */}
+                                            <div className="space-y-2">
+                                                {(data.network||[]).map(iface => (
+                                                    <div key={iface.iface} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                        <div className="flex items-center justify-between mb-2">
+                                                            <div className="flex items-center gap-3">
+                                                                <Icons.Network />
+                                                                <span className="font-medium text-white">{iface.iface}</span>
+                                                                <span className="text-xs text-gray-500 bg-proxmox-card px-2 py-0.5 rounded">{iface.type}</span>
+                                                                {iface.active && <span className="text-xs text-green-400 bg-green-500/10 px-2 py-0.5 rounded">Active</span>}
+                                                            </div>
+                                                            <div className="flex items-center gap-2">
+                                                                <button 
+                                                                    onClick={() => setData({...data, editIface: {...iface, isNew: false}})}
+                                                                    className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-white"
+                                                                    title="Edit"
+                                                                >
+                                                                    <Icons.Cog />
+                                                                </button>
+                                                                <button 
+                                                                    onClick={async () => {
+                                                                        if (!confirm(`${iface.iface}: ${t('deleteInterfaceConfirm')}`)) return;
+                                                                        try {
+                                                                            const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE', credentials: 'include', headers: authHeaders });
+                                                                            if (res.ok) { addToast(`${iface.iface} ${t('deleted')}`); loadTabData('network'); }
+                                                                            else { const err = await res.json(); addToast(err.error || t('error'), 'error'); }
+                                                                        } catch (e) { addToast(t('error') || 'Error', 'error'); }
+                                                                    }}
+                                                                    className="p-1.5 rounded hover:bg-red-500/20 text-gray-400 hover:text-red-400"
+                                                                    title="Delete"
+                                                                >
+                                                                    <Icons.Trash />
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-4 gap-4 text-sm">
+                                                            {iface.address && <div><span className="text-gray-500">IP:</span><span className="ml-2 text-white font-mono">{iface.address}/{iface.netmask || iface.cidr?.split('/')[1] || ''}</span></div>}
+                                                            {iface.gateway && <div><span className="text-gray-500">Gateway:</span><span className="ml-2 text-white font-mono">{iface.gateway}</span></div>}
+                                                            {iface.bridge_ports && <div><span className="text-gray-500">Ports:</span><span className="ml-2 text-white">{iface.bridge_ports}</span></div>}
+                                                            {iface.slaves && <div><span className="text-gray-500">Slaves:</span><span className="ml-2 text-white">{iface.slaves}</span></div>}
+                                                            {iface['vlan-raw-device'] && <div><span className="text-gray-500">VLAN Device:</span><span className="ml-2 text-white">{iface['vlan-raw-device']}</span></div>}
+                                                            {iface['vlan-id'] && <div><span className="text-gray-500">VLAN ID:</span><span className="ml-2 text-white">{iface['vlan-id']}</span></div>}
+                                                            {iface.bond_mode && <div><span className="text-gray-500">Bond Mode:</span><span className="ml-2 text-white">{iface.bond_mode}</span></div>}
+                                                            {iface.comments && <div className="col-span-4"><span className="text-gray-500">Comment:</span><span className="ml-2 text-gray-400">{iface.comments}</span></div>}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                                {(!data.network || data.network.length === 0) && <div className="text-center py-8 text-gray-500">{t('noNetworkInterfaces') || 'No network interfaces'}</div>}
+                                            </div>
+
+                                            {/* MK May 2026 — Per-NIC traffic + error counters via /netstats (SSH /proc/net/dev) */}
+                                            {data.netstats && data.netstats.length > 0 && (
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden mt-4">
+                                                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                        <h3 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.BarChart />
+                                                            {t('interfaceStatistics') || 'Interface Statistics'}
+                                                        </h3>
+                                                        <span className="text-xs text-gray-500">{t('source') || 'via'} /proc/net/dev</span>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="bg-proxmox-dark text-xs text-gray-400">
+                                                                <tr>
+                                                                    <th className="text-left p-3">Iface</th>
+                                                                    <th className="text-right p-3">RX bytes</th>
+                                                                    <th className="text-right p-3">RX pkts</th>
+                                                                    <th className="text-right p-3">RX errs</th>
+                                                                    <th className="text-right p-3">RX drop</th>
+                                                                    <th className="text-right p-3">TX bytes</th>
+                                                                    <th className="text-right p-3">TX pkts</th>
+                                                                    <th className="text-right p-3">TX errs</th>
+                                                                    <th className="text-right p-3">TX drop</th>
+                                                                    <th className="text-right p-3">Coll</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {(data.netstats || []).filter(s => s.iface !== 'lo').map((s, idx) => {
+                                                                    const errOrDrop = (n) => n > 0 ? '#f87171' : '';
+                                                                    return (
+                                                                        <tr key={s.iface || idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/40">
+                                                                            <td className="p-3 font-mono text-white">{s.iface}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-300">{formatBytes(s.rx_bytes)}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-400">{(s.rx_packets || 0).toLocaleString()}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.rx_errs)}}>{s.rx_errs || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.rx_drop)}}>{s.rx_drop || 0}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-300">{formatBytes(s.tx_bytes)}</td>
+                                                                            <td className="p-3 text-right font-mono text-gray-400">{(s.tx_packets || 0).toLocaleString()}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_errs)}}>{s.tx_errs || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_drop)}}>{s.tx_drop || 0}</td>
+                                                                            <td className="p-3 text-right font-mono" style={{color: errOrDrop(s.tx_colls)}}>{s.tx_colls || 0}</td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <div className="px-4 py-2 text-xs text-gray-500 border-t border-proxmox-border">
+                                                        {t('errOrDropHint') || 'Non-zero RX/TX errs / drops highlighted in red. Counters are cumulative since boot.'}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Edit/Create Interface Modal */}
+                                            {data.editIface && (
+                                                <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80">
+                                                    <div className="w-full max-w-xl bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                                        <h3 className="text-lg font-semibold text-white mb-4">
+                                                            {data.editIface.isNew ? `Create: Linux ${data.editIface.type}` : `Edit: ${data.editIface.iface}`}
+                                                        </h3>
+                                                        <div className="space-y-4">
+                                                            <div className="grid grid-cols-2 gap-4">
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">Name</label>
+                                                                    <input type="text" value={data.editIface.iface || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, iface: e.target.value}})}
+                                                                        disabled={!data.editIface.isNew}
+                                                                        placeholder={data.editIface.type === 'bridge' ? 'vmbr0' : data.editIface.type === 'bond' ? 'bond0' : 'vlan0'}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm disabled:opacity-50" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">IPv4/CIDR</label>
+                                                                    <input type="text" value={data.editIface.cidr || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, cidr: e.target.value}})}
+                                                                        placeholder="192.168.1.1/24"
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">Gateway (IPv4)</label>
+                                                                    <input type="text" value={data.editIface.gateway || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, gateway: e.target.value}})}
+                                                                        placeholder="192.168.1.1"
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">IPv6/CIDR</label>
+                                                                    <input type="text" value={data.editIface.cidr6 || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, cidr6: e.target.value}})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">Gateway (IPv6)</label>
+                                                                    <input type="text" value={data.editIface.gateway6 || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, gateway6: e.target.value}})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">MTU</label>
+                                                                    <input type="number" value={data.editIface.mtu || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, mtu: e.target.value}})}
+                                                                        placeholder="1500"
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Bridge specific */}
+                                                            {data.editIface.type === 'bridge' && (
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">Bridge Ports</label>
+                                                                        <input type="text" value={data.editIface.bridge_ports || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, bridge_ports: e.target.value}})}
+                                                                            placeholder="ens18"
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    </div>
+                                                                    <div className="flex items-center gap-4 pt-5">
+                                                                        <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                                            <input type="checkbox" checked={data.editIface.bridge_vlan_aware || false} 
+                                                                                onChange={(e) => setData({...data, editIface: {...data.editIface, bridge_vlan_aware: e.target.checked}})} />
+                                                                            VLAN aware
+                                                                        </label>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            {/* Bond specific */}
+                                                            {data.editIface.type === 'bond' && (
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">Slaves</label>
+                                                                        <input type="text" value={data.editIface.slaves || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, slaves: e.target.value}})}
+                                                                            placeholder="ens18 ens19"
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">Mode</label>
+                                                                        <select value={data.editIface.bond_mode || 'balance-rr'} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, bond_mode: e.target.value}})}
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                                                            <option value="balance-rr">balance-rr</option>
+                                                                            <option value="active-backup">active-backup</option>
+                                                                            <option value="balance-xor">balance-xor</option>
+                                                                            <option value="broadcast">broadcast</option>
+                                                                            <option value="802.3ad">LACP (802.3ad)</option>
+                                                                            <option value="balance-tlb">balance-tlb</option>
+                                                                            <option value="balance-alb">balance-alb</option>
+                                                                        </select>
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">Hash Policy</label>
+                                                                        <select value={data.editIface.bond_xmit_hash_policy || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, bond_xmit_hash_policy: e.target.value}})}
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm">
+                                                                            <option value="">Default</option>
+                                                                            <option value="layer2">layer2</option>
+                                                                            <option value="layer2+3">layer2+3</option>
+                                                                            <option value="layer3+4">layer3+4</option>
+                                                                        </select>
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">Bond Primary</label>
+                                                                        <input type="text" value={data.editIface['bond-primary'] || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, 'bond-primary': e.target.value}})}
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            {/* VLAN specific */}
+                                                            {data.editIface.type === 'vlan' && (
+                                                                <div className="grid grid-cols-2 gap-4">
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">VLAN raw device</label>
+                                                                        <input type="text" value={data.editIface['vlan-raw-device'] || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, 'vlan-raw-device': e.target.value}})}
+                                                                            placeholder="vmbr0"
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    </div>
+                                                                    <div>
+                                                                        <label className="block text-xs text-gray-400 mb-1">VLAN Tag</label>
+                                                                        <input type="number" value={data.editIface['vlan-id'] || ''} 
+                                                                            onChange={(e) => setData({...data, editIface: {...data.editIface, 'vlan-id': e.target.value}})}
+                                                                            placeholder="100"
+                                                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+
+                                                            <div className="grid grid-cols-2 gap-4">
+                                                                <div className="flex items-center gap-2">
+                                                                    <input type="checkbox" checked={data.editIface.autostart !== 0} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, autostart: e.target.checked ? 1 : 0}})} />
+                                                                    <span className="text-sm text-gray-300">Autostart</span>
+                                                                </div>
+                                                                <div>
+                                                                    <label className="block text-xs text-gray-400 mb-1">Comment</label>
+                                                                    <input type="text" value={data.editIface.comments || ''} 
+                                                                        onChange={(e) => setData({...data, editIface: {...data.editIface, comments: e.target.value}})}
+                                                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="flex justify-end gap-3 mt-6">
+                                                            <button onClick={() => setData({...data, editIface: null})}
+                                                                className="px-4 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-gray-300 hover:text-white">
+                                                                {t('cancel')}
+                                                            </button>
+                                                            <button onClick={async () => {
+                                                                const iface = data.editIface;
+                                                                if (!iface.iface) { addToast(t('nameRequired') || 'Name required', 'error'); return; }
+                                                                try {
+                                                                    const payload = { ...iface };
+                                                                    delete payload.isNew;
+                                                                    delete payload.active;
+                                                                    delete payload.exists;
+                                                                    delete payload.families;
+                                                                    delete payload.method;
+                                                                    delete payload.method6;
+                                                                    delete payload.priority;
+                                                                    
+                                                                    const url = iface.isNew 
+                                                                        ? `${API_URL}/clusters/${clusterId}/nodes/${node}/network`
+                                                                        : `${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`;
+                                                                    const method = iface.isNew ? 'POST' : 'PUT';
+                                                                    
+                                                                    const res = await fetch(url, {
+                                                                        method,
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify(payload)
+                                                                    });
+                                                                    if (res.ok) {
+                                                                        addToast(iface.isNew ? (t('interfaceCreated') || 'Interface created') : (t('interfaceUpdated') || 'Interface updated'));
+                                                                        setData({...data, editIface: null});
+                                                                        loadTabData('network');
+                                                                    } else {
+                                                                        const err = await res.json();
+                                                                        addToast(err.error || t('error'), 'error');
+                                                                    }
+                                                                } catch (e) { addToast(t('error') || 'Error', 'error'); }
+                                                            }} className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600">
+                                                                {data.editIface.isNew ? 'Create' : 'Save'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                        </fieldset>
+                                    )}
+
+                                    {activeTab === 'system' && (
+                                        <div className="space-y-6">
+                                            {/* MK + LW May 2026 — Sensors panel (lm-sensors) */}
+                                            {data.sensors && data.sensors.length > 0 && (
+                                                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Activity className="w-4 h-4" />
+                                                            {t('sensors') || 'Sensors'}
+                                                            <span className="text-xs text-gray-500 font-normal">({data.sensors.length})</span>
+                                                        </h4>
+                                                        <button onClick={() => loadTabData('system')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded text-gray-400 hover:text-white">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    <div className="overflow-x-auto">
+                                                        <table className="w-full text-sm">
+                                                            <thead className="text-xs text-gray-400">
+                                                                <tr>
+                                                                    <th className="text-left p-2">Chip</th>
+                                                                    <th className="text-left p-2">{t('sensor') || 'Sensor'}</th>
+                                                                    <th className="text-right p-2">{t('value') || 'Value'}</th>
+                                                                    <th className="text-right p-2">Max</th>
+                                                                    <th className="text-right p-2">Crit</th>
+                                                                    <th className="text-center p-2">Alarm</th>
+                                                                </tr>
+                                                            </thead>
+                                                            <tbody>
+                                                                {data.sensors.map((s, idx) => {
+                                                                    const unit = s.kind === 'temp' ? '°C' : s.kind === 'fan' ? 'RPM' : s.kind === 'volt' ? 'V' : '';
+                                                                    // colour: red if alarm OR (temp && >= crit), yellow if temp >= max, green otherwise
+                                                                    let clr = '';
+                                                                    if (s.alarm) clr = '#f54f47';
+                                                                    else if (s.kind === 'temp' && s.crit && s.value >= s.crit) clr = '#f54f47';
+                                                                    else if (s.kind === 'temp' && s.max && s.value >= s.max) clr = '#efc006';
+                                                                    return (
+                                                                        <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-darker/40">
+                                                                            <td className="p-2 text-gray-500 font-mono text-xs">{s.chip}</td>
+                                                                            <td className="p-2 text-white">{s.label}</td>
+                                                                            <td className="p-2 text-right font-mono" style={{color: clr || '#e6edf3'}}>
+                                                                                {s.value != null ? `${typeof s.value === 'number' ? s.value.toFixed(1) : s.value} ${unit}` : '-'}
+                                                                            </td>
+                                                                            <td className="p-2 text-right font-mono text-gray-500">{s.max != null ? `${typeof s.max === 'number' ? s.max.toFixed(0) : s.max} ${unit}` : '-'}</td>
+                                                                            <td className="p-2 text-right font-mono text-gray-500">{s.crit != null ? `${typeof s.crit === 'number' ? s.crit.toFixed(0) : s.crit} ${unit}` : '-'}</td>
+                                                                            <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>ok</span>}</td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+                                                    <div className="px-2 py-2 text-xs text-gray-500 mt-1">
+                                                        {t('sensorsHint') || 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.'}
+                                                    </div>
+                                                    {/* #601 — temperature over time (hottest sensor, from the 5-min metrics collector) */}
+                                                    {data.tempHistory && data.tempHistory.length >= 2 && (() => {
+                                                        const vals = data.tempHistory.map(p => p.temp).filter(v => typeof v === 'number');
+                                                        if (vals.length < 2) return null;
+                                                        const w = 480, h = 60, pad = 4;
+                                                        const mx = Math.max(...vals), mn = Math.min(...vals), flat = mx === mn, rng = (mx - mn) || 1;
+                                                        const pts = vals.map((v, i) => {
+                                                            const x = pad + (i / (vals.length - 1)) * (w - 2 * pad);
+                                                            const y = flat ? h / 2 : pad + (1 - (v - mn) / rng) * (h - 2 * pad);
+                                                            return `${x},${y}`;
+                                                        }).join(' ');
+                                                        const cur = vals[vals.length - 1];
+                                                        const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+                                                        const clr = cur >= 85 ? '#f54f47' : cur >= 75 ? '#efc006' : '#60b515';
+                                                        return (
+                                                            <div className="mt-3 pt-3 border-t border-proxmox-border">
+                                                                <div className="flex items-center justify-between mb-1">
+                                                                    <span className="text-xs font-medium text-gray-300">{t('tempHistoryTitle') || 'Temperature over time (hottest sensor)'}</span>
+                                                                    <span className="text-xs text-gray-500">{vals.length} {t('samples') || 'samples'}</span>
+                                                                </div>
+                                                                <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="block" style={{ height: '60px' }}>
+                                                                    <polyline fill="none" stroke={clr} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={pts} />
+                                                                </svg>
+                                                                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400 mt-1">
+                                                                    <span>{t('current') || 'Current'}: <span className="font-mono" style={{ color: clr }}>{cur.toFixed(1)} °C</span></span>
+                                                                    <span>{t('min') || 'Min'}: <span className="font-mono">{mn.toFixed(1)} °C</span></span>
+                                                                    <span>{t('max') || 'Max'}: <span className="font-mono">{mx.toFixed(1)} °C</span></span>
+                                                                    <span>{t('avg') || 'Avg'}: <span className="font-mono">{avg.toFixed(1)} °C</span></span>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
+                                                </div>
+                                            )}
+
+                                            {/* MK May 2026 — Cluster Health panel (corosync rings + pvecm quorum + service state) */}
+                                            {data.clusterHealth && (
+                                                <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <h4 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Shield className="w-4 h-4" />
+                                                            {t('clusterHealth') || 'Cluster Health'}
+                                                        </h4>
+                                                        <button onClick={() => loadTabData('system')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded text-gray-400 hover:text-white">
+                                                            <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    {/* MK May 2026 — SSH unavailable: render a single explainer
+                                                        instead of five question-mark service cards. Surfaces
+                                                        in dev / fresh-install setups where the PegaProx user
+                                                        has no SSH key to the PVE nodes yet. */}
+                                                    {data.clusterHealth.ssh_unavailable ? (
+                                                        <div className="text-sm text-gray-400 italic">
+                                                            {t('clusterHealthSshMissing') || 'Cluster Health needs SSH access to the node from PegaProx (corosync-cfgtool, pvecm, systemctl). Configure the cluster\'s Node-Shell SSH credentials and refresh.'}
+                                                        </div>
+                                                    ) : (<>
+                                                    {/* pvecm quorum */}
+                                                    {data.clusterHealth.pvecm && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs text-gray-400 mb-1">{t('quorum') || 'Quorum'}</div>
+                                                            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                                                                <div><span className="text-gray-500">{t('status') || 'Status'}:</span>
+                                                                    <span className="ml-2 font-medium" style={{color: data.clusterHealth.pvecm.quorate === 'Yes' ? '#60b515' : '#f54f47'}}>
+                                                                        {data.clusterHealth.pvecm.quorate || '?'}
+                                                                    </span>
+                                                                </div>
+                                                                {data.clusterHealth.pvecm.cluster_name && <div><span className="text-gray-500">{t('clusterName') || 'Name'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.cluster_name}</span></div>}
+                                                                {data.clusterHealth.pvecm.total_votes != null && <div><span className="text-gray-500">{t('votes') || 'Votes'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.total_votes} / {data.clusterHealth.pvecm.expected_votes ?? '?'}</span></div>}
+                                                                {data.clusterHealth.pvecm.config_version != null && <div><span className="text-gray-500">{t('configVersion') || 'Config v'}:</span><span className="ml-2 text-white font-mono">{data.clusterHealth.pvecm.config_version}</span></div>}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    {/* corosync rings */}
+                                                    {data.clusterHealth.corosync?.rings?.length > 0 && (
+                                                        <div className="mb-3">
+                                                            <div className="text-xs text-gray-400 mb-1">{t('corosyncRings') || 'Corosync Rings'}</div>
+                                                            <table className="w-full text-sm">
+                                                                <thead className="text-xs text-gray-500"><tr><th className="text-left p-1">Ring</th><th className="text-left p-1">{t('address') || 'Address'}</th><th className="text-left p-1">{t('status') || 'Status'}</th><th className="text-right p-1">{t('nodes') || 'Nodes'}</th></tr></thead>
+                                                                <tbody>
+                                                                    {data.clusterHealth.corosync.rings.map((r, idx) => {
+                                                                        const ok = (r.status || '').toLowerCase().includes('active') || (r.status || '').toLowerCase().includes('connected');
+                                                                        return (
+                                                                            <tr key={r.id ?? idx} className="border-t border-proxmox-border">
+                                                                                <td className="p-1 font-mono">{r.id ?? '?'}</td>
+                                                                                <td className="p-1 font-mono text-gray-300">{r.address || '-'}</td>
+                                                                                <td className="p-1" style={{color: ok ? '#60b515' : '#efc006'}}>{r.status || '-'}</td>
+                                                                                <td className="p-1 text-right font-mono">{r.nodes ?? '-'}</td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                    {/* services — only when at least one had a real ActiveState */}
+                                                    {data.clusterHealth.services?.some(s => s.active) && (
+                                                        <div>
+                                                            <div className="text-xs text-gray-400 mb-1">{t('services') || 'Services'}</div>
+                                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-2">
+                                                                {data.clusterHealth.services.filter(s => s.active).map(s => {
+                                                                    const ok = s.active === 'active';
+                                                                    const bad = s.active === 'failed' || s.result === 'failure';
+                                                                    const clr = bad ? '#f54f47' : ok ? '#60b515' : '#efc006';
+                                                                    return (
+                                                                        <div key={s.name} className="p-2 bg-proxmox-card rounded border border-proxmox-border">
+                                                                            <div className="text-xs font-mono text-white">{s.name}</div>
+                                                                            <div className="text-xs" style={{color: clr}}>{s.active}{s.sub && s.sub !== 'running' ? ` (${s.sub})` : ''}</div>
+                                                                            {s.since && <div className="text-[10px] text-gray-500 truncate" title={s.since}>{t('since') || 'since'} {s.since.split(' ').slice(0,2).join(' ')}</div>}
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                    </>)}
+                                                </div>
+                                            )}
+                                            {data.dns === null && <div role="alert" className="text-sm text-red-400">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                            {data.hosts === null && <div role="alert" className="text-sm text-red-400">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                            <fieldset {...haLock} className="space-y-6 min-w-0">
+                                            {/* DNS - nothing to edit or save until a read came back (#1163) */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="flex justify-between items-center mb-4">
+                                                    <h4 className="font-medium text-white">DNS</h4>
+                                                    <button onClick={() => handleSave('dns', data.dns, t('dnsSaved') || 'DNS saved')} disabled={data.dns == null} className="px-3 py-1 bg-proxmox-orange rounded text-white text-sm hover:bg-orange-600 disabled:opacity-50">{t('save')}</button>
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-4">
+                                                    <div>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('searchDomain') || 'Search Domain'}</label>
+                                                        <input type="text" value={data.dns?.search||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, search: e.target.value}})}
+                                                            className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('dnsServer') || 'DNS Server'} 1</label>
+                                                        <input type="text" value={data.dns?.dns1||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, dns1: e.target.value}})}
+                                                            className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
+                                                    </div>
+                                                    <div>
+                                                        <label className="block text-xs text-gray-400 mb-1">{t('dnsServer') || 'DNS Server'} 2</label>
+                                                        <input type="text" value={data.dns?.dns2||''} disabled={data.dns == null} onChange={(e) => setData({...data, dns: {...data.dns, dns2: e.target.value}})}
+                                                            className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm" />
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Time */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <h4 className="font-medium text-white mb-3">{t('time') || 'Time'}</h4>
+                                                <div className="grid grid-cols-2 gap-4 text-sm">
+                                                    <div>
+                                                        <span className="text-gray-400">{t('timezone') || 'Timezone'}:</span>
+                                                        <select
+                                                            value={data.time?.timezone || 'UTC'}
+                                                            onChange={async (e) => {
+                                                                const tz = e.target.value;
+                                                                handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'));
+                                                            }}
+                                                            className="ml-2 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-sm"
+                                                        >
+                                                            {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div><span className="text-gray-400">{t('localTime') || 'Local Time'}:</span><span className="ml-2 text-white font-mono">{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : 'N/A'}</span></div>
+                                                </div>
+                                            </div>
+
+                                            {/* Hosts */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="flex justify-between items-center mb-4">
+                                                    <h4 className="font-medium text-white">/etc/hosts</h4>
+                                                    <button onClick={() => handleSave('hosts', { data: data.hosts }, t('hostsSaved') || 'Hosts saved')} disabled={data.hosts == null} className="px-3 py-1 bg-proxmox-orange rounded text-white text-sm hover:bg-orange-600 disabled:opacity-50">{t('save')}</button>
+                                                </div>
+                                                <textarea value={data.hosts||''} disabled={data.hosts == null} onChange={(e) => setData({...data, hosts: e.target.value})} rows={5}
+                                                    className="w-full px-3 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none" />
+                                            </div>
+
+                                            {/* Certificates */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="flex justify-between items-center mb-4">
+                                                    <h4 className="font-medium text-white">{t('sslCertificates') || 'SSL Certificates'}</h4>
+                                                    <button 
+                                                        onClick={() => setData({...data, showCertUpload: !data.showCertUpload})}
+                                                        className="px-3 py-1 bg-proxmox-card border border-proxmox-border rounded text-gray-300 text-sm hover:text-white hover:border-proxmox-orange"
+                                                    >
+                                                        {data.showCertUpload ? t('cancel') : (t('uploadCustomCert') || 'Upload Custom Certificate')}
+                                                    </button>
+                                                </div>
+                                                
+                                                {/* Current Certificates */}
+                                                <div className="space-y-2 mb-4">
+                                                    {(data.certificates||[]).length > 0 ? (data.certificates||[]).map((c, i) => (
+                                                        <div key={i} className="flex justify-between items-center py-3 px-4 bg-proxmox-card rounded-lg">
+                                                            <div>
+                                                                <div className="text-white font-medium">{c.filename || 'Certificate'}</div>
+                                                                <div className="text-xs text-gray-500">{c.subject || 'N/A'}</div>
+                                                                <div className="text-xs text-gray-500">{t('issuer') || 'Issuer'}: {c.issuer || 'N/A'}</div>
+                                                            </div>
+                                                            <div className="text-right">
+                                                                <div className={`text-sm ${c.notafter && c.notafter * 1000 > Date.now() ? 'text-green-400' : 'text-red-400'}`}>
+                                                                    {c.notafter ? new Date(c.notafter * 1000).toLocaleDateString() : 'N/A'}
+                                                                </div>
+                                                                <div className="text-xs text-gray-500">
+                                                                    {c.notafter ? (c.notafter * 1000 > Date.now() ? (t('valid') || 'Valid') : (t('expired') || 'Expired')) : ''}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )) : <div className="text-gray-500 text-sm">{t('noCertificates') || 'No certificates found'}</div>}
+                                                </div>
+
+                                                {/* Certificate Upload Form */}
+                                                {data.showCertUpload && (
+                                                    <div className="mt-4 p-4 bg-proxmox-card rounded-lg border border-proxmox-border space-y-4">
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-2">{t('certificate') || 'Certificate'} (PEM {t('format') || 'Format'})</label>
+                                                            <textarea 
+                                                                value={data.newCert || ''} 
+                                                                onChange={(e) => setData({...data, newCert: e.target.value})}
+                                                                placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
+                                                                rows={6}
+                                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none"
+                                                            />
+                                                            <p className="text-xs text-gray-500 mt-1">{t('certChainHint') || 'Can contain multiple certificates (chain)'}</p>
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs text-gray-400 mb-2">{t('privateKey') || 'Private Key'} (PEM {t('format') || 'Format'})</label>
+                                                            <textarea 
+                                                                value={data.newKey || ''} 
+                                                                onChange={(e) => setData({...data, newKey: e.target.value})}
+                                                                placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                                                                rows={6}
+                                                                className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm font-mono resize-none"
+                                                            />
+                                                        </div>
+                                                        <div className="flex items-center gap-4">
+                                                            <label className="flex items-center gap-2 text-sm text-gray-300">
+                                                                <input type="checkbox" checked={data.certRestart !== false} onChange={(e) => setData({...data, certRestart: e.target.checked})} className="rounded" />
+                                                                {t('restartPveproxyAfterUpload') || 'Restart pveproxy after upload'}
+                                                            </label>
+                                                        </div>
+                                                        <div className="flex gap-3">
+                                                            <button
+                                                                onClick={async () => {
+                                                                    if (!data.newCert || !data.newKey) {
+                                                                        addToast(t('certAndKeyRequired') || 'Certificate and key required', 'error');
+                                                                        return;
+                                                                    }
+                                                                    try {
+                                                                        const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom`, {
+                                                                            method: 'POST',
+                                                                            credentials: 'include',
+                                                                            headers: { 'Content-Type': 'application/json' },
+                                                                            body: JSON.stringify({
+                                                                                certificates: data.newCert,
+                                                                                key: data.newKey,
+                                                                                restart: data.certRestart !== false,
+                                                                                force: true
+                                                                            })
+                                                                        });
+                                                                        if (res.ok) {
+                                                                            addToast(t('certUploaded') || 'Certificate uploaded!');
+                                                                            setData({...data, newCert: '', newKey: '', showCertUpload: false});
+                                                                            loadTabData('system');
+                                                                        } else {
+                                                                            const err = await res.json();
+                                                                            addToast(err.error || t('uploadFailed') || 'Upload failed', 'error');
+                                                                        }
+                                                                    } catch (e) {
+                                                                        addToast(t('connectionError'), 'error');
+                                                                    }
+                                                                }}
+                                                                className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white text-sm hover:bg-orange-600"
+                                                            >
+                                                                <Icons.Shield />
+                                                                {t('uploadCertificate') || 'Upload Certificate'}
+                                                            </button>
+                                                            <button
+                                                                onClick={async () => {
+                                                                    if (!confirm(t('deleteCertConfirm') || 'Delete custom certificate and revert to self-signed?')) return;
+                                                                    try {
+                                                                        const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom?restart=true`, {
+                                                                            method: 'DELETE',
+                                                                            credentials: 'include',
+                                                                        });
+                                                                        if (res.ok) {
+                                                                            addToast(t('certDeleted') || 'Certificate deleted');
+                                                                            loadTabData('system');
+                                                                        } else {
+                                                                            const err = await res.json();
+                                                                            addToast(err.error || t('deleteFailed'), 'error');
+                                                                        }
+                                                                    } catch (e) {
+                                                                        addToast(t('connectionError'), 'error');
+                                                                    }
+                                                                }}
+                                                                className="px-4 py-2 bg-red-500/20 border border-red-500/50 rounded-lg text-red-400 text-sm hover:bg-red-500/30"
+                                                            >
+                                                                {t('deleteCustomCert') || 'Delete Custom Cert'}
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            </fieldset>
+
+                                            {/* Syslog */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="flex justify-between items-center mb-3">
+                                                    <h4 className="font-medium text-white">{t('syslogLatest') || 'Syslog (latest entries)'}</h4>
+                                                    <button 
+                                                        onClick={() => loadTabData('system')}
+                                                        className="p-1.5 rounded hover:bg-proxmox-hover text-gray-400 hover:text-white"
+                                                        title={t('refresh') || 'Refresh'}
+                                                    >
+                                                        <Icons.RefreshCw />
+                                                    </button>
+                                                </div>
+                                                <div className="max-h-64 overflow-y-auto bg-black/50 rounded p-3">
+                                                    {(data.syslog||[]).length > 0 ? (
+                                                        <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap leading-relaxed">{(data.syslog||[]).join('\n')}</pre>
+                                                    ) : (
+                                                        <div className="text-gray-500 text-sm">{t('noLogEntries') || 'No log entries'}</div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'hardware' && (
+                                        <fieldset {...haLock} className="contents">
+                                        <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders} />
+                                        </fieldset>
+                                    )}
+
+                                    {activeTab === 'disks' && (
+                                        <div className="space-y-6">
+                                            {/* Physical Disks with Actions */}
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                    <h3 className="font-medium text-white flex items-center gap-2">
+                                                        <Icons.HardDrive />
+                                                        Physical Disks
+                                                    </h3>
+                                                    <button 
+                                                        onClick={() => loadTabData('disks')}
+                                                        className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
+                                                    >
+                                                        <Icons.RefreshCw />
+                                                    </button>
+                                                </div>
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full">
+                                                        <thead className="bg-proxmox-dark">
+                                                            <tr>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Device</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Model</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Size</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Type</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Usage</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Health</th>
+                                                                <th className="text-left p-3 text-sm text-gray-400">Actions</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {(data.disks||[]).length > 0 ? (data.disks||[]).map((d, idx) => (
+                                                                <tr key={d.devpath || idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                    <td className="p-3">
+                                                                        <span className="font-mono text-white">{d.devpath || 'Unknown'}</span>
+                                                                        {d.serial && <div className="text-xs text-gray-500 font-mono">{d.serial}</div>}
+                                                                    </td>
+                                                                    <td className="p-3 text-gray-400 text-sm max-w-48 truncate">{d.model || 'Unknown'}</td>
+                                                                    <td className="p-3 text-proxmox-orange font-medium">{formatBytes(d.size)}</td>
+                                                                    <td className="p-3">
+                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                            d.type === 'ssd' ? 'bg-blue-500/20 text-blue-400' :
+                                                                            d.type === 'nvme' ? 'bg-purple-500/20 text-purple-400' :
+                                                                            'bg-gray-500/20 text-gray-400'
+                                                                        }`}>
+                                                                            {(d.type || 'hdd').toUpperCase()}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="p-3">
+                                                                        {d.used === 'unused' || !d.used ? (
+                                                                            <span className="text-green-400 text-sm">✓ Unused</span>
+                                                                        ) : (
+                                                                            <span className="text-yellow-400 text-sm">{d.used}</span>
+                                                                        )}
+                                                                    </td>
+                                                                    <td className="p-3">
+                                                                        <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                            d.health === 'PASSED' ? 'bg-green-500/20 text-green-400' :
+                                                                            d.health === 'FAILED' ? 'bg-red-500/20 text-red-400' :
+                                                                            'bg-gray-500/20 text-gray-400'
+                                                                        }`}>
+                                                                            {d.health || 'N/A'}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="p-3">
+                                                                        <div className="flex gap-1">
+                                                                            <button
+                                                                                onClick={async () => {
+                                                                                    // LW: open modal in loading state, fetch, then populate
+                                                                                    setSmartModal({ disk: d, loading: true, data: null, error: null });
+                                                                                    try {
+                                                                                        const diskPath = (d.devpath || '').replace('/dev/', '');
+                                                                                        const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/${encodeURIComponent(diskPath)}/smart`, { credentials: 'include', headers: authHeaders });
+                                                                                        if (res.ok) {
+                                                                                            const smart = await res.json();
+                                                                                            setSmartModal({ disk: d, loading: false, data: smart, error: null });
+                                                                                        } else {
+                                                                                            const err = await res.json().catch(() => ({}));
+                                                                                            setSmartModal({ disk: d, loading: false, data: null, error: err.error || `HTTP ${res.status}` });
+                                                                                        }
+                                                                                    } catch (e) {
+                                                                                        setSmartModal({ disk: d, loading: false, data: null, error: e.message || String(e) });
+                                                                                    }
+                                                                                }}
+                                                                                className="p-1.5 hover:bg-blue-500/20 rounded text-gray-400 hover:text-blue-400"
+                                                                                title="SMART Data"
+                                                                            >
+                                                                                <Icons.Activity />
+                                                                            </button>
+                                                                            {(d.used === 'unused' || !d.used) && (
+                                                                                <fieldset {...haLock} className="contents">
+                                                                                    <button 
+                                                                                        onClick={async () => {
+                                                                                            if (!confirm(`Initialize ${d.devpath} with GPT partition table?\n\nThis will ERASE all data on the disk!`)) return;
+                                                                                            try {
+                                                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/initgpt`, {
+                                                                                                    method: 'POST',
+                                                                                                    credentials: 'include',
+                                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                                    body: JSON.stringify({ disk: d.devpath })
+                                                                                                });
+                                                                                                if (res.ok) {
+                                                                                                    addToast('GPT partition table initialized', 'success');
+                                                                                                    loadTabData('disks');
+                                                                                                } else {
+                                                                                                    const err = await res.json();
+                                                                                                    addToast(err.error || 'Failed to initialize', 'error');
+                                                                                                }
+                                                                                            } catch(e) { addToast('Error initializing disk', 'error'); }
+                                                                                        }}
+                                                                                        className="p-1.5 hover:bg-green-500/20 rounded text-gray-400 hover:text-green-400"
+                                                                                        title="Initialize GPT"
+                                                                                    >
+                                                                                        <Icons.Plus />
+                                                                                    </button>
+                                                                                    <button 
+                                                                                        onClick={async () => {
+                                                                                            if (!confirm(`⚠️ DANGER: Wipe disk ${d.devpath}?\n\nThis will DESTROY ALL DATA on the disk!`)) return;
+                                                                                            if (!confirm(`Are you ABSOLUTELY SURE?\n\nThis action cannot be undone!`)) return;
+                                                                                            try {
+                                                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/disks/wipe`, {
+                                                                                                    method: 'POST',
+                                                                                                    credentials: 'include',
+                                                                                                    headers: { 'Content-Type': 'application/json' },
+                                                                                                    body: JSON.stringify({ disk: d.devpath })
+                                                                                                });
+                                                                                                if(res.ok) {
+                                                                                                    addToast('Disk wiped successfully', 'success');
+                                                                                                    loadTabData('disks');
+                                                                                                } else {
+                                                                                                    const err = await res.json();
+                                                                                                    addToast(err.error || 'Failed to wipe', 'error');
+                                                                                                }
+                                                                                            } catch(e) { addToast('Error wiping disk', 'error'); }
+                                                                                        }}
+                                                                                        className="p-1.5 hover:bg-red-500/20 rounded text-gray-400 hover:text-red-400"
+                                                                                        title="Wipe Disk"
+                                                                                    >
+                                                                                        <Icons.Trash />
+                                                                                    </button>
+                                                                                </fieldset>
+                                                                            )}
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            )) : (
+                                                                <tr><td colSpan="7" className="p-8 text-center text-gray-500">No physical disks found</td></tr>
+                                                            )}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+
+                                            <fieldset {...haLock} className="space-y-6 min-w-0">
+                                            {isXcpng ? (
+                                                /* XCP-ng: Storage Repositories - NS Mar 2026 */
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                    <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                        <h3 className="font-medium text-white flex items-center gap-2">
+                                                            <Icons.Database />
+                                                            {t('storageRepos') || 'Storage Repositories'}
+                                                        </h3>
+                                                        <button
+                                                            onClick={() => openDiskModal('sr')}
+                                                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Plus className="inline mr-1" /> {t('createSr') || 'Create SR'}
+                                                        </button>
+                                                    </div>
+                                                    <div className="p-4">
+                                                        <p className="text-xs text-gray-500 mb-3">{t('srHint') || 'Storage Repositories are managed via XAPI. Use the button above to create NFS, iSCSI, or local storage.'}</p>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <>
+                                            {/* LVM Volume Groups */}
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                    <h3 className="font-medium text-white flex items-center gap-2">
+                                                        <Icons.Database />
+                                                        LVM Volume Groups
+                                                    </h3>
+                                                    <button
+                                                        onClick={() => openDiskModal('lvm')}
+                                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                    >
+                                                        <Icons.Plus className="inline mr-1" /> Create LVM
+                                                    </button>
+                                                </div>
+                                                <div className="p-4">
+                                                    {(data.lvm||[]).length > 0 ? (
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                            {data.lvm.map((v, idx) => (
+                                                                <div key={v.vg || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                                    <div className="flex justify-between items-center mb-2">
+                                                                        <span className="font-medium text-white">{v.vg || 'Unknown'}</span>
+                                                                        <span className="text-proxmox-orange font-medium">{formatBytes(v.size)}</span>
+                                                                    </div>
+                                                                    {v.free && v.size && (
+                                                                        <>
+                                                                            <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
+                                                                                <div
+                                                                                    className="h-full bg-proxmox-orange rounded-full"
+                                                                                    style={{ width: `${Math.round((1 - v.free/v.size) * 100)}%` }}
+                                                                                />
+                                                                            </div>
+                                                                            <div className="text-xs text-gray-500 mt-1">
+                                                                                {formatBytes(v.free)} free
+                                                                            </div>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No LVM Volume Groups</div>}
+                                                </div>
+                                            </div>
+
+                                            {/* LVM-Thin Pools */}
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                    <h3 className="font-medium text-white flex items-center gap-2">
+                                                        <Icons.Database />
+                                                        LVM-Thin Pools
+                                                    </h3>
+                                                    <button
+                                                        onClick={() => openDiskModal('lvmthin')}
+                                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                    >
+                                                        <Icons.Plus className="inline mr-1" /> Create LVM-Thin
+                                                    </button>
+                                                </div>
+                                                <div className="p-4">
+                                                    {(data.lvmthin||[]).length > 0 ? (
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                            {data.lvmthin.map((p, idx) => (
+                                                                <div key={p.lv || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                                    <div className="flex justify-between items-center mb-2">
+                                                                        <span className="font-medium text-white">{p.lv || 'Unknown'}</span>
+                                                                        <span className="text-proxmox-orange font-medium">{formatBytes(p.lv_size)}</span>
+                                                                    </div>
+                                                                    <div className="text-xs text-gray-500 mb-2">VG: {p.vg || '?'}</div>
+                                                                    <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
+                                                                        <div
+                                                                            className={`h-full rounded-full ${(p.usage||0) > 80 ? 'bg-red-500' : (p.usage||0) > 60 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                                            style={{ width: `${p.usage || 0}%` }}
+                                                                        />
+                                                                    </div>
+                                                                    <div className="text-xs text-gray-500 mt-1">{p.usage || 0}% used</div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No LVM-Thin Pools</div>}
+                                                </div>
+                                            </div>
+                                                </>
+                                            )}
+                                            </fieldset>
+
+                                            {/* ZFS Pools - LW Oct 2026: outside the lock, the pool view only reads */}
+                                            {!isXcpng && (
+                                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                <div className="p-4 border-b border-proxmox-border flex items-center justify-between">
+                                                    <h3 className="font-medium text-white flex items-center gap-2">
+                                                        <Icons.Database />
+                                                        ZFS Pools
+                                                    </h3>
+                                                    <fieldset {...haLock} className="contents">
+                                                    <div className="flex gap-2">
+                                                        <button
+                                                            onClick={() => openDiskModal('directory')}
+                                                            className="px-3 py-1.5 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Folder className="inline mr-1" /> Directory
+                                                        </button>
+                                                        <button
+                                                            onClick={() => openDiskModal('zfs')}
+                                                            className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Plus className="inline mr-1" /> Create ZFS
+                                                        </button>
+                                                    </div>
+                                                    </fieldset>
+                                                </div>
+                                                <div className="p-4">
+                                                    {(data.zfs||[]).length > 0 ? (
+                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                            {data.zfs.map((z, idx) => (
+                                                                <div key={z.name || idx} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                                    <div className="flex justify-between items-center mb-2">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <span className="font-medium text-white">{z.name || 'Unknown'}</span>
+                                                                            <span className={`text-xs px-2 py-0.5 rounded ${
+                                                                                z.health === 'ONLINE' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                                            }`}>
+                                                                                {z.health || 'N/A'}
+                                                                            </span>
+                                                                        </div>
+                                                                        <span className="text-proxmox-orange font-medium">{formatBytes(z.size)}</span>
+                                                                    </div>
+                                                                    {z.alloc && z.size && (
+                                                                        <>
+                                                                            <div className="h-2 bg-proxmox-darker rounded-full overflow-hidden">
+                                                                                <div
+                                                                                    className="h-full bg-blue-500 rounded-full"
+                                                                                    style={{ width: `${Math.round((z.alloc/z.size) * 100)}%` }}
+                                                                                />
+                                                                            </div>
+                                                                            <div className="text-xs text-gray-500 mt-1">
+                                                                                {formatBytes(z.free || (z.size - z.alloc))} free
+                                                                            </div>
+                                                                        </>
+                                                                    )}
+                                                                    {z.name && (
+                                                                        <button
+                                                                            onClick={() => setZfsPool(z.name)}
+                                                                            data-zfs-open={z.name}
+                                                                            title={t('zfsPoolDetails')}
+                                                                            className="mt-3 px-2 py-1 text-xs bg-proxmox-darker hover:bg-proxmox-hover border border-proxmox-border rounded-lg flex items-center gap-1 text-gray-300"
+                                                                        >
+                                                                            <Icons.HardDrive className="w-3.5 h-3.5" /> {t('zfsPoolDetails')}
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    ) : <div className="text-gray-500 text-sm text-center py-4">No ZFS Pools</div>}
+                                                </div>
+                                            </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {/* APT Repos tab */}
+                                    {activeTab === 'repos' && (
+                                        <fieldset {...haLock} className="contents">
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between">
+                                                <h3 className="text-lg font-medium text-white flex items-center gap-2">
+                                                    <Icons.Package className="w-5 h-5 text-proxmox-orange" />
+                                                    APT {t('repositories') || 'Repositories'}
+                                                </h3>
+                                                <button
+                                                    onClick={async () => {
+                                                        try {
+                                                            const r = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, {
+                                                                method: 'POST',
+                                                                credentials: 'include',
+                                                                headers: authHeaders
+                                                            });
+                                                            if (r.ok) {
+                                                                addToast(t('packageListRefreshStarted') || 'Package list refresh started', 'success');
+                                                            } else {
+                                                                addToast(t('error') || 'Error', 'error');
+                                                            }
+                                                        } catch (e) {
+                                                            addToast(t('error') || 'Error', 'error');
+                                                        }
+                                                    }}
+                                                    className="px-3 py-1.5 bg-proxmox-orange/20 hover:bg-proxmox-orange/30 text-proxmox-orange rounded-lg text-sm flex items-center gap-2"
+                                                >
+                                                    <Icons.RefreshCw className="w-4 h-4" />
+                                                    apt update
+                                                </button>
+                                            </div>
+
+                                            {/* Info Box */}
+                                            <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-lg text-sm">
+                                                <p className="text-gray-300">
+                                                    {t('repoInfo') || 'Manage APT repositories for this node. Enable/disable repositories to control which packages are available.'}
+                                                </p>
+                                            </div>
+
+                                            {/* Proxmox Source Format Notice */}
+                                            <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg text-sm">
+                                                <p className="text-yellow-400 flex items-center gap-2">
+                                                    <Icons.AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                                                    {t('repoProxmoxNotice') || "Note: Due to Proxmox's switch to a new source format, the display may currently be inaccurate. We're working on it."}
+                                                </p>
+                                            </div>
+
+                                            {/* Repository List */}
+                                            {loading ? (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    <Icons.RotateCw className="w-6 h-6 animate-spin mx-auto mb-2" />
+                                                    {t('loading')}...
+                                                </div>
+                                            ) : (data.repos || []).length > 0 ? (
+                                                <div className="space-y-3">
+                                                    {(data.repos || []).map(repo => (
+                                                        <div 
+                                                            key={repo.id}
+                                                            className={`p-4 rounded-lg border transition-all ${
+                                                                repo.enabled 
+                                                                    ? 'bg-green-500/5 border-green-500/30' 
+                                                                    : 'bg-proxmox-dark border-proxmox-border'
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                                                                        repo.enabled ? 'bg-green-500/20' : 'bg-gray-500/20'
+                                                                    }`}>
+                                                                        {repo.requires_subscription ? (
+                                                                            <Icons.Shield className={repo.enabled ? 'text-green-400' : 'text-gray-500'} />
+                                                                        ) : (
+                                                                            <Icons.Package className={repo.enabled ? 'text-green-400' : 'text-gray-500'} />
+                                                                        )}
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="flex items-center gap-2">
+                                                                            <h4 className="font-medium text-white">{repo.name}</h4>
+                                                                            {repo.is_other && (
+                                                                                <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">
+                                                                                    {t('detected') || 'Detected'}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <p className="text-xs text-gray-500">{repo.description}</p>
+                                                                        {repo.requires_subscription && (
+                                                                            <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded bg-yellow-500/20 text-yellow-400">
+                                                                                {t('requiresSubscription') || 'Requires Subscription'}
+                                                                            </span>
+                                                                        )}
+                                                                        {repo.uri && (
+                                                                            <p className="text-xs text-gray-600 mt-1 font-mono truncate max-w-xs">{repo.uri}</p>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-3">
+                                                                    <span className={`text-xs px-2 py-1 rounded ${
+                                                                        repo.enabled 
+                                                                            ? 'bg-green-500/20 text-green-400' 
+                                                                            : 'bg-gray-500/20 text-gray-400'
+                                                                    }`}>
+                                                                        {repo.enabled ? (t('enabled') || 'Enabled') : (t('disabled') || 'Disabled')}
+                                                                    </span>
+                                                                    {repo.exists && (
+                                                                        <button
+                                                                            onClick={async () => {
+                                                                                try {
+                                                                                    // For "other" repos, include file and index
+                                                                                    const bodyData = { enabled: !repo.enabled };
+                                                                                    if (repo.is_other) {
+                                                                                        bodyData.file = repo.file;
+                                                                                        bodyData.index = repo.index;
+                                                                                        bodyData.name = repo.name;
+                                                                                    }
+                                                                                    const r = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/${repo.id}`, {
+                                                                                        method: 'PUT',
+                                                                                        credentials: 'include',
+                                                                                        headers: { 'Content-Type': 'application/json', ...authHeaders },
+                                                                                        body: JSON.stringify(bodyData)
+                                                                                    });
+                                                                                    if (r.ok) {
+                                                                                        addToast(`${repo.name} ${!repo.enabled ? 'enabled' : 'disabled'}`, 'success');
+                                                                                        loadTabData('repos');
+                                                                                    } else {
+                                                                                        const err = await r.json();
+                                                                                        addToast(err.error || t('error'), 'error');
+                                                                                    }
+                                                                                } catch (e) {
+                                                                                    addToast(t('error') || 'Error', 'error');
+                                                                                }
+                                                                            }}
+                                                                            className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                                                                                repo.enabled
+                                                                                    ? 'bg-red-500/20 hover:bg-red-500/30 text-red-400'
+                                                                                    : 'bg-green-500/20 hover:bg-green-500/30 text-green-400'
+                                                                            }`}
+                                                                        >
+                                                                            {repo.enabled ? (t('disable') || 'Disable') : (t('enable') || 'Enable')}
+                                                                        </button>
+                                                                    )}
+                                                                    {!repo.exists && (
+                                                                        <span className="text-xs text-gray-500">{t('notConfigured') || 'Not configured'}</span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            {repo.file && (
+                                                                <div className="mt-2 text-xs text-gray-500 font-mono">
+                                                                    {repo.file}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="text-center py-8 text-gray-500">
+                                                    {t('noReposFound') || 'No repositories found'}
+                                                </div>
+                                            )}
+
+                                            {/* Warning */}
+                                            <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                                <div className="flex items-start gap-2">
+                                                    <Icons.AlertTriangle className="w-5 h-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+                                                    <div className="text-sm text-yellow-200">
+                                                        <strong>{t('warning') || 'Warning'}:</strong> {t('repoWarning') || 'Mixing enterprise and no-subscription repositories is not recommended. After changing repositories, run "apt update" to refresh the package list.'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        </fieldset>
+                                    )}
+
+                                    {activeTab === 'tasks' && (
+                                        <div className="space-y-2">
+                                            {(data.tasks||[]).length > 0 ? (data.tasks||[]).map((t, idx) => (
+                                                <div key={t.upid || idx} className="p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div className="flex justify-between items-center">
+                                                        <div>
+                                                            <span className="text-white">{t.type || 'Unknown'}</span>
+                                                            <span className={`ml-2 text-xs px-2 py-0.5 rounded ${t.status==='OK'?'text-green-400 bg-green-500/10':t.status?'text-red-400 bg-red-500/10':'text-yellow-400 bg-yellow-500/10'}`}>
+                                                                {t.status || 'running'}
+                                                            </span>
+                                                        </div>
+                                                        <span className="text-xs text-gray-500">{t.starttime ? new Date(t.starttime*1000).toLocaleString() : 'N/A'}</span>
+                                                    </div>
+                                                    <div className="text-xs text-gray-500 mt-1">{t.user || 'unknown'} - {t.id || 'N/A'}</div>
+                                                </div>
+                                            )) : <div className="text-center py-8 text-gray-500">{t('noTasks') || 'No tasks'}</div>}
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'timeline' && (
+                                        <TimelineView clusterId={clusterId} node={node} t={t}
+                                            authFetch={(u, o = {}) => fetch(u, { ...o, credentials: 'include', headers: { ...(o.headers || {}), ...authHeaders } }).catch(() => null)} />
+                                    )}
+
+                                    {activeTab === 'subscription' && (
+                                        <div className="space-y-6">
+                                            <div className="p-6 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <div className="flex items-center justify-between mb-4">
+                                                    <h3 className="font-medium text-white">{t('subscriptionStatus')}</h3>
+                                                    <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                                                        data.subscription?.status === 'Active' || data.subscription?.status === 'active' 
+                                                            ? 'bg-green-500/20 text-green-400' 
+                                                            : 'bg-yellow-500/20 text-yellow-400'
+                                                    }`}>
+                                                        {data.subscription?.status === 'Active' || data.subscription?.status === 'active' ? t('licensed') : t('notLicensed')}
+                                                    </span>
+                                                </div>
+                                                
+                                                {(data.subscription?.status === 'Active' || data.subscription?.status === 'active') ? (
+                                                    <div className="space-y-3 text-sm">
+                                                        <div className="flex justify-between py-2 border-b border-proxmox-border">
+                                                            <span className="text-gray-400">{t('product')}</span>
+                                                            <span className="text-white">{data.subscription?.productname || 'Proxmox VE Subscription'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between py-2 border-b border-proxmox-border">
+                                                            <span className="text-gray-400">{t('licenseKey')}</span>
+                                                            <span className="text-white font-mono">{data.subscription?.key || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between py-2 border-b border-proxmox-border">
+                                                            <span className="text-gray-400">Server ID</span>
+                                                            <span className="text-white font-mono">{data.subscription?.serverid || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between py-2 border-b border-proxmox-border">
+                                                            <span className="text-gray-400">{t('validUntil')}</span>
+                                                            <span className="text-white">{data.subscription?.nextduedate || 'N/A'}</span>
+                                                        </div>
+                                                        <div className="flex justify-between py-2">
+                                                            <span className="text-gray-400">{t('supportLevel')}</span>
+                                                            <span className="text-white">{data.subscription?.level || 'N/A'}</span>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className="space-y-4">
+                                                        <div className="p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                                                            <div className="flex items-start gap-3">
+                                                                <Icons.AlertTriangle />
+                                                                <div>
+                                                                    <div className="text-yellow-400 font-medium">{t('noActiveSubscription')}</div>
+                                                                    <div className="text-sm text-gray-400 mt-1">
+                                                                        {t('noSubscriptionDesc')}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        {data.subscription?.serverid && (
+                                                            <div className="text-sm">
+                                                                <span className="text-gray-400">Server ID: </span>
+                                                                <span className="text-white font-mono">{data.subscription.serverid}</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* License Key Input */}
+                                            <div className="p-6 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                <h4 className="font-medium text-white mb-4">{t('enterLicenseKey')}</h4>
+                                                <div className="space-y-4">
+                                                    <fieldset {...haLock} className="min-w-0">
+                                                        <label className="block text-xs text-gray-400 mb-2">{t('subscriptionKey')}</label>
+                                                        <input 
+                                                            type="text" 
+                                                            value={data.newLicenseKey || ''} 
+                                                            onChange={(e) => setData({...data, newLicenseKey: e.target.value})}
+                                                            placeholder="pve1c-xxxxxxxxxx"
+                                                            className="w-full px-4 py-3 bg-proxmox-card border border-proxmox-border rounded-lg text-white font-mono focus:outline-none focus:border-proxmox-orange"
+                                                        />
+                                                        <p className="text-xs text-gray-500 mt-2">
+                                                            Format: pve1c-xxxxxxxxxx, pve2c-xxxxxxxxxx, pve4c-xxxxxxxxxx, etc.
+                                                        </p>
+                                                    </fieldset>
+                                                    <div className="flex gap-3">
+                                                        <fieldset {...haLock} className="contents">
+                                                        <button
+                                                            onClick={async () => {
+                                                                if(!data.newLicenseKey) {
+                                                                    addToast(t('pleaseEnterLicenseKey'), 'error');
+                                                                    return;
+                                                                }
+                                                                try {
+                                                                    const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`, {
+                                                                        method: 'PUT',
+                                                                        credentials: 'include',
+                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                        body: JSON.stringify({ key: data.newLicenseKey })
+                                                                    });
+                                                                    if(res.ok) {
+                                                                        addToast(t('licenseActivated'));
+                                                                        setData({...data, newLicenseKey: ''});
+                                                                        loadTabData('subscription');
+                                                                    } else {
+                                                                        const err = await res.json();
+                                                                        addToast(err.error || t('activationFailed'), 'error');
+                                                                    }
+                                                                } catch (e) {
+                                                                    addToast(t('connectionError'), 'error');
+                                                                }
+                                                            }}
+                                                            disabled={!data.newLicenseKey}
+                                                            className="flex items-center gap-2 px-4 py-2 bg-proxmox-orange rounded-lg text-white font-medium hover:bg-orange-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                                        >
+                                                            <Icons.Shield />
+                                                            {t('activateLicense')}
+                                                        </button>
+                                                        </fieldset>
+                                                        <button
+                                                            onClick={() => loadTabData('subscription')}
+                                                            className="flex items-center gap-2 px-4 py-2 bg-proxmox-card border border-proxmox-border rounded-lg text-gray-300 hover:text-white transition-colors"
+                                                        >
+                                                            <Icons.RefreshCw />
+                                                            {t('refreshStatus')}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Info Box */}
+                                            <div className="p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg">
+                                                <div className="flex items-start gap-3">
+                                                    <Icons.Info />
+                                                    <div className="text-sm text-gray-300">
+                                                        <p className="mb-2">{t('subscriptionBenefits')}:</p>
+                                                        <ul className="list-disc list-inside space-y-1 text-gray-400">
+                                                            <li>{t('subscriptionBenefit1')}</li>
+                                                            <li>{t('subscriptionBenefit2')}</li>
+                                                            <li>{t('subscriptionBenefit3')}</li>
+                                                        </ul>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'ceph' && (
+                                        <fieldset {...haLock} className="contents">
+                                        <div className="space-y-6">
+                                            {loading ? (
+                                                <div className="flex items-center justify-center py-12">
+                                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-proxmox-orange"></div>
+                                                </div>
+                                            ) : data.ceph?.denied ? (
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center" data-ceph-denied="">
+                                                    <Icons.Lock className="w-12 h-12 mx-auto text-gray-600 mb-4" />
+                                                    <h3 className="text-lg font-semibold mb-2">{t('cephNoAccess')}</h3>
+                                                    <p className="text-gray-400">{t('cephNoAccessDesc')}</p>
+                                                </div>
+                                            ) : !data.ceph?.available ? (
+                                                <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-8 text-center">
+                                                    <Icons.Database className="w-12 h-12 mx-auto text-gray-600 mb-4" />
+                                                    <h3 className="text-lg font-semibold mb-2">{t('cephNotInstalled') || 'Ceph Not Installed'}</h3>
+                                                    <p className="text-gray-400 mb-4">{t('cephNotInstalledOnNode') || 'Ceph is not configured on this node.'}</p>
+                                                    <button
+                                                        onClick={async () => {
+                                                            if (!confirm('Initialize Ceph on this node? This will install and configure Ceph.')) return;
+                                                            try {
+                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/init`, {
+                                                                    method: 'POST',
+                                                                    credentials: 'include',
+                                                                    headers: { 'Content-Type': 'application/json', ...authHeaders }
+                                                                });
+                                                                if (res.ok) {
+                                                                    addToast('Ceph initialization started', 'success');
+                                                                    loadTabData('ceph');
+                                                                } else {
+                                                                    const err = await res.json().catch(() => ({}));
+                                                                    addToast(err.error || 'Failed to initialize Ceph', 'error');
+                                                                }
+                                                            } catch (e) {
+                                                                addToast('Connection error', 'error');
+                                                            }
+                                                        }}
+                                                        className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-white font-medium transition-colors"
+                                                    >
+                                                        {t('cephInit') || 'Initialize Ceph'}
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {/* Ceph Status Overview */}
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className="font-semibold flex items-center gap-2">
+                                                                <Icons.Activity />
+                                                                {t('cephStatus') || 'Ceph Status'}
+                                                            </h3>
+                                                            <div className="flex gap-2">
+                                                                {['start', 'stop', 'restart'].map(action => (
+                                                                    <button
+                                                                        key={action}
+                                                                        onClick={async () => {
+                                                                            if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} Ceph services on ${node}?`)) return;
+                                                                            try {
+                                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/${action}`, {
+                                                                                    method: 'POST',
+                                                                                    credentials: 'include',
+                                                                                    headers: authHeaders
+                                                                                });
+                                                                                addToast(res.ok ? `Ceph ${action} initiated` : `Failed to ${action}`, res.ok ? 'success' : 'error');
+                                                                                if (res.ok) setTimeout(() => loadTabData('ceph'), 2000);
+                                                                            } catch (e) { addToast('Error', 'error'); }
+                                                                        }}
+                                                                        className={`px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                                                                            action === 'stop' ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' :
+                                                                            action === 'restart' ? 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30' :
+                                                                            'bg-green-500/20 text-green-400 hover:bg-green-500/30'
+                                                                        }`}
+                                                                    >
+                                                                        {action.charAt(0).toUpperCase() + action.slice(1)}
+                                                                    </button>
+                                                                ))}
+                                                            </div>
+                                                        </div>
+                                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                <div className="text-sm text-gray-400 mb-1">{t('health') || 'Health'}</div>
+                                                                <div className={`text-xl font-bold ${
+                                                                    data.ceph?.status?.health?.status === 'HEALTH_OK' ? 'text-green-400' :
+                                                                    data.ceph?.status?.health?.status === 'HEALTH_WARN' ? 'text-yellow-400' :
+                                                                    'text-red-400'
+                                                                }`}>
+                                                                    {data.ceph?.status?.health?.status || 'Unknown'}
+                                                                </div>
+                                                            </div>
+                                                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                <div className="text-sm text-gray-400 mb-1">OSDs</div>
+                                                                <div className="text-xl font-bold text-blue-400">{(data.ceph?.osd || []).length}</div>
+                                                                <div className="text-xs text-gray-400">
+                                                                    {(data.ceph?.osd || []).filter(o => o.status === 'up').length} up, {(data.ceph?.osd || []).filter(o => o.in).length} in
+                                                                </div>
+                                                            </div>
+                                                            <div className="bg-proxmox-dark rounded-lg p-4">
+                                                                <div className="text-sm text-gray-400 mb-1">{t('cephMons') || 'Monitors'}</div>
+                                                                <div className="text-xl font-bold text-purple-400">{(data.ceph?.mon || []).length}</div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* OSDs on this node */}
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                        <div className="p-4 border-b border-proxmox-border">
+                                                            <h3 className="font-semibold">OSDs ({(data.ceph?.osd || []).length})</h3>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full">
+                                                                <thead className="bg-proxmox-dark">
+                                                                    <tr>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">ID</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('name') || 'Name'}</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('status')}</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">In/Out</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">Class</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('actions')}</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {(!data.ceph?.osd || data.ceph.osd.length === 0) ? (
+                                                                        <tr><td colSpan="6" className="p-8 text-center text-gray-500">No OSDs on this node</td></tr>
+                                                                    ) : data.ceph.osd.map((osd) => (
+                                                                        <tr key={osd.id} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                            <td className="p-3">{osd.id}</td>
+                                                                            <td className="p-3 font-medium">{osd.name || `osd.${osd.id}`}</td>
+                                                                            <td className="p-3">
+                                                                                <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                    osd.status === 'up' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                                                }`}>{osd.status || 'unknown'}</span>
+                                                                            </td>
+                                                                            <td className="p-3">
+                                                                                <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                                    osd.in ? 'bg-blue-500/20 text-blue-400' : 'bg-yellow-500/20 text-yellow-400'
+                                                                                }`}>{osd.in ? 'In' : 'Out'}</span>
+                                                                            </td>
+                                                                            <td className="p-3 text-gray-300">{osd.device_class || osd.class || '-'}</td>
+                                                                            <td className="p-3">
+                                                                                <div className="flex gap-1">
+                                                                                    <button
+                                                                                        onClick={async () => {
+                                                                                            const action = osd.in ? 'out' : 'in';
+                                                                                            if (!confirm(`Mark OSD ${osd.id} as ${action.toUpperCase()}?`)) return;
+                                                                                            // MK May 2026 (#408 family): destructive POST with silent catch.
+                                                                                            try {
+                                                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/osd/${osd.id}/${action}`, {
+                                                                                                    method: 'POST', credentials: 'include', headers: authHeaders
+                                                                                                });
+                                                                                                if (res?.ok) {
+                                                                                                    addToast(`OSD ${osd.id} marked ${action.toUpperCase()}`, 'success');
+                                                                                                    loadTabData('ceph');
+                                                                                                } else {
+                                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                                    addToast(err.error || `Failed to mark OSD ${action} (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                }
+                                                                                            } catch (e) {
+                                                                                                addToast(`Failed to mark OSD ${action}: ${e.message || e}`, 'error');
+                                                                                            }
+                                                                                        }}
+                                                                                        className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
+                                                                                    >
+                                                                                        {osd.in ? 'Out' : 'In'}
+                                                                                    </button>
+                                                                                    <button
+                                                                                        onClick={async () => {
+                                                                                            try {
+                                                                                                const res = await fetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/osd/${osd.id}/scrub`, {
+                                                                                                    method: 'POST', credentials: 'include', headers: authHeaders
+                                                                                                });
+                                                                                                if (res?.ok) {
+                                                                                                    addToast('Scrub started', 'success');
+                                                                                                } else {
+                                                                                                    const err = await res.json().catch(() => ({}));
+                                                                                                    addToast(err.error || `Failed to start scrub (HTTP ${res?.status || '?'})`, 'error');
+                                                                                                }
+                                                                                            } catch (e) { addToast(`Failed to start scrub: ${e.message || e}`, 'error'); }
+                                                                                        }}
+                                                                                        className="px-2 py-1 text-xs bg-proxmox-dark hover:bg-proxmox-hover rounded transition-colors"
+                                                                                    >
+                                                                                        Scrub
+                                                                                    </button>
+                                                                                </div>
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Monitors */}
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                        <div className="p-4 border-b border-proxmox-border">
+                                                            <h3 className="font-semibold">{t('cephMons') || 'Monitors'} ({(data.ceph?.mon || []).length})</h3>
+                                                        </div>
+                                                        <div className="divide-y divide-proxmox-border">
+                                                            {(data.ceph?.mon || []).map((mon, idx) => (
+                                                                <div key={idx} className="p-4 flex justify-between items-center">
+                                                                    <div>
+                                                                        <span className="font-medium">{mon.name}</span>
+                                                                        {mon.addr && <span className="text-gray-400 ml-2 font-mono text-xs">{mon.addr}</span>}
+                                                                    </div>
+                                                                    <span className={`px-2 py-0.5 rounded text-xs ${
+                                                                        mon.quorum !== false ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'
+                                                                    }`}>
+                                                                        {mon.quorum !== false ? 'In Quorum' : 'Not in Quorum'}
+                                                                    </span>
+                                                                </div>
+                                                            ))}
+                                                            {(!data.ceph?.mon || data.ceph.mon.length === 0) && (
+                                                                <div className="p-8 text-center text-gray-500">No monitors</div>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Pools */}
+                                                    <div className="bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                                        <div className="p-4 border-b border-proxmox-border">
+                                                            <h3 className="font-semibold">{t('cephPools') || 'Pools'} ({(data.ceph?.pools || []).length})</h3>
+                                                        </div>
+                                                        <div className="overflow-x-auto">
+                                                            <table className="w-full">
+                                                                <thead className="bg-proxmox-dark">
+                                                                    <tr>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">{t('name')}</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">Size</th>
+                                                                        <th className="text-left p-3 text-sm text-gray-400">PGs</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                    {(!data.ceph?.pools || data.ceph.pools.length === 0) ? (
+                                                                        <tr><td colSpan="3" className="p-8 text-center text-gray-500">No pools</td></tr>
+                                                                    ) : data.ceph.pools.map((pool, idx) => (
+                                                                        <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-dark/50">
+                                                                            <td className="p-3 font-medium">{pool.pool_name || pool.name}</td>
+                                                                            <td className="p-3 text-gray-300">{pool.size || '-'}</td>
+                                                                            <td className="p-3 text-gray-300">{pool.pg_num || '-'}</td>
+                                                                        </tr>
+                                                                    ))}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                        </fieldset>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* LW May 2026 — SMART Modal (replaces the alert(JSON) call site) */}
+                    {smartModal && (
+                        <SmartModal modal={smartModal} onClose={() => setSmartModal(null)} formatBytes={formatBytes} />
+                    )}
+                    {zfsPool && (
+                        <ZfsPoolDetail clusterId={clusterId} node={node} pool={zfsPool} onClose={() => setZfsPool(null)} />
+                    )}
+                </div>
+            );
+        }
+
+        // Console Modal Component with noVNC
+        // NS: Getting noVNC to work in a React component was... interesting
+        // The cleanup logic is important - otherwise you get zombie connections
+        // NS May 2026 — `hidden` lets multiple consoles stay mounted while only one is
+        // visible (multi-console tabs). When hidden the overlay backdrop is suppressed
+        // via display:none on the wrapper.
+        function ConsoleModal({ vm, consoleInfo, clusterId, onClose, hidden = false, onMinimize = null, standalone = false }) {
+            const { t } = useTranslation();
+            const { isCorporate } = useLayout(); // LW: corporate corporate chrome
+            const canvasRef = useRef(null);
+            // #959 - the datacenter keymap, as reported by the console ticket. A ref and not
+            // state: only the paste handler reads it, and it must not re-render the canvas.
+            const keymapRef = useRef('');
+            const [isFullscreen, setIsFullscreen] = useState(false);
+            const [connectionStatus, setConnectionStatus] = useState('connecting');
+            const [vncPort, setVncPort] = useState(null);
+            const [rfb, setRfb] = useState(null);
+            const rfbRef = useRef(null);
+            const containerRef = useRef(null);
+            const retryCount = useRef(0);
+            // LW Sep 2026 — was 3 tries at a flat 2s, so any disruption lasting longer than
+            // about six seconds burned the whole budget and left the console dead until the
+            // user reopened it by hand. Worse, those three attempts land in exactly the seconds
+            // the backend is least able to answer. Back off instead, and give it long enough to
+            // ride out a congestion window rather than a hiccup. Cap the wait so a console that
+            // does come back doesn't sit on a two-minute timer.
+            const maxRetries = 8;
+            const retryDelayMs = (n) => Math.min(1000 * Math.pow(2, Math.max(0, n - 1)), 15000);
+            const { getAuthHeaders, sessionId, reverseProxyEnabled } = useAuth();
+            // NS May 2026 — view-mode toggle. 'vnc' = noVNC graphical (default,
+            // existing behaviour); 'term' = xterm.js via PVE termproxy. Per-modal
+            // state so each open starts on the user's preferred mode.
+            // NS May 2026 — term mode only makes sense for LXC. For QEMU we always
+            // force VNC (PVE's termproxy on qemu is the serial console which most VMs
+            // don't have configured, so it would just show a confusing blank).
+            const isLxc = vm?.type === 'lxc';
+            const [viewMode, setViewMode] = useState(() => {
+                if (!isLxc) return 'vnc';
+                try { return localStorage.getItem('pegaprox-console-view-pref') === 'term' ? 'term' : 'vnc'; }
+                catch (_) { return 'vnc'; }
+            });
+            // if vm.type changes (different tab activated), snap back to vnc on non-LXC
+            useEffect(() => {
+                if (!isLxc && viewMode !== 'vnc') setViewMode('vnc');
+            }, [isLxc]);  // eslint-disable-line react-hooks/exhaustive-deps
+            const setMode = (m) => {
+                if (m === 'term' && !isLxc) return;  // ignore on non-LXC
+                setViewMode(m);
+                try { localStorage.setItem('pegaprox-console-view-pref', m); } catch (_) {}
+            };
+
+            useEffect(() => {
+                if(!consoleInfo || !canvasRef.current) return;
+                // NS May 2026 — skip noVNC bootstrap entirely when the user is
+                // viewing the xterm terminal. Switching back ('term' → 'vnc')
+                // re-runs this effect via the [viewMode] dep below.
+                if (viewMode !== 'vnc') return;
+
+                let cancelled = false;
+
+                const startVNC = async () => {
+                    try {
+                        setConnectionStatus('connecting');
+                        console.log('VNC: Starting connection...');
+                        
+                        // Get VNC ticket from backend.
+                        // MK Apr 2026 — Stable VNC Mode: when enabled in user prefs, ask the
+                        // backend to also generate an AES-256-GCM session key. The browser-side
+                        // SecureVncSocket then wraps every frame in encrypt/decrypt so middleboxes
+                        // (TLS-inspection NGFW, EDR network filter) can't recognize / mangle the
+                        // binary RFB. Default OFF — opt-in for environments that need it.
+                        const stableMode = (typeof window !== 'undefined') &&
+                                           window.localStorage &&
+                                           window.localStorage.getItem('pegaprox-vnc-stable-mode') === '1';
+                        console.log('VNC: Getting ticket...' + (stableMode ? ' (stable mode)' : ''));
+                        const ticketResponse = await fetch(
+                            `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console${stableMode ? '?stable=1' : ''}`,
+                            { headers: getAuthHeaders() }
+                        );
+
+                        if(!ticketResponse.ok) {
+                            console.error('VNC: Failed to get ticket');
+                            setConnectionStatus('error');
+                            return;
+                        }
+
+                        const ticketData = await ticketResponse.json();
+                        if(!ticketData.success) {
+                            console.error('VNC: Ticket error:', ticketData.error);
+                            setConnectionStatus('error');
+                            return;
+                        }
+
+                        keymapRef.current = ticketData.keymap || '';
+                        const vncPassword = ticketData.ticket;
+                        const stableHandle = ticketData.stable;   // {session_id, key_b64, ...} when stable mode active
+                        console.log('VNC: Got ticket' + (stableHandle ? ' + crypto session' : ''));
+                        
+                        if(cancelled) return;
+                        
+                        // MK: Mar 2026 - fetch single-use WS token instead of passing session in URL
+                        let vncWsToken = '';
+                        try {
+                            const tokenResp = await fetch(`${API_URL}/ws/token`, { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
+                            if (tokenResp.ok) {
+                                const td = await tokenResp.json();
+                                vncWsToken = td.token;
+                            }
+                        } catch(e) {
+                            console.warn('VNC WS token failed');
+                        }
+
+                        // Build WebSocket URL - VNC runs on main port + 1 (unless reverse proxy port set)
+                        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                        const mainPort = parseInt(window.location.port) || (window.location.protocol === 'https:' ? 443 : 80);
+                        
+                        let vncPortNum = reverseProxyEnabled ? mainPort : mainPort + 1;
+                        if (reverseProxyEnabled) {
+                            console.log(`Using main port for VNC (Reverse Proxy Enabled): ${vncPortNum}`);
+                        }
+
+                        setVncPort(vncPortNum);
+                        const stableQS = stableHandle ? `&enc_session=${encodeURIComponent(stableHandle.session_id)}` : '';
+                        // MK Apr 2026 (#352 follow-up) — pass the JS-issued vncproxy
+                        // ticket+port to the WS handler so it doesn't issue its OWN
+                        // vncproxy (which on PVE 9.1.x produces a different RFB
+                        // password than the one noVNC just got, breaking auth).
+                        const pvePassthroughQS =
+                            (ticketData.ticket && ticketData.port)
+                                ? `&pve_ticket=${encodeURIComponent(ticketData.ticket)}&pve_port=${encodeURIComponent(ticketData.port)}`
+                                : '';
+                        const wsUrl = `${wsProtocol}//${window.location.hostname}:${vncPortNum}/api/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vncwebsocket?token=${encodeURIComponent(vncWsToken)}${stableQS}${pvePassthroughQS}`;
+                        
+                        // LW: Mar 2026 - removed wsUrl log (session leak)
+                        
+                        // Load noVNC - try local first (if downloaded), then CDN unless air-gapped
+                        if(!window.RFB) {
+                            console.log('VNC: Loading noVNC...');
+                            await new Promise((resolve, reject) => {
+                                let settled = false;
+                                const script = document.createElement('script');
+                                script.type = 'module';
+                                const localPath = '/static/js/novnc/rfb.min.js';
+                                const cdnPath = 'https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js';
+                                const airGap = (() => { try { return localStorage.getItem('pegaprox-air-gap') === '1'; } catch(_) { return false; } })();
+                                script.textContent = `
+                                    let RFB;
+                                    const _airGap = ${JSON.stringify(airGap)};
+                                    try {
+                                        const resp = await fetch('${localPath}', {method: 'HEAD'});
+                                        if (resp.ok) {
+                                            RFB = (await import('${localPath}')).default;
+                                            console.log('VNC: loaded from local');
+                                        } else {
+                                            throw new Error('local not found');
+                                        }
+                                    } catch(e) {
+                                        if (_airGap) {
+                                            console.error('[air-gap] noVNC missing locally; refusing CDN fetch');
+                                            window.dispatchEvent(new CustomEvent('novnc-failed'));
+                                            throw e;
+                                        }
+                                        RFB = (await import('${cdnPath}')).default;
+                                        console.log('VNC: loaded from CDN');
+                                    }
+                                    if (RFB) {
+                                        window.RFB = RFB;
+                                        window.dispatchEvent(new CustomEvent('novnc-loaded'));
+                                    } else {
+                                        window.dispatchEvent(new CustomEvent('novnc-failed'));
+                                    }
+                                `;
+
+                                const cleanup = () => {
+                                    window.removeEventListener('novnc-loaded', onLoaded);
+                                    window.removeEventListener('novnc-failed', onFailed);
+                                };
+                                const onLoaded = () => {
+                                    if (settled) return;
+                                    settled = true;
+                                    cleanup();
+                                    console.log('VNC: noVNC ready');
+                                    resolve();
+                                };
+                                const onFailed = () => {
+                                    if (settled) return;
+                                    settled = true;
+                                    cleanup();
+                                    reject(new Error('Failed to load noVNC'));
+                                };
+
+                                window.addEventListener('novnc-loaded', onLoaded);
+                                window.addEventListener('novnc-failed', onFailed);
+                                document.head.appendChild(script);
+
+                                // NS: 20s timeout, but only reject if load hasn't completed yet
+                                setTimeout(() => {
+                                    if(!settled && !window.RFB) {
+                                        settled = true;
+                                        cleanup();
+                                        reject(new Error('noVNC load timeout'));
+                                    }
+                                }, 20000);
+                            });
+                        }
+                        
+                        if(cancelled || !window.RFB) {
+                            setConnectionStatus('load_error');
+                            return;
+                        }
+                        
+                        console.log('VNC: Connecting...');
+
+                        // MK Apr 2026 — Stable Mode: pass our crypto-wrapped socket to noVNC instead
+                        // of the URL string. noVNC's Websock.attach() accepts a WebSocket-shaped
+                        // object as the second arg, so RFB negotiates the underlying transport
+                        // through our wrapper which transparently encrypts/decrypts each frame.
+                        let rfbInstance;
+                        if (stableHandle && window.connectVnc) {
+                            // MK Apr 2026 — fetch the polling-fallback ticket LAZILY (only if the
+                            // WS leg actually fails). Pre-fetching a second console ticket up
+                            // front broke things on PVE 9.1.x: two concurrent vncproxy sessions
+                            // on the same VM make PVE deliver only the initial handshake bytes
+                            // (recv=60B / SHORT_OR_EMPTY pattern). One ticket per path, lazily.
+                            const pollUrl = `${window.location.protocol}//${window.location.host}${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/vnc-poll`;
+                            const forcePolling = window.localStorage &&
+                                                 window.localStorage.getItem('pegaprox-vnc-force-polling') === '1';
+                            const fetchPollHandle = async () => {
+                                const pr = await fetch(
+                                    `${API_URL}/clusters/${clusterId}/vms/${vm.node}/${vm.type}/${vm.vmid}/console?stable=1`,
+                                    { headers: getAuthHeaders() }
+                                );
+                                if (!pr.ok) throw new Error('console ticket http=' + pr.status);
+                                const pj = await pr.json();
+                                if (!pj.success || !pj.stable) throw new Error('no stable handle in response');
+                                return {
+                                    ...pj.stable,
+                                    pve_ticket: pj.ticket,
+                                    pve_port: pj.port,
+                                };
+                            };
+
+                            const secureSock = await window.connectVnc({
+                                wsUrl,
+                                pollUrl,
+                                wsKey: stableHandle.key_b64,
+                                getPollHandle: fetchPollHandle,
+                                wsTimeoutMs: 4000,
+                                forcePolling,
+                                onTransport: (t) => console.log('VNC: transport=' + t),
+                            });
+                            secureSock.addEventListener('integrityerror', (ev) => {
+                                console.error('VNC: middlebox tampering detected:', ev.data);
+                                setConnectionStatus('integrity_failed');
+                            });
+                            rfbInstance = new window.RFB(canvasRef.current, secureSock, {
+                                credentials: { password: vncPassword }
+                            });
+                        } else {
+                            rfbInstance = new window.RFB(canvasRef.current, wsUrl, {
+                                credentials: { password: vncPassword }
+                            });
+                        }
+                        rfbInstance.scaleViewport = true;
+                        rfbInstance.resizeSession = true;
+
+                        rfbInstance.addEventListener('connect', () => {
+                            console.log('VNC: Connected!');
+                            retryCount.current = 0;
+                            setConnectionStatus('connected');
+                        });
+
+                        // MK Apr 2026 — auth-failure must stop the reconnect cascade.
+                        // Without this flag, securityfailure → disconnect (non-clean) →
+                        // disconnect handler retries → fresh ticket → fails again → loop.
+                        // The customer experience was "console flickers open and closes
+                        // 5 times then dies" because every retry generated a new vncproxy
+                        // ticket that hit the same root-cause failure.
+                        let authFailed = false;
+
+                        rfbInstance.addEventListener('disconnect', (e) => {
+                            console.log('VNC: Disconnected', e.detail);
+                            if (authFailed) {
+                                // ticket was rejected at RFB level — retrying just generates
+                                // another ticket that will fail the same way. Surface a
+                                // single clear auth_failed state to the user.
+                                setConnectionStatus('auth_failed');
+                                return;
+                            }
+                            if (e.detail.clean) {
+                                setConnectionStatus('disconnected');
+                            } else if (!cancelled && retryCount.current < maxRetries) {
+                                retryCount.current++;
+                                const wait = retryDelayMs(retryCount.current);
+                                console.log(`VNC: Reconnecting (${retryCount.current}/${maxRetries}) in ${wait}ms...`);
+                                setConnectionStatus('reconnecting');
+                                rfbRef.current = null;
+                                setTimeout(() => { if (!cancelled) startVNC(); }, wait);
+                            } else {
+                                setConnectionStatus('error');
+                            }
+                        });
+
+                        rfbInstance.addEventListener('securityfailure', (e) => {
+                            authFailed = true;
+                            console.error('VNC: Security failure', e);
+                            setConnectionStatus('auth_failed');
+                        });
+                        
+                        // handle credentials request
+                        rfbInstance.addEventListener('credentialsrequired', () => {
+                            console.log('VNC: Credentials required, sending...');
+                            rfbInstance.sendCredentials({ password: vncPassword });
+                        });
+
+                        // clipboard sync from remote VM
+                        rfbInstance.addEventListener('clipboard', (e) => {
+                            if (e.detail?.text) {
+                                navigator.clipboard.writeText(e.detail.text).catch(() => {});
+                            }
+                        });
+
+                        setRfb(rfbInstance);
+                        rfbRef.current = rfbInstance;
+                        
+                    } catch (e) {
+                        console.error('VNC: Error:', e);
+                        if(!cancelled) {
+                            setConnectionStatus('load_error');
+                        }
+                    }
+                };
+                
+                startVNC();
+                
+                return () => {
+                    cancelled = true;
+                    if(rfbRef.current) {
+                        try {
+                            rfbRef.current.disconnect();
+                        } catch (e) {}
+                        rfbRef.current = null;
+                    }
+                };
+            }, [consoleInfo, clusterId, vm, viewMode]);
+
+            // resize handling - observer for container changes, window event for monitor switches
+            useEffect(() => {
+                if (!rfb || !canvasRef.current) return;
+
+                const triggerResize = () => {
+                    if (rfbRef.current) {
+                        rfbRef.current.scaleViewport = true;
+                    }
+                };
+
+                const observer = new ResizeObserver(triggerResize);
+                observer.observe(canvasRef.current);
+                window.addEventListener('resize', triggerResize);
+
+                return () => {
+                    observer.disconnect();
+                    window.removeEventListener('resize', triggerResize);
+                };
+            }, [rfb]);
+
+            const handleFullscreen = () => {
+                if(!document.fullscreenElement) {
+                    containerRef.current?.requestFullscreen();
+                    setIsFullscreen(true);
+                } else {
+                    document.exitFullscreen();
+                    setIsFullscreen(false);
+                }
+            };
+
+            const handleCtrlAltDel = () => {
+                if(rfb) {
+                    rfb.sendCtrlAltDel();
+                }
+            };
+
+            // NS: type text into VM as keypresses - clipboardPasteFrom only sets VNC clipboard
+            // buffer which needs guest agent, this actually works everywhere
+            // MK #653 (dcodner24) — shifted symbols pasted unshifted (!->1, @->2, _->-, {->[ ...).
+            // qemu's VNC keysym path doesn't assert Shift for the symbol row, so sending keysym
+            // 0x21 lands on the '1' key unshifted. Manual typing works because the browser holds
+            // Shift for us, so paste has to do the same: hold Shift_L, tap the *base* key on that
+            // physical key, release Shift_L — exactly what pressing it by hand does. Uppercase
+            // already works (qemu shifts A-Z itself), so leave those on the plain path.
+            // MK Sep 2026 #959 - and only while the datacenter runs a US keymap.
+            // With `keyboard: es` set, qemu maps the keysym to the Spanish layout itself, so
+            // holding Shift over the US base key produced '"' where the reporter pasted '@'.
+            // An unset keymap stays on this path: qemu assumes en-us when it is given none,
+            // which is the situation #653 was reported from.
+            const SHIFTED_US = {
+                '!':0x31,'@':0x32,'#':0x33,'$':0x34,'%':0x35,'^':0x36,'&':0x37,'*':0x38,'(':0x39,')':0x30,
+                '_':0x2D,'+':0x3D,'{':0x5B,'}':0x5D,'|':0x5C,':':0x3B,'"':0x27,'<':0x2C,'>':0x2E,'?':0x2F,'~':0x60,
+            };
+            // LW Oct 2026 (#959) - that still left every other keymap with bare keysyms, and qemu
+            // never presses a modifier for a keysym: '@' on a Spanish guest arrived as a plain 2.
+            // So paste types like a hand on that keyboard: the physical key (KeyboardEvent.code,
+            // which noVNC turns into a scancode) with Shift and/or AltGr held - what noVNC itself
+            // sends for a real key press. One string per modifier level, the 48 keys in the order
+            // of PASTE_KEYS, rows split by a space, '•' where that level has nothing. Positions
+            // that are dead keys on Windows AND Linux get a Space after them; where only Windows
+            // has a dead key (the '~' of es and fr, for one) the key is sent as it is.
+            const PASTE_KEYS = ('Backquote 1 2 3 4 5 6 7 8 9 0 Minus Equal Q W E R T Y U I O P BracketLeft BracketRight '
+                + 'A S D F G H J K L Semicolon Quote Backslash IntlBackslash Z X C V B N M Comma Period Slash')
+                .split(' ').map(k => k.length > 1 ? k : ((k >= '0' && k <= '9' ? 'Digit' : 'Key') + k));
+            const PASTE_LAYOUTS = {
+                'en-gb': { base:  '`1234567890-= qwertyuiop[] asdfghjkl;\'# \\zxcvbnm,./',
+                           shift: '¬!"£$%^&*()_+ QWERTYUIOP{} ASDFGHJKL:@~ |ZXCVBNM<>?',
+                           altgr: '••••€•••••••• •••••••••••• •••••••••••• •••••••••••' },
+                de: { base:  '^1234567890ß´ qwertzuiopü+ asdfghjklöä# <yxcvbnm,.-',
+                      shift: '°!"§$%&/()=?` QWERTZUIOPÜ* ASDFGHJKLÖÄ\' >YXCVBNM;:_',
+                      altgr: '••²³•••{[]}\\• @•€••••••••~ •••••••••••• |••••••µ•••',
+                      dead: '^´`' },
+                es: { base:  'º1234567890\'¡ qwertyuiop`+ asdfghjklñ´ç <zxcvbnm,.-',
+                      shift: 'ª!"·$%&/()=?¿ QWERTYUIOP^* ASDFGHJKLÑ¨Ç >ZXCVBNM;:_',
+                      altgr: '\\|@#~•¬•••••• ••€•••••••[] ••••••••••{} •••••••••••',
+                      dead: '`^´¨' },
+                fr: { base:  '²&é"\'(-è_çà)= azertyuiop^$ qsdfghjklmù* <wxcvbn,;:!',
+                      shift: '•1234567890°+ AZERTYUIOP¨£ QSDFGHJKLM%µ >WXCVBN?./§',
+                      altgr: '••~#{[|`\\^@]} ••€••••••••¤ •••••••••••• •••••••••••',
+                      dead: '^¨' },
+                it: { base:  '\\1234567890\'ì qwertyuiopè+ asdfghjklòàù <zxcvbnm,.-',
+                      shift: '|!"£$%&/()=?^ QWERTYUIOPé* ASDFGHJKLç°§ >ZXCVBNM;:_',
+                      altgr: '•••••••••••`~ ••€•••••••[] •••••••••@#• •••••••••••',
+                      altgrShift: '••••••••••••• ••••••••••{} •••••••••••• •••••••••••' },
+                pt: { base:  '\\1234567890\'« qwertyuiop+´ asdfghjklçº~ <zxcvbnm,.-',
+                      shift: '|!"#$%&/()=?» QWERTYUIOP*` ASDFGHJKLÇª^ >ZXCVBNM;:_',
+                      altgr: '••@£§••{[]}•• ••€•••••••¨• •••••••••••• •••••••••••',
+                      dead: '´`~^¨' },
+                pl: { base:  '`1234567890-= qwertyuiop[] asdfghjkl;\'\\ •zxcvbnm,./',
+                      shift: '~!@#$%^&*()_+ QWERTYUIOP{} ASDFGHJKL:"| •ZXCVBNM<>?',
+                      altgr: '••••••••••••• ••ę•••€•ó••• ąś••••••ł••• •żźć••ń••••',
+                      altgrShift: '••••••••••••• ••Ę•••••Ó••• ĄŚ••••••Ł••• •ŻŹĆ••Ń••••' },
+            };
+            const PASTE_SHIFT = [0xFFE1, 'ShiftLeft'];
+            const PASTE_ALTGR = [0xFE03, 'AltRight'];     // ISO_Level3_Shift, as noVNC sends AltGraph
+            const DEAD_KEYSYMS = { '`': 0xFE50, '´': 0xFE51, '^': 0xFE52, '~': 0xFE53, '¨': 0xFE57 };
+            // Latin-2 letters have keysyms of their own, and a keymap only knows those
+            const LATIN2_KEYSYMS = { 'ą': 0x1B1, 'Ą': 0x1A1, 'ć': 0x1E6, 'Ć': 0x1C6, 'ę': 0x1EA, 'Ę': 0x1CA,
+                'ł': 0x1B3, 'Ł': 0x1A3, 'ń': 0x1F1, 'Ń': 0x1D1, 'ś': 0x1B6, 'Ś': 0x1A6,
+                'ź': 0x1BC, 'Ź': 0x1AC, 'ż': 0x1BF, 'Ż': 0x1AF };
+            const pasteKeyMap = (keymap) => {
+                const layout = PASTE_LAYOUTS[keymap];
+                if (!layout) return null;
+                const map = {};
+                [['base', []], ['shift', [PASTE_SHIFT]], ['altgr', [PASTE_ALTGR]],
+                 ['altgrShift', [PASTE_ALTGR, PASTE_SHIFT]]].forEach(([level, mods]) => {
+                    Array.from((layout[level] || '').replace(/ /g, '')).forEach((ch, i) => {
+                        if (ch === '•' || map[ch] || !PASTE_KEYS[i]) return;
+                        const cp = ch.codePointAt(0);
+                        const dead = (layout.dead || '').includes(ch);
+                        map[ch] = { code: PASTE_KEYS[i], mods, dead,
+                                    keysym: dead ? DEAD_KEYSYMS[ch]
+                                          : (cp <= 0xFF ? cp : (LATIN2_KEYSYMS[ch] || 0x01000000 + cp)) };
+                    });
+                });
+                return map;
+            };
+            const typeTextToVM = (conn, text, keymap) => {
+                const usLayout = !keymap || keymap === 'en-us';
+                const keys = usLayout ? null : pasteKeyMap(keymap);
+                for (const ch of text) {
+                    const code = ch.charCodeAt(0);
+                    const key = keys && keys[ch];
+                    if (code === 10 || code === 13) {
+                        conn.sendKey(0xFF0D); // Return
+                    } else if (code === 9) {
+                        conn.sendKey(0xFF09); // Tab
+                    } else if (key) {
+                        key.mods.forEach(([ks, c]) => conn.sendKey(ks, c, true));
+                        conn.sendKey(key.keysym, key.code);
+                        key.mods.slice().reverse().forEach(([ks, c]) => conn.sendKey(ks, c, false));
+                        if (key.dead) conn.sendKey(0x20, 'Space');   // dead key + Space = the character itself
+                    } else if (usLayout && SHIFTED_US[ch] !== undefined) {
+                        conn.sendKey(0xFFE1, 'ShiftLeft', true);   // Shift_L down
+                        conn.sendKey(SHIFTED_US[ch]);              // tap the unshifted base key
+                        conn.sendKey(0xFFE1, 'ShiftLeft', false);  // Shift_L up
+                    } else if (code >= 0x20 && code <= 0x7E) {
+                        conn.sendKey(code); // ASCII printable = X11 keysym
+                    } else if (code > 0x00A0) {
+                        conn.sendKey(0x01000000 + code); // Unicode
+                    }
+                }
+            };
+
+            // NS Sep 2026 (#767) — pop the console into its own browser window. An MSP asked
+            // for this to watch several guests side by side; the workaround until now was to
+            // open PVE's own GUI (the External button below) and lose our console entirely.
+            // Named window per guest, so clicking twice focuses the existing one instead of
+            // stacking duplicates. The in-app tab closes: the session lives in the popup now.
+            const popOutConsole = () => {
+                const cid = clusterId || vm?._clusterId;
+                if (!cid || !vm) return;
+                const key = `${cid}:${vm.type}:${vm.vmid}:${vm.node}`;
+                // deliberately NOT carrying vm.name: the window resolves it from the
+                // cluster, so a hand-written link cannot put its own label on a console
+                const url = `${window.location.origin}/?console=${encodeURIComponent(key)}`;
+                const win = window.open(
+                    url,
+                    `pegaprox-console-${key.replace(/[^A-Za-z0-9]/g, '_')}`,
+                    'width=1280,height=860,menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes'
+                );
+                if (!win) {                      // blocked by a popup blocker — keep the tab
+                    alert(t('popupBlocked') || 'Your browser blocked the console window. Allow popups for PegaProx and try again.');
+                    return;
+                }
+                try { win.focus(); } catch (_) {}
+                onClose?.();
+            };
+
+            const openInProxmox = () => {
+                // NS: IPv6 needs brackets in URLs
+                const h = consoleInfo.host.includes(':') && !consoleInfo.host.startsWith('[') ? `[${consoleInfo.host}]` : consoleInfo.host;
+                // #551: PVE noVNC expects console=kvm for QEMU VMs (vm.type is 'qemu'); lxc stays as-is
+                const consoleType = vm.type === 'qemu' ? 'kvm' : vm.type;
+                const url = `https://${h}:8006/?console=${consoleType}&novnc=1&vmid=${vm.vmid}&node=${vm.node}`;
+                window.open(url, '_blank');
+            };
+
+            // LW May 2026 — corporate chrome for corporate, original for modern.
+            // NS 2026-05-10 — connectionStatus tracks ONLY noVNC. When the user
+            // is on the Term tab, hide the noVNC status entirely (the embedded
+            // terminal shows its own loading state). Earlier code rendered a
+            // stale "Connection Error" in term mode whenever a prior noVNC
+            // attempt had failed or been skipped.
+            const statusColor = viewMode === 'term' ? '#49afd9'
+                : connectionStatus === 'connected' ? '#60b515'
+                : (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? '#efc006'
+                : '#f54f47';
+            const statusLabel = viewMode === 'term' ? 'Terminal'
+                : connectionStatus === 'connected' ? 'Connected'
+                : connectionStatus === 'connecting' ? 'Connecting…'
+                : connectionStatus === 'reconnecting' ? 'Reconnecting…'
+                : 'Error';
+
+            // #767 — in its own window there is nothing behind the console to dim, and the
+            // 82vh card would just leave a black gutter. Same geometry as fullscreen, but a
+            // separate flag: isFullscreen tracks the browser Fullscreen API, this doesn't.
+            const fillWindow = isFullscreen || standalone;
+
+            return (
+                <div className={isCorporate ? "corp-vm-modal-overlay" : "fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80"}
+                     style={hidden ? {display: 'none'}
+                            : standalone ? {padding: 0, bottom: LEGAL_STRIP_H, background: 'transparent',
+                                            backdropFilter: 'none', WebkitBackdropFilter: 'none'}
+                            : undefined}>
+                    <div
+                        ref={containerRef}
+                        className={isCorporate
+                            ? "corp-vm-modal"
+                            : `bg-proxmox-card border border-proxmox-border shadow-2xl overflow-hidden flex flex-col ${fillWindow ? 'w-full h-full' : 'rounded-2xl animate-scale-in w-full max-w-5xl h-[80vh]'}`}
+                        style={isCorporate
+                            ? (fillWindow
+                                ? {maxWidth: '100vw', width: '100vw',
+                                   height: standalone ? `calc(100vh - ${LEGAL_STRIP_H}px)` : '100vh',
+                                   maxHeight: standalone ? `calc(100vh - ${LEGAL_STRIP_H}px)` : '100vh'}
+                                : {maxWidth: '1280px', width: '100%', height: '82vh', maxHeight: '82vh'})
+                            : undefined}
+                    >
+                        {/* Header */}
+                        {isCorporate ? (
+                        <div className="corp-vm-modal-header">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <Icons.Monitor className="w-5 h-5" style={{color: 'var(--corp-accent, #49afd9)'}} />
+                                <div className="min-w-0">
+                                    <div className="corp-vm-modal-title truncate">{vm.name || `VM ${vm.vmid}`}</div>
+                                    <div className="corp-vm-modal-meta flex items-center gap-2">
+                                        <span>{vm.type.toUpperCase()} · {vm.node}</span>
+                                        <span style={{display:'inline-flex', alignItems:'center', gap:4}}>
+                                            <span style={{display:'inline-block', width:6, height:6, borderRadius:'50%', background: statusColor}}></span>
+                                            <span style={{color: statusColor}}>{statusLabel}</span>
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="corp-vm-modal-actions">
+                                {/* NS May 2026 — VNC ↔ xterm.js toggle (PVE termproxy) — LXC only */}
+                                {isLxc && (
+                                    <div className="flex border border-proxmox-border" style={{borderRadius:0}}>
+                                        <button
+                                            onClick={() => setMode('vnc')}
+                                            className={'px-2.5 py-1 text-[12px] flex items-center gap-1 ' + (viewMode === 'vnc' ? 'bg-blue-500/15 text-blue-400' : 'text-gray-400 hover:text-white')}
+                                            title={t('consoleVnc') || 'VNC graphical console'}
+                                        >
+                                            <Icons.Monitor className="w-3.5 h-3.5" />
+                                            VNC
+                                        </button>
+                                        <button
+                                            onClick={() => setMode('term')}
+                                            className={'px-2.5 py-1 text-[12px] flex items-center gap-1 ' + (viewMode === 'term' ? 'bg-emerald-500/15 text-emerald-400' : 'text-gray-400 hover:text-white')}
+                                            title={t('consolePct') || 'xterm terminal (PVE termproxy)'}
+                                        >
+                                            <Icons.Terminal className="w-3.5 h-3.5" />
+                                            Term
+                                        </button>
+                                    </div>
+                                )}
+                                {viewMode === 'vnc' && vm.type === 'qemu' && connectionStatus === 'connected' && (
+                                    <button onClick={handleCtrlAltDel} className="corp-vm-btn corp-vm-btn-ghost">
+                                        Ctrl+Alt+Del
+                                    </button>
+                                )}
+                                {viewMode === 'vnc' && connectionStatus === 'connected' && (
+                                    <button
+                                        onClick={() => {
+                                            const conn = rfbRef.current;
+                                            if (!conn) return;
+                                            const text = prompt('Paste text:');
+                                            if (text) typeTextToVM(conn, text, keymapRef.current);
+                                        }}
+                                        className="corp-vm-btn corp-vm-btn-ghost flex items-center gap-1"
+                                        title={t('pasteClipboard') || 'Paste from clipboard'}
+                                    >
+                                        <Icons.ClipboardList className="w-3.5 h-3.5" />
+                                        Paste
+                                    </button>
+                                )}
+                                {!standalone && (
+                                    <button onClick={popOutConsole} className="corp-vm-btn corp-vm-btn-ghost"
+                                        title={t('openInOwnWindow') || 'Open in its own window'}>
+                                        <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                    </button>
+                                )}
+                                <button onClick={openInProxmox} className="corp-vm-btn corp-vm-btn-ghost">
+                                    External
+                                </button>
+                                <button onClick={handleFullscreen} className="corp-vm-btn corp-vm-btn-ghost"
+                                    title={isFullscreen ? (t('exitFullscreen') || 'Exit fullscreen') : (t('fullscreen') || 'Fullscreen')}>
+                                    {isFullscreen ? <Icons.Minimize /> : <Icons.Maximize />}
+                                </button>
+                                <button onClick={onClose} className="corp-vm-btn corp-vm-btn-ghost" title={t('close') || 'Close'}>
+                                    <Icons.X />
+                                </button>
+                            </div>
+                        </div>
+                        ) : (
+                        <div className="flex items-center justify-between px-4 py-3 border-b border-proxmox-border bg-proxmox-dark">
+                            <div className="flex items-center gap-3">
+                                <Icons.Monitor />
+                                <div>
+                                    <h2 className="font-semibold text-white">{vm.name || `VM ${vm.vmid}`}</h2>
+                                    <p className="text-xs text-gray-400">
+                                        {vm.type.toUpperCase()} · {vm.node} ·
+                                        <span className={'ml-1 ' + (
+                                            viewMode === 'term' ? 'text-blue-400' :
+                                            connectionStatus === 'connected' ? 'text-green-400' :
+                                            (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') ? 'text-yellow-400' :
+                                            'text-red-400'
+                                        )}>
+                                            {viewMode === 'term' ? 'Terminal' :
+                                             connectionStatus === 'connected' ? 'Connected' :
+                                             connectionStatus === 'connecting' ? 'Connecting...' :
+                                             connectionStatus === 'reconnecting' ? 'Reconnecting...' :
+                                             'Error'}
+                                        </span>
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {isLxc && (
+                                    <div className="flex border border-proxmox-border rounded-lg overflow-hidden">
+                                        <button
+                                            onClick={() => setMode('vnc')}
+                                            className={'px-3 py-1.5 text-xs flex items-center gap-1 ' + (viewMode === 'vnc' ? 'bg-blue-500/20 text-blue-400' : 'bg-proxmox-dark text-gray-400 hover:text-white')}
+                                            title="VNC console"
+                                        >
+                                            <Icons.Monitor className="w-3.5 h-3.5" />VNC
+                                        </button>
+                                        <button
+                                            onClick={() => setMode('term')}
+                                            className={'px-3 py-1.5 text-xs flex items-center gap-1 ' + (viewMode === 'term' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-proxmox-dark text-gray-400 hover:text-white')}
+                                            title="xterm terminal"
+                                        >
+                                            <Icons.Terminal className="w-3.5 h-3.5" />Term
+                                        </button>
+                                    </div>
+                                )}
+                                {viewMode === 'vnc' && vm.type === 'qemu' && connectionStatus === 'connected' && (
+                                    <button
+                                        onClick={handleCtrlAltDel}
+                                        className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                    >
+                                        Ctrl+Alt+Del
+                                    </button>
+                                )}
+                                {viewMode === 'vnc' && connectionStatus === 'connected' && (
+                                    <button
+                                        onClick={() => {
+                                            const conn = rfbRef.current;
+                                            if (!conn) return;
+                                            const text = prompt('Paste text:');
+                                            if (text) typeTextToVM(conn, text, keymapRef.current);
+                                        }}
+                                        className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                        title={t('pasteClipboard') || 'Paste from clipboard'}
+                                    >
+                                        <Icons.ClipboardList className="w-3.5 h-3.5 inline mr-1" />Paste
+                                    </button>
+                                )}
+                                {!standalone && (
+                                    <button
+                                        onClick={popOutConsole}
+                                        className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                        title={t('openInOwnWindow') || 'Open in its own window'}
+                                    >
+                                        <Icons.ExternalLink className="w-3.5 h-3.5 inline" />
+                                    </button>
+                                )}
+                                <button
+                                    onClick={openInProxmox}
+                                    className="px-3 py-1.5 bg-proxmox-dark border border-proxmox-border rounded-lg text-xs text-gray-300 hover:text-white hover:border-proxmox-orange transition-colors"
+                                >
+                                    External
+                                </button>
+                                <button
+                                    onClick={handleFullscreen}
+                                    className="p-2 rounded-lg hover:bg-proxmox-hover transition-colors"
+                                >
+                                    {isFullscreen ? <Icons.Minimize /> : <Icons.Maximize />}
+                                </button>
+                                <button
+                                    onClick={onClose}
+                                    className="p-2 rounded-lg hover:bg-red-500/20 text-gray-400 hover:text-red-400 transition-colors"
+                                >
+                                    <Icons.X />
+                                </button>
+                            </div>
+                        </div>
+                        )}
+
+                        {/* Console Area */}
+                        <div className="flex-1 bg-black relative overflow-hidden" style={{minHeight: 0}}>
+                            {/* NS May 2026 — xterm terminal mode (PVE termproxy).
+                                The PveTermProxyTerminal component is fully self-contained:
+                                fetches its own ticket, opens its own WS, renders xterm. */}
+                            {viewMode === 'term' && (
+                                <PveTermProxyTerminal
+                                    key={`term-${vm.vmid}`}
+                                    vm={vm}
+                                    clusterId={clusterId}
+                                    addToast={(_m) => {}}
+                                />
+                            )}
+                            {viewMode === 'vnc' && (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-proxmox-darker">
+                                    <div className="text-center">
+                                        <div className="animate-spin w-8 h-8 border-2 border-proxmox-orange border-t-transparent rounded-full mx-auto mb-4"></div>
+                                        <p className="text-gray-400">{connectionStatus === 'reconnecting' ? `Reconnecting (${retryCount.current}/${maxRetries})...` : 'Connecting to console...'}</p>
+                                    </div>
+                                </div>
+                            )}
+                            {viewMode === 'vnc' && (connectionStatus === 'error' || connectionStatus === 'load_error' || connectionStatus === 'auth_failed') && (
+                                <div className="absolute inset-0 flex items-center justify-center bg-proxmox-darker">
+                                    <div className="text-center max-w-md p-6">
+                                        <div className="text-red-400 text-xl mb-4">⚠️ {t('connectionError')}</div>
+                                        
+                                        {window.location.protocol === 'https:' && !reverseProxyEnabled && (
+                                            <div className="text-gray-400 text-sm mb-4 p-4 bg-proxmox-dark rounded-lg text-left">
+                                                <p className="mb-3 font-medium text-white">{t('certInstructions')}</p>
+                                                <p className="mb-2">{t('certStep1')}</p>
+                                                <a
+                                                    href={`https://${window.location.hostname}:${vncPort || ((parseInt(window.location.port) || 443) + 1)}/`}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="block text-proxmox-orange hover:underline mb-3 break-all"
+                                                >
+                                                    https://{window.location.hostname}:{vncPort || ((parseInt(window.location.port) || 443) + 1)}/
+                                                </a>
+                                                <p className="mb-2">{t('certStep2')}</p>
+                                                <p className="text-xs text-gray-500">{t('certStep3')}</p>
+                                            </div>
+                                        )}
+                                        
+                                        <div className="flex gap-3 justify-center">
+                                            {!reverseProxyEnabled && (
+                                                <button
+                                                    onClick={() => {
+                                                        const port = vncPort || ((parseInt(window.location.port) || 443) + 1);
+                                                        window.open(`https://${window.location.hostname}:${port}/`, '_blank');
+                                                    }}
+                                                    className="px-4 py-2 bg-blue-600 rounded-lg text-white hover:bg-blue-700 transition-colors text-sm"
+                                                >
+                                                    {t('acceptCert')}
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={openInProxmox}
+                                                className="px-4 py-2 bg-proxmox-orange rounded-lg text-white hover:bg-orange-600 transition-colors text-sm"
+                                            >
+                                                {t('openInProxmox')}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {/* noVNC canvas — kept mounted but hidden when in term mode so
+                                a quick switch back doesn't trigger a full re-init. */}
+                            <div ref={canvasRef} className="w-full h-full"
+                                style={{display: viewMode === 'vnc' ? 'block' : 'none'}} />
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // LW: Feb 2026 - Corporate Node Detail View (experimental)
+        // ── In-band hardware monitoring panel (#609) ──────────────────────────
+        // Self-contained: does its own consent + hardware fetch, renders the
+        // mandatory compliance-warning modal (text is server-versioned so the
+        // audit record references an exact version), offers the one-click
+        // ipmitool install, and shows the sensor/power/FRU/event rollup. Dropped
+        // into both the corporate node-detail (a 'hardware' tab) and the default
+        // NodeModal. Theme-adaptive via var(--color-text) + a shared status palette.
+        function HardwareMonitoringPanel({ clusterId, node, t, addToast, getAuthHeaders, onCrState }) {
+            const { language } = useTranslation();   // request + record the localized warning (#609 phase 2)
+            // both consents are this instance's own settings: no standby saves them (#625)
+            const { haStandby } = useAuth();
+            const [consent, setConsent] = useState(null);   // {enabled, warning, current_version, acknowledged_by, acknowledged_at, ack_lang}
+            const [hw, setHw] = useState(null);              // {available, health, sensors, chassis, power_w, fru, events} | {error}
+            const [loading, setLoading] = useState(true);
+            const [showWarn, setShowWarn] = useState(false);
+            const [ackChecked, setAckChecked] = useState(false);
+            const [enabling, setEnabling] = useState(false);
+            const [installing, setInstalling] = useState(false);
+            const [delayLeft, setDelayLeft] = useState(0);   // countdown for warning.require_delay_seconds (Redfish phase uses >0)
+            // #609 phase 3 — out-of-band Redfish consent + per-node BMC endpoint
+            const [rfConsent, setRfConsent] = useState(null);
+            const [showRfWarn, setShowRfWarn] = useState(false);
+            const [rfAck, setRfAck] = useState(false);
+            const [rfEnabling, setRfEnabling] = useState(false);
+            const [rfDelayLeft, setRfDelayLeft] = useState(0);
+            const [bmc, setBmc] = useState(null);           // {configured, host, user, verify_ssl}
+            const [bmcForm, setBmcForm] = useState({ host: '', user: '', password: '', verify_ssl: false });
+            const [bmcSaving, setBmcSaving] = useState(false);
+            const [bmcTesting, setBmcTesting] = useState(false);
+            const [bmcTest, setBmcTest] = useState(null);   // {available, health, reason}
+
+            const hwFetch = async (url, opts = {}) => {
+                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
+                catch (e) { console.error(e); return null; }
+            };
+
+            // LW Nov 2026 - Corporate Redesigned hands onCrState down and gets the panel in its own tokens and buttons;
+            // every read, write and dialog stays the same
+            const cr = !!onCrState;
+            const statusColor = (s) => (cr
+                ? (s === 'critical' ? 'var(--cr-error)' : s === 'warning' ? 'var(--cr-warning)' : s === 'ok' ? 'var(--cr-success)' : 'var(--cr-text-secondary)')
+                : (s === 'critical' ? '#f54f47' : s === 'warning' ? '#efc006' : s === 'ok' ? '#60b515' : '#8b98a5'));
+            const crBtn = (kind, classic, style) => (cr ? { className: `cr-btn cr-btn-${kind}` } : { className: classic, style });
+
+            const loadConsent = async () => {
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent?lang=${encodeURIComponent(language || 'en')}`);
+                if (r && r.ok) { const c = await r.json(); setConsent(c); return c; }
+                return null;
+            };
+            const loadHw = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/hardware`);
+                if (!r) { setHw({ error: t('hwReadFailed') || 'Failed to read hardware' }); return; }
+                const body = await r.json().catch(() => ({}));
+                if (r.status === 403 && body.code === 'CONSENT_REQUIRED') { setHw(null); }
+                else if (r.ok) { setHw(body); }
+                else { setHw({ error: body.error || (t('hwReadFailed') || 'Failed to read hardware') }); }
+            };
+            const refresh = async () => {
+                setLoading(true);
+                const c = await loadConsent();
+                if (c && c.enabled) await loadHw();
+                setLoading(false);
+            };
+            useEffect(() => { refresh(); }, [clusterId, node, language]);   // re-fetch localized warning on language switch
+            // LW Nov 2026 - Corporate Redesigned shows these rows in its own sensor table (CrNodeHardware).
+            // What was read stays with the view when the tab is left (the Summary judges from it, with its age)
+            useEffect(() => {
+                if (onCrState) onCrState({ node, loading, consent: consent ? !!consent.enabled : null, hw, at: Date.now() });
+            }, [onCrState, node, loading, consent, hw]);
+
+            const openWarn = () => {
+                setAckChecked(false);
+                setDelayLeft((consent && consent.warning && consent.warning.require_delay_seconds) || 0);
+                setShowWarn(true);
+            };
+            useEffect(() => {
+                if (!showWarn || delayLeft <= 0) return;
+                const iv = setInterval(() => setDelayLeft(x => x <= 1 ? 0 : x - 1), 1000);
+                return () => clearInterval(iv);
+            }, [showWarn, delayLeft]);
+
+            const enable = async () => {
+                setEnabling(true);
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/consent`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ acknowledge: true, ack_version: consent && consent.current_version, lang: language || 'en' })
+                });
+                if (r && r.ok) { addToast(t('hwEnabled') || 'Hardware monitoring enabled', 'success'); setShowWarn(false); await refresh(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setEnabling(false);
+            };
+            const install = async () => {
+                setInstalling(true);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/hardware/ipmitool/install`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ nodes: [node] })
+                });
+                const body = r ? await r.json().catch(() => ({})) : {};
+                if (r && r.ok && body.success) { addToast(t('hwInstallDone') || 'ipmitool installed', 'success'); await loadHw(); }
+                else {
+                    const detail = (body.results && body.results[0] && body.results[0].error) || body.error;
+                    addToast(detail || (t('hwInstallFailed') || 'ipmitool install failed'), 'error');
+                }
+                setInstalling(false);
+            };
+
+            // #609 phase 3 — out-of-band Redfish consent + per-node BMC endpoint
+            const loadBmc = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`);
+                if (r && r.ok) {
+                    const b = await r.json();
+                    setBmc(b);
+                    if (b.configured) setBmcForm({ host: b.host || '', user: b.user || '', password: '********', verify_ssl: !!b.verify_ssl });
+                    else setBmcForm({ host: '', user: '', password: '', verify_ssl: false });
+                }
+            };
+            const loadRfConsent = async () => {
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/redfish-consent?lang=${encodeURIComponent(language || 'en')}`);
+                if (r && r.ok) { const c = await r.json(); setRfConsent(c); if (c.enabled) loadBmc(); return c; }
+                return null;
+            };
+            useEffect(() => { loadRfConsent(); }, [clusterId, node, language]);
+            const openRfWarn = () => {
+                setRfAck(false);
+                setRfDelayLeft((rfConsent && rfConsent.warning && rfConsent.warning.require_delay_seconds) || 0);
+                setShowRfWarn(true);
+            };
+            useEffect(() => {
+                if (!showRfWarn || rfDelayLeft <= 0) return;
+                const iv = setInterval(() => setRfDelayLeft(x => x <= 1 ? 0 : x - 1), 1000);
+                return () => clearInterval(iv);
+            }, [showRfWarn, rfDelayLeft]);
+            const enableRedfish = async () => {
+                setRfEnabling(true);
+                const r = await hwFetch(`${API_URL}/hardware-monitoring/redfish-consent`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ acknowledge: true, ack_version: rfConsent && rfConsent.current_version, lang: language || 'en' })
+                });
+                if (r && r.ok) { addToast(t('hwEnabled') || 'Enabled', 'success'); setShowRfWarn(false); await loadRfConsent(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setRfEnabling(false);
+            };
+            const saveBmc = async () => {
+                setBmcSaving(true);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bmcForm)
+                });
+                if (r && r.ok) { addToast(t('bmcSaved') || 'BMC endpoint saved', 'success'); await loadBmc(); await refresh(); }
+                else { const e = r ? await r.json().catch(() => ({})) : {}; addToast(e.error || (t('error') || 'Error'), 'error'); }
+                setBmcSaving(false);
+            };
+            const testBmc = async () => {
+                setBmcTesting(true); setBmcTest(null);
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint/test`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bmcForm)
+                });
+                setBmcTest(r ? await r.json().catch(() => ({ available: false, reason: 'error' })) : { available: false, reason: 'no response' });
+                setBmcTesting(false);
+            };
+            const removeBmc = async () => {
+                const r = await hwFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/bmc-endpoint`, { method: 'DELETE' });
+                if (r && r.ok) { addToast(t('bmcRemoved') || 'BMC endpoint removed', 'success'); setBmc(null); setBmcForm({ host: '', user: '', password: '', verify_ssl: false }); setBmcTest(null); await refresh(); }
+            };
+
+            const w = consent && consent.warning;
+            const rw = rfConsent && rfConsent.warning;
+            const inputStyle = cr ? { background: 'var(--cr-bg-sunken)', border: '1px solid var(--cr-border-primary)', color: 'var(--cr-text-primary)', borderRadius: 3 }
+                : { background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)', color: 'var(--color-text, #e9ecef)' };
+            const ipmitoolMissing = hw && hw.available === false && /ipmitool/i.test(hw.reason || '');
+            const card = cr ? { border: '1px solid var(--cr-border-secondary)', background: 'var(--cr-bg-panel)', borderRadius: 3 }
+                : { border: '1px solid rgba(255,255,255,0.10)', background: 'rgba(255,255,255,0.02)' };
+            const cardHead = cr ? { padding: '8px 12px', background: 'var(--cr-bg-sunken)', borderBottom: '1px solid var(--cr-border-secondary)' }
+                : { padding: '8px 12px', background: 'rgba(255,255,255,0.04)', borderBottom: '1px solid rgba(255,255,255,0.10)' };
+            const txt = cr ? { color: 'var(--cr-text-primary)' } : { color: 'var(--color-text, #e9ecef)' };
+            const sub = cr ? { color: 'var(--cr-text-secondary)' } : { color: 'var(--corp-text-secondary, #adbbc4)' };
+            const healthWord = (h) => (h === 'ok' ? (t('healthy') || 'Healthy') : h === 'warning' ? (t('warning') || 'Warning') : (t('critical') || 'Critical'));
+
+            if (loading) {
+                return (<div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>);
+            }
+
+            return (
+                <div className="space-y-4">
+                    {/* Feature disabled → mandatory consent gate */}
+                    {consent && !consent.enabled && (
+                        <div style={card}>
+                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hardwareMonitoring') || 'Hardware Monitoring'}</span></div>
+                            <div className="p-4 space-y-3">
+                                <p className="text-[13px]" style={sub}>{t('hardwareMonitoringDisabledDesc') || 'In-band hardware monitoring (IPMI) is not enabled. It reads sensors, power, inventory and the hardware event log directly on the node — credential-free, read-only.'}</p>
+                                {haStandby ? <HaSettingsOnActive own /> : (
+                                <button onClick={openWarn}
+                                    {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5', {background: '#49afd9', color: '#08131b'})}>
+                                    <Icons.Cpu className="w-3.5 h-3.5" />{t('enableHardwareMonitoring') || 'Enable hardware monitoring'}
+                                </button>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Enabled → data / install / reason */}
+                    {consent && consent.enabled && (
+                        <React.Fragment>
+                            {/* header row: health + refresh + enabled-by */}
+                            <div className="flex items-center justify-between flex-wrap gap-2">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-[13px] font-medium" style={txt}>{t('hardwareMonitoring') || 'Hardware Monitoring'}</span>
+                                    {cr && hw && hw.available && hw.health && (
+                                        <span data-cr-nh-ib-health={hw.health}>
+                                            <CrBadge tone={hw.health === 'ok' ? 'success' : hw.health === 'warning' ? 'warning' : 'error'}>{healthWord(hw.health)}</CrBadge>
+                                        </span>
+                                    )}
+                                    {!cr && hw && hw.available && hw.health && (
+                                        <span className="px-2 py-0.5 rounded text-xs flex items-center gap-1.5"
+                                            style={{background: statusColor(hw.health) + '22', color: statusColor(hw.health)}}>
+                                            <span className="w-2 h-2 rounded-full" style={{background: statusColor(hw.health)}}></span>
+                                            {hw.health === 'ok' ? (t('healthy') || 'Healthy') : hw.health === 'warning' ? (t('warning') || 'Warning') : (t('critical') || 'Critical')}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    {consent.acknowledged_by && <span className="text-[11px]" style={sub}>{t('hwEnabledBy') || 'Enabled by'} {consent.acknowledged_by}</span>}
+                                    {cr
+                                        ? <CrButton icon={<Icons.RotateCw />} onClick={refresh} data-cr-nh-ib-refresh="">{t('refresh')}</CrButton>
+                                        : <button onClick={refresh} className="text-[12px] flex items-center gap-1" style={{color: '#49afd9'}}><Icons.RotateCw className="w-3 h-3" />{t('refresh') || 'Refresh'}</button>}
+                                </div>
+                            </div>
+
+                            {/* MK Aug 2026 (#686) — surface WHAT drove a Critical/Warning rollup so it
+                                isn't a red badge over a list of green sensors. */}
+                            {hw && hw.available && (hw.health === 'critical' || hw.health === 'warning') && Array.isArray(hw.health_reasons) && hw.health_reasons.length > 0 && (
+                                <div className="flex items-start gap-1.5 text-[12px]" style={sub}>
+                                    <Icons.AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" style={{color: statusColor(hw.health)}} />
+                                    <span>
+                                        {cr ? t('crNhIbCause') : (t('hwHealthCause') || 'Contributing')}:{' '}
+                                        {hw.health_reasons.map((r, i) => (
+                                            <span key={i}>
+                                                <span style={{color: statusColor(r.severity)}}>{r.label}</span>
+                                                {r.source === 'event' ? ' (SEL)' : r.source === 'system' ? ' (system health)' : ''}
+                                                {i < hw.health_reasons.length - 1 ? ', ' : ''}
+                                            </span>
+                                        ))}
+                                    </span>
+                                </div>
+                            )}
+
+                            {/* ipmitool missing → install */}
+                            {ipmitoolMissing && (
+                                <div style={card}>
+                                    <div className="p-4 space-y-3">
+                                        <p className="text-[13px]" style={sub}>{t('hwIpmitoolMissing') || 'ipmitool is not installed on this node.'}</p>
+                                        <div className="border rounded p-2 text-[11px]" style={{borderColor: 'rgba(239,192,6,0.3)', background: 'rgba(239,192,6,0.05)', color: '#efc006'}}>
+                                            {t('hwInstallHint') || 'PegaProx will run apt-get install ipmitool on the node and may load the IPMI kernel modules. Read-only, local IPMI only.'}
+                                        </div>
+                                        <button onClick={install} disabled={installing}
+                                            {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', {background: '#49afd9', color: '#08131b'})}>
+                                            {installing ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Download className="w-3.5 h-3.5" />}
+                                            {installing ? (t('hwInstalling') || 'Installing…') : (t('hwInstallIpmitool') || 'Install ipmitool')}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* other unavailable reason (no BMC, unreachable, …) */}
+                            {hw && hw.available === false && !ipmitoolMissing && (
+                                <div style={card}><div className="p-4"><p className="text-[13px]" style={sub}>{hw.reason || hw.error || (t('hwNoData') || 'No hardware data available')}</p></div></div>
+                            )}
+
+                            {/* available → sensors / power / FRU / events */}
+                            {hw && hw.available && (
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                    {/* System info (FRU) + power */}
+                                    <div style={card}>
+                                        <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSystemInfo') || 'System Information'}</span></div>
+                                        {cr ? (
+                                            <div className="cr-nh-ib-kv">
+                                                <CrNcKv id="hw-fru" rows={[
+                                                    { k: 'manufacturer', label: t('manufacturer'), value: hw.fru && hw.fru.manufacturer },
+                                                    { k: 'product', label: t('product'), value: hw.fru && hw.fru.product },
+                                                    { k: 'serial', label: t('serialNumber'), value: hw.fru && hw.fru.serial, mono: true },
+                                                    { k: 'part', label: t('partNumber'), value: hw.fru && hw.fru.part },
+                                                    { k: 'power', label: t('powerDraw'), value: typeof hw.power_w === 'number' ? `${hw.power_w} W` : '' },
+                                                    { k: 'intrusion', label: t('chassisIntrusion'), value: hw.chassis && hw.chassis.intrusion },
+                                                ]} />
+                                            </div>
+                                        ) : (
+                                        <table className="w-full text-[12px]"><tbody>
+                                            {hw.fru && hw.fru.manufacturer && <tr><td className="px-3 py-1.5" style={sub}>{t('manufacturer') || 'Manufacturer'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.manufacturer}</td></tr>}
+                                            {hw.fru && hw.fru.product && <tr><td className="px-3 py-1.5" style={sub}>{t('product') || 'Product'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.product}</td></tr>}
+                                            {hw.fru && hw.fru.serial && <tr><td className="px-3 py-1.5" style={sub}>{t('serialNumber') || 'Serial'}</td><td className="px-3 py-1.5" style={{...txt, fontFamily: 'monospace'}}>{hw.fru.serial}</td></tr>}
+                                            {hw.fru && hw.fru.part && <tr><td className="px-3 py-1.5" style={sub}>{t('partNumber') || 'Part No.'}</td><td className="px-3 py-1.5" style={txt}>{hw.fru.part}</td></tr>}
+                                            {typeof hw.power_w === 'number' && <tr><td className="px-3 py-1.5" style={sub}>{t('powerDraw') || 'Power draw'}</td><td className="px-3 py-1.5" style={txt}>{hw.power_w} W</td></tr>}
+                                            {hw.chassis && hw.chassis.intrusion && <tr><td className="px-3 py-1.5" style={sub}>{t('chassisIntrusion') || 'Chassis intrusion'}</td><td className="px-3 py-1.5" style={txt}>{hw.chassis.intrusion}</td></tr>}
+                                        </tbody></table>
+                                        )}
+                                    </div>
+
+                                    {/* Sensors */}
+                                    {!onCrState && (
+                                    <div style={card}>
+                                        <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwSensors') || 'Sensors'} {hw.sensors ? `(${hw.sensors.length})` : ''}</span></div>
+                                        <div className="max-h-72 overflow-y-auto">
+                                            <table className="w-full text-[12px]"><tbody>
+                                                {(hw.sensors || []).map((s, i) => (
+                                                    <tr key={i}>
+                                                        <td className="px-3 py-1" style={sub}>{s.name}</td>
+                                                        <td className="px-3 py-1 text-right" style={txt}>{s.reading || (s.value != null ? `${s.value} ${s.unit || ''}` : '-')}</td>
+                                                        <td className="px-2 py-1"><span className="inline-block w-2 h-2 rounded-full" style={{background: statusColor(s.status)}} title={s.status}></span></td>
+                                                    </tr>
+                                                ))}
+                                                {(!hw.sensors || hw.sensors.length === 0) && <tr><td className="px-3 py-2" style={sub}>{t('hwNoData') || 'No sensor data'}</td></tr>}
+                                            </tbody></table>
+                                        </div>
+                                    </div>
+                                    )}
+
+                                    {/* Event log (SEL) */}
+                                    {hw.events && hw.events.length > 0 && (
+                                        <div style={card} className={cr ? undefined : 'lg:col-span-2'}>
+                                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('hwEventLog') || 'Hardware event log (SEL)'} ({hw.events.length})</span></div>
+                                            <div className="max-h-64 overflow-y-auto">
+                                                <table className={cr ? 'corp-datagrid cr-table cr-nn-table' : 'w-full text-[12px]'}><tbody>
+                                                    {hw.events.map((e, i) => (
+                                                        <tr key={i}>
+                                                            <td className="px-2 py-1"><span className="inline-block w-2 h-2 rounded-full" style={{background: statusColor(e.severity)}} title={e.severity}></span></td>
+                                                            <td className="px-3 py-1 whitespace-nowrap" style={sub}>{e.time}</td>
+                                                            <td className="px-3 py-1" style={txt}>{e.sensor}</td>
+                                                            <td className="px-3 py-1" style={txt}>{e.description}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody></table>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </React.Fragment>
+                    )}
+
+                    {/* Out-of-band Redfish (#609 phase 3) — separate, sharper opt-in */}
+                    {rfConsent && (
+                        <div style={card}>
+                            <div style={cardHead}><span className="text-[13px] font-medium" style={txt}>{t('redfishOob') || 'Out-of-band (Redfish)'}</span></div>
+                            <div className="p-4 space-y-3">
+                                {!rfConsent.enabled && (
+                                    <React.Fragment>
+                                        <p className="text-[13px]" style={sub}>{t('redfishOobDesc') || 'Read hardware health over the management network via the BMC Redfish API — a credential-based, out-of-band fallback when in-band IPMI is unavailable.'}</p>
+                                        {haStandby ? <HaSettingsOnActive own /> : (
+                                        <button onClick={openRfWarn} {...crBtn('default', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5', {background: '#efc006', color: '#08131b'})}>
+                                            <Icons.Server className="w-3.5 h-3.5" />{t('enableRedfish') || 'Enable out-of-band monitoring'}
+                                        </button>
+                                        )}
+                                    </React.Fragment>
+                                )}
+                                {rfConsent.enabled && (
+                                    <div className="space-y-2">
+                                        <p className="text-[12px]" style={sub}>{t('redfishBmcHint') || 'BMC endpoint for this node. The password is stored encrypted and never shown again.'}</p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            <label className="text-[11px] block" style={sub}>{t('bmcHost') || 'BMC host / IP'}
+                                                <input value={bmcForm.host} onChange={e => setBmcForm(f => ({ ...f, host: e.target.value }))} placeholder="10.0.0.10" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="text-[11px] block" style={sub}>{t('bmcUser') || 'BMC user'}
+                                                <input value={bmcForm.user} onChange={e => setBmcForm(f => ({ ...f, user: e.target.value }))} autoComplete="off" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="text-[11px] block" style={sub}>{t('bmcPassword') || 'BMC password'}
+                                                <input type="password" value={bmcForm.password} onChange={e => setBmcForm(f => ({ ...f, password: e.target.value }))} autoComplete="new-password" className="w-full mt-0.5 px-2 py-1 text-[12px] rounded" style={inputStyle} />
+                                            </label>
+                                            <label className="flex items-center gap-2 text-[11px] mt-4 cursor-pointer" style={sub}>
+                                                <input type="checkbox" checked={bmcForm.verify_ssl} onChange={e => setBmcForm(f => ({ ...f, verify_ssl: e.target.checked }))} />
+                                                {t('bmcVerifySsl') || 'Verify TLS certificate'}
+                                            </label>
+                                        </div>
+                                        {bmcTest && (
+                                            <div className="text-[12px] flex items-center gap-1.5" style={{ color: bmcTest.available ? '#60b515' : '#f54f47' }}>
+                                                <span className="w-2 h-2 rounded-full" style={{ background: bmcTest.available ? '#60b515' : '#f54f47' }}></span>
+                                                {bmcTest.available ? `${t('bmcTestOk') || 'Reachable'}${bmcTest.health ? ' — ' + bmcTest.health : ''}` : `${t('bmcTestFail') || 'Failed'}: ${bmcTest.reason || ''}`}
+                                            </div>
+                                        )}
+                                        <div className="flex items-center gap-2">
+                                            <button onClick={saveBmc} disabled={bmcSaving || !bmcForm.host} {...crBtn('primary', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', { background: '#49afd9', color: '#08131b' })}>
+                                                {bmcSaving ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}{t('save') || 'Save'}
+                                            </button>
+                                            <button onClick={testBmc} disabled={bmcTesting || !bmcForm.host} {...crBtn('default', 'px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50', { border: '1px solid rgba(255,255,255,0.2)', color: 'var(--color-text, #e9ecef)' })}>
+                                                {bmcTesting ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Activity className="w-3.5 h-3.5" />}{t('bmcTest') || 'Test'}
+                                            </button>
+                                            {bmc && bmc.configured && <button onClick={removeBmc} {...crBtn('danger', 'px-3 py-1.5 text-sm', { color: '#f54f47' })}>{t('remove') || 'Remove'}</button>}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Mandatory compliance-warning modal (server-versioned text) */}
+                    {showWarn && w && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !enabling && setShowWarn(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" style={{background: 'var(--corp-card-bg, #1a2733)'}} onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold mb-1 flex items-center gap-2" style={txt}>
+                                    <Icons.AlertTriangle className="w-4 h-4" style={{color: '#efc006'}} />
+                                    {w.title || (t('enableHardwareMonitoring') || 'Enable hardware monitoring')}
+                                </h3>
+                                {w.summary && <p className="text-xs mb-3" style={sub}>{w.summary}</p>}
+                                {Array.isArray(w.points) && (
+                                    <ul className="text-[12px] space-y-1.5 mb-3 list-disc pl-5" style={sub}>
+                                        {w.points.map((p, i) => <li key={i}>{p}</li>)}
+                                    </ul>
+                                )}
+                                {w.compliance_note && (
+                                    <div className="border rounded p-2 mb-3 text-[11px]" style={{borderColor: 'rgba(239,192,6,0.3)', background: 'rgba(239,192,6,0.05)', color: '#efc006'}}>
+                                        {w.compliance_note}
+                                    </div>
+                                )}
+                                <label className="flex items-start gap-2 text-[12px] mb-4 cursor-pointer" style={txt}>
+                                    <input type="checkbox" className="mt-0.5" checked={ackChecked} onChange={e => setAckChecked(e.target.checked)} />
+                                    <span>{w.confirm_label || (t('hwConfirmDefault') || 'I understand and accept responsibility for enabling this')}</span>
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowWarn(false)} disabled={enabling} className="px-3 py-1.5 text-sm" style={sub}>{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={enable} disabled={enabling || !ackChecked || delayLeft > 0}
+                                        className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
+                                        style={{background: '#49afd9', color: '#08131b'}}>
+                                        {enabling ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {delayLeft > 0 ? `${t('hwEnable') || 'Enable'} (${delayLeft})` : (t('hwEnable') || 'Enable')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Out-of-band Redfish warning modal — sharper, with the enforced delay */}
+                    {showRfWarn && rw && (
+                        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => !rfEnabling && setShowRfWarn(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-5 w-full max-w-lg max-h-[90vh] overflow-y-auto" style={{background: 'var(--corp-card-bg, #1a2733)'}} onClick={e => e.stopPropagation()}>
+                                <h3 className="text-base font-semibold mb-1 flex items-center gap-2" style={txt}>
+                                    <Icons.AlertTriangle className="w-4 h-4" style={{color: '#f54f47'}} />
+                                    {rw.title || (t('enableRedfish') || 'Enable out-of-band monitoring')}
+                                </h3>
+                                {rw.summary && <p className="text-xs mb-3" style={sub}>{rw.summary}</p>}
+                                {Array.isArray(rw.points) && (
+                                    <ul className="text-[12px] space-y-1.5 mb-3 list-disc pl-5" style={sub}>
+                                        {rw.points.map((p, i) => <li key={i}>{p}</li>)}
+                                    </ul>
+                                )}
+                                {rw.compliance_note && (
+                                    <div className="border rounded p-2 mb-3 text-[11px]" style={{borderColor: 'rgba(245,79,71,0.3)', background: 'rgba(245,79,71,0.06)', color: '#f88'}}>
+                                        {rw.compliance_note}
+                                    </div>
+                                )}
+                                <label className="flex items-start gap-2 text-[12px] mb-4 cursor-pointer" style={txt}>
+                                    <input type="checkbox" className="mt-0.5" checked={rfAck} onChange={e => setRfAck(e.target.checked)} />
+                                    <span>{rw.confirm_label || (t('hwConfirmDefault') || 'I understand and accept responsibility for enabling this')}</span>
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setShowRfWarn(false)} disabled={rfEnabling} className="px-3 py-1.5 text-sm" style={sub}>{t('cancel') || 'Cancel'}</button>
+                                    <button onClick={enableRedfish} disabled={rfEnabling || !rfAck || rfDelayLeft > 0}
+                                        className="px-3 py-1.5 text-sm rounded flex items-center gap-1.5 disabled:opacity-50"
+                                        style={{background: '#49afd9', color: '#08131b'}}>
+                                        {rfEnabling ? <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" /> : <Icons.Check className="w-3.5 h-3.5" />}
+                                        {rfDelayLeft > 0 ? `${t('hwEnable') || 'Enable'} (${rfDelayLeft})` : (t('hwEnable') || 'Enable')}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        function CorporateNodeDetailView({ node, clusterId, clusterHost, clusterName, clusterMetrics, clusterResources, onBack, onOpenNodeConfig, onMaintenanceToggle, onNodeAction, onStartUpdate, onSelectVm, addToast, crKind }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, reverseProxyEnabled, haReadOnly, haConsolesElsewhere } = useAuth();
+            const { isCorpRedesigned } = useLayout();
+            // #625 v2 - a standby shows the node: no power, maintenance or update actions, no
+            // shell, and the configure and hardware forms render disabled
+            // A forwarding standby acts through the active again; the shell tab points
+            // to the shell on the active on every standby that does not serve users
+            const [activeDetailTab, setActiveDetailTab] = useState('summary');
+            const [showActionsMenu, setShowActionsMenu] = useState(false);
+            // LW Oct 2026 (#763, #954) - entering maintenance asks with the evacuation options
+            const [showMaintConfirm, setShowMaintConfirm] = useState(false);
+            const [maintOptions, setMaintOptions] = useState({});
+            // LW Nov 2026 - Actions > Update asks first: the redesign with the Updates tab's dialog (row: what the last
+            // check said of this node), classic with its node card's question (reboot: the box)
+            const [updAsk, setUpdAsk] = useState(null);
+            const [configSubTab, setConfigSubTab] = useState('network');
+            const [zfsPool, setZfsPool] = useState(null);  // the ZFS pool shown in full
+            const [monitorSubTab, setMonitorSubTab] = useState('performance');
+            const [perfTimeframe, setPerfTimeframe] = useState('hour');
+            const [loading, setLoading] = useState(false);
+            const [data, setData] = useState({});
+            // LW Oct 2026 (#828) - an answer belongs to the node it was asked for. navGen moves
+            // on every node or cluster switch, slotSeq on every new request for one slot, so a
+            // late answer for the previous node (or an older reload) never lands, and loading
+            // only counts the requests that still matter
+            const navGenRef = useRef(0);
+            const slotSeqRef = useRef({});
+            const inflightRef = useRef(new Set());
+            const navKey = `${clusterId}/${node}`;
+            const navKeyRef = useRef(navKey);
+            navKeyRef.current = navKey;
+            // LW: Feb 2026 - edit states for configure tab
+            const [editingDns, setEditingDns] = useState(false);
+            const [editingHosts, setEditingHosts] = useState(false);
+            const [dnsForm, setDnsForm] = useState({});
+            const [hostsForm, setHostsForm] = useState('');
+            const [showCertUpload, setShowCertUpload] = useState(false);
+            const [certForm, setCertForm] = useState({ cert: '', key: '', restart: true });
+            const [saving, setSaving] = useState(false);
+            const [nodeIp, setNodeIp] = useState('');
+            // LW Nov 2026 - where /ip took the address from; a *_fallback is a stand-in, not the node's own
+            const [nodeIpSource, setNodeIpSource] = useState('');
+            // LW Nov 2026 - the redesign draws the in-band (BMC) rows with the other sensors: the panel hands up what it read
+            const [crBmc, setCrBmc] = useState(null);
+            const crHw = isCorpRedesigned && crKind === 'proxmox';
+            // ... and keeps it until the view shows another node
+            useEffect(() => { setCrBmc(null); setUpdAsk(null); }, [clusterId, node]);
+            // LW Nov 2026 - unsaved edits of a configure card in the redesign: the cards report them, and a
+            // sub tab, a node tab, Back or a click that leaves the view asks first (keep or discard).
+            // Classic draws no such card, so every guard below goes straight on there
+            const crRootRef = useRef(null);
+            const crDirtyRef = useRef({});
+            const [crDirty, setCrDirty] = useState(false);
+            const [crLeave, setCrLeave] = useState(null);   // { go } while the question is open
+            const [crCfgGen, setCrCfgGen] = useState(0);    // a discard draws the cards afresh
+            const crOnDirty = useCallback((id, on) => {
+                const d = crDirtyRef.current;
+                if (on) d[id] = true; else delete d[id];
+                setCrDirty(Object.keys(d).length > 0);
+            }, []);
+            const crIsDirty = () => crHw && Object.keys(crDirtyRef.current).length > 0;
+            const crAsk = (go) => setCrLeave({ go });
+            const crGuard = (go) => { if (crIsDirty()) crAsk(go); else go(); };
+            const crDiscard = () => {
+                const go = crLeave && crLeave.go;
+                crDirtyRef.current = {};
+                setCrDirty(false);
+                setCrLeave(null);
+                setShowCertUpload(false);
+                setCertForm({ cert: '', key: '', restart: true });
+                setCrCfgGen(g => g + 1);
+                if (go) go();
+            };
+            useCrNcLeaveGuard(crHw && crDirty, crRootRef, crAsk);
+
+            const metrics = clusterMetrics?.[node] || {};
+            const nodeOnline = metrics.status !== 'offline';
+            const isMaint = metrics.maintenance_mode;
+            const proxmoxUrl = getNodeProxmoxUrl(nodeIp, node);
+
+            const authFetch = async (url, opts = {}) => {
+                try { return await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } }); }
+                catch(e) { console.error(e); return null; }
+            };
+
+            // LW Nov 2026 - Corporate Redesigned draws the answer as crPfPrep (cr_perf.js) reads it: an {error}
+            // of the route is a failed read, the XCP-ng wrapper unwrapped, a time without snapshots a gap
+            const crPerf = useMemo(() => (isCorpRedesigned ? crPfPrep(data.performance, crKind) : undefined),
+                                   [isCorpRedesigned, data.performance, crKind]);
+            const crPerfPrep = (d) => (isCorpRedesigned ? crPfPrep(d, crKind) : d);
+            // LW Oct 2026 - the performance charts zoom together, finer data for a narrow range
+            const perfZoom = useChartZoom({
+                preset: perfTimeframe, loaded: isCorpRedesigned ? crPerf : data.performance, resetKey: navKey,
+                loadPreset: tf => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf}`)
+                    .then(r => r?.ok ? r.json() : null).then(crPerfPrep),
+                loadRange: (from, to) => authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/metrics-history?from=${Math.floor(from)}&to=${Math.ceil(to)}`)
+                    .then(r => r?.ok ? r.json() : null).then(crPerfPrep),
+            });
+            const perfNet = perfZoom.source('net_in', 'net_out');
+
+            // LW: Feb 2026 - save handler for configure tab edits
+            // LW Nov 2026 - it answers whether the write went through, so the redesign keeps an edit open after a refusal
+            const handleSave = async (endpoint, payload, successMsg, method) => {
+                setSaving(true);
+                let ok = false;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/${endpoint}`, {
+                        method: method || 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (res && res.ok) {
+                        ok = true;
+                        addToast(successMsg, 'success');
+                        // Reload relevant data
+                        if (endpoint.includes('dns') || endpoint.includes('hosts') || endpoint.includes('time') || endpoint.includes('certificates') || endpoint.includes('syslog')) loadTabData('system');
+                        else if (endpoint.includes('disk')) loadTabData('disks');
+                        else if (endpoint.includes('repo')) loadTabData('repos');
+                        else if (endpoint.includes('network')) loadTabData('network');
+                    } else {
+                        const err = res ? await res.json().catch(() => ({})) : {};
+                        addToast(err.error || 'Error', 'error');
+                    }
+                } catch (e) { addToast('Error', 'error'); }
+                setSaving(false);
+                return ok;
+            };
+
+            // LW Nov 2026 - the delete of one interface, from the classic table and from the redesign
+            const deleteNetIface = async (iface) => {
+                if (!confirm(`${t('delete')} ${iface.iface}?`)) return;
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`, { method: 'DELETE' });
+                addToast(res && res.ok ? `${iface.iface} ${t('deleted')}` : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network');
+            };
+
+            // LW Nov 2026 - the repos route sends name / enabled / uri in lower case (settings.py
+            // get_node_repos); read as Enabled every repo was off and the button always enabled
+            const handleRepoToggle = async (repo) => {
+                const payload = { enabled: !repo.enabled };
+                if (repo.is_other) { payload.file = repo.file; payload.index = repo.index; payload.name = repo.name; }
+                return handleSave(`repos/${repo.id || repo.index}`, payload, repo.enabled ? 'Repository disabled' : 'Repository enabled');
+            };
+
+            // LW Nov 2026 - apt update of the node, from the classic button and from the redesign
+            const handleAptUpdate = async () => {
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/repos/refresh`, { method: 'POST' });
+                addToast(res && res.ok ? 'apt update started' : 'Error', res && res.ok ? 'success' : 'error');
+                return !!(res && res.ok);
+            };
+
+            const handleCertUpload = async () => {
+                setSaving(true);
+                let ok = false;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ certificates: certForm.cert, key: certForm.key, restart: certForm.restart, force: true })
+                    });
+                    if (res && res.ok) { ok = true; addToast('Certificate uploaded', 'success'); setShowCertUpload(false); setCertForm({ cert: '', key: '', restart: true }); loadTabData('system'); }
+                    else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || 'Upload failed', 'error'); }
+                } catch (e) { addToast('Upload failed', 'error'); }
+                setSaving(false);
+                return ok;
+            };
+
+            // LW Nov 2026 - back to the self-signed certificate, the classic dialog's request (pveproxy restarts)
+            const handleCertRevert = async () => {
+                setSaving(true);
+                let ok = false;
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/certificates/custom?restart=true`, { method: 'DELETE' });
+                    if (res && res.ok) { ok = true; addToast(t('certDeleted') || 'Certificate deleted', 'success'); loadTabData('system'); }
+                    else { const err = res ? await res.json().catch(() => ({})) : {}; addToast(err.error || t('deleteFailed') || 'Delete failed', 'error'); }
+                } catch (e) { addToast(t('connectionError'), 'error'); }
+                setSaving(false);
+                return ok;
+            };
+
+            const formatBytes = b => {
+                if(!b) return '0 B';
+                const k = 1024, sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(b) / Math.log(k));
+                return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+            };
+
+            const formatUptime = (s) => {
+                if(!s) return '-';
+                const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+                if(d > 0) return `${d}d ${h}h ${m}m`;
+                if(h > 0) return `${h}h ${m}m`;
+                return `${m}m`;
+            };
+
+            // Close actions menu on outside click
+            useEffect(() => {
+                if (!showActionsMenu) return;
+                const close = () => setShowActionsMenu(false);
+                document.addEventListener('click', close);
+                return () => document.removeEventListener('click', close);
+            }, [showActionsMenu]);
+
+            // Fetch tab data
+            const loadTabData = async (tab, tf) => {
+                // a save that finished after the switch reloads its own node, not this one
+                if (navKeyRef.current !== navKey) return;
+                const gen = navGenRef.current;
+                const seq = (slotSeqRef.current[tab] || 0) + 1;
+                slotSeqRef.current[tab] = seq;
+                const inflight = inflightRef.current;
+                const token = {};
+                inflight.add(token);
+                setLoading(true);
+                try {
+                    const endpoints = {
+                        summary: [`${API_URL}/clusters/${clusterId}/nodes/${node}/summary`],
+                        performance: [`${API_URL}/clusters/${clusterId}/nodes/${node}/rrddata?timeframe=${tf || perfTimeframe}`],
+                        tasks: [`${API_URL}/clusters/${clusterId}/nodes/${node}/tasks?limit=50`],
+                        network: [`${API_URL}/clusters/${clusterId}/nodes/${node}/network`],
+                        system: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/dns`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/hosts`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/time`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/syslog?limit=100`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/certificates`,
+                            // LW Nov 2026 - nothing below reads these two; the redesign leaves them out, so a
+                            // read after a Save does not wait for sensors over SSH
+                            ...(crHw ? [] : [
+                                `${API_URL}/clusters/${clusterId}/nodes/${node}/cluster-health`,
+                                `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            ]),
+                        ],
+                        sensors: [  // #601 — dedicated load for the hardware tab (lm-sensors + temp history)
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/sensors`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/temperature-history`,
+                        ],
+                        disks: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/lvm`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/lvmthin`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/disks/zfs`,
+                        ],
+                        repos: [`${API_URL}/clusters/${clusterId}/nodes/${node}/repos`],
+                        // LW Nov 2026 - Corporate Redesigned's Hardware tab lists the PCI devices (the route the guest passthrough reads)
+                        pci: [`${API_URL}/clusters/${clusterId}/nodes/${node}/hardware/pci`],
+                        subscription: [`${API_URL}/clusters/${clusterId}/nodes/${node}/subscription`],
+                        ceph: [
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/status`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/osd`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/mon`,
+                            `${API_URL}/clusters/${clusterId}/nodes/${node}/ceph/pool`,
+                        ],
+                    };
+                    const urls = endpoints[tab] || [];
+                    if (urls.length === 0) return;
+                    // LW Nov 2026 - the redesign keeps why a sensors, disks or tasks read failed (crNdRead, cr_node.js)
+                    // LW Nov 2026 (#1218) - Ceph always: the classic view says a refusal too, not "not configured"
+                    const crKeep = (crHw && (tab === 'sensors' || tab === 'disks' || tab === 'system' || tab === 'repos' || tab === 'subscription' || tab === 'pci')) || (isCorpRedesigned && tab === 'tasks') || tab === 'ceph';
+                    const results = await Promise.all(urls.map(u => u.endsWith('/dns')
+                        ? authFetch(u).then(readNodeDns)
+                        : crKeep ? authFetch(u).then(crNdRead)
+                        : authFetch(u).then(r => r && r.ok ? r.json() : null).catch(() => null)));
+                    if (gen !== navGenRef.current || navKeyRef.current !== navKey || slotSeqRef.current[tab] !== seq) return;
+                    // NS: Feb 2026 - Use functional setData to avoid stale closure bugs
+                    setData(prev => {
+                        const newData = { ...prev };
+                        if (tab === 'summary') newData.summary = results[0];
+                        else if (tab === 'performance') newData.performance = results[0];
+                        else if (tab === 'tasks') {
+                            if (crKeep) newData.tasksRead = results[0];
+                            newData.tasks = crKeep && crNdFail(results[0]) ? null : results[0];
+                        }
+                        else if (tab === 'network') newData.network = results[0];
+                        else if (tab === 'system') {
+                            // a failed read stays null, so the next visit to the tab asks again; the redesign
+                            // keeps why the others failed and hands the classic fields what they had before
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.sysFail = { hosts: crNdFail(results[1]), time: crNdFail(results[2]), syslog: crNdFail(results[3]), certificates: crNdFail(results[4]) };
+                            newData.dns = results[0].dns;
+                            newData.dnsError = results[0].dnsError;
+                            newData.hosts = typeof got[1]?.data === 'string' ? got[1].data : null;
+                            newData.time = got[2] || {};
+                            newData.syslog = got[3] || [];
+                            newData.certificates = got[4] || [];
+                        }
+                        else if (tab === 'sensors') {  // #601
+                            if (crKeep) { newData.sensorsRead = results[0]; newData.sensorsAt = Date.now(); newData.tempsRead = results[1]; }
+                            newData.sensors = (results[0] && Array.isArray(results[0].sensors)) ? results[0].sensors : null;
+                            newData.tempHistory = (results[1] && Array.isArray(results[1].series)) ? results[1].series : null;
+                        }
+                        else if (tab === 'disks') {
+                            // the tables below get null for a failed read, as before; the redesign keeps the reasons
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.disksRead = results;
+                            newData.disks = got[0] || [];
+                            newData.lvm = nodeLvmVgs(got[1]);
+                            newData.lvmthin = nodeThinPools(got[2]);
+                            newData.zfs = got[3] || [];
+                        }
+                        else if (tab === 'repos') {
+                            // LW Nov 2026 - the classic table gets what it had; the redesign keeps the answer or why it failed
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.reposRead = results[0];
+                            newData.repos = got[0]?.repositories || [];
+                        }
+                        else if (tab === 'pci') newData.pciRead = results[0];
+                        else if (tab === 'subscription') {
+                            // LW Nov 2026 - Corporate Redesigned keeps the answer or why it failed; the classic grid gets what it had
+                            if (crKeep) newData.subscriptionRead = results[0];
+                            newData.subscription = (crKeep && crNdFail(results[0]) ? null : results[0]) || {};
+                        }
+                        else if (tab === 'ceph') {
+                            const got = crKeep ? results.map(x => (crNdFail(x) ? null : x)) : results;
+                            if (crKeep) newData.cephRead = results;
+                            newData.ceph = { status: got[0], osd: got[1] || [], mon: got[2] || [], pools: got[3] || [], available: got[0] !== null,
+                                             denied: crNdFail(results[0])?.status === 403 };
+                        }
+                        return newData;
+                    });
+                } catch (e) { console.error(e); }
+                finally {
+                    inflight.delete(token);
+                    if (inflight === inflightRef.current) setLoading(inflight.size > 0);
+                }
+            };
+
+            // LW: Feb 2026 - reset data and load summary when node changes
+            useEffect(() => {
+                setData({}); setConfigSubTab('network'); setZfsPool(null); setMonitorSubTab('performance'); setActiveDetailTab('summary'); loadTabData('summary');
+                return () => { navGenRef.current++; inflightRef.current = new Set(); };
+            }, [clusterId, node]);
+
+            useEffect(() => {
+                let cancelled = false;
+                setNodeIp('');
+                setNodeIpSource('');
+                authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/ip`)
+                    .then(r => r && r.ok ? r.json() : null)
+                    .then(ipData => {
+                        if (!cancelled) { setNodeIp(ipData?.ip || ''); setNodeIpSource(ipData?.source || ''); }
+                    })
+                    .catch(() => {
+                        if (!cancelled) setNodeIp('');
+                    });
+                return () => { cancelled = true; };
+            }, [clusterId, node]);
+
+            // Load data when tab changes
+            useEffect(() => {
+                if (activeDetailTab === 'summary' && !data.summary) loadTabData('summary');
+                else if (activeDetailTab === 'monitor') {
+                    if (monitorSubTab === 'performance' && !data.performance) loadTabData('performance');
+                    else if (monitorSubTab === 'tasks' && !data.tasks) loadTabData('tasks');
+                }
+                else if (activeDetailTab === 'configure') {
+                    if (configSubTab === 'network' && !data.network) loadTabData('network');
+                    // a failed DNS read (null) is asked again from its own tab only, the others wait for the first read
+                    else if (['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab) && (configSubTab === 'dns' ? !data.dns : data.dns === undefined)) loadTabData('system');
+                    else if (['disks', 'lvm', 'lvmthin', 'zfs'].includes(configSubTab) && !data.disks) loadTabData('disks');
+                    else if (configSubTab === 'repos' && !data.repos) loadTabData('repos');
+                    else if (configSubTab === 'ceph' && !data.ceph) loadTabData('ceph');
+                }
+                else if (activeDetailTab === 'hardware' && data.sensors === undefined) loadTabData('sensors');  // #601
+                else if (activeDetailTab === 'subscription' && !data.subscription) loadTabData('subscription');
+            }, [activeDetailTab, configSubTab, monitorSubTab]);
+
+            // LW Nov 2026 - Corporate Redesigned's Hardware tab also shows the PCI devices and the disk health: one
+            // read each per visit of the node (the disks read is the one Configure > Disks makes)
+            useEffect(() => {
+                if (!crHw || activeDetailTab !== 'hardware') return;
+                if (data.pciRead === undefined) loadTabData('pci');
+                if (data.disksRead === undefined) loadTabData('disks');
+            }, [crHw, activeDetailTab]);
+
+            const handlePerfTimeframeChange = (tf) => {
+                setPerfTimeframe(tf);
+                loadTabData('performance', tf);
+            };
+
+            const nodeVms = (clusterResources || []).filter(r => r.node === node && (r.type === 'qemu' || r.type === 'lxc'));
+            // LW Nov 2026 - the System sub tabs the redesign draws itself for a PVE node
+            const crSys = crHw && ['dns', 'hosts', 'time', 'certs', 'syslog'].includes(configSubTab);
+            // LW Nov 2026 - and these five from the disks, repos and ceph reads (cr_nodestore.js)
+            const crStore = crHw && ['lvm', 'lvmthin', 'zfs', 'repos', 'ceph'].includes(configSubTab);
+            // LW Nov 2026 - the disk list sits outside the standby lock: its reads (list, SMART, pool detail) stay
+            // open there, its writes (Initialize GPT, Wipe, a new storage) are off on a standby on their own
+            const crDisks = crHw && configSubTab === 'disks';
+            const runningVms = nodeVms.filter(v => v.status === 'running').length;
+
+            // LW: Feb 2026 - backend sends flat fields: cpu_percent, mem_used, mem_total, disk_used, disk_total
+            // Swap only available from summary API, not clusterMetrics
+            const cpuPercent = metrics.cpu_percent?.toFixed(1) || '0.0';
+            const ramUsed = metrics.mem_used || 0;
+            const ramTotal = metrics.mem_total || 0;
+            const ramPercent = ramTotal > 0 ? ((ramUsed / ramTotal) * 100).toFixed(1) : '0.0';
+            const swapUsed = data.summary?.swap?.used || 0;
+            const swapTotal = data.summary?.swap?.total || 0;
+            const swapPercent = swapTotal > 0 ? ((swapUsed / swapTotal) * 100).toFixed(1) : '0.0';
+            const rootUsed = metrics.disk_used || 0;
+            const rootTotal = metrics.disk_total || 0;
+            const rootPercent = rootTotal > 0 ? ((rootUsed / rootTotal) * 100).toFixed(1) : '0.0';
+
+            // LW Nov 2026 - one node's update. The redesign takes the count and kernel flag of the last check from the
+            // server's copy (it asks no node), read when the question opens; until then the count is '-', never 0
+            const { can: crCan } = crVmCan();
+            const crAskUpdate = async () => {
+                if (!isCorpRedesigned) { setUpdAsk({ classic: true, reboot: true }); return; }
+                setUpdAsk({ reading: true, row: { name: node, m: metrics, count: '-', kernel: false } });
+                const r = await authFetch(`${API_URL}/updates-overview`);
+                const d = r && r.ok ? await r.json().catch(() => null) : null;
+                if (navKeyRef.current !== navKey) return;
+                const h = d && Array.isArray(d.hosts) ? d.hosts.find(x => x && x.kind === 'node' && x.cluster_id === clusterId && String(x.name) === node && x.ok) : null;
+                // the reboot default follows the kernel flag, so the question can be started only once this
+                // read ended, found or not; the dialog stays mounted and keeps what was chosen in it
+                setUpdAsk(a => (a && a.row && a.row.name === node && !a.classic
+                    ? { reading: false, row: h ? { ...a.row, count: typeof h.count === 'number' ? h.count : '-', kernel: !!h.kernel } : a.row } : a));
+            };
+            // the Updates tab's request: the reboot as chosen, force only after the dialog asked again
+            const crStartUpdate = async (name, reboot, force) => {
+                const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${name}/update`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(force ? { reboot, force: true } : { reboot }),
+                });
+                const d = res ? await res.json().catch(() => null) : null;
+                if (res && !res.ok && d && crUpdNeedsForce(d.error, d.code)) return { needForce: true };
+                if (res && (res.ok || (d && d.success))) { setUpdAsk(null); addToast(`${t('updateStartedFor')} ${name}`, 'success'); return { ok: true }; }
+                if (d && d.code === 'MISSING_PERMISSION' && d.required === 'node.reboot') return { err: t('crUpdWhyRebootPerm') };
+                return { err: (d && d.error) || (res ? `HTTP ${res.status}` : t('crDcNoAnswer')) };
+            };
+            // LW Nov 2026 - the header of the redesign takes the node's state as its health card does (crNsLive): a
+            // node not online has no live figures, and a cluster host /ip fell back to is marked as a stand-in
+            const crLive = crNsLive(clusterMetrics?.[node]);
+            const crHeadState = crLive.state === 'offline' ? 'offline' : isMaint ? 'maintenance' : crLive.state === 'online' ? 'online' : 'unknown';
+            const crIpStandIn = /_fallback$/.test(String(nodeIpSource || ''));
+
+            // the Actions menu of the header, shared with the header of Corporate Redesigned
+            const nodeActionsMenu = (
+                <div className="relative">
+                    <button onClick={(e) => { e.stopPropagation(); setShowActionsMenu(!showActionsMenu); }}>
+                        {t('actions')} <Icons.ChevronDown className="w-3 h-3" />
+                    </button>
+                    {showActionsMenu && (
+                        <div className="corp-dropdown absolute right-0 top-full mt-1 w-52 z-50 py-1" onClick={(e) => e.stopPropagation()}>
+                            {!haReadOnly && (<>
+                            <button onClick={() => { if (!isMaint) { setMaintOptions({}); setShowMaintConfirm(true); setShowActionsMenu(false); return; } if(!confirm(`${isMaint ? 'Disable' : 'Enable'} maintenance mode on "${node}"?`)) return; onMaintenanceToggle(node, !isMaint); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.Wrench className="w-3.5 h-3.5" /> {isMaint ? t('disableMaintenance') || 'Disable Maintenance' : t('maintenance')}
+                            </button>
+                            <button onClick={() => { if(!confirm(`Reboot node "${node}"?`)) return; onNodeAction(node, 'reboot'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.RefreshCw className="w-3.5 h-3.5" /> {t('rebootNode')}
+                            </button>
+                            <button onClick={() => { if(!confirm(`Shutdown node "${node}"?`)) return; onNodeAction(node, 'shutdown'); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: '#f54f47'}}>
+                                <Icons.Power className="w-3.5 h-3.5" /> {t('shutdownNode')}
+                            </button>
+                            <button onClick={() => { setShowActionsMenu(false); crAskUpdate(); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}
+                                data-corp-node-update="">
+                                <Icons.Download className="w-3.5 h-3.5" /> {t('update') || 'Update'}
+                            </button>
+                            <div className="my-1" style={{borderTop: '1px solid var(--corp-border-medium)'}}></div>
+                            </>)}
+                            <button onClick={() => { onOpenNodeConfig(node); setShowActionsMenu(false); }} className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                <Icons.Settings className="w-3.5 h-3.5" /> {t('nodeSettings')}
+                            </button>
+                            {/* LW Apr 2026 (#250) - open PVE web UI on this cluster in a new tab.
+                                We use the cluster API host; PVE auto-routes to the right node. */}
+                            {clusterHost && (
+                                <button
+                                    onClick={() => {
+                                        const h = (clusterHost || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0];
+                                        if (!h) { addToast(t('noHostKnown') || 'No host known for this cluster', 'warning'); return; }
+                                        window.open(`https://${h}:8006/`, '_blank', 'noopener,noreferrer');
+                                        setShowActionsMenu(false);
+                                    }}
+                                    className="w-full text-left px-3 py-1.5 text-[13px] flex items-center gap-2" style={{color: 'var(--corp-text-secondary)'}}>
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" /> {t('openWebUI') || 'Open Web UI'}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                </div>
+            );
+            const nodeTabLabel = (tab) => (tab === 'summary' ? t('summary') : tab === 'monitor' ? t('monitor') : tab === 'configure' ? t('configure') : tab === 'hardware' ? (t('hardware') || 'Hardware') : tab === 'vms' ? 'VMs' : tab === 'shell' ? 'Shell' : t('subscriptionInfo'));
+
+            return (
+                <div className="space-y-0" ref={crRootRef}>
+                    {/* Header Bar */}
+                    {isCorpRedesigned ? (
+                        <CrObjectHeader kind="node" icon={<Icons.Server />} name={node} onBack={() => crGuard(onBack)}
+                            status={crHeadState === 'unknown'
+                                ? <span data-cr-state="unknown" title={t('crNsStatusNotLive')}><CrBadge tone="neutral">{t('unknown')}</CrBadge></span>
+                                : <CrStateBadge state={crHeadState} />}
+                            meta={[
+                                { key: 'cluster', label: t('cluster'), value: clusterName },
+                                { key: 'ip', label: t('ipAddress'), mono: true, value: nodeIp && crIpStandIn
+                                    ? <span data-cr-node-ip-standin="" title={t('crNcIpStandIn')}>{nodeIp} <span className="cr-muted">({t('crNcIpStandIn')})</span></span> : nodeIp },
+                                { key: 'pve', label: t('pveVersion'), value: data.summary?.pveversion || metrics.pveversion },
+                                { key: 'cpu', label: t('cpu'), value: crLive.live && crNsNum(metrics.cpu_percent) != null ? `${cpuPercent}%` : null },
+                                { key: 'mem', label: t('memory'), value: crLive.live && ramTotal > 0 ? `${ramPercent}% (${formatBytes(ramUsed)} / ${formatBytes(ramTotal)})` : null },
+                                { key: 'guests', label: t('guests'), value: `${runningVms}/${nodeVms.length} ${t('running').toLowerCase()}` },
+                                { key: 'uptime', label: t('uptime'), value: crLive.live || crNsNum(data.summary?.uptime) > 0 ? crUptime(data.summary?.uptime || metrics.uptime) : null },
+                            ]}
+                            actions={(
+                                <>
+                                    {proxmoxUrl && (
+                                        <button type="button" onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}>
+                                            <Icons.ExternalLink className="w-3 h-3" /> {t('openInProxmox')}
+                                        </button>
+                                    )}
+                                    {nodeActionsMenu}
+                                </>
+                            )} />
+                    ) : (
+                    <div className="flex items-center justify-between px-4 py-2 border-b border-proxmox-border" style={{background: 'var(--corp-header-bg)'}}>
+                        <div className="flex items-center gap-2">
+                            <button onClick={onBack} className="p-1 hover:text-white" style={{color: 'var(--corp-text-secondary)'}} title={t('backToList')}>
+                                <Icons.ChevronLeft className="w-4 h-4" />
+                            </button>
+                            <Icons.Server className="w-4 h-4" style={{color: nodeOnline ? '#49afd9' : '#f54f47'}} />
+                            <span className="text-[14px] font-medium" style={{color: '#e9ecef'}}>{node}</span>
+                            {proxmoxUrl && (
+                                <button
+                                    onClick={() => window.open(proxmoxUrl, '_blank', 'noopener,noreferrer')}
+                                    className="p-1 rounded hover:bg-white/5"
+                                    style={{color: '#49afd9'}}
+                                    title={t('openInProxmox') || 'Open in Proxmox'}
+                                >
+                                    <Icons.ExternalLink className="w-3.5 h-3.5" />
+                                </button>
+                            )}
+                            <span className={`corp-badge flex items-center gap-1 ${nodeOnline ? (isMaint ? 'corp-badge-maintenance' : 'corp-badge-online') : 'corp-badge-offline'}`}>
+                                {isMaint && <Icons.Wrench className="w-3 h-3" />}
+                                {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}
+                            </span>
+                        </div>
+                        <div className="corp-toolbar flex items-center gap-1">
+                            {nodeActionsMenu}
+                        </div>
+                    </div>
+                    )}
+
+                    {/* Tab Strip */}
+                    {isCorpRedesigned ? (
+                        <CrTabs id="node" active={activeDetailTab} onChange={tab => { if (tab !== activeDetailTab) crGuard(() => setActiveDetailTab(tab)); }} label={node}
+                            tabs={['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => ({ id: tab, label: nodeTabLabel(tab) }))} />
+                    ) : (
+                    <div className="corp-tab-strip px-4">
+                        {['summary', 'monitor', 'configure', 'hardware', 'vms', 'shell', 'subscription'].map(tab => (
+                            <button key={tab} className={activeDetailTab === tab ? 'active' : ''} onClick={() => setActiveDetailTab(tab)}>
+                                {nodeTabLabel(tab)}
+                            </button>
+                        ))}
+                    </div>
+                    )}
+
+                    {/* Tab Content */}
+                    <div className="p-4">
+                        {loading && !data.summary && (
+                            <div className="flex items-center justify-center h-32">
+                                <Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} />
+                            </div>
+                        )}
+
+                        {/* LW Nov 2026 - the redesign: the node's health from what the view holds (cr_node.js), for a
+                            PVE node the system information and the guests under it in the same cards (cr_nodecfg.js) */}
+                        {activeDetailTab === 'summary' && isCorpRedesigned && (
+                            <div className={crHw ? 'cr-nc-page' : undefined}>
+                                <CrBoundary key={navKey} id="node-health">
+                                    <CrNodeHealth node={node} clusterId={clusterId} kind={crKind} metrics={clusterMetrics?.[node]} summary={data.summary}
+                                        hw={crHw ? { read: data.sensorsRead, readAt: data.sensorsAt, bmc: crBmc } : null} loading={loading}
+                                        onPerf={() => { setMonitorSubTab('performance'); setActiveDetailTab('monitor'); }}
+                                        onHardware={() => setActiveDetailTab('hardware')} onReload={() => loadTabData('summary')} />
+                                </CrBoundary>
+                                {crHw && (
+                                    <CrBoundary key={`${navKey}/sysinfo`} id="node-sysinfo">
+                                        <CrNodeSysInfo node={node} summary={data.summary} metrics={metrics} nodeIp={nodeIp} nodeIpSource={nodeIpSource}
+                                            network={data.network} guests={nodeVms} onOpenGuests={() => setActiveDetailTab('vms')}
+                                            onOpenNetwork={() => { setConfigSubTab('network'); setActiveDetailTab('configure'); }} />
+                                    </CrBoundary>
+                                )}
+                            </div>
+                        )}
+                        {/* Summary Tab */}
+                        {activeDetailTab === 'summary' && !crHw && (
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                {/* Host Details card */}
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hostDetails')}</span>
+                                    </div>
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            <tr><td>{t('status')}</td><td className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background: isMaint ? '#efc006' : nodeOnline ? '#60b515' : '#f54f47'}}></span>{isMaint && <Icons.Wrench className="w-3 h-3" style={{color: '#efc006'}} />} {isMaint ? t('maintenance') : nodeOnline ? t('online') : t('offline')}</td></tr>
+                                            <tr><td>{t('pveVersion')}</td><td>{data.summary?.pveversion || metrics.pveversion || '-'}</td></tr>
+                                            <tr><td>{t('kernelVersion')}</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.summary?.kversion || '-'}</td></tr>
+                                            <tr><td>{t('cpuModel')}</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
+                                            <tr><td>{t('cores')}</td><td>{data.summary?.cpuinfo?.cores || '-'} ({data.summary?.cpuinfo?.cpus || '-'} {t('logicalProcessors')})</td></tr>
+                                            <tr><td>{t('cpuSockets')}</td><td>{data.summary?.cpuinfo?.sockets || '-'}</td></tr>
+                                            <tr><td>VMs</td><td>{nodeVms.length} ({runningVms} {t('running').toLowerCase()})</td></tr>
+                                            <tr><td>{t('uptime')}</td><td>{formatUptime(data.summary?.uptime || metrics.uptime)}</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Capacity & Usage card - LW Nov 2026: the redesign has these figures in its health tiles, with their limits */}
+                                {!isCorpRedesigned && (
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('capacityUsage')}</span>
+                                    </div>
+                                    <div className="p-3 space-y-3">
+                                        {[
+                                            { label: 'CPU', percent: cpuPercent, used: `${cpuPercent}%`, total: `${data.summary?.cpuinfo?.cpus || '-'} ${t('logicalProcessors')}`, color: '#49afd9' },
+                                            { label: 'RAM', percent: ramPercent, used: formatBytes(ramUsed), total: formatBytes(ramTotal), color: '#9b59b6' },
+                                            { label: 'Swap', percent: swapPercent, used: formatBytes(swapUsed), total: formatBytes(swapTotal), color: '#ec4899' },
+                                            { label: 'Root FS', percent: rootPercent, used: formatBytes(rootUsed), total: formatBytes(rootTotal), color: '#60b515' },
+                                            // NS Apr 2026: KSM share — relative to total RAM (matches native PVE UI).
+                                            // Only surfaces when backend provided the field (non-Linux hosts omit it).
+                                            ...(typeof data.summary?.ksm?.shared === 'number' ? [{
+                                                label: t('ksmSharing') || 'KSM Sharing',
+                                                percent: ramTotal ? (data.summary.ksm.shared / ramTotal) * 100 : 0,
+                                                used: formatBytes(data.summary.ksm.shared),
+                                                total: formatBytes(ramTotal),
+                                                color: '#a855f7',
+                                            }] : []),
+                                        ].map(item => (
+                                            <div key={item.label}>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <span className="text-[12px]" style={{color: 'var(--corp-text-secondary)'}}>{item.label}</span>
+                                                    <span className="text-[12px]" style={{color: 'var(--color-text)'}}>{item.used} / {item.total}</span>
+                                                </div>
+                                                <div className="corp-capacity-bar">
+                                                    <div style={{width: `${Math.min(item.percent, 100)}%`, background: item.color}}></div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                )}
+
+                                {/* Hardware card */}
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hardwareInfo')}</span>
+                                    </div>
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            <tr><td>CPU</td><td>{data.summary?.cpuinfo?.model || '-'}</td></tr>
+                                            <tr><td>{t('totalRam')}</td><td>{isCorpRedesigned && !(ramTotal > 0) ? '-' : formatBytes(ramTotal)}</td></tr>
+                                            <tr><td>{t('networkInterfaces')}</td><td>{data.network ? (Array.isArray(data.network) ? data.network.length : '-') : '-'}</td></tr>
+                                            <tr><td>{t('rootFilesystem')}</td><td>{isCorpRedesigned && !(rootTotal > 0) ? '-' : formatBytes(rootTotal)}</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                {/* Related Objects card */}
+                                <div style={{border: '1px solid var(--corp-border-medium)'}}>
+                                    <div className="px-3 py-2" style={{background: 'var(--corp-header-bg)', borderBottom: '1px solid var(--corp-border-medium)'}}>
+                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('relatedObjects')}</span>
+                                    </div>
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            <tr><td>QEMU VMs</td><td>{nodeVms.filter(v => v.type === 'qemu').length}</td></tr>
+                                            <tr><td>LXC CTs</td><td>{nodeVms.filter(v => v.type === 'lxc').length}</td></tr>
+                                            <tr><td>{t('running')}</td><td>{runningVms}</td></tr>
+                                            <tr><td>{t('stopped')}</td><td>{nodeVms.filter(v => v.status === 'stopped').length}</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Monitor Tab */}
+                        {activeDetailTab === 'monitor' && (
+                            <div className="flex gap-0" style={{minHeight: '400px'}}>
+                                <div className="corp-subnav">
+                                    <button className={`corp-subnav-item ${monitorSubTab === 'performance' ? 'active' : ''}`} onClick={() => setMonitorSubTab('performance')}>{t('performance')}</button>
+                                    <button className={`corp-subnav-item ${monitorSubTab === 'tasks' ? 'active' : ''}`} onClick={() => { setMonitorSubTab('tasks'); if (monitorSubTab === 'tasks' && !data.tasks) loadTabData('tasks'); }}>{t('tasks')}</button>
+                                    <button className={`corp-subnav-item ${monitorSubTab === 'timeline' ? 'active' : ''}`} onClick={() => setMonitorSubTab('timeline')} data-corp-node-timeline>{t('tlTab')}</button>
+                                </div>
+                                <div className="flex-1 pl-4">
+                                    {/* LW Nov 2026 - the figures, the charts and their data quality of the redesign (cr_perf.js) */}
+                                    {monitorSubTab === 'performance' && isCorpRedesigned && (
+                                        <CrBoundary key={navKey} id="node-perf">
+                                            <CrNodePerf node={node} clusterId={clusterId} kind={crKind} live={clusterMetrics?.[node]} summary={data.summary}
+                                                p={crPerf} loading={loading} range={perfTimeframe} onRange={handlePerfTimeframeChange}
+                                                onReload={() => loadTabData('performance')} zoom={perfZoom} authFetch={authFetch} />
+                                        </CrBoundary>
+                                    )}
+                                    {monitorSubTab === 'performance' && !isCorpRedesigned && (
+                                        <div className="space-y-4">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('performance')}</span>
+                                                <div className="flex items-center gap-1">
+                                                    <span className="mr-2"><ChartZoomBar zoom={perfZoom} /></span>
+                                                    {['hour', 'day', 'week', 'month', 'year'].map(tf => (
+                                                        <button key={tf} onClick={() => handlePerfTimeframeChange(tf)}
+                                                            className="px-2 py-1 text-[11px]"
+                                                            style={perfTimeframe === tf ? {background: '#324f61', color: '#e9ecef', border: '1px solid #49afd9'} : {color: '#adbbc4', border: '1px solid #485764'}}
+                                                        >{tf.charAt(0).toUpperCase() + tf.slice(1)}</button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            {loading && !data.performance ? (
+                                                <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
+                                            ) : data.performance?.metrics ? (
+                                                <ChartZoomContext.Provider value={perfZoom}>
+                                                <div className="space-y-3">
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <LineChart {...perfZoom.series('cpu')} label="CPU" color="#49afd9" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('memory')} label="Memory" color="#9b59b6" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('iowait')} label="IO Wait" color="#eab308" unit="%" />
+                                                        <LineChart {...perfZoom.series('loadavg')} label="Load Average" color="#22c55e" unit="" />
+                                                    </div>
+                                                    <LineChart datasets={[{label: 'Net In', data: perfNet.metrics.net_in, color: '#06b6d4'}, {label: 'Net Out', data: perfNet.metrics.net_out, color: '#8b5cf6'}]} timestamps={perfNet.timestamps} label="Network I/O" unit=" KB/s" />
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <LineChart {...perfZoom.series('swap')} label="Swap" color="#ec4899" unit="%" yMin={0} yMax={100} />
+                                                        <LineChart {...perfZoom.series('rootfs')} label="Root FS" color="#a855f7" unit="%" yMin={0} yMax={100} />
+                                                    </div>
+                                                </div>
+                                                </ChartZoomContext.Provider>
+                                            ) : (
+                                                <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.BarChart className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">No performance data available</p></div>
+                                            )}
+                                        </div>
+                                    )}
+                                    {/* LW Oct 2026 - what happened on this node, a guest opens its own view */}
+                                    {monitorSubTab === 'timeline' && (
+                                        <TimelineView key={navKey} clusterId={clusterId} node={node} authFetch={authFetch} t={t}
+                                            onOpenGuest={onSelectVm ? (vmid) => {
+                                                const vm = (clusterResources || []).find(r => Number(r.vmid) === Number(vmid));
+                                                if (vm) onSelectVm(vm);
+                                            } : undefined} />
+                                    )}
+                                    {monitorSubTab === 'tasks' && (isCorpRedesigned ? (
+                                        // LW Nov 2026 - the redesign: filters, search and the log of a task (cr_node.js)
+                                        <CrBoundary key={navKey} id="node-tasks">
+                                            <CrNodeTasks node={node} clusterId={clusterId} kind={crKind} read={data.tasksRead} loading={loading}
+                                                authFetch={authFetch} onReload={() => loadTabData('tasks')} guests={nodeVms} onOpenGuest={onSelectVm} />
+                                        </CrBoundary>
+                                    ) : (
+                                        <div>
+                                            <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('tasks')}</span>
+                                            {loading && !data.tasks ? (
+                                                <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
+                                            ) : (
+                                                <table className="corp-datagrid">
+                                                    <thead><tr><th>{t('type')}</th><th>{t('status')}</th><th>UPID</th><th>{t('started') || 'Started'}</th></tr></thead>
+                                                    <tbody>
+                                                        {(data.tasks || []).slice(0, 50).map((task, i) => (
+                                                            <tr key={i}>
+                                                                <td>{task.type || '-'}</td>
+                                                                <td><span className={`corp-badge ${task.status === 'OK' || task.status === 'running' ? 'corp-badge-running' : task.status ? 'corp-badge-offline' : 'corp-badge-stopped'}`}>{task.status || '-'}</span></td>
+                                                                <td className="text-[11px] font-mono" style={{color: '#728b9a'}}>{task.upid ? task.upid.substring(0, 30) + '...' : '-'}</td>
+                                                                <td>{task.starttime ? new Date(task.starttime * 1000).toLocaleString() : '-'}</td>
+                                                            </tr>
+                                                        ))}
+                                                        {(!data.tasks || data.tasks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No tasks</td></tr>}
+                                                    </tbody>
+                                                </table>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Configure Tab */}
+                        {activeDetailTab === 'configure' && (
+                            <div className="flex gap-0" style={{minHeight: '400px'}}>
+                                {/* LW Nov 2026 - the effect on the sub tab reads a tab on its first visit; a click on the open
+                                    one reads again only what is missing, so a first visit is one read, not two */}
+                                <div className="corp-subnav" onClickCapture={crHw ? (e => crNcSubnavHold(e, crIsDirty, crAsk)) : undefined}>
+                                    <div className="corp-subnav-header">{t('network')}</div>
+                                    <button className={`corp-subnav-item ${configSubTab === 'network' ? 'active' : ''}`} onClick={() => setConfigSubTab('network')}>{t('network')}</button>
+                                    <div className="corp-subnav-header">{t('systemInfo')}</div>
+                                    <button className={`corp-subnav-item ${configSubTab === 'dns' ? 'active' : ''}`} onClick={() => { setConfigSubTab('dns'); if (configSubTab === 'dns' && !data.dns) loadTabData('system'); }}>{t('dns')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'hosts' ? 'active' : ''}`} onClick={() => { setConfigSubTab('hosts'); if (configSubTab === 'hosts' && data.dns === undefined) loadTabData('system'); }}>{t('hostsFile')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'time' ? 'active' : ''}`} onClick={() => { setConfigSubTab('time'); if (configSubTab === 'time' && data.dns === undefined) loadTabData('system'); }}>{t('timeConfig')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'certs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('certs'); if (configSubTab === 'certs' && data.dns === undefined) loadTabData('system'); }}>{t('certificates')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'syslog' ? 'active' : ''}`} onClick={() => { setConfigSubTab('syslog'); if (configSubTab === 'syslog' && data.dns === undefined) loadTabData('system'); }}>{t('syslog')}</button>
+                                    <div className="corp-subnav-header">{t('storage')}</div>
+                                    <button className={`corp-subnav-item ${configSubTab === 'disks' ? 'active' : ''}`} onClick={() => { setConfigSubTab('disks'); if (configSubTab === 'disks' && !data.disks) loadTabData('disks'); }}>{t('disks')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'lvm' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvm'); if (configSubTab === 'lvm' && !data.disks) loadTabData('disks'); }}>{t('lvmStorage')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'lvmthin' ? 'active' : ''}`} onClick={() => { setConfigSubTab('lvmthin'); if (configSubTab === 'lvmthin' && !data.disks) loadTabData('disks'); }}>{t('lvmThinStorage')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'zfs' ? 'active' : ''}`} onClick={() => { setConfigSubTab('zfs'); if (configSubTab === 'zfs' && !data.disks) loadTabData('disks'); }}>{t('zfsStorage')}</button>
+                                    <div className="corp-subnav-header">Extras</div>
+                                    <button className={`corp-subnav-item ${configSubTab === 'repos' ? 'active' : ''}`} onClick={() => { setConfigSubTab('repos'); if (configSubTab === 'repos' && !data.repos) loadTabData('repos'); }}>{t('repositories')}</button>
+                                    <button className={`corp-subnav-item ${configSubTab === 'ceph' ? 'active' : ''}`} onClick={() => { setConfigSubTab('ceph'); if (configSubTab === 'ceph' && !data.ceph) loadTabData('ceph'); }}>Ceph</button>
+                                </div>
+                                <div className="flex-1 pl-4">
+                                    {configSubTab === 'dns' && data.dns === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('dnsReadFailed').replace('{reason}', data.dnsError || t('connectionError'))} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                    {configSubTab === 'hosts' && data.hosts === null && !crSys && <div role="alert" className="text-sm text-red-400 mb-3">{t('hostsReadFailed')} <button onClick={() => loadTabData('system')} className="underline">{t('retry')}</button></div>}
+                                    {/* LW Nov 2026 - the redesign draws these five of a PVE node in section cards (cr_nodecfg.js), outside
+                                        the fieldset so a standby can still read again; the writes take readOnly and the classic handlers */}
+                                    {crSys && (
+                                        <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-cfg">
+                                            <CrNodeSystemCfg tab={configSubTab} node={node} data={data} loading={loading} saving={saving} readOnly={haReadOnly}
+                                                onRetry={() => loadTabData('system')}
+                                                onSaveDns={form => handleSave('dns', form, 'DNS saved')}
+                                                onSaveHosts={text => handleSave('hosts', { data: text }, 'Hosts saved', 'POST')}
+                                                onSaveTime={tz => handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'))}
+                                                cert={{ open: showCertUpload, setOpen: setShowCertUpload, form: certForm, setForm: setCertForm, upload: handleCertUpload, revert: handleCertRevert }}
+                                                onDirty={crOnDirty} />
+                                        </CrBoundary>
+                                    )}
+                                    {/* LW Nov 2026 - LVM, LVM-Thin, ZFS, Repositories and Ceph of a PVE node as cards; reads stay open on a
+                                        standby, the repository switch and apt update take readOnly and the classic handlers, the
+                                        disk writes the classic requests of NodeModal (cr_nodestore.js, off on a standby) */}
+                                    {crStore && (
+                                        <CrBoundary key={`${navKey}/${configSubTab}/${crCfgGen}`} id="node-store">
+                                            <CrNodeStoreCfg tab={configSubTab} node={node} clusterId={clusterId} data={data} loading={loading} saving={saving} readOnly={haReadOnly}
+                                                zfsPool={zfsPool} onZfsPool={setZfsPool} authFetch={authFetch}
+                                                onReloadDisks={() => loadTabData('disks')} onReloadRepos={() => loadTabData('repos')} onReloadCeph={() => loadTabData('ceph')}
+                                                onToggleRepo={handleRepoToggle}
+                                                onAptUpdate={handleAptUpdate} onDirty={crOnDirty} />
+                                        </CrBoundary>
+                                    )}
+                                    {crDisks && (
+                                        <CrNodeDisks key={navKey} node={node} clusterId={clusterId} read={data.disksRead} loading={loading}
+                                            authFetch={authFetch} onReload={() => loadTabData('disks')} />
+                                    )}
+                                    <fieldset disabled={haReadOnly} className="contents">
+                                    {/* LW Nov 2026 - the redesign keeps its network card (and an open Apply dialog) while a failed list is read again */}
+                                    {loading && !data.network && !data.dns && !data.disks && !crSys && !crStore && !crDisks
+                                        && !(crHw && configSubTab === 'network' && data.network === null) ? (
+                                        <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
+                                    ) : (
+                                        <>
+                                            {/* LW: Feb 2026 - full network editing like modern NodeModal */}
+                                            {configSubTab === 'network' && (
+                                                <div>
+                                                    {/* LW Nov 2026 - the redesign: by kind, what waits, Apply and Revert behind a summary (cr_node.js) */}
+                                                    {isCorpRedesigned && crKind === 'proxmox' ? (
+                                                        <CrNodeNetwork network={data.network} loading={loading} clusterId={clusterId} node={node}
+                                                            nodeIp={nodeIp} nodeIpSource={nodeIpSource} clusterHost={clusterHost} authFetch={authFetch} addToast={addToast}
+                                                            readOnly={haReadOnly} onReload={() => loadTabData('network')} onDelete={deleteNetIface}
+                                                            onEdit={iface => setData(prev => ({...prev, editIface: {...iface, isNew: false}}))}
+                                                            onCreate={ifType => setData(prev => ({...prev, editIface: { type: ifType, iface: '', isNew: true, autostart: 1 }}))} />
+                                                    ) : (<>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('network')}</span>
+                                                        <div className="flex gap-1">
+                                                            <div className="relative">
+                                                                <button onClick={() => setData(prev => ({...prev, showCreateMenu: !prev.showCreateMenu}))}
+                                                                    className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
+                                                                    <Icons.Plus className="w-3 h-3" /> Create
+                                                                </button>
+                                                                {data.showCreateMenu && (
+                                                                    <div className="absolute top-full right-0 mt-1 z-10 min-w-[160px]" style={{background: 'var(--corp-header-bg)', border: '1px solid var(--corp-border-medium)'}}>
+                                                                        {['bridge', 'bond', 'vlan', 'OVSBridge', 'OVSBond', 'OVSIntPort'].map(ifType => (
+                                                                            <button key={ifType} onClick={() => setData(prev => ({...prev, showCreateMenu: false, editIface: { type: ifType, iface: '', isNew: true, autostart: 1 }}))}
+                                                                                className="w-full px-3 py-1.5 text-left text-[12px] hover:bg-[#324f61]" style={{color: 'var(--corp-text-secondary)'}}>
+                                                                                Linux {ifType.charAt(0).toUpperCase() + ifType.slice(1)}
+                                                                            </button>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'PUT' }); addToast(res && res.ok ? 'Network config applied' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>Apply</button>
+                                                            <button onClick={async () => { const res = await authFetch(`${API_URL}/clusters/${clusterId}/nodes/${node}/network`, { method: 'DELETE' }); addToast(res && res.ok ? 'Changes reverted' : 'Error', res && res.ok ? 'success' : 'error'); loadTabData('network'); }}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#efc006', border: '1px solid rgba(239,192,6,0.3)'}}>Revert</button>
+                                                        </div>
+                                                    </div>
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>{t('name')}</th><th>{t('type')}</th><th>CIDR</th><th>Gateway</th><th>{t('active') || 'Active'}</th><th>{t('comment')}</th><th style={{width: '60px'}}></th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.network) ? data.network : []).map((iface, i) => (
+                                                                <tr key={i}>
+                                                                    <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{iface.iface || iface.name || '-'}</td>
+                                                                    <td>{iface.type || '-'}</td>
+                                                                    <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{iface.cidr || iface.address || '-'}</td>
+                                                                    <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{iface.gateway || '-'}</td>
+                                                                    <td><span className="w-2 h-2 rounded-full inline-block" style={{background: iface.active ? '#60b515' : '#728b9a'}}></span></td>
+                                                                    <td title={iface.comments || ''} style={{maxWidth: '240px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>{iface.comments || ''}</td>
+                                                                    <td>
+                                                                        <div className="flex gap-1">
+                                                                            <button onClick={() => setData(prev => ({...prev, editIface: {...iface, isNew: false}}))}
+                                                                                className="p-1 hover:bg-[#324f61]" title="Edit" style={{color: '#49afd9'}}>
+                                                                                <Icons.Cog className="w-3 h-3" />
+                                                                            </button>
+                                                                            <button onClick={() => deleteNetIface(iface)}
+                                                                                className="p-1 hover:bg-[#324f61]" title="Delete" style={{color: '#e57373'}}>
+                                                                                <Icons.Trash className="w-3 h-3" />
+                                                                            </button>
+                                                                        </div>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                            {(!data.network || data.network.length === 0) && <tr><td colSpan={7} className="text-center py-4" style={{color: '#728b9a'}}>No network interfaces</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                    </>)}
+                                                    {/* LW: Feb 2026 - edit/create interface modal */}
+                                                    {data.editIface && (
+                                                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" style={{background: 'rgba(0,0,0,0.7)'}}>
+                                                            <div className="w-full max-w-xl" style={{background: 'var(--corp-bar-track)', border: '1px solid var(--corp-border-medium)'}}>
+                                                                <div className="px-4 py-3 flex items-center justify-between" style={{borderBottom: '1px solid var(--corp-border-medium)', background: 'var(--corp-header-bg)'}}>
+                                                                    <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>
+                                                                        {data.editIface.isNew ? `Create: Linux ${data.editIface.type}` : `Edit: ${data.editIface.iface}`}
+                                                                    </span>
+                                                                    <button onClick={() => setData(prev => ({...prev, editIface: null}))} style={{color: '#728b9a'}}><Icons.X className="w-4 h-4" /></button>
+                                                                </div>
+                                                                <div className="p-4 space-y-3">
+                                                                    <div className="grid grid-cols-2 gap-3">
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>{t('name')}</label>
+                                                                            <input type="text" value={data.editIface.iface || ''} disabled={!data.editIface.isNew}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, iface: e.target.value}}))}
+                                                                                placeholder={data.editIface.type === 'bridge' ? 'vmbr0' : data.editIface.type === 'bond' ? 'bond0' : 'vlan0'}
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white disabled:opacity-50" />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>IPv4/CIDR</label>
+                                                                            <input type="text" value={data.editIface.cidr || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, cidr: e.target.value}}))}
+                                                                                placeholder="192.168.1.1/24"
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Gateway (IPv4)</label>
+                                                                            <input type="text" value={data.editIface.gateway || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, gateway: e.target.value}}))}
+                                                                                placeholder="192.168.1.1"
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>IPv6/CIDR</label>
+                                                                            <input type="text" value={data.editIface.cidr6 || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, cidr6: e.target.value}}))}
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Gateway (IPv6)</label>
+                                                                            <input type="text" value={data.editIface.gateway6 || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, gateway6: e.target.value}}))}
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" />
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>MTU</label>
+                                                                            <input type="number" value={data.editIface.mtu || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, mtu: e.target.value}}))}
+                                                                                placeholder="1500"
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                        </div>
+                                                                    </div>
+                                                                    {data.editIface.type === 'bridge' && (
+                                                                        <div className="grid grid-cols-2 gap-3">
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Bridge Ports</label>
+                                                                                <input type="text" value={data.editIface.bridge_ports || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bridge_ports: e.target.value}}))}
+                                                                                    placeholder="ens18"
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                            </div>
+                                                                            <div className="flex items-center pt-4">
+                                                                                <label className="flex items-center gap-2 text-[12px]" style={{color: '#adbbc4'}}>
+                                                                                    <input type="checkbox" checked={data.editIface.bridge_vlan_aware || false}
+                                                                                        onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bridge_vlan_aware: e.target.checked}}))} />
+                                                                                    VLAN aware
+                                                                                </label>
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                    {data.editIface.type === 'bond' && (
+                                                                        <div className="grid grid-cols-2 gap-3">
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Slaves</label>
+                                                                                <input type="text" value={data.editIface.slaves || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, slaves: e.target.value}}))}
+                                                                                    placeholder="ens18 ens19"
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                            </div>
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Mode</label>
+                                                                                <select value={data.editIface.bond_mode || 'balance-rr'}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bond_mode: e.target.value}}))}
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white">
+                                                                                    <option value="balance-rr">balance-rr</option>
+                                                                                    <option value="active-backup">active-backup</option>
+                                                                                    <option value="balance-xor">balance-xor</option>
+                                                                                    <option value="broadcast">broadcast</option>
+                                                                                    <option value="802.3ad">LACP (802.3ad)</option>
+                                                                                    <option value="balance-tlb">balance-tlb</option>
+                                                                                    <option value="balance-alb">balance-alb</option>
+                                                                                </select>
+                                                                            </div>
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Hash Policy</label>
+                                                                                <select value={data.editIface.bond_xmit_hash_policy || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, bond_xmit_hash_policy: e.target.value}}))}
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white">
+                                                                                    <option value="">Default</option>
+                                                                                    <option value="layer2">layer2</option>
+                                                                                    <option value="layer2+3">layer2+3</option>
+                                                                                    <option value="layer3+4">layer3+4</option>
+                                                                                </select>
+                                                                            </div>
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Bond Primary</label>
+                                                                                <input type="text" value={data.editIface['bond-primary'] || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'bond-primary': e.target.value}}))}
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                    {data.editIface.type === 'vlan' && (
+                                                                        <div className="grid grid-cols-2 gap-3">
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>VLAN raw device</label>
+                                                                                <input type="text" value={data.editIface['vlan-raw-device'] || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'vlan-raw-device': e.target.value}}))}
+                                                                                    placeholder="vmbr0"
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                            </div>
+                                                                            <div>
+                                                                                <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>VLAN Tag</label>
+                                                                                <input type="number" value={data.editIface['vlan-id'] || ''}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, 'vlan-id': e.target.value}}))}
+                                                                                    placeholder="100"
+                                                                                    className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="grid grid-cols-2 gap-3">
+                                                                        <div className="flex items-center gap-2">
+                                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: '#adbbc4'}}>
+                                                                                <input type="checkbox" checked={data.editIface.autostart !== 0}
+                                                                                    onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, autostart: e.target.checked ? 1 : 0}}))} />
+                                                                                Autostart
+                                                                            </label>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Comment</label>
+                                                                            <input type="text" value={data.editIface.comments || ''}
+                                                                                onChange={e => setData(prev => ({...prev, editIface: {...prev.editIface, comments: e.target.value}}))}
+                                                                                className="w-full px-2 py-1.5 text-[12px] bg-proxmox-dark border border-proxmox-border text-white" />
+                                                                        </div>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="px-4 py-3 flex justify-end gap-2" style={{borderTop: '1px solid #485764'}}>
+                                                                    <button onClick={() => setData(prev => ({...prev, editIface: null}))}
+                                                                        className="px-3 py-1.5 text-[12px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
+                                                                    <button onClick={async () => {
+                                                                        const iface = data.editIface;
+                                                                        if (!iface.iface) { addToast(t('nameRequired') || 'Name required', 'error'); return; }
+                                                                        const payload = { ...iface };
+                                                                        delete payload.isNew; delete payload.active; delete payload.exists; delete payload.families; delete payload.method; delete payload.method6; delete payload.priority;
+                                                                        const url = iface.isNew ? `${API_URL}/clusters/${clusterId}/nodes/${node}/network` : `${API_URL}/clusters/${clusterId}/nodes/${node}/network/${iface.iface}`;
+                                                                        const method = iface.isNew ? 'POST' : 'PUT';
+                                                                        const res = await authFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                                                                        if (res && res.ok) {
+                                                                            addToast(iface.isNew ? (t('interfaceCreated') || 'Interface created') : (t('interfaceUpdated') || 'Interface updated'), 'success');
+                                                                            setData(prev => ({...prev, editIface: null}));
+                                                                            loadTabData('network');
+                                                                        } else { addToast('Error', 'error'); }
+                                                                    }} className="px-3 py-1.5 text-[12px]" style={{color: '#fff', background: '#49afd9', border: 'none'}}>
+                                                                        {data.editIface.isNew ? 'Create' : t('save')}
+                                                                    </button>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {configSubTab === 'dns' && !crSys && (
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('dns')}</span>
+                                                        {!editingDns ? (
+                                                            <button onClick={() => { setEditingDns(true); setDnsForm({ search: data.dns?.search || '', dns1: data.dns?.dns1 || '', dns2: data.dns?.dns2 || '', dns3: data.dns?.dns3 || '' }); }} disabled={data.dns == null}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('edit')}</button>
+                                                        ) : (
+                                                            <div className="flex gap-1">
+                                                                <button onClick={() => setEditingDns(false)} className="px-2 py-1 text-[11px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
+                                                                <button onClick={() => { handleSave('dns', dnsForm, 'DNS saved'); setEditingDns(false); }} disabled={saving || data.dns == null}
+                                                                    className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{saving ? '...' : t('save')}</button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    {/* a failed read shows the alert above, no '-' rows that look like a node without DNS (#1163) */}
+                                                    {editingDns && data.dns ? (
+                                                        <div className="space-y-2">
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Search Domain</label><input value={dnsForm.search} onChange={e => setDnsForm({...dnsForm, search: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 1</label><input value={dnsForm.dns1} onChange={e => setDnsForm({...dnsForm, dns1: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 2</label><input value={dnsForm.dns2} onChange={e => setDnsForm({...dnsForm, dns2: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>DNS 3</label><input value={dnsForm.dns3} onChange={e => setDnsForm({...dnsForm, dns3: e.target.value})} className="w-full px-2 py-1.5 text-[13px] bg-proxmox-dark border border-proxmox-border text-white font-mono" /></div>
+                                                        </div>
+                                                    ) : data.dns !== null && (
+                                                        <table className="corp-property-grid">
+                                                            <tbody>
+                                                                <tr><td>Search Domain</td><td>{data.dns?.search || '-'}</td></tr>
+                                                                <tr><td>DNS 1</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns1 || '-'}</td></tr>
+                                                                <tr><td>DNS 2</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns2 || '-'}</td></tr>
+                                                                <tr><td>DNS 3</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.dns?.dns3 || '-'}</td></tr>
+                                                            </tbody>
+                                                        </table>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {configSubTab === 'hosts' && !crSys && (
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('hostsFile')}</span>
+                                                        {!editingHosts ? (
+                                                            <button onClick={() => { setEditingHosts(true); setHostsForm(data.hosts || ''); }} disabled={data.hosts == null}
+                                                                className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('edit')}</button>
+                                                        ) : (
+                                                            <div className="flex gap-1">
+                                                                <button onClick={() => setEditingHosts(false)} className="px-2 py-1 text-[11px]" style={{color: '#adbbc4', border: '1px solid #485764'}}>{t('cancel')}</button>
+                                                                <button onClick={() => { handleSave('hosts', { data: hostsForm }, 'Hosts saved', 'POST'); setEditingHosts(false); }} disabled={saving || data.hosts == null}
+                                                                    className="px-2 py-1 text-[11px]" style={{color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>{saving ? '...' : t('save')}</button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                    {editingHosts ? (
+                                                        <textarea value={hostsForm} disabled={data.hosts == null} onChange={e => setHostsForm(e.target.value)} rows={8}
+                                                            className="w-full px-3 py-2 text-[12px] bg-proxmox-dark border border-proxmox-border text-white font-mono" style={{resize: 'vertical'}} />
+                                                    ) : (
+                                                        <pre className="text-[12px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '300px'}}>{data.hosts === null ? '' : (data.hosts ?? 'No data')}</pre>
+                                                    )}
+                                                </div>
+                                            )}
+                                            {configSubTab === 'time' && !crSys && (
+                                                <div>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('timeConfig')}</span>
+                                                    <table className="corp-property-grid">
+                                                        <tbody>
+                                                            <tr>
+                                                                <td>Timezone</td>
+                                                                <td>
+                                                                    <select
+                                                                        value={data.time?.timezone || 'UTC'}
+                                                                        onChange={async (e) => {
+                                                                            const tz = e.target.value;
+                                                                            handleSave('time', { timezone: tz }, (t('timezoneSaved') || 'Timezone updated'));
+                                                                        }}
+                                                                        className="px-2 py-0.5 text-[13px] bg-transparent border rounded text-white"
+                                                                        style={{borderColor: 'var(--corp-border-medium)'}}
+                                                                    >
+                                                                        {TIMEZONES.map(tz => <option key={tz} value={tz}>{tz}</option>)}
+                                                                    </select>
+                                                                </td>
+                                                            </tr>
+                                                            <tr><td>Local Time</td><td>{data.time?.localtime ? new Date(data.time.localtime * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
+                                                            <tr><td>UTC Time</td><td>{data.time?.time ? new Date(data.time.time * 1000).toLocaleString(undefined, { timeZone: 'UTC' }) : '-'}</td></tr>
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'certs' && !crSys && (
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('certificates')}</span>
+                                                        <button onClick={() => setShowCertUpload(!showCertUpload)}
+                                                            className="px-2 py-1 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{showCertUpload ? t('cancel') : 'Upload'}</button>
+                                                    </div>
+                                                    {showCertUpload && (
+                                                        <div className="mb-3 p-3 space-y-2" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)'}}>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Certificate (PEM)</label><textarea value={certForm.cert} onChange={e => setCertForm({...certForm, cert: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN CERTIFICATE-----" /></div>
+                                                            <div><label className="text-[11px] block mb-1" style={{color: '#728b9a'}}>Private Key (PEM)</label><textarea value={certForm.key} onChange={e => setCertForm({...certForm, key: e.target.value})} rows={4} className="w-full px-2 py-1.5 text-[11px] bg-proxmox-dark border border-proxmox-border text-white font-mono" placeholder="-----BEGIN PRIVATE KEY-----" /></div>
+                                                            <label className="flex items-center gap-2 text-[12px]" style={{color: 'var(--corp-text-secondary)'}}><input type="checkbox" checked={certForm.restart} onChange={e => setCertForm({...certForm, restart: e.target.checked})} /> Restart pveproxy after upload</label>
+                                                            <button onClick={handleCertUpload} disabled={saving || !certForm.cert || !certForm.key}
+                                                                className="px-3 py-1.5 text-[12px] disabled:opacity-40" style={{color: '#fff', background: '#49afd9', border: 'none'}}>{saving ? '...' : 'Upload Certificate'}</button>
+                                                        </div>
+                                                    )}
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>Filename</th><th>Subject</th><th>Issuer</th><th>Expires</th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.certificates) ? data.certificates : []).map((cert, i) => (
+                                                                <tr key={i}>
+                                                                    <td>{cert.filename || '-'}</td>
+                                                                    <td className="text-[11px]" style={{maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis'}}>{cert.subject || '-'}</td>
+                                                                    <td className="text-[11px]" style={{maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis'}}>{cert.issuer || '-'}</td>
+                                                                    <td>{cert.notafter ? new Date(cert.notafter * 1000).toLocaleDateString() : '-'}</td>
+                                                                </tr>
+                                                            ))}
+                                                            {(!data.certificates || data.certificates.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No certificates</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'syslog' && !crSys && (
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('syslog')}</span>
+                                                        <button onClick={() => loadTabData('system')} className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
+                                                            <Icons.RefreshCw className="w-3 h-3" /> Refresh
+                                                        </button>
+                                                    </div>
+                                                    <pre className="text-[11px] p-3 overflow-auto" style={{background: 'var(--corp-surface-1)', border: '1px solid var(--corp-border-medium)', color: 'var(--corp-text-secondary)', fontFamily: 'monospace', maxHeight: '400px'}}>
+                                                        {Array.isArray(data.syslog) ? data.syslog.map(l => l.t || l.n || l).join('\n') : (data.syslog || 'No data')}
+                                                    </pre>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'disks' && !crHw && (
+                                                <div>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('disks')}</span>
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>{t('device')}</th><th>{t('type')}</th><th>{t('size')}</th><th>{t('status')}</th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.disks) ? data.disks : []).map((disk, i) => (
+                                                                <tr key={i}>
+                                                                    <td style={{fontFamily: 'monospace', fontSize: '12px'}}>{disk.devpath || '-'}</td>
+                                                                    <td>{disk.type || '-'}</td>
+                                                                    <td>{formatBytes(disk.size)}</td>
+                                                                    <td>{disk.health || disk.used || '-'}</td>
+                                                                </tr>
+                                                            ))}
+                                                            {(!data.disks || data.disks.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No disks</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'lvm' && !crStore && (
+                                                <div>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmStorage')}</span>
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>VG</th><th>{t('size')}</th><th>{t('freeSpace')}</th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.lvm) ? data.lvm : []).map((vg, i) => (
+                                                                <tr key={i}><td>{vg.vg || '-'}</td><td>{formatBytes(vg.size)}</td><td>{formatBytes(vg.free)}</td></tr>
+                                                            ))}
+                                                            {(!data.lvm || data.lvm.length === 0) && <tr><td colSpan={3} className="text-center py-4" style={{color: '#728b9a'}}>No LVM volumes</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'lvmthin' && !crStore && (
+                                                <div>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('lvmThinStorage')}</span>
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>{t('pool')}</th><th>VG</th><th>{t('size')}</th><th>{t('usedSpace')}</th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.lvmthin) ? data.lvmthin : []).map((tp, i) => (
+                                                                <tr key={i}><td>{tp.lv || '-'}</td><td>{tp.vg || '-'}</td><td>{formatBytes(tp.lv_size)}</td><td>{tp.usage !== undefined ? `${tp.usage}%` : '-'}</td></tr>
+                                                            ))}
+                                                            {(!data.lvmthin || data.lvmthin.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No LVM-Thin pools</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'repos' && !crStore && (
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <span className="text-[13px] font-medium" style={{color: 'var(--color-text)'}}>{t('repositories')}</span>
+                                                        <button onClick={handleAptUpdate}
+                                                            className="px-2 py-1 text-[11px] flex items-center gap-1" style={{color: '#49afd9', border: '1px solid #485764'}}>
+                                                            <Icons.RefreshCw className="w-3 h-3" /> apt update
+                                                        </button>
+                                                    </div>
+                                                    <table className="corp-datagrid">
+                                                        <thead><tr><th>{t('name')}</th><th>URI</th><th>{t('enabled')}</th><th>{t('actions')}</th></tr></thead>
+                                                        <tbody>
+                                                            {(Array.isArray(data.repos) ? data.repos : []).map((repo, i) => (
+                                                                <tr key={i}>
+                                                                    <td>{repo.name || '-'}</td>
+                                                                    <td className="text-[11px] font-mono" style={{color: '#728b9a'}}>{repo.uri || (Array.isArray(repo.content?.URIs) ? repo.content.URIs.join(', ') : '') || '-'}</td>
+                                                                    <td><span className={`corp-badge ${repo.enabled ? 'corp-badge-online' : 'corp-badge-stopped'}`}>{repo.enabled ? t('enabled') : t('disabled')}</span></td>
+                                                                    <td>
+                                                                        <button onClick={() => handleRepoToggle(repo)}
+                                                                            className="px-2 py-0.5 text-[11px]"
+                                                                            style={repo.enabled ? {color: '#f54f47', border: '1px solid rgba(245,79,71,0.3)'} : {color: '#60b515', border: '1px solid rgba(96,181,21,0.3)'}}>
+                                                                            {repo.enabled ? t('disable') : t('enable')}
+                                                                        </button>
+                                                                    </td>
+                                                                </tr>
+                                                            ))}
+                                                            {(!data.repos || data.repos.length === 0) && <tr><td colSpan={4} className="text-center py-4" style={{color: '#728b9a'}}>No repositories</td></tr>}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            )}
+                                            {configSubTab === 'ceph' && !crStore && (
+                                                <div>
+                                                    <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>Ceph</span>
+                                                    {data.ceph?.denied ? (
+                                                        <div className="text-center py-8" style={{color: '#728b9a'}} data-ceph-denied=""><Icons.Lock className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">{t('cephNoAccess')}</p><p className="text-[12px] mt-1">{t('cephNoAccessDesc')}</p></div>
+                                                    ) : data.ceph && !data.ceph.available ? (
+                                                        <div className="text-center py-8" style={{color: '#728b9a'}}><Icons.Database className="w-8 h-8 mx-auto mb-2 opacity-50" /><p className="text-[13px]">Ceph not configured on this node</p></div>
+                                                    ) : (
+                                                        <div className="space-y-3">
+                                                            {data.ceph?.status && (
+                                                                <table className="corp-property-grid">
+                                                                    <tbody>
+                                                                        <tr><td>{t('health')}</td><td style={{color: data.ceph.status.health?.status === 'HEALTH_OK' ? '#60b515' : '#efc006'}}>{data.ceph.status.health?.status || '-'}</td></tr>
+                                                                        <tr><td>OSDs</td><td>{data.ceph.osd?.length || 0}</td></tr>
+                                                                        <tr><td>MONs</td><td>{data.ceph.mon?.length || 0}</td></tr>
+                                                                        <tr><td>Pools</td><td>{data.ceph.pools?.length || 0}</td></tr>
+                                                                    </tbody>
+                                                                </table>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+                                    </fieldset>
+                                    {/* LW Oct 2026 - the pools and the pool view only read: outside the standby lock */}
+                                    {configSubTab === 'zfs' && !crStore && !(loading && !data.network && !data.dns && !data.disks) && (
+                                        <div>
+                                            <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('zfsStorage')}</span>
+                                            <table className="corp-datagrid">
+                                                <thead><tr><th>{t('name')}</th><th>{t('size')}</th><th>{t('freeSpace')}</th><th>{t('health')}</th><th></th></tr></thead>
+                                                <tbody>
+                                                    {(Array.isArray(data.zfs) ? data.zfs : []).map((pool, i) => (
+                                                        <tr key={i} className={pool.name && zfsPool === pool.name ? 'corp-row-selected' : ''}>
+                                                            <td>{pool.name || '-'}</td><td>{formatBytes(pool.size)}</td><td>{formatBytes(pool.free)}</td>
+                                                            <td>{pool.health ? <span className={`corp-badge ${pool.health === 'ONLINE' ? 'corp-badge-online' : pool.health === 'DEGRADED' ? 'corp-badge-maintenance' : 'corp-badge-offline'}`}>{pool.health}</span> : '-'}</td>
+                                                            <td>{pool.name && (
+                                                                <button onClick={() => setZfsPool(zfsPool === pool.name ? null : pool.name)} data-zfs-open={pool.name} title={t('zfsPoolDetails')}
+                                                                    className="px-2 py-0.5 text-[11px]" style={{color: '#49afd9', border: '1px solid #485764'}}>{t('details')}</button>
+                                                            )}</td>
+                                                        </tr>
+                                                    ))}
+                                                    {(!data.zfs || data.zfs.length === 0) && <tr><td colSpan={5} className="text-center py-4" style={{color: '#728b9a'}}>{t('noZfsPools')}</td></tr>}
+                                                </tbody>
+                                            </table>
+                                            {/* the pool picked above, in full */}
+                                            {zfsPool && (
+                                                <ZfsPoolDetail corporate clusterId={clusterId} node={node} pool={zfsPool} onClose={() => setZfsPool(null)} />
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* VMs Tab */}
+                        {activeDetailTab === 'vms' && (isCorpRedesigned ? (
+                            // LW Nov 2026 - the redesign: search, filters and sorting of the node's guests (cr_node.js)
+                            <CrBoundary key={navKey} id="node-guests">
+                                <CrNodeGuests node={node} guests={nodeVms} onSelectVm={onSelectVm} />
+                            </CrBoundary>
+                        ) : (
+                            <div>
+                                <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('vmsOnNode')} ({nodeVms.length})</span>
+                                <table className="corp-datagrid">
+                                    <thead><tr><th>{t('name')}</th><th>VMID</th><th>{t('type')}</th><th>{t('status')}</th><th>CPU</th><th>{t('memory') || 'Memory'}</th></tr></thead>
+                                    <tbody>
+                                        {nodeVms.sort((a, b) => (a.name || '').localeCompare(b.name || '')).map(vm => (
+                                            <tr key={vm.vmid} className="cursor-pointer" onClick={() => onSelectVm && onSelectVm(vm)}>
+                                                <td className="flex items-center gap-1.5">
+                                                    {vm.type === 'lxc'
+                                                        ? <Icons.Box className="w-3 h-3" style={{color: vm.status === 'running' ? '#49afd9' : '#728b9a'}} />
+                                                        : <Icons.Monitor className="w-3 h-3" style={{color: vm.status === 'running' ? '#60b515' : '#728b9a'}} />
+                                                    }
+                                                    <span style={{color: '#49afd9'}}>{vm.name || '-'}</span>
+                                                </td>
+                                                <td>{vm.vmid}</td>
+                                                <td>{vm.type === 'qemu' ? 'QEMU' : 'LXC'}</td>
+                                                <td><span className={`corp-badge ${vm.status === 'running' ? 'corp-badge-running' : 'corp-badge-stopped'}`}>{vm.status === 'running' ? t('running') : t('stopped')}</span></td>
+                                                <td>{vm.maxcpu ? `${((vm.cpu || 0) * 100).toFixed(1)}%` : '-'}</td>
+                                                <td>{vm.maxmem ? `${formatBytes(vm.mem)} / ${formatBytes(vm.maxmem)}` : '-'}</td>
+                                            </tr>
+                                        ))}
+                                        {nodeVms.length === 0 && <tr><td colSpan={6} className="text-center py-4" style={{color: '#728b9a'}}>No VMs on this node</td></tr>}
+                                    </tbody>
+                                </table>
+                            </div>
+                        ))}
+
+                        {/* Hardware Tab (#609 in-band BMC) */}
+                        {activeDetailTab === 'hardware' && (
+                            <div className={crHw ? 'cr-nc-page cr-nh-page' : 'space-y-6'}>
+                                {/* LW Nov 2026 - the redesign: every sensor by kind with its limits and state, the history (cr_node.js) */}
+                                {crHw && (
+                                    <CrBoundary key={`${navKey}-basics`} id="node-hw-basics">
+                                        <CrNodeHwBasics summary={data.summary} disks={data.disksRead} loading={loading}
+                                            onReadDisks={() => loadTabData('disks')}
+                                            onOpenDisks={() => { setConfigSubTab('disks'); setActiveDetailTab('configure'); }} />
+                                    </CrBoundary>
+                                )}
+                                {crHw && (
+                                    <CrNodeHardware node={node} read={data.sensorsRead} temps={data.tempsRead} bmc={crBmc}
+                                        loading={loading} onReload={() => loadTabData('sensors')}>
+                                        <CrBoundary key={`${navKey}-pci`} id="node-pci">
+                                            <CrNodePci read={data.pciRead} loading={loading} onReload={() => loadTabData('pci')} />
+                                        </CrBoundary>
+                                    </CrNodeHardware>
+                                )}
+                                {crHw && <div data-cr-nh-bmc-anchor="" />}
+                                <fieldset disabled={haReadOnly} className={crHw ? 'contents cr-nh-inband' : 'contents'}>
+                                    <HardwareMonitoringPanel clusterId={clusterId} node={node} t={t} addToast={addToast} getAuthHeaders={getAuthHeaders}
+                                        {...(crHw ? { onCrState: setCrBmc } : {})} />
+                                </fieldset>
+                                {/* #601 — lm-sensors panel + temperature chart (was fetched but never rendered on the Corporate node view) */}
+                                {!crHw && data.sensors && data.sensors.length > 0 && (
+                                    <div className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                        <div className="flex items-center justify-between mb-3">
+                                            <h4 className="font-medium text-white flex items-center gap-2">
+                                                <Icons.Activity className="w-4 h-4" />
+                                                {t('sensors') || 'Sensors'}
+                                                <span className="text-xs text-gray-500 font-normal">({data.sensors.length})</span>
+                                            </h4>
+                                            <button onClick={() => loadTabData('sensors')} className="p-1.5 hover:bg-proxmox-hover rounded text-gray-400 hover:text-white">
+                                                <Icons.RefreshCw className="w-3.5 h-3.5" />
+                                            </button>
+                                        </div>
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-sm">
+                                                <thead className="text-xs text-gray-400">
+                                                    <tr>
+                                                        <th className="text-left p-2">Chip</th>
+                                                        <th className="text-left p-2">{t('sensor') || 'Sensor'}</th>
+                                                        <th className="text-right p-2">{t('value') || 'Value'}</th>
+                                                        <th className="text-right p-2">Max</th>
+                                                        <th className="text-right p-2">Crit</th>
+                                                        <th className="text-center p-2">Alarm</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {data.sensors.map((s, idx) => {
+                                                        const unit = s.kind === 'temp' ? '°C' : s.kind === 'fan' ? 'RPM' : s.kind === 'volt' ? 'V' : '';
+                                                        let clr = '';
+                                                        if (s.alarm) clr = '#f54f47';
+                                                        else if (s.kind === 'temp' && s.crit && s.value >= s.crit) clr = '#f54f47';
+                                                        else if (s.kind === 'temp' && s.max && s.value >= s.max) clr = '#efc006';
+                                                        return (
+                                                            <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-darker/40">
+                                                                <td className="p-2 text-gray-500 font-mono text-xs">{s.chip}</td>
+                                                                <td className="p-2 text-white">{s.label}</td>
+                                                                <td className="p-2 text-right font-mono" style={{color: clr || '#e6edf3'}}>{s.value != null ? `${typeof s.value === 'number' ? s.value.toFixed(1) : s.value} ${unit}` : '-'}</td>
+                                                                <td className="p-2 text-right font-mono text-gray-500">{s.max != null ? `${typeof s.max === 'number' ? s.max.toFixed(0) : s.max} ${unit}` : '-'}</td>
+                                                                <td className="p-2 text-right font-mono text-gray-500">{s.crit != null ? `${typeof s.crit === 'number' ? s.crit.toFixed(0) : s.crit} ${unit}` : '-'}</td>
+                                                                <td className="p-2 text-center">{s.alarm ? <span style={{color: '#f54f47'}}>!</span> : <span style={{color: '#60b515'}}>ok</span>}</td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                        <div className="px-2 py-2 text-xs text-gray-500 mt-1">
+                                            {t('sensorsHint') || 'Hardware sensors via lm-sensors. Cells in red exceed the critical threshold, yellow exceed max.'}
+                                        </div>
+                                        {data.tempHistory && data.tempHistory.length >= 2 && (() => {
+                                            const vals = data.tempHistory.map(p => p.temp).filter(v => typeof v === 'number');
+                                            if (vals.length < 2) return null;
+                                            const w = 480, h = 60, pad = 4;
+                                            const mx = Math.max(...vals), mn = Math.min(...vals), flat = mx === mn, rng = (mx - mn) || 1;
+                                            const pts = vals.map((v, i) => {
+                                                const x = pad + (i / (vals.length - 1)) * (w - 2 * pad);
+                                                const y = flat ? h / 2 : pad + (1 - (v - mn) / rng) * (h - 2 * pad);
+                                                return `${x},${y}`;
+                                            }).join(' ');
+                                            const cur = vals[vals.length - 1];
+                                            const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+                                            const clr = cur >= 85 ? '#f54f47' : cur >= 75 ? '#efc006' : '#60b515';
+                                            return (
+                                                <div className="mt-3 pt-3 border-t border-proxmox-border">
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <span className="text-xs font-medium text-gray-300">{t('tempHistoryTitle') || 'Temperature over time (hottest sensor)'}</span>
+                                                        <span className="text-xs text-gray-500">{vals.length} {t('samples') || 'samples'}</span>
+                                                    </div>
+                                                    <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="block" style={{ height: '60px' }}>
+                                                        <polyline fill="none" stroke={clr} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" points={pts} />
+                                                    </svg>
+                                                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400 mt-1">
+                                                        <span>{t('current') || 'Current'}: <span className="font-mono" style={{ color: clr }}>{cur.toFixed(1)} °C</span></span>
+                                                        <span>{t('min') || 'Min'}: <span className="font-mono">{mn.toFixed(1)} °C</span></span>
+                                                        <span>{t('max') || 'Max'}: <span className="font-mono">{mx.toFixed(1)} °C</span></span>
+                                                        <span>{t('avg') || 'Avg'}: <span className="font-mono">{avg.toFixed(1)} °C</span></span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Shell Tab */}
+                        {activeDetailTab === 'shell' && haConsolesElsewhere && <HaConsoleOnActive />}
+                        {activeDetailTab === 'shell' && !haConsolesElsewhere && (isCorpRedesigned ? (
+                            // LW Nov 2026 - Corporate Redesigned: the session's state above the one terminal (cr_nodemisc.js)
+                            <CrBoundary key={navKey} id="node-shell">
+                                <CrNodeShell node={node} clusterId={clusterId} addToast={addToast} />
+                            </CrBoundary>
+                        ) : (
+                            // NS #727 — clip (not hidden) so Firefox's selection-autoscroll can't
+                            // scroll this panel; hidden boxes stay programmatically scrollable, clip doesn't.
+                            <div className="bg-black border border-proxmox-border" style={{height: '500px', overflow: 'clip'}}>
+                                <NodeShellTerminal node={node} clusterId={clusterId} addToast={addToast} />
+                            </div>
+                        ))}
+
+                        {/* Subscription Tab - LW Nov 2026: Corporate Redesigned draws what a Proxmox VE node reports (cr_nodemisc.js) */}
+                        {activeDetailTab === 'subscription' && crHw && (
+                            <CrBoundary key={navKey} id="node-subscription">
+                                <CrNodeSubscription node={node} read={data.subscriptionRead} loading={loading}
+                                    onReload={() => loadTabData('subscription')} />
+                            </CrBoundary>
+                        )}
+                        {activeDetailTab === 'subscription' && !crHw && (
+                            <div>
+                                <span className="text-[13px] font-medium mb-3 block" style={{color: '#e9ecef'}}>{t('subscriptionInfo')}</span>
+                                {loading && !data.subscription ? (
+                                    <div className="flex items-center justify-center h-32"><Icons.RotateCw className="w-5 h-5 animate-spin" style={{color: '#49afd9'}} /></div>
+                                ) : (
+                                    <table className="corp-property-grid">
+                                        <tbody>
+                                            <tr><td>{t('status')}</td><td style={{color: data.subscription?.status === 'Active' ? '#60b515' : data.subscription?.status === 'notfound' ? '#728b9a' : '#efc006'}}>{data.subscription?.status || 'No subscription'}</td></tr>
+                                            <tr><td>Server ID</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.serverid || '-'}</td></tr>
+                                            <tr><td>Product</td><td>{data.subscription?.productname || '-'}</td></tr>
+                                            <tr><td>Key</td><td style={{fontFamily: 'monospace', fontSize: '12px'}}>{data.subscription?.key || '-'}</td></tr>
+                                            <tr><td>Next Due</td><td>{data.subscription?.nextduedate || '-'}</td></tr>
+                                        </tbody>
+                                    </table>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    {showMaintConfirm && !haReadOnly && (
+                        <MaintenanceDialog clusterId={clusterId} node={node} options={maintOptions} onOptions={setMaintOptions}
+                            onCancel={() => setShowMaintConfirm(false)}
+                            onConfirm={() => { setShowMaintConfirm(false); onMaintenanceToggle(node, true, maintOptions); }} />
+                    )}
+                    {crLeave && <CrNcLeave node={node} ids={Object.keys(crDirtyRef.current)} onKeep={() => setCrLeave(null)} onDiscard={crDiscard} />}
+                    {updAsk && updAsk.row && !haReadOnly && (
+                        <CrUpdNodeDialog key={node} row={updAsk.row} reading={!!updAsk.reading} canReboot={crCan('node.reboot')}
+                            onCancel={() => setUpdAsk(null)} onStart={crStartUpdate} />
+                    )}
+                    {updAsk && updAsk.classic && !haReadOnly && (
+                        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60" data-corp-node-update-ask="">
+                            <div className="w-full max-w-sm bg-proxmox-card border border-proxmox-border p-5">
+                                <h3 className="text-[14px] font-semibold mb-2" style={{color: '#e9ecef'}}>{t('startUpdate') || 'Start Update'}: {node}</h3>
+                                <label className="flex items-center gap-2 text-[13px] mb-4" style={{color: '#adbbc4'}}>
+                                    <input type="checkbox" checked={!!updAsk.reboot} onChange={(e) => { const on = e.target.checked; setUpdAsk(a => ({ ...a, reboot: on })); }} />
+                                    {t('rebootAfterUpdate') || 'Reboot after update'}
+                                </label>
+                                <div className="flex justify-end gap-2">
+                                    <button onClick={() => setUpdAsk(null)} className="px-3 py-1.5 text-[13px] border border-proxmox-border hover:text-white" style={{color: '#adbbc4'}}>{t('cancel')}</button>
+                                    <button onClick={() => { const rb = !!updAsk.reboot; setUpdAsk(null); onStartUpdate(node, rb); }} className="px-3 py-1.5 text-[13px] text-white" style={{background: '#49afd9', border: '1px solid #3d9bc2'}}>{t('startUpdate') || 'Start'}</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }

@@ -1,0 +1,12 @@
+pegaprox (0.9.3.1) stable; urgency=medium
+
+  * Architecture overhaul
+  * Add ESXi migration feature
+  * Add efficient LVM snapshots feature
+  * Add Ceph management
+  * Add Cross-cluster load balancing
+  * Add Cross-cluster replication
+  * Add new additional corporate alike theme
+  * Initial release of PegaProx Debian package
+
+ -- Florian Paul Azim Hoberg <gyptazy@gyptazy.com>  Wed, 04 Mar 2026 07:02:34 +0001

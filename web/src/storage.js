@@ -1,0 +1,2897 @@
+        // ═══════════════════════════════════════════════
+        // PegaProx - Storage
+        // DatastoreTab with storage cluster balancing
+        // ═══════════════════════════════════════════════
+        // LW Nov 2026 - how long the auto-sync of an upload waits for its Proxmox VE task to end
+        const CR_DS_AUTOSYNC_WAIT = 15 * 60 * 1000;
+
+        // Datastore Tab Component - with Storage Clusters for balancing
+        function DatastoreTab({ clusterId, addToast, initialStorage, initialNode, initialPick, sharedDatastoreData, sharedDatastoreRead, guests, onOpenGuest, crTasks, crSub, onCrSubShown }) {
+            const { t } = useTranslation();
+            const { getAuthHeaders, isAdmin, user, haReadOnly } = useAuth();
+            // #644: gate the storage action bar on the same fine-grained perms the API
+            // enforces (storage.download / upload / config) rather than a blanket admin
+            // check — a non-admin who holds e.g. storage.upload should get the button.
+            // #625: a standby keeps the reading ones only.
+            const hasPerm = (p) => (!haReadOnly || haReadPermission(p)) && (isAdmin || (Array.isArray(user?.permissions) && user.permissions.includes(p)));
+            const { isCorporate, isCorpRedesigned } = useLayout();
+            const [loading, setLoading] = useState(true);
+            const [datastores, setDatastores] = useState({ shared: [], local: {}, nodes: [] });
+            const [selectedStorage, setSelectedStorage] = useState(null);
+            const [storageContent, setStorageContent] = useState([]);
+            const [contentLoading, setContentLoading] = useState(false);
+            const [contentError, setContentError] = useState(null);
+            // LW Oct 2026 - Corporate Redesigned: why the content read failed, and the newest read
+            const [crContentError, setCrContentError] = useState(null);
+            const crContentSeq = useRef(0);
+            // LW Nov 2026 - how this tab's last read of /datastores ended ({ ok, at, msg }); the
+            // dashboard's own read comes in as sharedDatastoreRead, the later of the two counts
+            const [crDsRead, setCrDsRead] = useState(null);
+            // why the ESXi host list or the VM list of the picked host could not be read
+            const [crEsxiErr, setCrEsxiErr] = useState({ hosts: '', vms: '' });
+            const esxiVmsSeq = useRef(0);
+            // an upload that waits for its Proxmox VE task before the auto-sync copies it
+            const [crAutoSync, setCrAutoSync] = useState(null);
+            const [expandedNodes, setExpandedNodes] = useState({});
+            const [activeTab, setActiveTab] = useState('browse'); // browse, balancing, sync, sla, recovery
+            const [syncStatus, setSyncStatus] = useState(null);
+            const [syncLoading, setSyncLoading] = useState(false);
+            const [syncContentType, setSyncContentType] = useState('iso');
+            const [syncingFiles, setSyncingFiles] = useState({});  // {filename: true} while syncing
+            // MK May 2026 — Backup SLA tracking sub-tab
+            const [slaData, setSlaData] = useState(null);
+            const [slaLoading, setSlaLoading] = useState(false);
+            const [slaSaving, setSlaSaving] = useState(false);
+            const [slaDraftHours, setSlaDraftHours] = useState(0);
+            const [slaFilter, setSlaFilter] = useState('all'); // all, breached, no-backup, warning, ok
+            // LW Nov 2026 - why the last read failed; only Corporate Redesigned shows it
+            const [slaError, setSlaError] = useState('');
+
+            const refreshSla = () => {
+                setSlaLoading(true);
+                authFetch(`${API_URL}/clusters/${clusterId}/backup-sla`)
+                    .then(r => r?.json())
+                    .then(d => {
+                        if (d && !d.error) {
+                            setSlaData(d);
+                            setSlaDraftHours(d.max_age_hours || 0);
+                            setSlaError('');
+                        } else setSlaError((d && d.error) || t('crSlaNoAnswer'));
+                    })
+                    .catch(() => setSlaError(t('crSlaNoAnswer')))
+                    .finally(() => setSlaLoading(false));
+            };
+
+            // LW Oct 2026 - Corporate Redesigned: the health of a guest links to its Backup SLA or
+            // Restore tests; the tab opens on that sub tab, read as its button reads it
+            useEffect(() => {
+                if (!isCorpRedesigned || !crSub) return;
+                if (crSub === 'sla') { setActiveTab('sla'); refreshSla(); }
+                else if (crSub === 'recovery') setActiveTab('recovery');
+                if (onCrSubShown) onCrSubShown();
+            }, [crSub]);
+
+            const saveSlaConfig = async () => {
+                setSlaSaving(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/backup-sla/config`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ max_age_hours: parseInt(slaDraftHours) || 0 })
+                    });
+                    if (r && r.ok) {
+                        addToast(t('slaConfigSaved') || 'Backup SLA target saved', 'success');
+                        refreshSla();
+                        // LW Nov 2026 - Corporate Redesigned closes its edit bar on a save that went through
+                        return true;
+                    } else {
+                        const err = await r?.json().catch(() => ({}));
+                        addToast(err.error || (t('slaConfigSaveFailed') || 'Save failed'), 'error');
+                    }
+                } catch (e) {
+                    addToast(t('connectionError') || 'Connection error', 'error');
+                } finally {
+                    setSlaSaving(false);
+                }
+            };
+
+            const fmtAgeHours = (h) => {
+                if (h === null || h === undefined) return '—';
+                if (h < 24) return `${h.toFixed(1)} h`;
+                const d = Math.floor(h / 24);
+                const rem = (h - d * 24).toFixed(0);
+                return `${d}d ${rem}h`;
+            };
+
+            const refreshSyncStatus = () => {
+                setSyncLoading(true);
+                authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/status?content=${syncContentType}`)
+                    .then(r => r?.json()).then(d => { if(d) setSyncStatus(d); }).catch(()=>{}).finally(()=>setSyncLoading(false));
+            };
+
+            const _pollSyncResult = (filename, attempt = 0) => {
+                if (attempt > 20) { setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; }); return; }
+                setTimeout(async () => {
+                    try {
+                        const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/last-result`);
+                        if (r?.ok) {
+                            const d = await r.json();
+                            if (d.filename === filename && d.results) {
+                                if (d.failed > 0) addToast(`Sync ${filename}: ${d.ok} ok, ${d.failed} failed`, 'error');
+                                else if (d.ok > 0) addToast(`Sync complete: ${filename} → ${d.ok} node(s)`, 'success');
+                                else addToast(`Sync ${filename}: already on all nodes`, 'success');
+                                setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                                refreshSyncStatus();
+                                return;
+                            }
+                        }
+                    } catch(e) {}
+                    _pollSyncResult(filename, attempt + 1);
+                }, 3000);
+            };
+
+            // LW Nov 2026 - crTracked === true: Corporate Redesigned follows the copy itself (by the
+            // time of the result, as long as scp runs) and only needs to know the server took it
+            const triggerSync = async (sourceNode, storage, filename, crTracked) => {
+                setSyncingFiles(prev => ({...prev, [filename]: true}));
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({ source_node: sourceNode, storage, filename, content_type: syncContentType })
+                    });
+                    if (r?.ok) {
+                        addToast(`Syncing ${filename}...`, 'success');
+                        if (crTracked === true) {
+                            setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                            return true;
+                        }
+                        _pollSyncResult(filename);
+                    } else {
+                        const d = await r?.json().catch(() => ({}));
+                        addToast(d.error || `Sync failed for ${filename}`, 'error');
+                        setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                    }
+                } catch(e) {
+                    addToast(`Sync error: ${e.message}`, 'error');
+                    setSyncingFiles(prev => { const n = {...prev}; delete n[filename]; return n; });
+                }
+            };
+
+            // LW Nov 2026 - the classic button passes its click event, Corporate Redesigned passes true
+            const triggerSyncAll = async (crTracked) => {
+                setSyncingFiles({_all: true});
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/iso-sync/all`, {
+                        method: 'POST', headers: {'Content-Type':'application/json'},
+                        body: JSON.stringify({content_type: syncContentType})
+                    });
+                    if (r?.ok) {
+                        addToast(t('syncAllStarted') || 'Syncing all missing files...', 'success');
+                        if (crTracked === true) { setSyncingFiles({}); return true; }
+                        setTimeout(refreshSyncStatus, 10000);
+                    } else {
+                        const d = await r?.json().catch(() => ({}));
+                        addToast(d.error || 'Sync all failed', 'error');
+                    }
+                } catch(e) {
+                    addToast(`Sync error: ${e.message}`, 'error');
+                }
+                setTimeout(() => setSyncingFiles({}), 5000);
+            };
+            const [uploadModalOpen, setUploadModalOpen] = useState(false);
+            const [uploadFile, setUploadFile] = useState(null);
+            const [uploading, setUploading] = useState(false);
+            const [uploadProgress, setUploadProgress] = useState(0);
+            const [uploadSpeed, setUploadSpeed] = useState(0);
+            const [deleteConfirm, setDeleteConfirm] = useState(null);
+            const [batchRestore, setBatchRestore] = useState(null);  // 'pick' or 'runs' while the dialog is open
+            const [isRefreshing, setIsRefreshing] = useState(false);  // not used
+            const lastFetchTime = useRef(0);  // for rate limiting, not implemented
+            
+            // NS: URL Download state - Jan 2026
+            const [downloadUrlModalOpen, setDownloadUrlModalOpen] = useState(false);
+            const [downloadUrl, setDownloadUrl] = useState('');
+            const [downloadFilename, setDownloadFilename] = useState('');
+            const [urlDownloading, setUrlDownloading] = useState(false);
+            const [urlDownloadProgress, setUrlDownloadProgress] = useState(null);
+            
+            // NS: Template download state - Jan 2026
+            const [showTemplateModal, setShowTemplateModal] = useState(false);
+            const [availableTemplates, setAvailableTemplates] = useState([]);
+            const [templatesLoading, setTemplatesLoading] = useState(false);
+            const [templateFilter, setTemplateFilter] = useState('');
+            const [downloadingTemplate, setDownloadingTemplate] = useState(null);
+            
+            // MK: Storage Rescan modal state - Feb 2026
+            const [showRescanModal, setShowRescanModal] = useState(false);
+            const [rescanLoading, setRescanLoading] = useState(false);
+            
+            // Refs to prevent unnecessary re-renders and track state
+            const datastoresRef = useRef(null);
+            const fetchingRef = useRef(false);
+            const initialLoadDone = useRef(false);
+            const _mountedRef = useRef(true);  // cleanup
+            const activeClusterIdRef = useRef(clusterId);
+            
+            // Storage Clusters state
+            const [storageClusters, setStorageClusters] = useState([]);
+            const [selectedCluster, setSelectedCluster] = useState(null);
+            const [clusterStatus, setClusterStatus] = useState(null);
+            const [showCreateCluster, setShowCreateCluster] = useState(false);
+            const [newClusterName, setNewClusterName] = useState('');
+            const [newClusterStorages, setNewClusterStorages] = useState([]);
+            const [newClusterThreshold, setNewClusterThreshold] = useState(20);
+            const [newClusterTolerance, setNewClusterTolerance] = useState(5);
+            const [balancingLoading, setBalancingLoading] = useState(false);
+            // LW Oct 2026 - Corporate Redesigned: what became of the last read of the storage cluster list
+            const [crScRead, setCrScRead] = useState(null);
+            
+            // NS: ESXi Integration state - Dec 2025
+            const [esxiHosts, setEsxiHosts] = useState([]);
+            const [showAddEsxi, setShowAddEsxi] = useState(false);
+            const [esxiForm, setEsxiForm] = useState({ host: '', username: 'root', password: '' });
+            const [esxiLoading, setEsxiLoading] = useState(false);
+            const [selectedEsxi, setSelectedEsxi] = useState(null);
+            const [esxiVms, setEsxiVms] = useState([]);
+            const [esxiVmsLoading, setEsxiVmsLoading] = useState(false);
+            
+            /* LW: wrapped fetch with auth headers + error handling
+               returns null on failure so you can do: if(!res) return; */
+            const authFetch = async (url, opts = {}) => {
+                try {
+                    const res = await fetch(url, { ...opts, credentials: 'include', headers: { ...opts.headers, ...getAuthHeaders() } });
+                    return res;
+                } catch (e) {
+                    console.error('fetch failed:', e);
+                    return null;
+                }
+            };
+            
+            // old helper, keeping for now
+            const _authFetchOld = async (url, options) => {
+                return fetch(url, { ...options, headers: { ...options?.headers, ...getAuthHeaders() } })
+                  .catch(err => { console.error(err); return null })
+            };
+            
+            // NS: Load available templates from Proxmox repository
+            const loadAvailableTemplates = async () => {
+                setTemplatesLoading(true);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/templates/available`);
+                    if (res?.ok) {
+                        const data = await res.json();
+                        setAvailableTemplates(data || []);
+                    } else {
+                        console.error('Failed to load templates');
+                    }
+                } catch (e) {
+                    console.error('Error loading templates:', e);
+                }
+                setTemplatesLoading(false);
+            };
+            
+            // NS: Download template to storage
+            const downloadTemplate = async (template, storage) => {
+                setDownloadingTemplate(template.template);
+                try {
+                    const res = await authFetch(`${API_URL}/clusters/${clusterId}/templates/download`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            storage: storage,
+                            template: template.template
+                        })
+                    });
+                    if (res?.ok) {
+                        const data = await res.json();
+                        addToast(`${t('downloadStarted') || 'Download started'}: ${template.package || template.template}`, 'success');
+                        // Refresh storage content after a short delay
+                        setTimeout(() => {
+                            if (selectedStorage?.name === storage) {
+                                loadStorageContent(storage, selectedStorage.node);
+                            }
+                        }, 2000);
+                    } else {
+                        const err = await res.json();
+                        addToast(`${t('downloadFailed') || 'Download failed'}: ${err.error || 'Unknown error'}`, 'error');
+                    }
+                } catch (e) {
+                    console.error('Error downloading template:', e);
+                    addToast(`${t('error') || 'Error'}: ${e.message}`, 'error');
+                }
+                setDownloadingTemplate(null);
+            };
+            
+            // Stable sort function - always sorts alphabetically
+            const stableSortData = (data) => {
+                if (!data) return data;
+                
+                // sort shared alphabeticaly
+                const sortedShared = [...(data.shared || [])].sort((a, b) => 
+                    (a.storage || '').localeCompare(b.storage || '')
+                );
+                
+                // sort nodes  
+                const sortedNodes = [...(data.nodes || [])].sort((a, b) => a.localeCompare(b));
+                
+                // sort local per node
+                const sortedLocal = {};
+                for (const node of sortedNodes) {
+                    if (data.local && data.local[node]) {
+                        sortedLocal[node] = [...data.local[node]].sort((a, b) => 
+                            (a.storage || '').localeCompare(b.storage || '')
+                        );
+                    }
+                }
+                
+                return {
+                    shared: sortedShared,
+                    local: sortedLocal,
+                    nodes: sortedNodes
+                };
+            };
+            
+            // NS Nov 2026 - the cluster effect runs before the shared data effect: the other way
+            // round it cleared initialLoadDone right after the shared data had set it, on every
+            // mount, and a sidebar pick waited for the next 15 s refresh
+            useEffect(() => {
+                activeClusterIdRef.current = clusterId;
+                // LW: Reset ALL cluster-specific state when cluster changes
+                // This prevents showing stale data from previous cluster
+                setSelectedStorage(null);
+                setStorageContent([]);
+                setContentError(null);
+                setStorageClusters([]);  // NS: also reset storage clusters
+                setSelectedCluster(null);
+                setClusterStatus(null);
+                if (isCorpRedesigned) { setCrScRead(null); setCrDsRead(null); setCrEsxiErr({ hosts: '', vms: '' }); crDropAutoSync('crDsAutoSyncDropped'); }
+                setEsxiHosts([]);  // NS: reset ESXi hosts too
+                setSelectedEsxi(null);
+                setEsxiVms([]);
+
+                // Reset refs
+                initialLoadDone.current = false;  // Allow loading spinner again
+                datastoresRef.current = null;  // Clear cached data
+                fetchingRef.current = false;  // Reset fetch lock
+
+                if (!sharedDatastoreData || !sharedDatastoreData.shared?.length) {
+                    fetchDatastores();  // fallback: fetch independently if parent didn't pass data
+                }
+                fetchStorageClusters();
+            }, [clusterId]);
+
+            // NS: use parent datastore data when available so sidebar + tab always match
+            useEffect(() => {
+                if (sharedDatastoreData && sharedDatastoreData.shared?.length > 0) {
+                    const sorted = stableSortData(sharedDatastoreData);
+                    datastoresRef.current = sorted;
+                    setDatastores(sorted);
+                    if (!initialLoadDone.current) {
+                        const expanded = { shared: true };
+                        sorted.nodes?.forEach(n => expanded[n] = true);
+                        setExpandedNodes(expanded);
+                        initialLoadDone.current = true;
+                        setLoading(false);
+                    }
+                }
+            }, [sharedDatastoreData]);
+
+            // LW: Mar 2026 - auto-select storage from sidebar click
+            // initialNode disambiguates when multiple nodes have same storage name (e.g. "local")
+            // A pick is applied once, as soon as the list has it: every 15 s refresh of the list
+            // applied it again, over a storage picked here in the tab. initialPick is the sidebar's
+            // selection, a new one per click, so the same storage clicked again opens.
+            const pendingPickRef = useRef(null);
+            useEffect(() => {
+                pendingPickRef.current = initialStorage ? { storage: initialStorage, node: initialNode || null } : null;
+            }, [initialStorage, initialNode, initialPick]);
+            useEffect(() => {
+                const pick = pendingPickRef.current;
+                if (!pick || !initialLoadDone.current) return;
+                const open = (node) => { pendingPickRef.current = null; loadStorageContent(pick.storage, node); };
+                // if node is specified, go directly to that node's storage
+                if (pick.node) {
+                    const nodeStores = datastores.local?.[pick.node];
+                    if (nodeStores?.some(s => s.storage === pick.storage)) {
+                        open(pick.node);
+                        return;
+                    }
+                }
+                // fallback: check shared first, then scan local
+                const found = datastores.shared?.find(s => s.storage === pick.storage);
+                if (found) {
+                    open(null);
+                } else {
+                    for (const [node, stores] of Object.entries(datastores.local || {})) {
+                        if (stores.some(s => s.storage === pick.storage)) {
+                            open(node);
+                            return;
+                        }
+                    }
+                }
+            }, [initialStorage, initialNode, initialPick, datastores]);
+
+            const fetchDatastores = async () => {
+                // prevent concurrent fetches
+                if (fetchingRef.current) return;
+                fetchingRef.current = true;
+                
+                // Only show loading spinner on initial load
+                if (!initialLoadDone.current) {
+                    setLoading(true);
+                }
+                
+                try {
+                    const resp = await authFetch(`${API_URL}/clusters/${clusterId}/datastores`);
+                    if (resp && resp.ok) {
+                        const rawData = await resp.json();
+                        // LW: discard stale response if cluster changed during fetch
+                        if (clusterId !== activeClusterIdRef.current) return;
+                        // console.log('datastores raw:', rawData);
+                        
+                        // Apply stable sorting
+                        const data = stableSortData(rawData);
+                        
+                        // Create a comparable string (only compare essential data, not usage which changes)
+                        // ns: this is kinda hacky but prevents flickering
+                        const getEssentialData = (d) => ({
+                            shared: d.shared?.map(s => s.storage).sort(),
+                            nodes: d.nodes?.sort(),
+                            localKeys: Object.keys(d.local || {}).sort()
+                        });
+                        
+                        const currentEssential = JSON.stringify(getEssentialData(data));
+                        const prevEssential = datastoresRef.current ? 
+                            JSON.stringify(getEssentialData(datastoresRef.current)) : null;
+                        
+                        // Only update if structure changed (not just usage percentages)
+                        if (currentEssential !== prevEssential || !initialLoadDone.current) {
+                            datastoresRef.current = data;
+                            setDatastores(data);
+                            
+                            // Only set expanded nodes on first load
+                            if (!initialLoadDone.current) {
+                                const expanded = { shared: true };
+                                data.nodes?.forEach(n => expanded[n] = true);
+                                setExpandedNodes(expanded);
+                            }
+                        } else {
+                            // update usage data without triggering re-render of structure
+                            datastoresRef.current = data;
+                            setDatastores(data);  // prev => data
+                        }
+                        
+                        initialLoadDone.current = true;
+                        if (isCorpRedesigned) setCrDsRead({ ok: true, at: Date.now() });
+                    } else if (isCorpRedesigned && clusterId === activeClusterIdRef.current) {
+                        const msg = await crReadWhy(resp);
+                        if (clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg });
+                    }
+                } catch (err) {
+                    console.error('fetching datastores:', err);
+                    if (isCorpRedesigned && clusterId === activeClusterIdRef.current) setCrDsRead({ ok: false, at: Date.now(), msg: t('crLoadFailed') });
+                } finally {
+                    setLoading(false);
+                    fetchingRef.current = false;
+                }
+            };
+            // LW Nov 2026 - a refused or lost read as text: what its code says (the server's error is
+            // the English detail of a failed Proxmox VE read), the error and the status
+            const crCodedWhy = (b, status) => {
+                const coded = b && { UPSTREAM_AUTH: 'crNdWhyAuth', PVE_READ_FAILED: 'crNdWhyPve', PVE_UNREACHABLE: 'crNdWhyOffline' }[b.code];
+                return [coded ? t(coded) : '', b && typeof b.error === 'string' ? b.error : '', status ? `HTTP ${status}` : ''].filter(Boolean).join(' - ');
+            };
+            const crReadWhy = async (r) => {
+                if (!r) return t('crDriftOffline');
+                return crCodedWhy(await r.json().catch(() => null), r.status);
+            };
+            // the later of the two datastore reads, when it failed: hasData says an earlier read is on screen
+            const crDsFail = (() => {
+                if (!isCorpRedesigned) return null;
+                const a = crDsRead;
+                const b = sharedDatastoreRead && sharedDatastoreRead.at ? sharedDatastoreRead : null;
+                const last = !a ? b : !b ? a : (b.at > a.at ? b : a);
+                if (!last || last.ok) return null;
+                const hasData = !!((datastores.shared || []).length || Object.keys(datastores.local || {}).length);
+                return { msg: last.msg || '', hasData };
+            })();
+            
+            // LW Oct 2026 - Corporate Redesigned: the same GET, but a refused, failed or late answer says so
+            // instead of leaving "no storage clusters" (or the list of the cluster before) on screen
+            const crFetchStorageClusters = async () => {
+                const cid = clusterId;
+                setCrScRead(prev => ({ ...(prev && prev.cid === cid ? prev : {}), cid, pending: true }));
+                const r = await authFetch(`${API_URL}/clusters/${cid}/storage-clusters`);
+                const body = r ? await r.json().catch(() => null) : null;
+                if (cid !== activeClusterIdRef.current) return;
+                if (r && r.ok && Array.isArray(body)) {
+                    setStorageClusters(body);
+                    setCrScRead({ cid, state: 'ok', at: Date.now() });
+                    return;
+                }
+                const msg = body && typeof body.error === 'string' ? body.error : '';
+                const state = !r ? 'offline' : r.ok ? 'malformed' : r.status === 403 ? 'forbidden' : r.status === 404 ? 'notfound' : 'error';
+                setCrScRead({ cid, state, code: r ? r.status : 0, msg });
+            };
+
+            // storage clusters (ceph etc)
+            const fetchStorageClusters = async () => {
+                if (isCorpRedesigned) return crFetchStorageClusters();
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters`);
+                    if (r?.ok) {
+                        setStorageClusters(await r.json());
+                    }
+                } catch (e) {
+                    console.error('fetching storage clusters:', e);
+                }
+            };
+            
+            // a refused, failed or empty status read left the panel at "Balanced" (or at the group
+            // picked before); it now says the status could not be read. Only the answer for the
+            // group picked last is shown.
+            const statusSeq = useRef(0);
+            const loadClusterStatus = async (scId) => {
+                const seq = ++statusSeq.current;
+                setBalancingLoading(true);
+                let next;
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}/status`);
+                    const data = response ? await response.json().catch(() => null) : null;
+                    if (response && response.ok && data && Array.isArray(data.storages)) {
+                        next = data;
+                    } else {
+                        next = { id: scId, unreadable: true,
+                                 error: data?.error || (response ? `HTTP ${response.status}` : (t('connectionError') || 'Connection error')) };
+                    }
+                } catch (error) {
+                    console.error('loading cluster status:', error);
+                    next = { id: scId, unreadable: true, error: error?.message || String(error) };
+                }
+                if (seq !== statusSeq.current) return;
+                setClusterStatus(next);
+                setBalancingLoading(false);
+            };
+            
+            const createStorageCluster = async () => {
+                if (!newClusterName.trim() || newClusterStorages.length < 2) {
+                    alert(t('needTwoStorages') || 'Need at least 2 storages');
+                    return;
+                }
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: newClusterName,
+                            storages: newClusterStorages,
+                            threshold: newClusterThreshold,
+                            tolerance: newClusterTolerance
+                        })
+                    });
+                    if (response && response.ok) {
+                        setShowCreateCluster(false);
+                        setNewClusterName('');
+                        setNewClusterStorages([]);
+                        setNewClusterThreshold(20);
+                        setNewClusterTolerance(5);
+                        fetchStorageClusters();
+                    } else {
+                        const err = await response.json();
+                        alert(err.error || 'Failed to create');
+                    }
+                } catch (error) {
+                    console.error('creating storage cluster:', error);
+                }
+            };
+            
+            // The switches and sliders showed the new value whatever the server answered, a 403
+            // too. A refused change goes back to the value the server last confirmed and says why.
+            const setClusterField = (scId, patch) => {
+                setStorageClusters(prev => prev.map(sc => sc.id === scId ? { ...sc, ...patch } : sc));
+                setClusterStatus(prev => prev && prev.id === scId ? { ...prev, ...patch } : prev);
+            };
+
+            const errorText = (response, data) =>
+                data?.error || (response ? `HTTP ${response.status}` : (t('connectionError') || 'Connection error'));
+
+            // per group and field while a change of it is waiting or under way: the value the
+            // server confirmed last, the number of the last change sent, its debounce timer
+            const settingState = useRef({});
+            const fieldState = (scId, field) => {
+                const key = `${scId}:${field}`;
+                if (!settingState.current[key]) {
+                    settingState.current[key] = { key, confirmed: storageClusters.find(sc => sc.id === scId)?.[field],
+                                                  seq: 0, savedSeq: 0, inFlight: new Set(), timer: null };
+                }
+                return settingState.current[key];
+            };
+
+            const putClusterSetting = async (st, scId, field, value) => {
+                const seq = ++st.seq;
+                st.inFlight.add(seq);
+                const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ [field]: value })
+                });
+                const data = response ? await response.json().catch(() => null) : null;
+                const ok = !!(response && response.ok && data);
+                st.inFlight.delete(seq);
+                if (ok && seq > st.savedSeq) {
+                    // what the server kept, it may hold a value to its range
+                    st.savedSeq = seq;
+                    st.confirmed = field in data ? data[field] : value;
+                }
+                // a later change of this field is waiting or on its way: its answer decides
+                if (st.timer || [...st.inFlight].some(n => n > seq)) return;
+                if (!st.inFlight.size && settingState.current[st.key] === st) delete settingState.current[st.key];
+                setClusterField(scId, { [field]: st.confirmed });
+                if (!ok && seq === st.seq) addToast(errorText(response, data), 'error');
+            };
+
+            // one debounce per group and field, so a threshold and a tolerance change do not cancel
+            // each other; a switch goes out at once
+            const updateClusterSetting = (scId, field, value, delay = 500) => {
+                const st = fieldState(scId, field);
+                clearTimeout(st.timer);
+                st.timer = null;
+                setClusterField(scId, { [field]: value });
+                if (!delay) return putClusterSetting(st, scId, field, value);
+                st.timer = setTimeout(() => { st.timer = null; putClusterSetting(st, scId, field, value); }, delay);
+            };
+
+            const updateClusterThreshold = (scId, threshold) => updateClusterSetting(scId, 'threshold', threshold);
+            const toggleClusterEnabled = (scId, enabled) => updateClusterSetting(scId, 'enabled', enabled, 0);
+            const toggleAutoBalance = (scId, auto_balance) => updateClusterSetting(scId, 'auto_balance', auto_balance, 0);
+            
+            const deleteStorageCluster = async (scId) => {
+                if (!confirm(t('confirmDeleteCluster') || 'Delete this storage cluster?')) return;
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                        method: 'DELETE'
+                    });
+                    if (response && response.ok) {
+                        setStorageClusters(prev => prev.filter(sc => sc.id !== scId));
+                        if (selectedCluster === scId) {
+                            setSelectedCluster(null);
+                            setClusterStatus(null);
+                        }
+                    }
+                } catch (error) {
+                    console.error('deleting storage cluster:', error);
+                }
+            };
+            
+            const addStorageToCluster = async (scId, storageName) => {
+                const cluster = storageClusters.find(sc => sc.id === scId);
+                if (!cluster) return;
+                
+                const newStorages = [...cluster.storages, storageName];
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ storages: newStorages })
+                    });
+                    if (!response?.ok) addToast(errorText(response, response ? await response.json().catch(() => null) : null), 'error');
+                    fetchStorageClusters();
+                    if (selectedCluster === scId) loadClusterStatus(scId);
+                } catch (error) {
+                    console.error('adding storage:', error);
+                }
+            };
+            
+            const removeStorageFromCluster = async (scId, storageName) => {
+                const cluster = storageClusters.find(sc => sc.id === scId);
+                if (!cluster || cluster.storages.length <= 2) {
+                    alert(t('minTwoStorages') || 'Minimum 2 storages required');
+                    return;
+                }
+                
+                const newStorages = cluster.storages.filter(s => s !== storageName);
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-clusters/${scId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ storages: newStorages })
+                    });
+                    if (!response?.ok) addToast(errorText(response, response ? await response.json().catch(() => null) : null), 'error');
+                    fetchStorageClusters();
+                    if (selectedCluster === scId) loadClusterStatus(scId);
+                } catch (error) {
+                    console.error('removing storage:', error);
+                }
+            };
+            
+            const executeMigration = async (rec) => {
+                if (!confirm(`Move ${rec.disk} of ${rec.vm_name} from ${rec.source} to ${rec.target}?`)) return;
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/storage-balancing/migrate`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            vmid: rec.vmid,
+                            disk: rec.disk,
+                            target: rec.target
+                        })
+                    });
+                    if (response && response.ok) {
+                        alert(t('migrationStarted') || 'Migration started!');
+                        if (selectedCluster) loadClusterStatus(selectedCluster);
+                    } else {
+                        // no answer at all, or one that is no JSON (a proxy's error page): still say so
+                        const err = response ? await response.json().catch(() => null) : null;
+                        alert(`${t('migrationFailed') || 'Migration failed'}: ${errorText(response, err)}`);
+                    }
+                } catch (error) {
+                    console.error('executing migration:', error);
+                    alert(`${t('migrationFailed') || 'Migration failed'}: ${error?.message || error}`);
+                }
+            };
+            
+            const loadStorageContent = async (storageName, node) => {
+                // LW Oct 2026 - Corporate Redesigned: only the newest click lands, and a refused read says so
+                const crSeq = ++crContentSeq.current;
+                const crStale = () => isCorpRedesigned && crSeq !== crContentSeq.current;
+                setContentLoading(true);
+                setSelectedStorage({ name: storageName, node });
+                setContentError(null);
+                if (isCorpRedesigned) setCrContentError(null);
+                try {
+                    const url = node 
+                        ? `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content?node=${node}`
+                        : `${API_URL}/clusters/${clusterId}/datastores/${storageName}/content`;
+                    const response = await authFetch(url);
+                    if (crStale()) return;
+                    const data = response ? await response.json().catch(() => null) : null;
+                    if (crStale()) return;
+                    if (response && response.ok && Array.isArray(data)) {
+                        setStorageContent(data);
+                    } else {
+                        // not the previous storage's content under this one's name
+                        setStorageContent([]);
+                        setContentError(errorText(response, data));
+                        if (isCorpRedesigned) setCrContentError((data && data.code ? crCodedWhy(data, 0) : data && data.error) || t('crDsLoadFailed'));
+                    }
+                } catch (error) {
+                    console.error('loading content:', error);
+                    if (crStale()) return;
+                    setStorageContent([]);
+                    setContentError(error?.message || String(error));
+                    if (isCorpRedesigned) setCrContentError(t('crDsLoadFailed'));
+                } finally {
+                    if (!crStale()) setContentLoading(false);
+                }
+            };
+            
+            const handleDelete = async (item) => {
+                try {
+                    const url = `${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/content/${encodeURIComponent(item.volid)}?node=${selectedStorage.node || ''}`;
+                    const response = await authFetch(url, { method: 'DELETE' });
+                    
+                    if (response && response.ok) {
+                        setStorageContent(prev => prev.filter(i => i.volid !== item.volid));
+                        setDeleteConfirm(null);
+                    } else {
+                        const err = await response.json();
+                        alert(err.error || t('deleteFailed'));
+                    }
+                } catch (error) {
+                    console.error('deleting:', error);
+                    alert(t('deleteFailed'));
+                }
+            };
+            
+            // LW Nov 2026 - Corporate Redesigned: with auto-sync on (the ISO Sync tab, the flag of the
+            // classic checkbox) an ISO or template uploaded to a node's own storage is copied to the
+            // other nodes once the upload task of Proxmox VE ended well. The task is read from the
+            // task list the dashboard keeps, nothing is polled for it
+            const crQueueAutoSync = (answer, filename, ct) => {
+                let on = false;
+                try { on = localStorage.getItem(`autosync-${clusterId}`) === 'true'; } catch (_) {}
+                const sel = selectedStorage;
+                if (!on || !sel || !sel.node || (datastores.shared || []).some(s => s.storage === sel.name)) return;
+                let upid = '';
+                try { upid = (JSON.parse(answer) || {}).upid; } catch (_) {}
+                if (typeof upid !== 'string' || !upid) return;
+                setCrAutoSync({ cid: clusterId, upid, node: sel.node, storage: sel.name, filename, ct });
+                addToast(crFill(t('crDsAutoSyncWaiting'), { name: filename }), 'info');
+            };
+            // a pending copy that goes without being made is said: the page or the cluster was left, or
+            // its task was not seen ending within CR_DS_AUTOSYNC_WAIT
+            const crAutoSyncNow = useRef(null);
+            crAutoSyncNow.current = { job: crAutoSync, say: (key, job) => addToast(crFill(t(key), { name: job.filename }), 'warning') };
+            const crDropAutoSync = (key) => {
+                const { job, say } = crAutoSyncNow.current || {};
+                if (!job) return;
+                crAutoSyncNow.current = { job: null, say };
+                setCrAutoSync(null);
+                say(key, job);
+            };
+            useEffect(() => () => crDropAutoSync('crDsAutoSyncDropped'), []);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                if (!crAutoSync) return;
+                const id = setTimeout(() => crDropAutoSync('crDsAutoSyncTimeout'), CR_DS_AUTOSYNC_WAIT);
+                return () => clearTimeout(id);
+            }, [crAutoSync]);  // eslint-disable-line react-hooks/exhaustive-deps
+            useEffect(() => {
+                const job = crAutoSync;
+                if (!isCorpRedesigned || !job || job.cid !== clusterId) return;
+                const task = (Array.isArray(crTasks) ? crTasks : []).find(x => x && x.upid === job.upid);
+                const state = task ? crTaskState(task) : null;
+                if (!task || state === 'running' || state === 'queued') return;
+                setCrAutoSync(null);
+                if (state !== 'done') { addToast(crFill(t('crDsAutoSyncTaskFailed'), { name: job.filename }), 'error'); return; }
+                (async () => {
+                    const r = await authFetch(`${API_URL}/clusters/${job.cid}/iso-sync`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ source_node: job.node, storage: job.storage, filename: job.filename, content_type: job.ct }),
+                    });
+                    if (r && r.ok) addToast(crFill(t('crDsAutoSyncStarted'), { name: job.filename }), 'success');
+                    else addToast(crFill(t('crDsAutoSyncRefused'), { name: job.filename, why: await crReadWhy(r) }), 'error');
+                })();
+            }, [crAutoSync, crTasks]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+            const handleUpload = async () => {
+                if (!uploadFile || !selectedStorage) return;
+                
+                setUploading(true);
+                setUploadProgress(0);
+                setUploadSpeed(0);
+                
+                const formData = new FormData();
+                formData.append('file', uploadFile);
+                // MK: Mar 2026 - detect disk images vs ISOs for correct PVE content type (#115)
+                // LW: Mar 2026 - added vztmpl for container templates (#119)
+                const fname = uploadFile.name.toLowerCase();
+                const isDiskImage = fname.endsWith('.vmdk') || fname.endsWith('.qcow2') || fname.endsWith('.img') || fname.endsWith('.raw');
+                const isTemplate = fname.endsWith('.tar.gz') || fname.endsWith('.tar.xz') || fname.endsWith('.tar.zst');
+                formData.append('content', isDiskImage ? 'import' : isTemplate ? 'vztmpl' : 'iso');
+                if (selectedStorage.node) {
+                    formData.append('node', selectedStorage.node);
+                }
+                
+                // Use XMLHttpRequest for progress tracking
+                const xhr = new XMLHttpRequest();
+                const startTime = Date.now();
+                let lastLoaded = 0;
+                let lastTime = startTime;
+                
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        setUploadProgress(percent);
+                        
+                        // calc speed
+                        const now = Date.now();
+                        const timeDiff = (now - lastTime) / 1000; // seconds
+                        if (timeDiff > 0.5) { // update speed every 500ms
+                            const bytesDiff = e.loaded - lastLoaded;
+                            const speed = bytesDiff / timeDiff; // bytes per second
+                            setUploadSpeed(speed);
+                            lastLoaded = e.loaded;
+                            lastTime = now;
+                        }
+                    }
+                });
+                
+                xhr.addEventListener('load', () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        if (isCorpRedesigned && !isDiskImage) crQueueAutoSync(xhr.responseText, uploadFile.name, isTemplate ? 'vztmpl' : 'iso');
+                        setUploadModalOpen(false);
+                        setUploadFile(null);
+                        setUploadProgress(0);
+                        setUploadSpeed(0);
+                        // refresh after delay
+                        setTimeout(() => loadStorageContent(selectedStorage.name, selectedStorage.node), 2000);
+                    } else {
+                        try {
+                            const err = JSON.parse(xhr.responseText);
+                            alert(err.error || t('uploadFailed'));
+                        } catch {
+                            alert(t('uploadFailed'));
+                        }
+                    }
+                    setUploading(false);
+                });
+                
+                xhr.addEventListener('error', () => {
+                    console.error('Upload error');
+                    alert(t('uploadFailedNetwork'));
+                    setUploading(false);
+                    setUploadProgress(0);
+                    setUploadSpeed(0);
+                });
+                
+                xhr.addEventListener('abort', () => {
+                    setUploading(false);
+                    setUploadProgress(0);
+                    setUploadSpeed(0);
+                });
+                
+                xhr.open('POST', `${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/upload`);
+                xhr.withCredentials = true;
+
+                // LW: Mar 2026 - CSRF protection: custom header triggers CORS preflight
+                xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+
+                // auth headers
+                const headers = getAuthHeaders();
+                for (const [key, value] of Object.entries(headers)) {
+                    xhr.setRequestHeader(key, value);
+                }
+                
+                xhr.send(formData);
+            };
+            
+            const formatSpeed = (bytesPerSec) => {
+                if (!bytesPerSec) return '0 B/s';
+                const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+                let i = 0;
+                while (bytesPerSec >= 1024 && i < units.length - 1) { 
+                    bytesPerSec /= 1024; 
+                    i++; 
+                }
+                return `${bytesPerSec.toFixed(1)} ${units[i]}`;
+            };
+            
+            // NS: Download ISO from URL - Jan 2026 (like Proxmox)
+            const handleDownloadFromUrl = async () => {
+                if (!downloadUrl || !selectedStorage) return;
+                
+                // Extract filename from URL if not provided
+                let filename = downloadFilename.trim();
+                if (!filename) {
+                    try {
+                        const urlPath = new URL(downloadUrl).pathname;
+                        filename = urlPath.split('/').pop() || 'download.iso';
+                    } catch {
+                        filename = 'download.iso';
+                    }
+                }
+                
+                // Ensure .iso extension
+                if (!filename.toLowerCase().endsWith('.iso') && !filename.toLowerCase().endsWith('.img')) {
+                    filename += '.iso';
+                }
+                
+                setUrlDownloading(true);
+                setUrlDownloadProgress({ status: 'starting', percent: 0, message: t('startingDownload') || 'Starting download...' });
+                
+                try {
+                    const response = await authFetch(`${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/download-url`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            url: downloadUrl,
+                            filename: filename,
+                            node: selectedStorage.node || ''
+                        })
+                    });
+                    
+                    if (response && response.ok) {
+                        const data = await response.json();
+                        const taskId = data.task_id;
+                        
+                        // Poll for progress
+                        const pollInterval = setInterval(async () => {
+                            try {
+                                const statusResp = await authFetch(`${API_URL}/clusters/${clusterId}/datastores/${selectedStorage.name}/download-status/${taskId}`);
+                                if (statusResp && statusResp.ok) {
+                                    const status = await statusResp.json();
+                                    setUrlDownloadProgress(status);
+                                    
+                                    if (status.status === 'completed') {
+                                        clearInterval(pollInterval);
+                                        setUrlDownloading(false);
+                                        setDownloadUrlModalOpen(false);
+                                        setDownloadUrl('');
+                                        setDownloadFilename('');
+                                        // Refresh content
+                                        setTimeout(() => loadStorageContent(selectedStorage.name, selectedStorage.node), 1000);
+                                    } else if (status.status === 'error') {
+                                        clearInterval(pollInterval);
+                                        setUrlDownloading(false);
+                                        alert(status.message || t('downloadFailed') || 'Download failed');
+                                    }
+                                }
+                            } catch (e) {
+                                console.error('Polling download status:', e);
+                            }
+                        }, 1000);
+                        
+                        // Cleanup after 30 min max
+                        setTimeout(() => clearInterval(pollInterval), 30 * 60 * 1000);
+                        
+                    } else {
+                        const err = await response.json();
+                        alert(err.error || t('downloadFailed') || 'Download failed');
+                        setUrlDownloading(false);
+                    }
+                } catch (error) {
+                    console.error('Download from URL error:', error);
+                    alert(t('downloadFailed') || 'Download failed');
+                    setUrlDownloading(false);
+                }
+            };
+            
+            // NS: ESXi Integration functions - Dec 2025
+            const fetchEsxiHosts = async () => {
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts`);
+                    if (r?.ok) {
+                        setEsxiHosts(await r.json());
+                        if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: '' }));
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        setCrEsxiErr(x => ({ ...x, hosts: why }));
+                    }
+                } catch (e) {
+                    console.error('fetching esxi hosts:', e);
+                    if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, hosts: t('crLoadFailed') }));
+                }
+            };
+            
+            const connectEsxiHost = async () => {
+                if (!esxiForm.host || !esxiForm.password) {
+                    alert(t('fillAllFields') || 'Please fill all fields');
+                    return;
+                }
+                setEsxiLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(esxiForm)
+                    });
+                    if (r?.ok) {
+                        setShowAddEsxi(false);
+                        setEsxiForm({ host: '', username: 'root', password: '' });
+                        fetchEsxiHosts();
+                    } else {
+                        const err = await r.json();
+                        alert(err.error || t('connectionFailed'));
+                    }
+                } catch (e) {
+                    alert(t('connectionFailed'));
+                } finally {
+                    setEsxiLoading(false);
+                }
+            };
+            
+            const disconnectEsxiHost = async (hostId) => {
+                if (!confirm(t('confirmDisconnect') || 'Disconnect this ESXi host?')) return;
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}`, {
+                        method: 'DELETE'
+                    });
+                    if (r?.ok) {
+                        setEsxiHosts(prev => prev.filter(h => h.id !== hostId));
+                        if (selectedEsxi === hostId) {
+                            setSelectedEsxi(null);
+                            setEsxiVms([]);
+                        }
+                    }
+                } catch (e) {
+                    console.error('disconnecting esxi:', e);
+                }
+            };
+            
+            const fetchEsxiVms = async (hostId) => {
+                // LW Nov 2026 - the list of the host picked before is not this host's, and only the
+                // newest read lands: a failed or slow read showed the other host's VMs under this one
+                const mine = ++esxiVmsSeq.current;
+                setSelectedEsxi(hostId);
+                setEsxiVms([]);
+                if (isCorpRedesigned) setCrEsxiErr(x => ({ ...x, vms: '' }));
+                setEsxiVmsLoading(true);
+                try {
+                    const r = await authFetch(`${API_URL}/clusters/${clusterId}/esxi-hosts/${hostId}/vms`);
+                    if (r?.ok) {
+                        const list = await r.json();
+                        if (mine === esxiVmsSeq.current) setEsxiVms(list);
+                    } else if (isCorpRedesigned) {
+                        const why = await crReadWhy(r);
+                        if (mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: why }));
+                    }
+                } catch (e) {
+                    console.error('fetching esxi vms:', e);
+                    if (isCorpRedesigned && mine === esxiVmsSeq.current) setCrEsxiErr(x => ({ ...x, vms: t('crLoadFailed') }));
+                } finally {
+                    if (mine === esxiVmsSeq.current) setEsxiVmsLoading(false);
+                }
+            };
+            
+            // NS: ESXi VMs should be migrated via VMware Migration Wizard (Tasks tab)
+            // The native Proxmox import was removed - our wizard handles hardware detection better
+            
+            // load esxi hosts on mount
+            useEffect(() => {
+                fetchEsxiHosts();
+            }, [clusterId]);
+            
+            const toggleNode = (nodeKey) => {
+                setExpandedNodes(prev => ({ ...prev, [nodeKey]: !prev[nodeKey] }));
+            };
+            
+            const formatSize = (bytes) => {
+                if (!bytes) return '0 B';
+                const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+                let i = 0;
+                while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
+                return `${bytes.toFixed(1)} ${units[i]}`;
+            };
+            
+            const getContentIcon = (content) => {
+                if (content?.includes('iso')) return '💿';
+                if (content?.includes('images') || content?.includes('rootdir')) return '💾';
+                if (content?.includes('backup')) return '📦';
+                if (content?.includes('vztmpl')) return '📋';
+                return '📁';
+            };
+            
+            const getTypeColor = (type) => {
+                const colors = {
+                    'zfspool': 'text-blue-400', 'lvmthin': 'text-purple-400', 'lvm': 'text-purple-400',
+                    'dir': 'text-green-400', 'nfs': 'text-yellow-400', 'cifs': 'text-yellow-400',
+                    'cephfs': 'text-red-400', 'rbd': 'text-red-400',
+                    'iscsi': 'text-purple-400', 'iscsidirect': 'text-purple-400',
+                    'starlvm': 'text-teal-400',  // LW: StarWind shared thin-LVM
+                };
+                return colors[type] || 'text-gray-400';
+            };
+            
+            const canUploadTo = (storage) => {
+                return storage?.content?.includes('iso') || storage?.content?.includes('vztmpl');
+            };
+
+            // the picked balancing group as configured, and its members as the last status read
+            // saw them; a status that could not be read still lists the configured members
+            const balancingGroup = clusterStatus ? storageClusters.find(sc => sc.id === clusterStatus.id) : null;
+            const balancingMembers = !clusterStatus ? [] : (clusterStatus.storages
+                || (balancingGroup?.storages || []).map(name => ({ storage: name, usable: false, state: 'unreadable' })));
+            const memberStateText = (m) => {
+                const node = m.node || '-';
+                if (m.state === 'missing') return t('sbMemberMissing').replace('{node}', node);
+                if (m.state === 'disabled') return t('sbMemberDisabled').replace('{node}', node);
+                if (m.state === 'inactive') return t('sbMemberInactive').replace('{node}', node);
+                if (m.state === 'unavailable') return t('sbMemberUnavailable');
+                if (m.state === 'no_size') return t('sbMemberNoSize');
+                return t('sbMemberUnreadable');
+            };
+            
+            if (loading) {
+                return (
+                    <div className="flex items-center justify-center py-12">
+                        <Icons.RotateCw className="animate-spin" />
+                        <span className="ml-2">{t('loading')}</span>
+                    </div>
+                );
+            }
+            
+            const StorageRow = ({ storage, node, isShared }) => {
+                const usedPercent = storage.total ? Math.round(storage.used / storage.total * 100) : 0;
+                const isSelected = selectedStorage?.name === storage.storage && selectedStorage?.node === node;
+                // NS Apr 2026 — three honest states:
+                //   - unreachable: active=0 OR enabled=0 → red badge, dim row, no bar
+                //   - raw: active=1 but total=0 → typical iSCSI raw block / RBD without
+                //     a usage layer — Proxmox doesn't report stats but storage IS healthy.
+                //     Show "raw block device" hint instead of a fake "0 B / 0 B".
+                //   - normal: active=1 + total>0 → real numbers + bar
+                const isUnreachable = storage.active === 0 || storage.enabled === 0;
+                const isRaw = !isUnreachable && (storage.total === 0 && storage.used === 0);
+                // Per-node reachability hint for shared storages (backend now reports active_on/inactive_on)
+                const partial = isShared && Array.isArray(storage.active_on) && Array.isArray(storage.inactive_on)
+                    && storage.active_on.length > 0 && storage.inactive_on.length > 0;
+                const partialHint = partial
+                    ? `${t('activeOn') || 'Active on'}: ${storage.active_on.join(', ')} — ${t('unreachableFrom') || 'unreachable from'}: ${storage.inactive_on.join(', ')}`
+                    : null;
+
+                let rowTitle;
+                if (isUnreachable) rowTitle = t('storageUnreachableHint') || `${storage.storage} is configured but not reachable from ${node || 'this node'} — check network / mount / credentials`;
+                else if (partial) rowTitle = partialHint;
+                else if (isRaw) rowTitle = t('storageRawHint') || `${storage.type} raw block storage — Proxmox does not report usage stats for this storage type`;
+
+                // NS Apr 2026 — when clicking a shared row, route content fetch through
+                // a node that can actually reach the storage (active_on[0]). Without this,
+                // clicking "Proxmox" with pve1 reachable + pve2 dead would query pve2 and
+                // return empty — user would think the storage is empty.
+                const clickNode = node || (Array.isArray(storage.active_on) && storage.active_on.length > 0 ? storage.active_on[0] : null);
+
+                return (
+                    <div
+                        className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-all ${
+                            isSelected ? 'bg-proxmox-orange/20 border border-proxmox-orange/50' : 'bg-proxmox-dark hover:bg-proxmox-hover'
+                        } ${isUnreachable ? 'opacity-60' : ''}`}
+                        onClick={() => loadStorageContent(storage.storage, clickNode)}
+                        title={rowTitle}
+                    >
+                        <div className="flex items-center gap-3">
+                            <span className="text-lg">{getContentIcon(storage.content)}</span>
+                            <div>
+                                <div className="font-medium text-white flex items-center gap-1.5 flex-wrap">
+                                    {storage.storage}
+                                    {isUnreachable && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">
+                                            {t('storageUnreachable') || 'unreachable'}
+                                        </span>
+                                    )}
+                                    {!isUnreachable && partial && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/15 text-yellow-400 border border-yellow-500/30"
+                                            title={partialHint}>
+                                            {storage.active_on.length}/{storage.active_on.length + storage.inactive_on.length} {t('nodes') || 'nodes'}
+                                        </span>
+                                    )}
+                                    {!isUnreachable && isRaw && (
+                                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">
+                                            {t('storageRaw') || 'raw'}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                    <span className={getTypeColor(storage.type)}>{storage.type}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            {isUnreachable ? (
+                                <div className="text-xs text-gray-500 italic">
+                                    {t('storageUnreachableShort') || 'no data'}
+                                </div>
+                            ) : isRaw ? (
+                                <div className="text-xs text-gray-500 italic">
+                                    {t('storageRawNoUsage') || 'no usage stats'}
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="text-sm text-white">{formatSize(storage.used)} / {formatSize(storage.total)}</div>
+                                    <div className="w-24 h-1.5 bg-proxmox-border rounded-full mt-1">
+                                        <div
+                                            className={`h-full rounded-full ${usedPercent > 90 ? 'bg-red-500' : usedPercent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                            style={{ width: `${Math.min(usedPercent, 100)}%` }}
+                                        />
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+            
+            return (
+                <div className={isCorporate ? 'space-y-3' : 'space-y-4'}>
+                    {/* Tab Switcher */}
+                    {isCorporate ? (
+                        <div className="corp-tab-strip">
+                            <button onClick={() => setActiveTab('browse')} className={activeTab === 'browse' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
+                                <Icons.Folder style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('browse') || 'Browse'}</span>
+                            </button>
+                            <button onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }} className={activeTab === 'balancing' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
+                                <Icons.Zap style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>Storage Balancing</span>
+                            </button>
+                            {/* LW Nov 2026 - Corporate Redesigned reads the sync status in CrIsoSync, once */}
+                            <button onClick={() => {
+                                setActiveTab('sync'); if (!isCorpRedesigned) refreshSyncStatus();
+                            }} className={activeTab === 'sync' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
+                                <Icons.RefreshCw style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('isoSync') || 'ISO Sync'}</span>
+                            </button>
+                            <button onClick={() => {
+                                setActiveTab('sla'); refreshSla();
+                            }} className={activeTab === 'sla' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}}>
+                                <Icons.Shield style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('backupSla') || 'Backup SLA'}</span>
+                            </button>
+                            {/* LW Oct 2026 - restore tests: the weekly run and how recoverable each guest is */}
+                            <button onClick={() => setActiveTab('recovery')} className={activeTab === 'recovery' ? 'active' : ''} style={{display:'flex',alignItems:'center',gap:6}} data-rtest-tab>
+                                <Icons.LifeBuoy style={{width: 14, height: 14, flexShrink: 0}} />
+                                <span>{t('rtestTab')}</span>
+                            </button>
+                        </div>
+                    ) : (
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => setActiveTab('browse')}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'browse' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.Folder className="inline mr-2" />
+                            {t('browse') || 'Browse'}
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('balancing'); fetchStorageClusters(); }}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'balancing' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.Zap className="inline mr-2" />
+                            Storage Balancing
+                        </button>
+                        <button
+                            onClick={() => {
+                                setActiveTab('sync'); refreshSyncStatus();
+                            }}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'sync' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.RefreshCw className="inline mr-2" />
+                            {t('isoSync') || 'ISO Sync'}
+                        </button>
+                        <button
+                            onClick={() => { setActiveTab('sla'); refreshSla(); }}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'sla' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.Shield className="inline mr-2" />
+                            {t('backupSla') || 'Backup SLA'}
+                        </button>
+                        <button
+                            onClick={() => setActiveTab('recovery')} data-rtest-tab
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                                activeTab === 'recovery' ? 'bg-proxmox-orange text-white' : 'bg-proxmox-card text-gray-400 hover:text-white'
+                            }`}
+                        >
+                            <Icons.LifeBuoy className="inline mr-2" />
+                            {t('rtestTab')}
+                        </button>
+                    </div>
+                    )}
+                    
+                    {activeTab === 'sync' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the Sync and Sync All of the classic sub tab, drawn by CrIsoSync */
+                        <CrIsoSync key={clusterId} clusterId={clusterId} call={authFetch} datastores={datastores} dsLoading={loading}
+                            dsFail={crDsFail} onDsRetry={fetchDatastores} autoSyncWaiting={!!crAutoSync}
+                            contentType={syncContentType} onContentType={setSyncContentType} canSync={hasPerm('storage.upload')}
+                            onSync={triggerSync} onSyncAll={triggerSyncAll} addToast={addToast} />
+                    ) : activeTab === 'sync' ? (
+                        /* ISO/Template Sync Tab */
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <div>
+                                    <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                        <Icons.RefreshCw className="w-5 h-5" />
+                                        {t('isoSync') || 'ISO / Template Sync'}
+                                    </h3>
+                                    <p className="text-sm text-gray-500 mt-1">{t('isoSyncDesc') || 'Distribute ISOs and templates across all cluster nodes. Useful for iSCSI-only setups without shared file storage.'}</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <select value={syncContentType} onChange={e => {
+                                        setSyncContentType(e.target.value);
+                                        setTimeout(refreshSyncStatus, 50);
+                                    }} className="bg-proxmox-dark border border-proxmox-border rounded-lg px-3 py-1.5 text-sm text-white">
+                                        <option value="iso">ISOs</option>
+                                        <option value="vztmpl">Templates</option>
+                                    </select>
+                                    <button onClick={triggerSyncAll} disabled={syncingFiles._all}
+                                        className="px-4 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-1.5">
+                                        {syncingFiles._all && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
+                                        {t('syncAll') || 'Sync All Missing'}
+                                    </button>
+                                    <button onClick={refreshSyncStatus} className="p-1.5 text-gray-400 hover:text-white transition-colors" title="Refresh">
+                                        <Icons.RefreshCw className={`w-4 h-4 ${syncLoading ? 'animate-spin' : ''}`} />
+                                    </button>
+                                </div>
+                            </div>
+                            {/* LW: auto-sync toggle */}
+                            <div className="flex items-center gap-3 mb-4 p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                                    <input type="checkbox" className="rounded"
+                                        checked={localStorage.getItem(`autosync-${clusterId}`) === 'true'}
+                                        onChange={e => { localStorage.setItem(`autosync-${clusterId}`, e.target.checked); addToast(e.target.checked ? 'Auto-sync enabled — new uploads will be distributed automatically' : 'Auto-sync disabled', 'success'); }}
+                                    />
+                                    {t('autoSync') || 'Auto-Sync after Upload'}
+                                </label>
+                                <span className="text-xs text-gray-600">{t('autoSyncDesc') || 'Automatically distribute new ISOs/templates to all nodes after upload'}</span>
+                            </div>
+
+                            {syncLoading && !syncStatus ? (
+                                <div className="flex justify-center py-12"><Icons.RotateCw className="animate-spin w-8 h-8 text-gray-500" /></div>
+                            ) : syncStatus && syncStatus.files?.length > 0 ? (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead>
+                                            <tr className="border-b border-proxmox-border">
+                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">File</th>
+                                                <th className="text-left py-2 px-3 text-gray-400 font-medium">Size</th>
+                                                {syncStatus.nodes?.map(n => (
+                                                    <th key={n} className="text-center py-2 px-2 text-gray-400 font-medium text-xs">{n}</th>
+                                                ))}
+                                                <th className="text-center py-2 px-3 text-gray-400 font-medium" style={{minWidth: 70}}>Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {syncStatus.files.map((f, i) => {
+                                                const key = `${f.storage}:${f.name}`;
+                                                const nodeMap = syncStatus.matrix?.[key] || {};
+                                                const allSynced = syncStatus.nodes?.every(n => nodeMap[n]);
+                                                const sourceNode = syncStatus.nodes?.find(n => nodeMap[n]);
+                                                return (
+                                                    <tr key={i} className="border-b border-gray-700/30 hover:bg-proxmox-hover">
+                                                        <td className="py-2 px-3 text-white font-medium truncate max-w-[200px]" title={f.name}>{f.name}</td>
+                                                        <td className="py-2 px-3 text-gray-400 whitespace-nowrap">{f.size > 1073741824 ? `${(f.size/1073741824).toFixed(1)} GB` : `${(f.size/1048576).toFixed(0)} MB`}</td>
+                                                        {syncStatus.nodes?.map(n => (
+                                                            <td key={n} className="text-center py-2 px-2">
+                                                                {nodeMap[n] ? <span className="text-green-400">✓</span> : <span className="text-red-400/60">✗</span>}
+                                                            </td>
+                                                        ))}
+                                                        <td className="py-2 px-3 text-center">
+                                                            {allSynced ? (
+                                                                <span className="text-xs text-green-400/70">{t('synced') || 'Synced'}</span>
+                                                            ) : sourceNode ? (
+                                                                <button
+                                                                    onClick={() => triggerSync(sourceNode, f.storage, f.name)}
+                                                                    disabled={!!syncingFiles[f.name]}
+                                                                    className="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 rounded transition-colors disabled:opacity-50 flex items-center gap-1"
+                                                                >
+                                                                    {syncingFiles[f.name] ? <><Icons.RotateCw className="w-3 h-3 animate-spin" /> Syncing...</> : (t('sync') || 'Sync')}
+                                                                </button>
+                                                            ) : null}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <div className="text-center py-12 text-gray-500">
+                                    <Icons.Folder className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                                    <p>{t('noFilesFound') || 'No ISOs or templates found on any node.'}</p>
+                                </div>
+                            )}
+                        </div>
+                    ) : activeTab === 'sla' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the read, the draft and the Save of the classic sub tab, drawn by CrBackupSla */
+                        <CrBackupSla key={clusterId} clusterId={clusterId} data={slaData} loading={slaLoading} error={slaError} saving={slaSaving}
+                            draft={slaDraftHours} onDraft={setSlaDraftHours} onSave={saveSlaConfig} onRefresh={refreshSla}
+                            canConfig={hasPerm('cluster.config')} guests={guests} onOpenGuest={onOpenGuest} />
+                    ) : activeTab === 'sla' ? (
+                        /* MK May 2026 — Backup SLA Tracking sub-tab.
+                           Configure max-age threshold + see compliance per VM/CT.
+                           Pulls from /backup-sla endpoint which aggregates vzdump
+                           + PBS snapshots across all backup-capable storages. */
+                        <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6">
+                            <div className="flex items-start justify-between mb-4">
+                                <div>
+                                    <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                                        <Icons.Shield className="w-5 h-5" />
+                                        {t('backupSla') || 'Backup SLA'}
+                                    </h3>
+                                    <p className="text-sm text-gray-500 mt-1">
+                                        {t('backupSlaDesc') || 'Define how recent each VM\'s backup must be. Aggregates across local vzdumps + PBS snapshots and flags VMs that fall behind.'}
+                                    </p>
+                                </div>
+                                <button onClick={refreshSla} className="p-1.5 text-gray-400 hover:text-white transition-colors" title={t('refresh') || 'Refresh'}>
+                                    <Icons.RefreshCw className={`w-4 h-4 ${slaLoading ? 'animate-spin' : ''}`} />
+                                </button>
+                            </div>
+
+                            {/* Config row */}
+                            <div className="flex items-center gap-3 p-4 bg-proxmox-dark border border-proxmox-border rounded-lg mb-4">
+                                <Icons.Clock className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                                <label className="text-sm text-gray-300">{t('maxBackupAge') || 'Max backup age (hours)'}</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    max="8760"
+                                    value={slaDraftHours}
+                                    onChange={e => setSlaDraftHours(e.target.value)}
+                                    className="w-24 px-2 py-1 bg-proxmox-card border border-proxmox-border rounded text-white text-sm"
+                                />
+                                <span className="text-xs text-gray-500">{t('zeroDisables') || '0 = disabled'}</span>
+                                <div className="flex-1" />
+                                <button onClick={saveSlaConfig} disabled={slaSaving || !hasPerm('cluster.config')}
+                                    className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded text-sm font-medium disabled:opacity-50 flex items-center gap-1.5">
+                                    {slaSaving && <Icons.RotateCw className="w-3.5 h-3.5 animate-spin" />}
+                                    {t('save') || 'Save'}
+                                </button>
+                            </div>
+
+                            {/* Summary tiles */}
+                            {slaData && (
+                                <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+                                    {[
+                                        { key: 'compliance_pct', label: t('compliance') || 'Compliance', val: slaData.summary?.compliance_pct === null ? '—' : `${slaData.summary?.compliance_pct ?? 0}%`, color: 'text-blue-400', bg: 'bg-blue-500/10', filter: 'all' },
+                                        { key: 'ok', label: t('compliant') || 'Compliant', val: slaData.summary?.ok ?? 0, color: 'text-green-400', bg: 'bg-green-500/10', filter: 'ok' },
+                                        { key: 'warning', label: t('warning') || 'Warning', val: slaData.summary?.warning ?? 0, color: 'text-yellow-400', bg: 'bg-yellow-500/10', filter: 'warning' },
+                                        { key: 'breached', label: t('breached') || 'Breached', val: slaData.summary?.breached ?? 0, color: 'text-red-400', bg: 'bg-red-500/10', filter: 'breached' },
+                                        { key: 'no_backup', label: t('noBackup') || 'No backup', val: slaData.summary?.no_backup ?? 0, color: 'text-orange-400', bg: 'bg-orange-500/10', filter: 'no-backup' },
+                                    ].map(tile => (
+                                        <button
+                                            key={tile.key}
+                                            onClick={() => setSlaFilter(tile.filter)}
+                                            className={`p-3 rounded-lg border ${slaFilter === tile.filter ? 'border-proxmox-orange' : 'border-proxmox-border'} ${tile.bg} text-left hover:border-proxmox-orange transition-colors`}
+                                        >
+                                            <div className={`text-2xl font-bold ${tile.color}`}>{tile.val}</div>
+                                            <div className="text-xs text-gray-400 mt-1">{tile.label}</div>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
+                            {/* Disabled / no data state */}
+                            {!slaData && !slaLoading && (
+                                <div className="text-center py-12 text-gray-500">
+                                    <Icons.Shield className="w-12 h-12 mx-auto mb-3 opacity-30" />
+                                    <p>{t('slaLoadingPrompt') || 'Click refresh to load Backup SLA data.'}</p>
+                                </div>
+                            )}
+                            {slaData && !slaData.enabled && (
+                                <div className="p-4 bg-yellow-500/5 border border-yellow-500/20 rounded-lg mb-4 text-sm text-yellow-300">
+                                    {t('slaDisabledHint') || 'SLA tracking is disabled. Set a max backup age above to start evaluating.'}
+                                </div>
+                            )}
+
+                            {/* VM table */}
+                            {slaData && slaData.vms && slaData.vms.length > 0 && (
+                                <div className="bg-proxmox-dark border border-proxmox-border rounded-lg overflow-hidden">
+                                    <table className="w-full text-sm">
+                                        <thead className="bg-proxmox-card border-b border-proxmox-border">
+                                            <tr className="text-left text-xs uppercase text-gray-400">
+                                                <th className="px-3 py-2">{t('vmid') || 'VMID'}</th>
+                                                <th className="px-3 py-2">{t('name') || 'Name'}</th>
+                                                <th className="px-3 py-2">{t('node') || 'Node'}</th>
+                                                <th className="px-3 py-2">{t('lastBackup') || 'Last backup'}</th>
+                                                <th className="px-3 py-2">{t('age') || 'Age'}</th>
+                                                <th className="px-3 py-2">{t('source') || 'Source'}</th>
+                                                <th className="px-3 py-2">{t('status') || 'Status'}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {slaData.vms
+                                                .filter(v => slaFilter === 'all' || v.sla_status === slaFilter)
+                                                .map(v => {
+                                                    const statusColor = {
+                                                        'ok': 'bg-green-500/15 text-green-400',
+                                                        'warning': 'bg-yellow-500/15 text-yellow-400',
+                                                        'breached': 'bg-red-500/15 text-red-400',
+                                                        'no-backup': 'bg-orange-500/15 text-orange-400',
+                                                        'disabled': 'bg-gray-500/15 text-gray-400',
+                                                    }[v.sla_status] || 'bg-gray-500/15 text-gray-400';
+                                                    return (
+                                                        <tr key={`${v.type}-${v.vmid}`} className="border-b border-proxmox-border/50 hover:bg-proxmox-hover">
+                                                            <td className="px-3 py-2 text-gray-300">{v.vmid}</td>
+                                                            <td className="px-3 py-2 text-white">{v.name || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-400 text-xs">{v.node || '-'}</td>
+                                                            <td className="px-3 py-2 text-gray-400 text-xs">{v.last_backup_ts ? new Date(v.last_backup_ts * 1000).toLocaleString() : '—'}</td>
+                                                            <td className="px-3 py-2 text-gray-300">{fmtAgeHours(v.age_hours)}</td>
+                                                            <td className="px-3 py-2 text-xs text-gray-500">{v.backup_source || '-'}</td>
+                                                            <td className="px-3 py-2">
+                                                                <span className={`px-2 py-0.5 rounded text-xs ${statusColor}`}>{v.sla_status}</span>
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    ) : activeTab === 'recovery' && isCorpRedesigned ? (
+                        /* LW Nov 2026 - Corporate Redesigned: the same reads and writes, drawn by CrRestoreTests */
+                        <CrRestoreTests key={clusterId} clusterId={clusterId} addToast={addToast} />
+                    ) : activeTab === 'recovery' ? (
+                        <RestoreTestsPanel clusterId={clusterId} addToast={addToast} />
+                    ) : activeTab === 'browse' && isCorpRedesigned ? (
+                        /* LW Oct 2026 - Corporate Redesigned: the same state, setters and dialogs, drawn by CrStorageBrowse */
+                        <CrStorageBrowse key={clusterId} datastores={datastores} dsFail={crDsFail} onDsRetry={fetchDatastores} selected={selectedStorage}
+                            content={storageContent} loading={contentLoading} error={crContentError}
+                            onPick={loadStorageContent} may={hasPerm} canUploadTo={canUploadTo} isAdmin={isAdmin}
+                            guests={guests} onOpenGuest={onOpenGuest}
+                            run={{
+                                templates: () => { setShowTemplateModal(true); loadAvailableTemplates(); },
+                                url: () => setDownloadUrlModalOpen(true),
+                                upload: () => setUploadModalOpen(true),
+                                rescan: () => setShowRescanModal(true),
+                                restore: () => setBatchRestore('pick'),
+                                recent: () => setBatchRestore('runs'),
+                                remove: (item) => setDeleteConfirm(item),
+                            }}
+                            esxi={{
+                                hosts: esxiHosts, selected: selectedEsxi, vms: esxiVms, loading: esxiVmsLoading,
+                                hostsErr: crEsxiErr.hosts, vmsErr: crEsxiErr.vms, retryHosts: fetchEsxiHosts,
+                                pick: fetchEsxiVms, disconnect: disconnectEsxiHost, connect: () => setShowAddEsxi(true),
+                                close: () => { esxiVmsSeq.current++; setSelectedEsxi(null); setEsxiVms([]); setEsxiVmsLoading(false); setCrEsxiErr(x => ({ ...x, vms: '' })); },
+                            }} />
+                    ) : activeTab === 'browse' ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            {/* Storage Tree */}
+                            <div className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
+                                    <h3 className="font-semibold flex items-center gap-2">
+                                        <Icons.Database />
+                                        {t('datastores') || 'Datastores'}
+                                    </h3>
+                                </div>
+                                <div className="p-4 space-y-4 max-h-[600px] overflow-y-auto">
+                                    {/* Shared Storage */}
+                                    {datastores.shared?.length > 0 && (
+                                        <div>
+                                            <button 
+                                                className="flex items-center gap-2 w-full text-left p-2 rounded-lg hover:bg-proxmox-hover"
+                                                onClick={() => toggleNode('shared')}
+                                            >
+                                                <span className={`transform transition-transform ${expandedNodes.shared ? 'rotate-90' : ''}`}>▶</span>
+                                                <Icons.Globe />
+                                                <span className="font-medium text-yellow-400">{t('sharedStorage') || 'Shared Storage'}</span>
+                                                <span className="text-xs text-gray-500 ml-auto">{datastores.shared.length}</span>
+                                            </button>
+                                            {expandedNodes.shared && (
+                                                <div className="ml-6 mt-2 space-y-2">
+                                                    {datastores.shared.map(storage => (
+                                                        <StorageRow key={storage.storage} storage={storage} isShared={true} />
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    
+                                    {/* Local Storage per Node */}
+                                    {datastores.nodes?.map(node => (
+                                        <div key={node}>
+                                            <button 
+                                                className="flex items-center gap-2 w-full text-left p-2 rounded-lg hover:bg-proxmox-hover"
+                                                onClick={() => toggleNode(node)}
+                                            >
+                                                <span className={`transform transition-transform ${expandedNodes[node] ? 'rotate-90' : ''}`}>▶</span>
+                                                <Icons.Server />
+                                                <span className="font-medium">{node}</span>
+                                                <span className="text-xs text-gray-500 ml-auto">{datastores.local[node]?.length || 0}</span>
+                                            </button>
+                                            {expandedNodes[node] && datastores.local[node] && (
+                                                <div className="ml-6 mt-2 space-y-2">
+                                                    {datastores.local[node].map(storage => (
+                                                        <StorageRow key={`${node}-${storage.storage}`} storage={storage} node={node} />
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+                                    
+                                    {/* NS: ESXi Hosts Section - Dec 2025 */}
+                                    <div className="mt-4 pt-4 border-t border-proxmox-border">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <button 
+                                                className="flex items-center gap-2 text-left p-2 rounded-lg hover:bg-proxmox-hover flex-1"
+                                                onClick={() => toggleNode('esxi')}
+                                            >
+                                                <span className={`transform transition-transform ${expandedNodes.esxi ? 'rotate-90' : ''}`}>▶</span>
+                                                <span className="text-lg">🖥️</span>
+                                                <span className="font-medium text-cyan-400">{t('esxiHosts') || 'ESXi Hosts'}</span>
+                                                <span className="text-xs text-gray-500 ml-auto">{esxiHosts.length}</span>
+                                            </button>
+                                            {isAdmin && (
+                                                <button
+                                                    onClick={() => setShowAddEsxi(true)}
+                                                    className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-cyan-400"
+                                                    title={t('connectEsxi') || 'Connect ESXi'}
+                                                >
+                                                    <Icons.Plus />
+                                                </button>
+                                            )}
+                                        </div>
+                                        {expandedNodes.esxi && (
+                                            <div className="ml-6 space-y-2">
+                                                {esxiHosts.length === 0 ? (
+                                                    <p className="text-xs text-gray-500 py-2">{t('noEsxiHosts') || 'No ESXi hosts connected'}</p>
+                                                ) : (
+                                                    esxiHosts.map(host => (
+                                                        <div 
+                                                            key={host.id}
+                                                            className={`flex items-center gap-2 p-2 rounded-lg cursor-pointer transition-colors ${
+                                                                selectedEsxi === host.id ? 'bg-cyan-500/20 border border-cyan-500/30' : 'hover:bg-proxmox-hover'
+                                                            }`}
+                                                            onClick={() => fetchEsxiVms(host.id)}
+                                                        >
+                                                            <span className={`w-2 h-2 rounded-full ${host.connected ? 'bg-green-500' : 'bg-red-500'}`} />
+                                                            <span className="text-sm">{host.host}</span>
+                                                            {isAdmin && (
+                                                                <button
+                                                                    onClick={(e) => { e.stopPropagation(); disconnectEsxiHost(host.id); }}
+                                                                    className="ml-auto p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
+                                                                    title={t('esxiDisconnect')}
+                                                                >
+                                                                    <Icons.X className="w-3 h-3" />
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ))
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* Storage Content / ESXi VMs Panel */}
+                            <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                {selectedEsxi ? (
+                                    /* LW: ESXi VMs Panel */
+                                    <>
+                                        <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
+                                            <h3 className="font-semibold flex items-center gap-2">
+                                                <span className="text-lg">🖥️</span>
+                                                {t('esxiVms') || 'ESXi VMs'}
+                                                <span className="text-xs text-gray-500">({esxiHosts.find(h => h.id === selectedEsxi)?.host})</span>
+                                            </h3>
+                                            <button
+                                                onClick={() => { setSelectedEsxi(null); setEsxiVms([]); }}
+                                                className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400"
+                                            >
+                                                <Icons.X />
+                                            </button>
+                                        </div>
+                                        <div className="p-4">
+                                            {/* Experimental hint */}
+                                            <div className="p-2 bg-cyan-500/10 border border-cyan-500/30 rounded-lg mb-4 flex items-center gap-2">
+                                                <span>🧪</span>
+                                                <span className="text-xs text-cyan-400">{t('esxiExperimental') || 'ESXi integration is experimental'}</span>
+                                            </div>
+                                            
+                                            {esxiVmsLoading ? (
+                                                <div className="flex items-center justify-center py-12">
+                                                    <Icons.RotateCw className="animate-spin" />
+                                                </div>
+                                            ) : esxiVms.length === 0 ? (
+                                                <div className="text-center py-12 text-gray-500">
+                                                    <p>{t('esxiNoVms') || 'No VMs on this ESXi host'}</p>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-2">
+                                                    {esxiVms.map(vm => (
+                                                        <div key={vm.id} className="p-3 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-3">
+                                                                    <span className="w-3 h-3 rounded-full bg-gray-500" />
+                                                                    <div>
+                                                                        <p className="font-medium text-white">{vm.name}</p>
+                                                                        <p className="text-xs text-gray-500">
+                                                                            {vm.guest_os !== 'Unknown' ? `${vm.guest_os} • ` : ''}
+                                                                            {vm.num_cpu > 0 ? `${vm.num_cpu} vCPU • ` : ''}
+                                                                            {vm.memory_mb > 0 ? `${Math.round(vm.memory_mb / 1024)} GB RAM` : ''}
+                                                                        </p>
+                                                                        {/* LW: show volid for debugging */}
+                                                                        <p className="text-xs text-gray-600 font-mono truncate max-w-xs">{vm.volid || vm.id}</p>
+                                                                    </div>
+                                                                </div>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-xs text-gray-500 italic">
+                                                                        {t('useVMwareMigration') || 'Use ESXi → Migration Wizard'}
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </>
+                                ) : (
+                                    /* Original Storage Content */
+                                    <>
+                                        <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center flex-wrap gap-2">
+                                            <h3 className="font-semibold flex items-center gap-2 flex-wrap">
+                                                <Icons.Folder />
+                                                {selectedStorage ? (
+                                                    <>{t('content') || 'Content'}: {selectedStorage.name}</>
+                                                ) : (
+                                                    t('selectStorageToView') || 'Select a storage to view contents'
+                                                )}
+                                                {/* NS Apr 2026 — when a shared storage is reachable from multiple
+                                                    nodes (and the row showed "1/2 nodes"), let the user pick which
+                                                    node's view to load. Stats are equal across active nodes but the
+                                                    content listing always queries a specific node. */}
+                                                {selectedStorage && (() => {
+                                                    const sharedDef = datastores.shared?.find(s => s.storage === selectedStorage.name);
+                                                    const activeOn = Array.isArray(sharedDef?.active_on) ? sharedDef.active_on : [];
+                                                    const inactiveOn = Array.isArray(sharedDef?.inactive_on) ? sharedDef.inactive_on : [];
+                                                    if (activeOn.length === 0) return null;
+                                                    const showSwitcher = activeOn.length > 1 || inactiveOn.length > 0;
+                                                    if (!showSwitcher) return null;
+                                                    return (
+                                                        <span className="flex items-center gap-1.5 text-xs font-normal">
+                                                            <span className="text-gray-500">— {t('viewFromNode') || 'view from'}:</span>
+                                                            <select
+                                                                value={selectedStorage.node || activeOn[0]}
+                                                                onChange={e => loadStorageContent(selectedStorage.name, e.target.value)}
+                                                                className="bg-proxmox-dark border border-proxmox-border rounded px-2 py-1 text-xs text-white"
+                                                            >
+                                                                {activeOn.map(n => (
+                                                                    <option key={n} value={n}>{n} ✓</option>
+                                                                ))}
+                                                                {inactiveOn.map(n => (
+                                                                    <option key={n} value={n} disabled>{n} ({t('storageUnreachable') || 'unreachable'})</option>
+                                                                ))}
+                                                            </select>
+                                                        </span>
+                                                    );
+                                                })()}
+                                            </h3>
+                                            {selectedStorage && (
+                                                <div className="flex gap-2">
+                                                    {/* NS: Download Templates button - only for vztmpl storage */}
+                                                    {(() => {
+                                                        const storage = datastores.shared.find(s => s.storage === selectedStorage.name) || 
+                                                                       datastores.local[selectedStorage.node]?.find(s => s.storage === selectedStorage.name);
+                                                        return storage?.content?.includes('vztmpl') && hasPerm('storage.upload');
+                                                    })() && (
+                                                        <button
+                                                            onClick={() => { setShowTemplateModal(true); loadAvailableTemplates(); }}
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Download /> Templates
+                                                        </button>
+                                                    )}
+                                                    {/* NS: Download from URL - for ISO storage (like Proxmox) */}
+                                                    {(() => {
+                                                        const storage = datastores.shared.find(s => s.storage === selectedStorage.name) || 
+                                                                       datastores.local[selectedStorage.node]?.find(s => s.storage === selectedStorage.name);
+                                                        return storage?.content?.includes('iso') && hasPerm('storage.upload');
+                                                    })() && (
+                                                        <button
+                                                            onClick={() => setDownloadUrlModalOpen(true)}
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 rounded-lg text-sm"
+                                                            title={t('downloadFromUrl') || 'Download from URL'}
+                                                        >
+                                                            <Icons.Link /> {t('fromUrl') || 'From URL'}
+                                                        </button>
+                                                    )}
+                                                    {hasPerm('storage.upload') && canUploadTo(datastores.shared.find(s => s.storage === selectedStorage.name) ||
+                                                                 datastores.local[selectedStorage.node]?.find(s => s.storage === selectedStorage.name)) && (
+                                                        <button
+                                                            onClick={() => setUploadModalOpen(true)}
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                        >
+                                                            <Icons.Upload /> {t('upload') || 'Upload'}
+                                                        </button>
+                                                    )}
+                                                    {/* NS: Rescan button for iSCSI/LVM storage - Feb 2026 */}
+                                                    {(() => {
+                                                        const storage = datastores.shared.find(s => s.storage === selectedStorage.name) || 
+                                                                       datastores.local[selectedStorage.node]?.find(s => s.storage === selectedStorage.name);
+                                                        return ['iscsi', 'iscsidirect', 'lvm', 'lvmthin', 'zfspool', 'zfs', 'starlvm'].includes(storage?.type) && hasPerm('storage.config');
+                                                    })() && (
+                                                        <button
+                                                            onClick={() => setShowRescanModal(true)}
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm"
+                                                            title={t('rescanStorageTooltip') || 'Rescan storage to detect new LUNs/volumes'}
+                                                        >
+                                                            <Icons.RefreshCw className="w-4 h-4" /> {t('rescan') || 'Rescan'}
+                                                        </button>
+                                                    )}
+                                                    {/* LW Oct 2026 - several of its backups in one go, and the batches before */}
+                                                    {hasPerm('vm.backup') && storageContent.some(i => i.content === 'backup' && i.vmid) && (
+                                                        <button onClick={() => setBatchRestore('pick')} data-br-open
+                                                            className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm">
+                                                            <Icons.RotateCcw /> {t('batchRestoreButton')}
+                                                        </button>
+                                                    )}
+                                                    {hasPerm('backup.view') && storageContent.some(i => i.content === 'backup') && (
+                                                        <button onClick={() => setBatchRestore('runs')} data-br-recent-open title={t('batchRestoreRecent')}
+                                                            className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white">
+                                                            <Icons.ClipboardList />
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        onClick={() => loadStorageContent(selectedStorage.name, selectedStorage.node)}
+                                                        className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
+                                                    >
+                                                        <Icons.RotateCw />
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="p-4">
+                                            {contentLoading ? (
+                                                <div className="flex items-center justify-center py-12">
+                                                    <Icons.RotateCw className="animate-spin" />
+                                                </div>
+                                            ) : !selectedStorage ? (
+                                                <div className="text-center py-12 text-gray-500">
+                                                    <Icons.Database className="mx-auto mb-2 opacity-50" />
+                                                    <p>{t('clickStorageToView') || 'Click on a storage to view its contents'}</p>
+                                                </div>
+                                            ) : contentError ? (
+                                                <div className="text-center py-12" data-content-error="">
+                                                    <div className="flex justify-center mb-2"><Icons.AlertTriangle /></div>
+                                                    <p className="text-red-400">{t('storageContentUnreadable')}</p>
+                                                    <p className="text-sm text-gray-500 mt-1 break-all">{contentError}</p>
+                                                </div>
+                                            ) : storageContent.length === 0 ? (
+                                                <div className="text-center py-12 text-gray-500">
+                                                    <Icons.Folder className="mx-auto mb-2 opacity-50" />
+                                                    <p>{t('storageEmpty') || 'This storage is empty'}</p>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-1 max-h-[500px] overflow-y-auto">
+                                                    <table className="w-full">
+                                                        <thead className="sticky top-0 bg-proxmox-card">
+                                                            <tr className="text-left text-xs text-gray-500 uppercase">
+                                                                <th className="p-2">{t('name') || 'Name'}</th>
+                                                                <th className="p-2">{t('type') || 'Type'}</th>
+                                                                <th className="p-2">{t('format') || 'Format'}</th>
+                                                        <th className="p-2 text-right">{t('size') || 'Size'}</th>
+                                                        {hasPerm('storage.delete') && <th className="p-2 w-10"></th>}
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {storageContent.map((item, idx) => (
+                                                        <tr key={idx} className="border-t border-proxmox-border hover:bg-proxmox-hover">
+                                                            <td className="p-2">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span>{item.content === 'iso' ? '💿' : item.content === 'backup' ? '📦' : '💾'}</span>
+                                                                    <span className="font-mono text-sm truncate max-w-xs" title={item.volid}>
+                                                                        {item.volid?.split('/').pop() || item.volid}
+                                                                    </span>
+                                                                    {item.vmid && (
+                                                                        <span className="text-xs text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">
+                                                                            VM {item.vmid}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                            <td className="p-2 text-sm text-gray-400">{item.content}</td>
+                                                            <td className="p-2 text-sm text-gray-400">{item.format || '-'}</td>
+                                                            <td className="p-2 text-sm text-right">
+                                                                {/* LW May 2026 — `~` prefix when PVE 9.2 only had approximate-size
+                                                                    (size_is_approx flag set by backend). For backends like shared
+                                                                    LVM or thick qcow2 where computing the real size is expensive. */}
+                                                                {item.size_is_approx && <span className="text-gray-500">~</span>}
+                                                                {item.size_human || formatSize(item.size)}
+                                                                {item.size_is_approx && <span className="text-[10px] text-gray-500 ml-1" title="Approximate — PVE 9.2 reported approximate-size, not exact size">≈</span>}
+                                                            </td>
+                                                            {hasPerm('storage.delete') && (
+                                                                <td className="p-2">
+                                                                    {/* LW: allow deleting backups even with vmid - vzdumps always have vmid attached */}
+                                                                    {(item.content === 'backup' || (!item.vmid && (item.content === 'iso' || item.content === 'vztmpl'))) && (
+                                                                        <button
+                                                                            onClick={() => setDeleteConfirm(item)}
+                                                                            className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
+                                                                            title={t('delete') || 'Delete'}
+                                                                        >
+                                                                            <Icons.Trash />
+                                                                        </button>
+                                                                    )}
+                                                                </td>
+                                                            )}
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            </>
+                        )}
+                    </div>
+                </div>
+            ) : activeTab === 'balancing' && isCorpRedesigned ? (
+                /* LW Oct 2026 - Corporate Redesigned: the group list and datastores held here, the create dialog below */
+                <CrBoundary key={clusterId} id="balancing">
+                    <CrStorageBalancing clusterId={clusterId} authFetch={authFetch} datastores={datastores}
+                        dsLoading={loading} dsFail={crDsFail} onDsRetry={fetchDatastores} list={storageClusters} listRead={crScRead && crScRead.cid === clusterId ? crScRead : null}
+                        setList={setStorageClusters} reloadList={fetchStorageClusters} may={hasPerm} standby={!!haReadOnly}
+                        guests={guests} onOpenGuest={onOpenGuest} tasks={crTasks} onCreate={() => setShowCreateCluster(true)} />
+                </CrBoundary>
+            ) : (
+                /* Storage Balancing Tab with Storage Clusters */
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Experimental warning */}
+                    <div className="lg:col-span-3 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center gap-3">
+                        <span className="text-2xl">🧪</span>
+                        <div>
+                            <p className="text-yellow-400 font-medium">{t('experimentalFeature') || 'Experimental Feature'}</p>
+                            <p className="text-yellow-300/70 text-sm">{t('storageBalancingExperimental') || 'Storage Balancing is still experimental. We appreciate your feedback!'}</p>
+                        </div>
+                    </div>
+                    
+                    {/* Storage Clusters List */}
+                            <div className="lg:col-span-1 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-proxmox-border bg-proxmox-dark flex justify-between items-center">
+                                    <h3 className="font-semibold flex items-center gap-2">
+                                        <Icons.Zap className="text-yellow-400" />
+                                        Storage Clusters
+                                    </h3>
+                                    {hasPerm('storage.config') && (
+                                        <button
+                                            onClick={() => setShowCreateCluster(true)}
+                                            className="p-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg"
+                                            title={t('createCluster') || 'Create Cluster'}
+                                        >
+                                            <Icons.Plus />
+                                        </button>
+                                    )}
+                                </div>
+                                <div className="p-4 space-y-3 max-h-[500px] overflow-y-auto">
+                                    {storageClusters.length === 0 ? (
+                                        <div className="text-center py-8 text-gray-500">
+                                            <Icons.Database className="mx-auto mb-2 opacity-50" />
+                                            <p>{t('noStorageClusters') || 'No storage clusters configured'}</p>
+                                            <p className="text-xs mt-1">{t('createStorageClusterHint') || 'Create a cluster to balance storage across multiple volumes'}</p>
+                                        </div>
+                                    ) : (
+                                        storageClusters.map(sc => (
+                                            <div 
+                                                key={sc.id}
+                                                className={`p-3 rounded-lg cursor-pointer transition-all ${
+                                                    selectedCluster === sc.id 
+                                                        ? 'bg-proxmox-orange/20 border border-proxmox-orange/50' 
+                                                        : 'bg-proxmox-dark hover:bg-proxmox-hover'
+                                                }`}
+                                                onClick={() => { setSelectedCluster(sc.id); loadClusterStatus(sc.id); }}
+                                            >
+                                                <div className="flex items-center justify-between">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`w-2 h-2 rounded-full ${sc.enabled ? 'bg-green-500' : 'bg-gray-500'}`} />
+                                                        <span className="font-medium">{sc.name}</span>
+                                                    </div>
+                                                    {hasPerm('storage.config') && (
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); deleteStorageCluster(sc.id); }}
+                                                            className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
+                                                        >
+                                                            <Icons.Trash />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <div className="text-xs text-gray-500 mt-1">
+                                                    {sc.storages?.length || 0} {t('storages') || 'storages'} • {t('threshold')}: {sc.threshold}%
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                            
+                            {/* Storage Cluster Details */}
+                            <div className="lg:col-span-2 bg-proxmox-card border border-proxmox-border rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-proxmox-border bg-proxmox-dark">
+                                    <h3 className="font-semibold">
+                                        {clusterStatus ? (balancingGroup?.name ?? clusterStatus.name) : (t('selectStorageCluster') || 'Select a storage cluster')}
+                                    </h3>
+                                </div>
+                                <div className="p-4">
+                                    {balancingLoading ? (
+                                        <div className="flex items-center justify-center py-12">
+                                            <Icons.RotateCw className="animate-spin" />
+                                        </div>
+                                    ) : !clusterStatus ? (
+                                        <div className="text-center py-12 text-gray-500">
+                                            <Icons.Zap className="mx-auto mb-2 opacity-50" />
+                                            <p>{t('selectClusterToView') || 'Select a storage cluster to view balancing status'}</p>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-6">
+                                            {/* Cluster Settings */}
+                                            <div className="flex items-center justify-between gap-4 p-4 bg-proxmox-dark rounded-lg flex-wrap">
+                                                <Toggle
+                                                    checked={!!(balancingGroup || clusterStatus).enabled}
+                                                    onChange={(v) => toggleClusterEnabled(clusterStatus.id, v)}
+                                                    label={t('enabled') || 'Enabled'}
+                                                />
+                                                <div className="flex items-center gap-4">
+                                                    <Toggle
+                                                        checked={balancingGroup?.auto_balance || false}
+                                                        onChange={(v) => toggleAutoBalance(clusterStatus.id, v)}
+                                                        label={t('autoBalance') || 'Auto-Balance'}
+                                                    />
+                                                    <button
+                                                        onClick={() => loadClusterStatus(clusterStatus.id)}
+                                                        className="p-2 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
+                                                    >
+                                                        <Icons.RotateCw />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            
+                                            {/* Auto-Balance Info, the worker leaves a disabled group alone */}
+                                            {balancingGroup?.auto_balance && balancingGroup?.enabled && (
+                                                <div className="p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                                                    <div className="flex items-center gap-2 text-green-400 mb-2">
+                                                        <Icons.Zap />
+                                                        <span className="font-medium">{t('autoBalanceActive') || 'Auto-Balance Active'}</span>
+                                                    </div>
+                                                    <p className="text-sm text-gray-400">
+                                                        {t('autoBalanceDesc') || 'Disks will be automatically migrated when imbalance exceeds threshold. VMs with active snapshots/backups are skipped.'}
+                                                    </p>
+                                                </div>
+                                            )}
+                                            
+                                            {/* Threshold + Tolerance Sliders */}
+                                            <div className="p-4 bg-proxmox-dark rounded-lg space-y-4">
+                                                <Slider
+                                                    label={t('balancingThreshold') || 'Balancing Threshold'}
+                                                    description={t('thresholdDesc') || 'Trigger balancing when imbalance exceeds this value'}
+                                                    value={balancingGroup?.threshold ?? clusterStatus.threshold ?? 20}
+                                                    onChange={(v) => updateClusterThreshold(clusterStatus.id, v)}
+                                                    min={5}
+                                                    max={50}
+                                                    step={5}
+                                                />
+                                                <Slider
+                                                    label={t('migrationTolerance') || 'Tolerance'}
+                                                    description={t('storageToleranceDesc')}
+                                                    value={balancingGroup?.tolerance ?? clusterStatus.tolerance ?? 5}
+                                                    onChange={(v) => updateClusterSetting(clusterStatus.id, 'tolerance', v)}
+                                                    min={0}
+                                                    max={20}
+                                                    step={1}
+                                                />
+                                            </div>
+                                            
+                                            {/* Imbalance Status */}
+                                            {clusterStatus.unreadable ? (
+                                                <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-lg" data-sb-status="unreadable">
+                                                    <div className="flex items-center gap-2 text-red-400 font-medium">
+                                                        <Icons.AlertTriangle />
+                                                        <span>{t('sbStatusUnreadable')}</span>
+                                                    </div>
+                                                    <p className="text-sm text-gray-400 mt-1">{clusterStatus.error}</p>
+                                                </div>
+                                            ) : clusterStatus.imbalance == null ? (
+                                                <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg" data-sb-status="unknown">
+                                                    <div className="flex-1">
+                                                        <div className="text-sm text-gray-400">{t('currentImbalance') || 'Current Imbalance'}</div>
+                                                        <div className="text-2xl font-bold text-gray-400">-</div>
+                                                        <div className="text-xs text-gray-500 mt-1">{t('sbCannotJudgeHint')}</div>
+                                                        {clusterStatus.read_error && (
+                                                            <div className="text-xs text-red-400 mt-1" data-sb-read-error="">{clusterStatus.read_error}</div>
+                                                        )}
+                                                    </div>
+                                                    <div className="px-4 py-2 rounded-lg bg-gray-500/20 text-gray-300">{t('sbCannotJudge')}</div>
+                                                </div>
+                                            ) : (
+                                            <div className="flex items-center gap-4 p-4 bg-proxmox-dark rounded-lg" data-sb-status={clusterStatus.imbalance > clusterStatus.threshold ? 'over' : 'balanced'}>
+                                                <div className="flex-1">
+                                                    <div className="text-sm text-gray-400">{t('currentImbalance') || 'Current Imbalance'}</div>
+                                                    <div className={`text-2xl font-bold ${clusterStatus.imbalance > clusterStatus.threshold ? 'text-yellow-400' : 'text-green-400'}`}>
+                                                        {clusterStatus.imbalance}%
+                                                    </div>
+                                                </div>
+                                                <div className={`px-4 py-2 rounded-lg ${clusterStatus.imbalance > clusterStatus.threshold ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'}`}>
+                                                    {clusterStatus.imbalance > clusterStatus.threshold ? '⚠️ ' + (t('actionRecommended') || 'Action Recommended') : '✓ ' + (t('balanced') || 'Balanced')}
+                                                </div>
+                                            </div>
+                                            )}
+                                            
+                                            {/* Storages in Cluster */}
+                                            <div>
+                                                <div className="flex items-center justify-between mb-3">
+                                                    <h4 className="text-sm font-medium text-gray-400">{t('storagesInCluster') || 'Storages in Cluster'}</h4>
+                                                    {hasPerm('storage.config') && datastores.shared?.length > balancingMembers.length && (
+                                                        <select
+                                                            className="px-2 py-1 bg-proxmox-dark border border-proxmox-border rounded text-sm"
+                                                            onChange={(e) => { if (e.target.value) { addStorageToCluster(clusterStatus.id, e.target.value); e.target.value = ''; }}}
+                                                            defaultValue=""
+                                                        >
+                                                            <option value="">{t('addStorage') || '+ Add Storage'}</option>
+                                                            {datastores.shared?.filter(s => !balancingMembers.some(cs => cs.storage === s.storage)).map(s => (
+                                                                <option key={s.storage} value={s.storage}>{s.storage}</option>
+                                                            ))}
+                                                        </select>
+                                                    )}
+                                                </div>
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                    {balancingMembers.map(storage => (
+                                                        <div key={storage.storage} className={`p-3 bg-proxmox-dark rounded-lg ${storage.usable === false ? 'opacity-60' : ''}`} data-sb-member={storage.storage} data-state={storage.state}>
+                                                            <div className="flex justify-between items-center mb-2">
+                                                                <span className="font-medium">{storage.storage}</span>
+                                                                <div className="flex items-center gap-2">
+                                                                    {storage.usable === false ? (
+                                                                        <span className="text-xs text-gray-400 italic">{memberStateText(storage)}</span>
+                                                                    ) : (
+                                                                    <span className={`text-sm ${storage.usage_percent > 90 ? 'text-red-400' : storage.usage_percent > 70 ? 'text-yellow-400' : 'text-green-400'}`}>
+                                                                        {storage.usage_percent}%
+                                                                    </span>
+                                                                    )}
+                                                                    {hasPerm('storage.config') && balancingMembers.length > 2 && (
+                                                                        <button
+                                                                            onClick={() => removeStorageFromCluster(clusterStatus.id, storage.storage)}
+                                                                            className="p-1 hover:bg-red-500/20 rounded text-gray-500 hover:text-red-400"
+                                                                            title={t('remove') || 'Remove'}
+                                                                        >
+                                                                            <Icons.X />
+                                                                        </button>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                            {storage.usable !== false && (<>
+                                                            <div className="w-full h-2 bg-proxmox-border rounded-full">
+                                                                <div 
+                                                                    className={`h-full rounded-full ${storage.usage_percent > 90 ? 'bg-red-500' : storage.usage_percent > 70 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                                                    style={{ width: `${storage.usage_percent}%` }}
+                                                                />
+                                                            </div>
+                                                            <div className="text-xs text-gray-500 mt-1">
+                                                                {formatSize(storage.used)} / {formatSize(storage.total)}
+                                                                {storage.shared === false && <span> · {t('sbMemberLocal').replace('{node}', storage.node || '-')}</span>}
+                                                            </div>
+                                                            </>)}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            
+                                            {/* Recommendations */}
+                                            {clusterStatus.recommendations?.length > 0 && (
+                                                <div>
+                                                    <h4 className="text-sm font-medium text-gray-400 mb-3">{t('recommendations') || 'Recommendations'}</h4>
+                                                    <div className="space-y-2">
+                                                        {clusterStatus.recommendations.map((rec, idx) => (
+                                                            <div key={idx} className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg">
+                                                                <div className="flex items-center gap-3">
+                                                                    <div className={`p-2 rounded-lg ${rec.vm_status === 'running' ? 'bg-green-500/20' : 'bg-gray-500/20'}`}>
+                                                                        <Icons.HardDrive />
+                                                                    </div>
+                                                                    <div>
+                                                                        <div className="font-medium">{rec.vm_name} <span className="text-gray-500">({rec.disk})</span></div>
+                                                                        <div className="text-xs text-gray-500">{rec.reason}</div>
+                                                                    </div>
+                                                                </div>
+                                                                {rec.movable === false ? (
+                                                                    <span className="text-xs text-gray-400 text-right" data-sb-blocked={rec.blocked}>
+                                                                        {rec.blocked === 'ct_running' ? t('sbCtRunning') : rec.blocked_reason}
+                                                                    </span>
+                                                                ) : hasPerm('storage.config') && (
+                                                                    <button
+                                                                        onClick={() => executeMigration(rec)}
+                                                                        className="px-3 py-1.5 bg-proxmox-orange hover:bg-orange-600 rounded-lg text-sm"
+                                                                    >
+                                                                        {t('migrate') || 'Migrate'}
+                                                                    </button>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            
+                                            {clusterStatus.recommendations?.length === 0 && clusterStatus.imbalance != null && clusterStatus.imbalance <= clusterStatus.threshold && (
+                                                <div className="text-center py-6 text-gray-500">
+                                                    <Icons.Check className="mx-auto mb-2 text-green-400" />
+                                                    <p>{t('storageBalanced') || 'Storage is well balanced. No action needed.'}</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Create Storage Cluster Modal */}
+                    {showCreateCluster && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-lg">
+                                <h3 className="text-lg font-semibold mb-4">{t('createStorageCluster') || 'Create Storage Cluster'}</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('clusterName') || 'Cluster Name'}</label>
+                                        <input
+                                            type="text"
+                                            value={newClusterName}
+                                            onChange={(e) => setNewClusterName(e.target.value)}
+                                            placeholder="e.g. Production Storage"
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('selectStorages') || 'Select Storages'} ({t('minTwo') || 'min. 2'})</label>
+                                        <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto p-2 bg-proxmox-dark rounded-lg">
+                                            {datastores.shared?.map(storage => (
+                                                <label key={storage.storage} className="flex items-center gap-2 p-2 hover:bg-proxmox-hover rounded cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={newClusterStorages.includes(storage.storage)}
+                                                        onChange={(e) => {
+                                                            if (e.target.checked) {
+                                                                setNewClusterStorages(prev => [...prev, storage.storage]);
+                                                            } else {
+                                                                setNewClusterStorages(prev => prev.filter(s => s !== storage.storage));
+                                                            }
+                                                        }}
+                                                        className="rounded"
+                                                    />
+                                                    <span>{storage.storage}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                        {datastores.shared?.length === 0 && (
+                                            <div className="text-center py-4 text-gray-500 text-sm">
+                                                {t('noSharedStorages') || 'No shared storages available'}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div>
+                                        <Slider
+                                            label={t('balancingThreshold') || 'Balancing Threshold'}
+                                            value={newClusterThreshold}
+                                            onChange={setNewClusterThreshold}
+                                            min={5}
+                                            max={50}
+                                            step={5}
+                                        />
+                                        <Slider
+                                            label={t('migrationTolerance') || 'Tolerance'}
+                                            description={t('storageToleranceDesc')}
+                                            value={newClusterTolerance}
+                                            onChange={setNewClusterTolerance}
+                                            min={0}
+                                            max={20}
+                                            step={1}
+                                        />
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-4">
+                                        <button
+                                            onClick={() => { setShowCreateCluster(false); setNewClusterName(''); setNewClusterStorages([]); }}
+                                            className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
+                                        >
+                                            {t('cancel') || 'Cancel'}
+                                        </button>
+                                        <button
+                                            onClick={createStorageCluster}
+                                            disabled={!newClusterName.trim() || newClusterStorages.length < 2}
+                                            className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50"
+                                        >
+                                            {t('create') || 'Create'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Template downloads */}
+                    {showTemplateModal && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-4xl max-h-[85vh] flex flex-col">
+                                <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                                        <Icons.Download />
+                                        {t('downloadTemplates') || 'Download Container Templates'}
+                                    </h3>
+                                    <button
+                                        onClick={() => setShowTemplateModal(false)}
+                                        className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
+                                    >
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                                
+                                {/* Search filter */}
+                                <div className="p-4 border-b border-proxmox-border">
+                                    <input
+                                        type="text"
+                                        placeholder={t('searchTemplates') || 'Search templates...'}
+                                        value={templateFilter}
+                                        onChange={(e) => setTemplateFilter(e.target.value)}
+                                        className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white placeholder-gray-500"
+                                    />
+                                </div>
+                                
+                                {/* Template list */}
+                                <div className="flex-1 overflow-y-auto p-4">
+                                    {templatesLoading ? (
+                                        <div className="flex items-center justify-center py-12">
+                                            <Icons.RotateCw className="animate-spin mr-2" />
+                                            Loading templates...
+                                        </div>
+                                    ) : availableTemplates.length === 0 ? (
+                                        <div className="text-center py-12 text-gray-500">
+                                            <Icons.Package className="mx-auto mb-2 opacity-50" />
+                                            <p>{t('noTemplatesAvailable') || 'No templates available'}</p>
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-2">
+                                            {/* Group by section */}
+                                            {Object.entries(
+                                                availableTemplates
+                                                    .filter(t => !templateFilter || 
+                                                        t.package?.toLowerCase().includes(templateFilter.toLowerCase()) ||
+                                                        t.headline?.toLowerCase().includes(templateFilter.toLowerCase()) ||
+                                                        t.os?.toLowerCase().includes(templateFilter.toLowerCase())
+                                                    )
+                                                    .reduce((acc, t) => {
+                                                        const section = t.section || 'Other';
+                                                        if (!acc[section]) acc[section] = [];
+                                                        acc[section].push(t);
+                                                        return acc;
+                                                    }, {})
+                                            ).map(([section, templates]) => (
+                                                <div key={section} className="mb-4">
+                                                    <h4 className="text-sm font-semibold text-gray-400 uppercase mb-2 sticky top-0 bg-proxmox-card py-1">
+                                                        {section} ({templates.length})
+                                                    </h4>
+                                                    <div className="space-y-1">
+                                                        {templates.map((tmpl, idx) => (
+                                                            <div 
+                                                                key={idx}
+                                                                className="flex items-center justify-between p-3 bg-proxmox-dark rounded-lg hover:bg-proxmox-hover group"
+                                                            >
+                                                                <div className="flex-1 min-w-0">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className="font-medium text-white truncate">
+                                                                            {tmpl.package || tmpl.template}
+                                                                        </span>
+                                                                        {tmpl.version && (
+                                                                            <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">
+                                                                                {tmpl.version}
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                    {tmpl.headline && (
+                                                                        <p className="text-sm text-gray-400 truncate">{tmpl.headline}</p>
+                                                                    )}
+                                                                    <div className="flex items-center gap-2 mt-1 text-xs text-gray-500">
+                                                                        {tmpl.os && <span>OS: {tmpl.os}</span>}
+                                                                        {/* NS Oct 2026 - the link comes from the PVE answer, React renders a javascript: href as is */}
+                                                                        {typeof tmpl.infopage === 'string' && /^https?:\/\//i.test(tmpl.infopage) && (
+                                                                            <a 
+                                                                                href={tmpl.infopage} 
+                                                                                target="_blank" 
+                                                                                rel="noopener noreferrer"
+                                                                                className="text-blue-400 hover:underline"
+                                                                            >
+                                                                                Info
+                                                                            </a>
+                                                                        )}
+                                                                    </div>
+                                                                </div>
+                                                                <button
+                                                                    onClick={() => downloadTemplate(tmpl, selectedStorage.name)}
+                                                                    disabled={downloadingTemplate === tmpl.template}
+                                                                    className="flex items-center gap-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 disabled:opacity-50 rounded-lg text-sm ml-2 whitespace-nowrap"
+                                                                >
+                                                                    {downloadingTemplate === tmpl.template ? (
+                                                                        <><Icons.RotateCw className="animate-spin w-4 h-4" /> ...</>
+                                                                    ) : (
+                                                                        <><Icons.Download className="w-4 h-4" /> Download</>
+                                                                    )}
+                                                                </button>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                
+                                {/* Footer */}
+                                <div className="p-4 border-t border-proxmox-border bg-proxmox-dark flex justify-between items-center text-sm text-gray-400">
+                                    <span>
+                                        {availableTemplates.length} {t('templatesAvailable') || 'templates available'}
+                                    </span>
+                                    <span>
+                                        {t('downloadTo') || 'Download to'}: <strong className="text-white">{selectedStorage?.name}</strong>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Storage Rescan Modal - NS Feb 2026 */}
+                    {showRescanModal && selectedStorage && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl w-full max-w-md">
+                                <div className="p-4 border-b border-proxmox-border flex justify-between items-center">
+                                    <h3 className="text-lg font-semibold flex items-center gap-2">
+                                        <Icons.RefreshCw className="text-purple-400" />
+                                        {t('rescanStorage') || 'Rescan Storage'}
+                                    </h3>
+                                    <button
+                                        onClick={() => setShowRescanModal(false)}
+                                        className="p-1.5 hover:bg-proxmox-hover rounded-lg text-gray-400 hover:text-white"
+                                        disabled={rescanLoading}
+                                    >
+                                        <Icons.X />
+                                    </button>
+                                </div>
+                                <div className="p-4 space-y-4">
+                                    <p className="text-gray-400 text-sm">
+                                        {t('rescanStorageDesc') || `Rescan "${selectedStorage.name}" to detect changes.`}
+                                    </p>
+                                    
+                                    {/* Quick Rescan Option */}
+                                    <button
+                                        onClick={async () => {
+                                            setRescanLoading(true);
+                                            try {
+                                                addToast(t('rescanningStorage') || `Rescanning ${selectedStorage.name}...`, 'info');
+                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${selectedStorage.name}/rescan`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ deep_scan: false })
+                                                });
+                                                const data = await res.json();
+                                                if (res.ok && data.success) {
+                                                    addToast(t('storageRescanSuccess') || `Rescan completed on ${data.nodes_successful}/${data.nodes_scanned} nodes`, 'success');
+                                                    fetchDatastores();
+                                                    loadStorageContent(selectedStorage.name, selectedStorage.node);
+                                                } else {
+                                                    addToast(data.error || 'Rescan failed', 'error');
+                                                }
+                                            } catch (e) {
+                                                console.error('Rescan error:', e);
+                                                addToast(t('storageRescanError') || 'Failed to rescan storage', 'error');
+                                            } finally {
+                                                setRescanLoading(false);
+                                                setShowRescanModal(false);
+                                            }
+                                        }}
+                                        disabled={rescanLoading}
+                                        className="w-full p-4 bg-proxmox-dark hover:bg-proxmox-hover border border-proxmox-border rounded-xl text-left transition-colors disabled:opacity-50"
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className="p-2 bg-blue-500/20 rounded-lg">
+                                                <Icons.RefreshCw className="w-5 h-5 text-blue-400" />
+                                            </div>
+                                            <div>
+                                                <h4 className="font-medium text-white">{t('quickRescan') || 'Quick Rescan'}</h4>
+                                                <p className="text-sm text-gray-400 mt-1">
+                                                    {t('quickRescanDesc') || 'Refresh storage status via API. Use for general status updates.'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </button>
+                                    
+                                    {/* Deep Scan Option */}
+                                    <button
+                                        onClick={async () => {
+                                            setRescanLoading(true);
+                                            try {
+                                                addToast(t('deepRescanningStorage') || `Deep rescanning ${selectedStorage.name}...`, 'info');
+                                                const res = await authFetch(`${API_URL}/clusters/${clusterId}/datacenter/storage/${selectedStorage.name}/rescan`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ deep_scan: true, pvresize: true })
+                                                });
+                                                const data = await res.json();
+                                                if (res.ok && data.success) {
+                                                    addToast(`Deep scan completed on ${data.nodes_successful}/${data.nodes_scanned} nodes`, 'success');
+                                                    fetchDatastores();
+                                                    loadStorageContent(selectedStorage.name, selectedStorage.node);
+                                                } else {
+                                                    addToast(data.error || 'Deep scan failed', 'error');
+                                                }
+                                            } catch (e) {
+                                                console.error('Deep scan error:', e);
+                                                addToast(t('storageRescanError') || 'Failed to rescan storage', 'error');
+                                            } finally {
+                                                setRescanLoading(false);
+                                                setShowRescanModal(false);
+                                            }
+                                        }}
+                                        disabled={rescanLoading}
+                                        className="w-full p-4 bg-proxmox-dark hover:bg-proxmox-hover border border-purple-500/50 rounded-xl text-left transition-colors disabled:opacity-50"
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <div className="p-2 bg-purple-500/20 rounded-lg">
+                                                <Icons.Zap className="w-5 h-5 text-purple-400" />
+                                            </div>
+                                            <div>
+                                                <h4 className="font-medium text-white flex items-center gap-2">
+                                                    {t('deepRescan') || 'Deep Scan'}
+                                                    <span className="text-xs px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded">{t('recommended') || 'Recommended'}</span>
+                                                </h4>
+                                                <p className="text-sm text-gray-400 mt-1">
+                                                    {t('deepRescanDesc') || 'SSH-based SCSI rescan + multipath reconfigure + automatic pvresize. Use after LUN expansion or adding new LUNs.'}
+                                                </p>
+                                                <p className="text-xs text-yellow-500/80 mt-2 flex items-center gap-1">
+                                                    <Icons.AlertTriangle className="w-3 h-3" />
+                                                    {t('deepRescanNote') || 'Requires SSH access to nodes'}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    </button>
+                                    
+                                    {rescanLoading && (
+                                        <div className="flex items-center justify-center gap-2 py-2 text-gray-400">
+                                            <Icons.Loader className="w-4 h-4 animate-spin" />
+                                            {t('scanning') || 'Scanning...'}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className="p-4 border-t border-proxmox-border bg-proxmox-dark/50">
+                                    <button
+                                        onClick={() => setShowRescanModal(false)}
+                                        disabled={rescanLoading}
+                                        className="w-full px-4 py-2 bg-proxmox-border hover:bg-proxmox-hover rounded-lg text-sm transition-colors disabled:opacity-50"
+                                    >
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Upload Modal */}
+                    {uploadModalOpen && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
+                                <h3 className="text-lg font-semibold mb-4">{t('uploadFile') || 'Upload File'}</h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('selectFile') || 'Select File'}</label>
+                                        <input
+                                            type="file"
+                                            accept=".iso,.img,.qcow2,.vmdk,.raw,.tar.gz,.tar.xz,.tar.zst"
+                                            onChange={(e) => setUploadFile(e.target.files[0])}
+                                            disabled={uploading}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50"
+                                        />
+                                    </div>
+                                    {uploadFile && (
+                                        <div className="text-sm text-gray-400">
+                                            📄 {uploadFile.name} ({formatSize(uploadFile.size)})
+                                        </div>
+                                    )}
+                                    
+                                    {/* Upload Progress */}
+                                    {uploading && (
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-gray-400">
+                                                    {uploadProgress < 100 ? 'Uploading...' : 'Processing...'}
+                                                </span>
+                                                <span className="text-proxmox-orange font-mono">
+                                                    {uploadProgress}%
+                                                </span>
+                                            </div>
+                                            <div className="w-full bg-proxmox-dark rounded-full h-3 overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-gradient-to-r from-proxmox-orange to-orange-400 transition-all duration-300 ease-out"
+                                                    style={{ width: `${uploadProgress}%` }}
+                                                />
+                                            </div>
+                                            <div className="flex justify-between text-xs text-gray-500">
+                                                <span>{formatSize(uploadFile.size * uploadProgress / 100)} / {formatSize(uploadFile.size)}</span>
+                                                <span>{formatSpeed(uploadSpeed)}</span>
+                                            </div>
+                                        </div>
+                                    )}
+                                    
+                                    <div className="flex gap-2 justify-end">
+                                        <button
+                                            onClick={() => { setUploadModalOpen(false); setUploadFile(null); setUploadProgress(0); }}
+                                            disabled={uploading}
+                                            className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg disabled:opacity-50"
+                                        >
+                                            {t('cancel') || 'Cancel'}
+                                        </button>
+                                        <button
+                                            onClick={handleUpload}
+                                            disabled={!uploadFile || uploading}
+                                            className="px-4 py-2 bg-proxmox-orange hover:bg-orange-600 rounded-lg disabled:opacity-50 flex items-center gap-2"
+                                        >
+                                            {uploading ? (
+                                                <>
+                                                    <Icons.RotateCw className="animate-spin w-4 h-4" />
+                                                    <span>{uploadProgress}%</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Icons.Upload className="w-4 h-4" />
+                                                    <span>{t('upload') || 'Upload'}</span>
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Download from URL Modal - NS Jan 2026 */}
+                    {downloadUrlModalOpen && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-lg">
+                                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                                    <Icons.Link className="w-5 h-5" />
+                                    {t('downloadFromUrl') || 'Download from URL'}
+                                </h3>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('isoUrl') || 'ISO URL'}</label>
+                                        <input
+                                            type="url"
+                                            value={downloadUrl}
+                                            onChange={(e) => setDownloadUrl(e.target.value)}
+                                            placeholder="https://releases.ubuntu.com/22.04/ubuntu-22.04-live-server-amd64.iso"
+                                            disabled={urlDownloading}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50 text-sm"
+                                        />
+                                        <p className="text-xs text-gray-500 mt-1">
+                                            {t('isoUrlHint') || 'Direct link to ISO file (http/https)'}
+                                        </p>
+                                    </div>
+                                    
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('filename') || 'Filename'} ({t('optional') || 'optional'})</label>
+                                        <input
+                                            type="text"
+                                            value={downloadFilename}
+                                            onChange={(e) => setDownloadFilename(e.target.value)}
+                                            placeholder={t('autoDetect') || 'Auto-detect from URL'}
+                                            disabled={urlDownloading}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white disabled:opacity-50 text-sm"
+                                        />
+                                    </div>
+                                    
+                                    <div className="bg-proxmox-dark/50 rounded-lg p-3 text-sm">
+                                        <p className="text-gray-400">
+                                            <strong>{t('storage') || 'Storage'}:</strong> {selectedStorage?.name}
+                                            {selectedStorage?.node && <span className="text-gray-500"> ({selectedStorage.node})</span>}
+                                        </p>
+                                    </div>
+                                    
+                                    {/* Download Progress */}
+                                    {urlDownloading && urlDownloadProgress && (
+                                        <div className="space-y-2">
+                                            <div className="flex justify-between text-sm">
+                                                <span className="text-gray-400">
+                                                    {urlDownloadProgress.message || 'Downloading...'}
+                                                </span>
+                                                {urlDownloadProgress.percent !== undefined && (
+                                                    <span className="text-green-400 font-mono">
+                                                        {urlDownloadProgress.percent}%
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="w-full bg-proxmox-dark rounded-full h-3 overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-gradient-to-r from-green-500 to-green-400 transition-all duration-300 ease-out"
+                                                    style={{ width: `${urlDownloadProgress.percent || 0}%` }}
+                                                />
+                                            </div>
+                                            {urlDownloadProgress.downloaded && urlDownloadProgress.total && (
+                                                <div className="flex justify-between text-xs text-gray-500">
+                                                    <span>{formatSize(urlDownloadProgress.downloaded)} / {formatSize(urlDownloadProgress.total)}</span>
+                                                    {urlDownloadProgress.speed && <span>{formatSpeed(urlDownloadProgress.speed)}</span>}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                    
+                                    <div className="flex gap-2 justify-end">
+                                        <button
+                                            onClick={() => { setDownloadUrlModalOpen(false); setDownloadUrl(''); setDownloadFilename(''); setUrlDownloadProgress(null); }}
+                                            disabled={urlDownloading}
+                                            className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg disabled:opacity-50"
+                                        >
+                                            {t('cancel') || 'Cancel'}
+                                        </button>
+                                        <button
+                                            onClick={handleDownloadFromUrl}
+                                            disabled={!downloadUrl || urlDownloading}
+                                            className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg disabled:opacity-50 flex items-center gap-2"
+                                        >
+                                            {urlDownloading ? (
+                                                <>
+                                                    <Icons.RotateCw className="animate-spin w-4 h-4" />
+                                                    <span>{t('downloading') || 'Downloading...'}</span>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Icons.Download className="w-4 h-4" />
+                                                    <span>{t('download') || 'Download'}</span>
+                                                </>
+                                            )}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {batchRestore && selectedStorage && (
+                        <BatchRestoreModal clusterId={clusterId} storage={selectedStorage.name}
+                            items={batchRestore === 'pick' ? storageContent.filter(i => i.content === 'backup') : null}
+                            nodes={datastores.nodes || []} datastores={datastores}
+                            defaultNode={selectedStorage.node || (storageContent.find(i => i.content === 'backup') || {}).node}
+                            onClose={() => setBatchRestore(null)} />
+                    )}
+
+                    {/* Delete Confirm Modal */}
+                    {deleteConfirm && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md">
+                                <h3 className="text-lg font-semibold mb-4 text-red-400">{t('confirmDelete') || 'Confirm Delete'}</h3>
+                                <p className="text-gray-300 mb-4">
+                                    {t('deleteConfirmText') || 'Are you sure you want to delete'}:<br/>
+                                    <span className="font-mono text-sm">{deleteConfirm.volid?.split('/').pop()}</span>
+                                </p>
+                                <div className="flex gap-2 justify-end">
+                                    <button
+                                        onClick={() => setDeleteConfirm(null)}
+                                        className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
+                                    >
+                                        {t('cancel') || 'Cancel'}
+                                    </button>
+                                    <button
+                                        onClick={() => handleDelete(deleteConfirm)}
+                                        className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded-lg"
+                                    >
+                                        {t('delete') || 'Delete'}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* MK: ESXi Connect Modal - Dec 2025 */}
+                    {showAddEsxi && (
+                        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => setShowAddEsxi(false)}>
+                            <div className="bg-proxmox-card border border-proxmox-border rounded-xl p-6 w-full max-w-md" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                                    <span className="text-xl">🖥️</span>
+                                    {t('connectEsxi') || 'Connect ESXi Host'}
+                                </h3>
+                                
+                                {/* Experimental warning */}
+                                <div className="p-2 bg-yellow-500/10 border border-yellow-500/30 rounded-lg mb-4 flex items-center gap-2">
+                                    <span>🧪</span>
+                                    <span className="text-xs text-yellow-400">{t('esxiExperimental') || 'ESXi integration is experimental'}</span>
+                                </div>
+                                
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiHostname') || 'ESXi Hostname/IP'}</label>
+                                        <input
+                                            type="text"
+                                            value={esxiForm.host}
+                                            onChange={e => setEsxiForm({...esxiForm, host: e.target.value})}
+                                            placeholder="192.168.1.100 oder esxi.local"
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiUsername') || 'Username'}</label>
+                                        <input
+                                            type="text"
+                                            value={esxiForm.username}
+                                            onChange={e => setEsxiForm({...esxiForm, username: e.target.value})}
+                                            placeholder="root"
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm text-gray-400 mb-2">{t('esxiPassword') || 'Password'}</label>
+                                        <input
+                                            type="password"
+                                            value={esxiForm.password}
+                                            onChange={e => setEsxiForm({...esxiForm, password: e.target.value})}
+                                            className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white"
+                                        />
+                                    </div>
+                                    
+                                    <div className="flex gap-2 justify-end pt-2">
+                                        <button
+                                            onClick={() => setShowAddEsxi(false)}
+                                            className="px-4 py-2 bg-proxmox-dark hover:bg-proxmox-hover rounded-lg"
+                                        >
+                                            {t('cancel') || 'Cancel'}
+                                        </button>
+                                        <button
+                                            onClick={connectEsxiHost}
+                                            disabled={esxiLoading || !esxiForm.host || !esxiForm.password}
+                                            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg disabled:opacity-50 flex items-center gap-2"
+                                        >
+                                            {esxiLoading && <Icons.RotateCw className="animate-spin w-4 h-4" />}
+                                            {t('connect') || 'Connect'}
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+

@@ -1,0 +1,6809 @@
+# -*- coding: utf-8 -*-
+"""
+PegaProx Database - Layer 2
+SQLite database wrapper with encryption support.
+"""
+# MK: the db stuff was the worst part of the monolith, everything was just inline sql
+
+import os
+import re
+import sys
+import json
+import time
+import logging
+import threading
+import hashlib
+import hmac
+import socket
+import base64
+import uuid
+# MK May 2026 — DB connections now go through `dbcrypto.connect()` so
+# SQLCipher kicks in automatically when available.  The legacy `sqlite3`
+# alias is kept for the Row / IntegrityError types we use in queries below.
+import sqlite3
+from pegaprox.core import dbcrypto
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+from pegaprox.constants import (
+    DATABASE_FILE, CONFIG_DIR, KEY_FILE, CONFIG_FILE, CONFIG_FILE_ENCRYPTED,
+    USERS_FILE_ENCRYPTED, AUDIT_LOG_FILE, AUDIT_LOG_FILE_ENCRYPTED,
+    SESSIONS_FILE, SESSIONS_FILE_ENCRYPTED, ALERTS_CONFIG_FILE,
+    SCHEDULED_TASKS_FILE, VM_TAGS_FILE, AFFINITY_RULES_FILE,
+    MIGRATION_HISTORY_FILE, SERVER_SETTINGS_FILE, CUSTOM_ROLES_FILE,
+    ESXI_CONFIG_FILE, STORAGE_CLUSTERS_FILE,
+)
+from pegaprox.models.tasks import balancer_cooldown, BALANCER_COOLDOWN_DEFAULT
+
+# an audit field with one of these cannot be encoded, see add_audit_entry
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+
+# Fallback tenant ID for existing users (mirrors pegaprox.utils.rbac.DEFAULT_TENANT_ID)
+# Defined here to avoid circular import: rbac imports from db
+DEFAULT_TENANT_ID = 'default'
+
+# Options of a run started by hand that a rolling update schedule carries too, added in
+# place; a schedule saved before them gets the safe value of the default
+UPDATE_SCHEDULE_RUN_COLUMNS = (
+    ('wait_for_reboot', 'INTEGER DEFAULT 1'),
+    ('pause_on_evacuation_error', 'INTEGER DEFAULT 1'),
+    ('ceph_health_gate', "TEXT DEFAULT 'off'"),
+    ('notify_channels', "TEXT DEFAULT '[]'"),
+)
+
+# Encryption imports
+ENCRYPTION_AVAILABLE = False
+LEGACY_ENCRYPTION = False
+try:
+    from cryptography.fernet import Fernet
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.backends import default_backend
+    ENCRYPTION_AVAILABLE = True
+    LEGACY_ENCRYPTION = True
+except ImportError:
+    pass
+
+# MK Sep 2026 (audit) — a pool_permissions row whose permission list is empty grants
+# nothing inside the pool, but this query returned its cluster anyway, and the #555
+# fallback in check_cluster_access turns "holds a pool grant here" into cluster reach.
+# So an emptied grant kept the door open while the UI showed no permissions at all.
+# rbac.user_has_any_pool_access already gets this right (`any(p for p in perms.values())`),
+# which is what makes the difference a bug rather than a decision. Empty is stored as
+# '[]' by the write path and as NULL/'' by older rows.
+_NON_EMPTY_GRANT = " AND permissions IS NOT NULL AND TRIM(permissions) NOT IN ('', '[]')"
+
+
+def _group_grant_spellings(group):
+    """Every spelling a pool grant might plausibly use for one directory group.
+
+    #940 — an LDAP/AD login stores memberships as full DNs
+    ("CN=PVE-Admins,OU=Groups,DC=corp,DC=local"); utils/ldap.py puts member_of straight
+    into the user's `groups`. The pool-permission dialog, meanwhile, labels its field
+    "Group Name" / "Gruppenname" in all three places it appears and the operator types
+    `PVE-Admins`. The lookup compared the whole string, so the grant never matched, the
+    pool stayed empty, and nothing anywhere raised — which is why this sat unnoticed.
+
+    Returns the value as stored plus, when it parses as a DN, its first RDN value. A
+    grant written as a DN still matches only the DN (the leaf candidate is a bare name);
+    a grant written as a bare name now matches the DN's leaf. Note the consequence: two
+    groups in different OUs sharing a CN both match a bare-name grant. That is inherent
+    to typing a bare name and is what the dialog asks for — an operator who needs them
+    separated can enter the full DN, which stays exact.
+
+    The role/tenant mapping side of LDAP is unaffected: its field is called `group_dn`
+    and compares whole strings, which is consistent with what it asks for. MK
+
+    Oct 2026 (#940) - the same for a group path as Keycloak's group mapper sends it by
+    default ("/Org/PVE-Admins"): its last segment, with the same caveat.
+    """
+    import re as _re
+    g = (group or '').strip()
+    if not g:
+        return []
+    out = [g]
+    if g.startswith('/'):
+        leaf = g.rstrip('/').rsplit('/', 1)[-1].strip()
+        if leaf and leaf.lower() != g.lower():
+            out.append(leaf)
+        return out
+    # first RDN of a DN — split on a comma that is not escaped (RFC 4514 allows "\,")
+    head = _re.split(r'(?<!\\),', g, maxsplit=1)[0].strip()
+    if '=' in head:
+        leaf = head.split('=', 1)[1].strip().replace('\\,', ',')
+        if leaf and leaf.lower() != g.lower():
+            out.append(leaf)
+    return out
+
+
+def _group_grant_keys(groups):
+    """Lowercased spellings of every group in `groups`, for matching grants in one pass."""
+    keys = set()
+    for g in groups or []:
+        if isinstance(g, str):
+            keys.update(s.lower() for s in _group_grant_spellings(g))
+    return keys
+
+
+# auth_source values whose rows carry directory groups. The groups come from the LDAP
+# result or the IdP's claims at sign-in and from nowhere else, so a local account never
+# has any - whatever the column holds, and whatever a restored backup put there.
+# MK Oct 2026 (#940)
+DIRECTORY_AUTH_SOURCES = ('ldap', 'oidc', 'entra')
+
+
+def _directory_groups(auth_source, value):
+    """The group list a user row may carry: non-empty strings, none for a local account.
+
+    `value` is the stored JSON or a list. A broken value reads as no groups - this runs
+    in every pool lookup, and one bad row must not break them for that user."""
+    if (auth_source or 'local') not in DIRECTORY_AUTH_SOURCES:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or '[]')
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [g for g in value if isinstance(g, str) and g]
+
+
+def _replay_sr_failover_state(cursor):
+    """Mark the guests a finished failover moved and no failback brought home since.
+
+    The events are replayed oldest first: a guest a failover moved is failed over until
+    a failback moved it back. A failover event keeps {vmid: {success, ...}} as its details;
+    anything else there (a pre-flight abort, a restart) moved nobody. Returns how many
+    guests it marked."""
+    rows = cursor.execute(
+        "SELECT plan_id, event_type, completed_at, details FROM site_recovery_events "
+        "WHERE event_type IN ('planned', 'emergency', 'failback') AND completed_at IS NOT NULL "
+        "AND completed_at != '' ORDER BY started_at").fetchall()
+    where = {}
+    for plan_id, kind, done, details in rows:
+        try:
+            results = json.loads(details or '{}')
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(results, dict):
+            continue
+        for vmid, res in results.items():
+            if not (str(vmid).isdigit() and isinstance(res, dict) and res.get('success') is True):
+                continue
+            if res.get('skipped'):
+                continue
+            if kind == 'failback':
+                where.pop((plan_id, int(vmid)), None)
+            else:
+                where[(plan_id, int(vmid))] = (kind, done)
+    for (plan_id, vmid), (kind, done) in where.items():
+        cursor.execute("UPDATE site_recovery_vms SET failed_over = ?, failed_over_at = ? "
+                       "WHERE plan_id = ? AND vmid = ?", (kind, done, plan_id, vmid))
+    return len(where)
+
+
+class PegaProxDB:
+    """
+    SQLite database wrapper - MK
+    
+    switched from json files because they kept corrupting when multiple
+    requests came in. wasted a whole weekend on that shit lol
+    
+    sensitive stuff (passwords etc) is encrypted, rest is plain text
+    """
+    
+    _instance = None
+    _lock = threading.Lock()
+    # the failed_over columns came in with this process and their replay waits for it to act
+    _sr_replay_owed = False
+    _sr_replay_lock = threading.Lock()
+    
+    def __new__(cls):
+        # singleton - only one db connection
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+    
+    def __init__(self):
+        if self._initialized:
+            return
+        
+        self.db_path = DATABASE_FILE
+        self.fernet = None  # old encryption, keep for migration
+        self.aesgcm = None  # new aes256
+        self.aes_key = None  # raw key for HMAC signing
+        self._conn = None
+        self._local = threading.local()
+        # MK Oct 2026 - the newest audit checkpoint, kept beside the field key
+        self._audit_anchor_file = os.path.join(CONFIG_DIR, '.pegaprox_audit_anchor.json')
+        
+        self._init_encryption()
+        self._init_db()
+        self._migrate_from_legacy()
+        # after the file migration, so rows it brought in are inside the genesis digest
+        self._ensure_audit_genesis()
+        
+        self._initialized = True
+        logging.info(f"DB initialized: {self.db_path}")
+    
+    def _init_encryption(self):
+        """setup encryption keys"""
+        # MK: upgraded to aes256 in jan 2026, old fernet stuff still works
+        if not ENCRYPTION_AVAILABLE:
+            logging.warning("no encryption available!")
+            return
+        
+        # AES-256 key file
+        aes_key_file = os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
+        
+        # Load or generate AES-256 key
+        if os.path.exists(aes_key_file):
+            # verify permissions on existing key file
+            try:
+                mode = os.stat(aes_key_file).st_mode & 0o777
+                if mode != 0o600:
+                    logging.warning(f"[SECURITY] Fixing key file permissions: {oct(mode)} → 0o600")
+                    os.chmod(aes_key_file, 0o600)
+            except Exception:
+                pass
+            with open(aes_key_file, 'rb') as f:
+                aes_key = f.read()
+            if len(aes_key) != 32:
+                # MK: this used to regenerate the key in place. A short read here means a
+                # truncated write (disk full, power cut) or a half-restored backup — and
+                # overwriting is unrecoverable: every cluster password, SSH key, BMC password
+                # and server_settings secret in the DB was sealed with the old key, and the
+                # audit chain was signed with it. Refuse to start instead, same as below; we
+                # only ever write a fresh key when there is no file at all.
+                raise RuntimeError(
+                    f"FATAL: AES key file {aes_key_file} is {len(aes_key)} bytes, expected 32. "
+                    "Restore it from backup — regenerating would permanently destroy every "
+                    "stored credential. Remove the file only if you accept re-entering them.")
+        else:
+            # Generate new 256-bit key
+            aes_key = os.urandom(32)
+            with open(aes_key_file, 'wb') as f:
+                f.write(aes_key)
+            try:
+                os.chmod(aes_key_file, 0o600)
+            except Exception as e:
+                logging.error(f"SECURITY: Could not set key file permissions: {e}")
+                raise RuntimeError(f"Cannot secure encryption key file: {e}")
+            logging.info("Generated new AES-256-GCM encryption key")
+        
+        self.aesgcm = AESGCM(aes_key)
+        self.aes_key = aes_key  # Store raw key for HMAC signing
+        
+        # Load legacy Fernet key for backwards compatibility
+        if os.path.exists(KEY_FILE):
+            try:
+                with open(KEY_FILE, 'rb') as f:
+                    fernet_key = f.read()
+                self.fernet = Fernet(fernet_key)
+                logging.debug("Loaded legacy Fernet key for migration support")
+            except Exception as e:
+                logging.warning(f"Could not load legacy Fernet key: {e}")
+        else:
+            # Generate Fernet key for potential fallback
+            fernet_key = Fernet.generate_key()
+            with open(KEY_FILE, 'wb') as f:
+                f.write(fernet_key)
+            try:
+                os.chmod(KEY_FILE, 0o600)
+            except Exception as e:
+                logging.warning(f"Could not set Fernet key file permissions: {e}")
+            self.fernet = Fernet(fernet_key)
+            logging.info("Generated legacy Fernet key (for compatibility)")
+
+        # NS Feb 2026 - refuse to start without encryption
+        if not self.aesgcm and not self.fernet:
+            raise RuntimeError("FATAL: No encryption backend available. Cannot start safely.")
+
+    def _get_connection(self):
+        """Get thread-local database connection
+        
+        NS: Using thread-local storage because SQLite connections
+        shouldn't be shared across threads. Each thread gets its own.
+        """
+        if not hasattr(self._local, 'conn') or self._local.conn is None:
+            # MK May 2026 — dbcrypto.connect() picks SQLCipher when available
+            # (full-DB AES-256 + HMAC-SHA512 at rest) and falls back to plain
+            # sqlite3 otherwise. The PRAGMA key handshake happens inside the
+            # helper, before any other query runs.
+            self._local.conn = dbcrypto.connect(
+                self.db_path,
+                check_same_thread=False,  # We handle thread safety ourselves
+                timeout=30.0
+            )
+            self._local.conn.row_factory = dbcrypto.Row
+            # Enable foreign keys
+            self._local.conn.execute("PRAGMA foreign_keys = ON")
+            # WAL mode for better concurrency (multiple readers, one writer).
+            # Note: with SQLCipher, WAL is still supported but the WAL/SHM
+            # auxiliary files are also encrypted — backups must include them.
+            self._local.conn.execute("PRAGMA journal_mode = WAL")
+        return self._local.conn
+    
+    @property
+    def conn(self):
+        return self._get_connection()
+    
+    def _init_db(self):
+        """Initialize database schema
+        
+        NS: Also sets restrictive file permissions (0600) on the database file.
+        This prevents other users on the system from reading the DB.
+        """
+        conn = self.conn
+        cursor = conn.cursor()
+        
+        # NS: Set restrictive permissions on DB file - only owner can read/write
+        # This is critical security - DB contains encrypted secrets and session data
+        try:
+            if os.path.exists(self.db_path):
+                os.chmod(self.db_path, 0o600)
+                logging.debug(f"Set database file permissions to 0600")
+        except Exception as e:
+            logging.warning(f"Could not set database file permissions: {e}")
+        
+        # Clusters table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS clusters (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                user TEXT NOT NULL,
+                pass_encrypted TEXT NOT NULL,
+                ssl_verification INTEGER DEFAULT 1,
+                migration_threshold INTEGER DEFAULT 30,
+                migration_tolerance INTEGER DEFAULT 10,
+                check_interval INTEGER DEFAULT 300,
+                auto_migrate INTEGER DEFAULT 0,
+                balance_containers INTEGER DEFAULT 0,
+                balance_local_disks INTEGER DEFAULT 0,
+                proxlb_tags_enabled INTEGER DEFAULT 0,
+                proxlb_pins_auto_migrate INTEGER DEFAULT 0,
+                proxlb_pins_strict INTEGER DEFAULT 0,
+                dry_run INTEGER DEFAULT 1,
+                enabled INTEGER DEFAULT 1,
+                ha_enabled INTEGER DEFAULT 0,
+                fallback_hosts TEXT DEFAULT '[]',
+                ssh_user TEXT DEFAULT '',
+                ssh_key_encrypted TEXT DEFAULT '',
+                ssh_port INTEGER DEFAULT 22,
+                api_port INTEGER DEFAULT 8006,
+                ha_settings TEXT DEFAULT '{}',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        
+        # Users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT DEFAULT 'viewer',
+                permissions TEXT DEFAULT '[]',
+                tenant TEXT,
+                created_at TEXT,
+                last_login TEXT,
+                password_expiry TEXT,
+                totp_secret_encrypted TEXT,
+                totp_pending_secret_encrypted TEXT,
+                totp_enabled INTEGER DEFAULT 0,
+                force_password_change INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                theme TEXT DEFAULT '',
+                language TEXT DEFAULT '',
+                ui_layout TEXT DEFAULT 'modern',
+                taskbar_auto_expand INTEGER DEFAULT 1,
+                auth_source TEXT DEFAULT 'local',
+                display_name TEXT DEFAULT '',
+                email TEXT DEFAULT '',
+                avatar_mime TEXT DEFAULT '',
+                avatar_data TEXT DEFAULT '',
+                ldap_dn TEXT DEFAULT '',
+                last_ldap_sync TEXT DEFAULT '',
+                -- MK Sep 2026: what the directory itself last granted, so a sync can take
+                -- back its OWN grants without touching anything an admin set by hand. The
+                -- August revocation fix wrote both of these into the user dict and neither
+                -- had a column, so every restart wiped them and the revocation silently
+                -- stopped working.
+                ldap_permissions TEXT DEFAULT '[]',
+                ldap_tenant TEXT DEFAULT '',
+                tenant_permissions TEXT DEFAULT '{}',
+                denied_permissions TEXT DEFAULT '[]',
+                oidc_sub TEXT DEFAULT '',
+                last_oidc_sync TEXT DEFAULT '',
+                layout_chosen INTEGER DEFAULT 0,
+                -- the user's directory / IdP groups as of the last sign-in, read by
+                -- username in the pool-grant lookups (#940)
+                directory_groups TEXT DEFAULT '[]',
+                cloud_dashboard TEXT
+            )
+        ''')
+        
+        # Sessions table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                created_at TEXT,
+                expires_at TEXT,
+                ip_address TEXT,
+                user_agent TEXT
+            )
+        ''')
+        
+        # Audit log table with HMAC integrity verification
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                user TEXT,
+                action TEXT NOT NULL,
+                details TEXT,
+                ip_address TEXT,
+                hmac_signature TEXT
+            )
+        ''')
+        
+        # Create index for audit log queries
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user)
+        ''')
+        
+        # NS: Task-User mapping table for tracking who initiated tasks
+        # This persists across server restarts and is visible to all users
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS task_users (
+                upid TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                cluster_id TEXT,
+                created_at TEXT NOT NULL
+            )
+        ''')
+        
+        # Cleanup old task_users entries (older than 24 hours)
+        cursor.execute('''
+            DELETE FROM task_users 
+            WHERE datetime(created_at) < datetime('now', '-24 hours')
+        ''')
+        
+        # Alerts table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alerts (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT,
+                node TEXT,
+                vmid INTEGER,
+                type TEXT NOT NULL,
+                threshold REAL,
+                enabled INTEGER DEFAULT 1,
+                notify_methods TEXT DEFAULT '[]',
+                cooldown INTEGER DEFAULT 300,
+                last_triggered TEXT,
+                created_at TEXT
+            )
+        ''')
+        
+        # VM ACLs table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vm_acls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                vmid TEXT NOT NULL,
+                users TEXT DEFAULT '[]',
+                permissions TEXT DEFAULT '[]',
+                inherit_role INTEGER DEFAULT 1,
+                UNIQUE(cluster_id, vmid)
+            )
+        ''')
+        # MK Jul 2026 — inherit_role was never persisted before (no column), so an
+        # ACL saved with inherit_role=False (UI "custom permissions" mode) silently
+        # became full access in user_can_access_vm. Add the column for existing DBs;
+        # default 1 (True) preserves the historical effective behaviour for rows that
+        # predate the fix — they always acted as inherit_role=True anyway.
+        try:
+            cursor.execute("PRAGMA table_info(vm_acls)")
+            _acl_cols = [c[1] for c in cursor.fetchall()]
+            if 'inherit_role' not in _acl_cols:
+                cursor.execute("ALTER TABLE vm_acls ADD COLUMN inherit_role INTEGER DEFAULT 1")
+                logging.info("Added inherit_role column to vm_acls table")
+        except Exception as _ae:
+            logging.error(f"vm_acls inherit_role column migration failed: {_ae}")
+
+        # Affinity rules table
+        # MK: added enforce column Feb 2026 - was losing this value on every restart lol
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS affinity_rules (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                vms TEXT NOT NULL DEFAULT '[]',
+                enabled INTEGER DEFAULT 1,
+                enforce INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        ''')
+        
+        # Tenants - requested on reddit
+        # Someone on Reddit asked for multi-tenancy support, turns out its
+        # pretty useful for MSPs managing multiple customers
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS tenants (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                clusters TEXT DEFAULT '[]',
+                created_at TEXT,
+                quota_max_vms INTEGER DEFAULT 0,
+                quota_max_cores INTEGER DEFAULT 0,
+                quota_max_memory_gb INTEGER DEFAULT 0,
+                quota_max_disk_gb INTEGER DEFAULT 0,
+                quota_enforcement TEXT DEFAULT 'block',
+                vmid_range_start INTEGER DEFAULT 0,
+                vmid_range_end INTEGER DEFAULT 0
+            )
+        ''')
+        # NS #502 — per-tenant quota columns for existing tenants tables (0 = unlimited)
+        try:
+            cursor.execute("PRAGMA table_info(tenants)")
+            _tcols = [c[1] for c in cursor.fetchall()]
+            # NS Sep 2026 — quota_max_disk_gb joins the family, and vmid_range_* gives a tenant its
+            # own slice of the VMID space so two tenants creating guests on a shared cluster can't
+            # land on the same id. 0 keeps the old behaviour in both cases (no cap / no range).
+            for _cn, _cd in (('quota_max_vms', 'INTEGER DEFAULT 0'),
+                             ('quota_max_cores', 'INTEGER DEFAULT 0'),
+                             ('quota_max_memory_gb', 'INTEGER DEFAULT 0'),
+                             ('quota_max_disk_gb', 'INTEGER DEFAULT 0'),
+                             ('quota_enforcement', "TEXT DEFAULT 'block'"),
+                             ('vmid_range_start', 'INTEGER DEFAULT 0'),
+                             ('vmid_range_end', 'INTEGER DEFAULT 0')):
+                if _cn not in _tcols:
+                    cursor.execute(f"ALTER TABLE tenants ADD COLUMN {_cn} {_cd}")
+                    logging.info(f"Added {_cn} column to tenants table")
+        except Exception as _qe:
+            logging.error(f"tenant quota column migration failed: {_qe}")
+        
+        # Cluster Groups - organize clusters into collapsible groups with tenant assignment
+        # NS: Jan 2026 - requested by user for better organization
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cluster_groups (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                color TEXT DEFAULT '#E86F2D',
+                tenant_id TEXT,
+                sort_order INTEGER DEFAULT 0,
+                collapsed INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+            )
+        ''')
+        
+        # Custom roles table - need composite key for name + tenant_id
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_roles (
+                name TEXT NOT NULL,
+                permissions TEXT NOT NULL DEFAULT '[]',
+                description TEXT,
+                tenant_id TEXT,
+                created_at TEXT,
+                PRIMARY KEY (name, tenant_id)
+            )
+        ''')
+        
+        # Migration: Recreate table with correct schema if needed
+        try:
+            cursor.execute("SELECT tenant_id FROM custom_roles LIMIT 1")
+        except:
+            # Old table without tenant_id - recreate
+            cursor.execute("DROP TABLE IF EXISTS custom_roles")
+            cursor.execute('''
+                CREATE TABLE custom_roles (
+                    name TEXT NOT NULL,
+                    permissions TEXT NOT NULL DEFAULT '[]',
+                    description TEXT,
+                    tenant_id TEXT,
+                    created_at TEXT,
+                    PRIMARY KEY (name, tenant_id)
+                )
+            ''')
+        
+        # Scheduled tasks table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT,
+                name TEXT NOT NULL,
+                task_type TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                config TEXT DEFAULT '{}',
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                next_run TEXT,
+                created_at TEXT
+            )
+        ''')
+        
+        # VM Tags table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vm_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                vmid INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                tag_color TEXT,
+                UNIQUE(cluster_id, vmid, tag_name)
+            )
+        ''')
+        
+        # Balancing excluded VMs table - MK Jan 2026
+        # VMs that should not be automatically migrated during load balancing
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS balancing_excluded_vms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                vmid INTEGER NOT NULL,
+                reason TEXT,
+                created_by TEXT,
+                created_at TEXT,
+                UNIQUE(cluster_id, vmid)
+            )
+        ''')
+        
+        # Migration history table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS migration_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                vmid INTEGER NOT NULL,
+                vm_name TEXT,
+                source_node TEXT NOT NULL,
+                target_node TEXT NOT NULL,
+                reason TEXT,
+                status TEXT,
+                duration_seconds REAL,
+                timestamp TEXT NOT NULL,
+                trigger_kind TEXT,
+                details TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_migration_timestamp ON migration_history(timestamp DESC)
+        ''')
+        # the balancer history pages one cluster newest first, and the trim keeps per cluster
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_migration_cluster ON migration_history(cluster_id, id)
+        ''')
+
+        # #720 — persist node maintenance so it survives a PegaProx restart.
+        # Originally SOFT (non-HA) entries only: native HA maintenance was supposed to be
+        # re-derived from PVE on each poll (#78). That re-derivation is blind on PVE 9 (see
+        # _get_native_ha_maintenance_nodes), so we persist BOTH kinds now and keep native_ha
+        # alongside — exit_maintenance_mode needs it to clear the flag upstream after a restart.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS node_maintenance (
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                entered_at TEXT NOT NULL,
+                native_ha INTEGER DEFAULT 0,
+                PRIMARY KEY (cluster_id, node)
+            )
+        ''')
+
+        # migration for DBs created before native_ha was persisted
+        try:
+            cursor.execute("PRAGMA table_info(node_maintenance)")
+            _nm_cols = [col[1] for col in cursor.fetchall()]
+            if 'native_ha' not in _nm_cols:
+                logging.info("Adding native_ha column to node_maintenance table...")
+                cursor.execute("ALTER TABLE node_maintenance ADD COLUMN native_ha INTEGER DEFAULT 0")
+        except Exception as e:
+            # #720 — do NOT swallow this. A node_maintenance table left without the native_ha
+            # column silently disables maintenance persistence (save/get raise on every call),
+            # which is the exact bug this column fixes. Fail init loudly rather than commit a
+            # half-migrated schema (review).
+            logging.error(f"node_maintenance native_ha migration failed: {e}")
+            raise
+
+        # MK Oct 2026 (#954) - the Proxmox HA rules a rolling update switched off for its run.
+        # Written before the first one is touched: after a restart nothing else knows them
+        # (a disabled rule looks like any other), and they have to be switched on again.
+        # owner: who holds it off - 'rolling', or 'maintenance:<node>' for the maintenance of
+        # one node. One rule can be held by several; it goes back on when the last one lets go.
+        # A table from before the owner was keyed on (cluster_id, rule): it is moved aside,
+        # built again with the new key, and its rows (all a rolling update's) copied over.
+        cursor.execute("PRAGMA table_info(suspended_ha_rules)")
+        _sh_cols = {col[1] for col in cursor.fetchall()}
+        _sh_keyed = bool(_sh_cols) and 'owner' not in _sh_cols
+        if _sh_keyed:
+            cursor.execute('DROP TABLE IF EXISTS suspended_ha_rules_keyed')
+            cursor.execute('ALTER TABLE suspended_ha_rules RENAME TO suspended_ha_rules_keyed')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS suspended_ha_rules (
+                cluster_id TEXT NOT NULL,
+                rule TEXT NOT NULL,
+                rule_type TEXT NOT NULL,
+                suspended_at TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT 'rolling',
+                PRIMARY KEY (cluster_id, rule, owner)
+            )
+        ''')
+        if _sh_keyed:
+            cursor.execute("INSERT OR IGNORE INTO suspended_ha_rules (cluster_id, rule, rule_type, suspended_at, owner) "
+                           "SELECT cluster_id, rule, rule_type, suspended_at, 'rolling' FROM suspended_ha_rules_keyed")
+            cursor.execute('DROP TABLE suspended_ha_rules_keyed')
+
+        # MK Oct 2026 - rolling updates, so a restart or another instance taking over finds a
+        # run again (core/rolling_runs.py). state: everything but the log, as JSON. Shared
+        # (core/ha.py SYNC_TABLES); logs and updated_at change with every log line and step no
+        # config version.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS rolling_update_runs (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT '{}',
+                logs TEXT NOT NULL DEFAULT '[]',
+                started_by TEXT,
+                started_at TEXT,
+                updated_at TEXT,
+                completed_at TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_rolling_runs_cluster '
+                       'ON rolling_update_runs(cluster_id, started_at)')
+
+        # Server settings table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS server_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        
+        # User favorites table - NS Jan 2026
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_favorites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                cluster_id TEXT,
+                vmid INTEGER,
+                vm_type TEXT,
+                vm_name TEXT,
+                added_at TEXT,
+                kind TEXT NOT NULL DEFAULT 'vm',
+                node TEXT NOT NULL DEFAULT ''
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(username)
+        ''')
+        # MK Oct 2026 - a favorite is a VM, a node or a cluster (api/search.py). The table
+        # had columns for a VM only; its rows from before are VMs, which is what the two
+        # defaults say, so they read the same before and after (a sync hashes them alike).
+        try:
+            cursor.execute("PRAGMA table_info(user_favorites)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'kind' not in columns:
+                cursor.execute("ALTER TABLE user_favorites ADD COLUMN kind TEXT NOT NULL DEFAULT 'vm'")
+            if 'node' not in columns:
+                cursor.execute("ALTER TABLE user_favorites ADD COLUMN node TEXT NOT NULL DEFAULT ''")
+            # One row per user and thing. Nodes and clusters have no vmid, and two NULLs
+            # never collide in a unique index, hence the IFNULL.
+            cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_favorites_unique'")
+            if not cursor.fetchone():
+                cursor.execute('''
+                    DELETE FROM user_favorites WHERE id NOT IN (
+                        SELECT MIN(id) FROM user_favorites
+                        GROUP BY username, kind, cluster_id, IFNULL(vmid, -1), node)
+                ''')
+                cursor.execute('''
+                    CREATE UNIQUE INDEX idx_favorites_unique
+                    ON user_favorites(username, kind, cluster_id, IFNULL(vmid, -1), node)
+                ''')
+        except Exception as e:
+            logging.error(f"user_favorites migration failed, favorites stay unavailable: {e}")
+        
+        # Scheduled actions table - NS Jan 2026
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT,
+                vmid INTEGER,
+                vm_type TEXT DEFAULT 'qemu',
+                action TEXT NOT NULL,
+                schedule_type TEXT NOT NULL,
+                schedule_time TEXT,
+                schedule_days TEXT,
+                schedule_date TEXT,
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                name TEXT,
+                created_by TEXT,
+                created_at TEXT
+            )
+        ''')
+        # MK Apr 2026 (#337): existing deployments are missing name + vm_type columns.
+        # Both were in the Python in-memory model but never persisted, so edits
+        # dropped both back to defaults on reload. Migrate in-place.
+        try:
+            cursor.execute("PRAGMA table_info(scheduled_actions)")
+            cols = {row['name'] for row in cursor.fetchall()}
+            if 'name' not in cols:
+                cursor.execute("ALTER TABLE scheduled_actions ADD COLUMN name TEXT")
+            if 'vm_type' not in cols:
+                cursor.execute("ALTER TABLE scheduled_actions ADD COLUMN vm_type TEXT DEFAULT 'qemu'")
+        except Exception as _migr_e:
+            logging.warning(f"scheduled_actions migration skipped: {_migr_e}")
+        
+        # Update schedules table - MK Jan 2026
+        # For automatic rolling updates
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS update_schedules (
+                cluster_id TEXT PRIMARY KEY,
+                enabled INTEGER DEFAULT 0,
+                schedule_type TEXT DEFAULT 'recurring',
+                day TEXT DEFAULT 'sunday',
+                time TEXT DEFAULT '03:00',
+                include_reboot INTEGER DEFAULT 1,
+                skip_evacuation INTEGER DEFAULT 0,
+                skip_up_to_date INTEGER DEFAULT 1,
+                evacuation_timeout INTEGER DEFAULT 1800,
+                reboot_timeout INTEGER DEFAULT 600,
+                last_run TEXT,
+                next_run TEXT,
+                created_by TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                migrate_templates INTEGER DEFAULT 0,
+                relax_anti_affinity INTEGER DEFAULT 0
+            )
+        ''')
+        # MK #630 — backfill reboot_timeout on schedule tables created before the column existed.
+        try:
+            cursor.execute("PRAGMA table_info(update_schedules)")
+            _us_cols = {r[1] for r in cursor.fetchall()}
+            if 'reboot_timeout' not in _us_cols:
+                cursor.execute("ALTER TABLE update_schedules ADD COLUMN reboot_timeout INTEGER DEFAULT 600")
+            # MK Oct 2026 (#763, #954) - the two evacuation options; off on an older schedule
+            for _col in ('migrate_templates', 'relax_anti_affinity'):
+                if _col not in _us_cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+            for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                if _col not in _us_cols:
+                    cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
+        except Exception as _e:
+            logging.warning(f"update_schedules reboot_timeout migration skipped: {_e}")
+
+        # Metrics history table - NS Jan 2026
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS metrics_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                data TEXT NOT NULL
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics_history(timestamp DESC)
+        ''')
+        # MK Oct 2026 - what a snapshot holds sits in parts beside it (background/metrics_store.py)
+        from pegaprox.background import metrics_store
+        metrics_store.ensure_schema(cursor)
+        
+        # Custom Scripts table - MK Jan 2026
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS custom_scripts (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT DEFAULT '',
+                type TEXT DEFAULT 'bash',
+                content TEXT NOT NULL,
+                target_nodes TEXT DEFAULT 'all',
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                last_status TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_scripts_cluster ON custom_scripts(cluster_id)
+        ''')
+        
+        # NS: Additional tables for full JSON migration - Jan 2026
+        # MK: finally got around to migrating all the random json files to sqlite
+        # took way longer than expected but now everything is in one place
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cluster_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                config TEXT DEFAULT '{}',
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(cluster_id, alert_type)
+            )
+        ''')
+
+        # #609 phase 3 — per-node out-of-band BMC (Redfish) endpoints. The password
+        # column holds an aes256: ciphertext (via _encrypt), never plaintext.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS node_bmc_endpoints (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                bmc_host TEXT NOT NULL,
+                bmc_user TEXT DEFAULT '',
+                bmc_password_encrypted TEXT DEFAULT '',
+                bmc_verify_ssl INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(cluster_id, node)
+            )
+        ''')
+
+        # MK Oct 2026 (#1136) - a root password of one node, for clusters whose nodes do not
+        # share one. Sealed like clusters.pass_encrypted. A row without a password only holds
+        # the last login check of that node (core/node_creds.py).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS cluster_node_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                node TEXT NOT NULL,
+                password_encrypted TEXT DEFAULT '',
+                updated_by TEXT DEFAULT '',
+                updated_at TEXT,
+                address TEXT DEFAULT '',
+                check_status TEXT DEFAULT '',
+                check_detail TEXT DEFAULT '',
+                check_credential TEXT DEFAULT '',
+                checked_at TEXT,
+                UNIQUE(cluster_id, node)
+            )
+        ''')
+
+        # NS #501 Jun 2026 — persisted active (fired) alert instances for ack +
+        # escalation tracking. The in-memory cooldown map only deduped sends; this
+        # records each ongoing incident so the UI can acknowledge it and the loop
+        # can escalate unacked ones. last_fired_at is refreshed on every fire → a
+        # row that stops getting refreshed (~2x cooldown) is auto-resolved.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS active_alerts (
+                id TEXT PRIMARY KEY,
+                alert_key TEXT NOT NULL,
+                alert_id TEXT,
+                cluster_id TEXT,
+                metric TEXT,
+                target_type TEXT,
+                target_id TEXT,
+                target_name TEXT,
+                severity TEXT DEFAULT 'warning',
+                message TEXT,
+                current_value REAL,
+                threshold REAL,
+                operator TEXT,
+                triggered_at TEXT,
+                last_fired_at TEXT,
+                acked_at TEXT,
+                acked_by TEXT,
+                escalation_step INTEGER DEFAULT 0,
+                last_escalated_at TEXT,
+                resolved_at TEXT,
+                resolved_by TEXT,
+                object_key TEXT
+            )
+        ''')
+        # MK Oct 2026 - object_key: what an event incident is about (a task, a Ceph
+        # cluster, a replication job), see background/alert_events.py
+        cursor.execute("PRAGMA table_info(active_alerts)")
+        if 'object_key' not in [col[1] for col in cursor.fetchall()]:
+            cursor.execute("ALTER TABLE active_alerts ADD COLUMN object_key TEXT")
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_unresolved ON active_alerts(resolved_at)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_key ON active_alerts(alert_key)')
+        # a mute holds back what a rule, an object or both would send, until it runs out.
+        # Shared configuration (core/ha.py SYNC_TABLES); only the active reads it to send.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alert_mutes (
+                id TEXT PRIMARY KEY,
+                cluster_id TEXT NOT NULL,
+                rule_id TEXT NOT NULL DEFAULT '',
+                object_key TEXT NOT NULL DEFAULT '',
+                object_label TEXT,
+                until TEXT NOT NULL,
+                reason TEXT,
+                created_by TEXT,
+                created_at TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_alert_mutes_cluster ON alert_mutes(cluster_id)')
+
+        # LW: ESXi integration was a pain, but people kept asking for it
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS esxi_storages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                host TEXT NOT NULL,
+                username TEXT,
+                password_encrypted TEXT,
+                datastore TEXT,
+                enabled INTEGER DEFAULT 1,
+                last_sync TEXT,
+                config TEXT DEFAULT '{}'
+            )
+        ''')
+        
+        # NS: storage clusters for ceph/gluster/zfs pools shared across nodes
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS storage_clusters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                storage_type TEXT DEFAULT 'ceph',
+                nodes TEXT DEFAULT '[]',
+                config TEXT DEFAULT '{}',
+                enabled INTEGER DEFAULT 1,
+                UNIQUE(cluster_id, name)
+            )
+        ''')
+        
+        # MK: Pool Permissions - Jan 2026
+        # Store permissions for Proxmox resource pools
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pool_permissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                cluster_id TEXT NOT NULL,
+                pool_id TEXT NOT NULL,
+                subject_type TEXT NOT NULL,
+                subject_id TEXT NOT NULL,
+                permissions TEXT DEFAULT '[]',
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE(cluster_id, pool_id, subject_type, subject_id)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_pool_perms_cluster ON pool_permissions(cluster_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_pool_perms_pool ON pool_permissions(cluster_id, pool_id)
+        ''')
+        # NS: Feb 2026 - Proxmox Backup Server connections
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS pbs_servers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER DEFAULT 8007,
+                user TEXT NOT NULL,
+                pass_encrypted TEXT DEFAULT '',
+                api_token_id TEXT DEFAULT '',
+                api_token_secret_encrypted TEXT DEFAULT '',
+                fingerprint TEXT DEFAULT '',
+                ssl_verify INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                linked_clusters TEXT DEFAULT '[]',
+                notes TEXT DEFAULT '',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        # NS: Feb 2026 - VMware/vCenter integration
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS vmware_servers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER DEFAULT 443,
+                username TEXT NOT NULL,
+                pass_encrypted TEXT DEFAULT '',
+                server_type TEXT DEFAULT 'vcenter',
+                ssl_verify INTEGER DEFAULT 0,
+                enabled INTEGER DEFAULT 1,
+                linked_clusters TEXT DEFAULT '[]',
+                notes TEXT DEFAULT '',
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
+        # LW: Feb 2026 - API Tokens for programmatic access without sessions
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                token_prefix TEXT NOT NULL,
+                username TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT DEFAULT 'viewer',
+                permissions TEXT DEFAULT '[]',
+                expires_at TEXT,
+                last_used_at TEXT,
+                last_used_ip TEXT,
+                created_at TEXT NOT NULL,
+                revoked INTEGER DEFAULT 0
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(username)
+        ''')
+
+        # NS Apr 2026 — WebAuthn / FIDO2 hardware token credentials
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS webauthn_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                credential_id BLOB NOT NULL UNIQUE,
+                public_key BLOB NOT NULL,
+                sign_count INTEGER DEFAULT 0,
+                transports TEXT DEFAULT '',
+                aaguid TEXT DEFAULT '',
+                name TEXT NOT NULL,
+                user_handle BLOB NOT NULL,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                last_used_ip TEXT
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_webauthn_user ON webauthn_credentials(username)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_webauthn_cred ON webauthn_credentials(credential_id)')
+        
+        # Schema migrations for existing databases
+        # Add password_salt column if it doesn't exist (for databases created before this fix)
+        try:
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'password_salt' not in columns:
+                logging.info("Adding password_salt column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN password_salt TEXT DEFAULT ''")
+                    logging.info("Added password_salt column to users table")
+                    
+                    # Force re-migration of users to populate password_salt
+                    logging.info("Will re-migrate users from legacy files...")
+                    conn.commit()
+                    self._force_remigrate_users = True
+                except Exception as e:
+                    logging.error(f"Failed to add password_salt column: {e}")
+            
+            # user prefs columns
+            if 'theme' not in columns:
+                logging.info("Adding theme column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN theme TEXT DEFAULT ''")
+                    logging.info("Added theme column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add theme column: {e}")
+            
+            if 'language' not in columns:
+                logging.info("Adding language column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT ''")
+                    logging.info("Added language column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add language column: {e}")
+            
+            if 'ui_layout' not in columns:
+                logging.info("Adding ui_layout column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN ui_layout TEXT DEFAULT 'modern'")
+                    logging.info("Added ui_layout column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add ui_layout column: {e}")
+            
+            # NS: Add enabled column if missing (user disable feature)
+            if 'enabled' not in columns:
+                logging.info("Adding enabled column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN enabled INTEGER DEFAULT 1")
+                    logging.info("Added enabled column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add enabled column: {e}")
+            
+            # MK: Add totp_pending_secret_encrypted column for 2FA setup
+            if 'totp_pending_secret_encrypted' not in columns:
+                logging.info("Adding totp_pending_secret_encrypted column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN totp_pending_secret_encrypted TEXT DEFAULT ''")
+                    logging.info("Added totp_pending_secret_encrypted column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add totp_pending_secret_encrypted column: {e}")
+            
+            # NS: Add taskbar_auto_expand column for user preferences - Feb 2026
+            if 'taskbar_auto_expand' not in columns:
+                logging.info("Adding taskbar_auto_expand column to users table...")
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN taskbar_auto_expand INTEGER DEFAULT 1")
+                    logging.info("Added taskbar_auto_expand column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add taskbar_auto_expand column: {e}")
+            
+            # LW: Feb 2026 - LDAP auth fields
+            if 'auth_source' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN auth_source TEXT DEFAULT 'local'")
+                    logging.info("Added auth_source column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add auth_source column: {e}")
+            
+            if 'display_name' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''")
+                    logging.info("Added display_name column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add display_name column: {e}")
+            
+            if 'email' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN email TEXT DEFAULT ''")
+                    logging.info("Added email column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add email column: {e}")
+
+            if 'avatar_mime' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN avatar_mime TEXT DEFAULT ''")
+                    logging.info("Added avatar_mime column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add avatar_mime column: {e}")
+
+            if 'avatar_data' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN avatar_data TEXT DEFAULT ''")
+                    logging.info("Added avatar_data column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add avatar_data column: {e}")
+            
+            if 'ldap_dn' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN ldap_dn TEXT DEFAULT ''")
+                    logging.info("Added ldap_dn column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add ldap_dn column: {e}")
+            
+            for _col, _decl in (('ldap_permissions', "TEXT DEFAULT '[]'"),
+                                ('ldap_tenant', "TEXT DEFAULT ''")):
+                if _col not in columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE users ADD COLUMN {_col} {_decl}")
+                        logging.info(f"Added {_col} column to users table")
+                    except Exception as e:
+                        logging.error(f"Failed to add {_col} column: {e}")
+
+            if 'last_ldap_sync' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN last_ldap_sync TEXT DEFAULT ''")
+                    logging.info("Added last_ldap_sync column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add last_ldap_sync column: {e}")
+            
+            # NS: Feb 2026 - OIDC and tenant permission fields
+            if 'tenant_permissions' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN tenant_permissions TEXT DEFAULT '{}'")
+                    logging.info("Added tenant_permissions column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add tenant_permissions column: {e}")
+            
+            if 'denied_permissions' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN denied_permissions TEXT DEFAULT '[]'")
+                    logging.info("Added denied_permissions column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add denied_permissions column: {e}")
+            
+            if 'oidc_sub' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN oidc_sub TEXT DEFAULT ''")
+                    logging.info("Added oidc_sub column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add oidc_sub column: {e}")
+            
+            if 'last_oidc_sync' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN last_oidc_sync TEXT DEFAULT ''")
+                    logging.info("Added last_oidc_sync column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add last_oidc_sync column: {e}")
+
+            if 'layout_chosen' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN layout_chosen INTEGER DEFAULT 0")
+                    logging.info("Added layout_chosen column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add layout_chosen column: {e}")
+
+            # MK Oct 2026 (#940) - the groups an LDAP/OIDC sign-in saw. Without a column
+            # user['groups'] was never stored, so a pool grant on a group matched nobody.
+            if 'directory_groups' not in columns:
+                try:
+                    cursor.execute("ALTER TABLE users ADD COLUMN directory_groups TEXT DEFAULT '[]'")
+                    logging.info("Added directory_groups column to users table")
+                except Exception as e:
+                    logging.error(f"Failed to add directory_groups column: {e}")
+
+        except Exception as e:
+            logging.error(f"Error checking users schema: {e}")
+        
+        # Schema migration for clusters table - add group_id
+        try:
+            cursor.execute("PRAGMA table_info(clusters)")
+            cluster_columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'group_id' not in cluster_columns:
+                logging.info("Adding group_id column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN group_id TEXT DEFAULT NULL")
+                    logging.info("Added group_id column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add group_id column: {e}")
+            
+            if 'display_name' not in cluster_columns:
+                logging.info("Adding display_name column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN display_name TEXT DEFAULT ''")
+                    logging.info("Added display_name column to clusters table for custom naming")
+                except Exception as e:
+                    logging.error(f"Failed to add display_name column: {e}")
+            
+            # MK: Add sort_order for consistent cluster ordering in sidebar
+            if 'sort_order' not in cluster_columns:
+                logging.info("Adding sort_order column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN sort_order INTEGER DEFAULT 0")
+                    logging.info("Added sort_order column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add sort_order column: {e}")
+            
+            # LW: Add excluded_nodes for node exclusion from balancing (like ProxLB)
+            if 'excluded_nodes' not in cluster_columns:
+                logging.info("Adding excluded_nodes column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN excluded_nodes TEXT DEFAULT '[]'")
+                    logging.info("Added excluded_nodes column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add excluded_nodes column: {e}")
+
+            # MK Jul 2026 (#426) — opt-in gate for driving placement/affinity from
+            # ProxLB-convention VM tags (plb_affinity_*, plb_anti_affinity_*,
+            # plb_ignore_*, plb_pin_*). Off by default = zero behaviour change.
+            if 'proxlb_tags_enabled' not in cluster_columns:
+                logging.info("Adding proxlb_tags_enabled column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_tags_enabled INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_tags_enabled column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_tags_enabled column: {e}")
+
+            # A plb_pin_ tag is only a veto on proposed moves - it never pulls a
+            # guest back to its pinned node. Reconciliation does, and like every
+            # other autonomous move it stays off until the operator asks for it.
+            if 'proxlb_pins_auto_migrate' not in cluster_columns:
+                logging.info("Adding proxlb_pins_auto_migrate column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_pins_auto_migrate INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_pins_auto_migrate column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_pins_auto_migrate column: {e}")
+
+            # A pin ranks evacuation targets; it does not veto the drain, because a
+            # guest left behind on a node that is about to reboot is the worse
+            # outcome. Operators whose pins are hard constraints (licensing, PCI
+            # passthrough, local disks) turn this on to get the old veto back.
+            if 'proxlb_pins_strict' not in cluster_columns:
+                logging.info("Adding proxlb_pins_strict column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN proxlb_pins_strict INTEGER DEFAULT 0")
+                    logging.info("Added proxlb_pins_strict column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add proxlb_pins_strict column: {e}")
+
+            # MK Feb 2026: Add smbios_autoconfig for per-cluster SMBIOS settings
+            if 'smbios_autoconfig' not in cluster_columns:
+                logging.info("Adding smbios_autoconfig column to clusters table...")
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN smbios_autoconfig TEXT DEFAULT '{}'")
+                    logging.info("Added smbios_autoconfig column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add smbios_autoconfig column: {e}")
+
+            # NS Mar 2026: API token fields for 2FA-safe REST auth (#110)
+            if 'api_token_user' not in cluster_columns:
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN api_token_user TEXT DEFAULT ''")
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN api_token_secret_encrypted TEXT DEFAULT ''")
+                    logging.info("Added api_token columns to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add api_token columns: {e}")
+
+            # MK Mar 2026: cluster_type for XCP-ng support
+            if 'cluster_type' not in cluster_columns:
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN cluster_type TEXT DEFAULT 'proxmox'")
+                    logging.info("Added cluster_type column to clusters table")
+                except Exception as e:
+                    logging.error(f"Failed to add cluster_type column: {e}")
+
+            if 'migration_tolerance' not in cluster_columns:
+                try:
+                    cursor.execute("ALTER TABLE clusters ADD COLUMN migration_tolerance INTEGER DEFAULT 10")
+                except Exception:
+                    pass
+
+            # NS May 2026 (#364) — these load-balancer settings were settable via
+            # the API but never persisted to the DB, so they reverted to default
+            # within seconds of a save. Adding the columns + including them in
+            # save_cluster / get_all_clusters fixes the revert behaviour.
+            for col_name, col_def in [
+                ('predictive_balancing', "INTEGER DEFAULT 0"),
+                ('predictive_threshold', "REAL DEFAULT 0.0"),
+                ('balance_cpu_weight', "REAL DEFAULT 1.0"),
+                ('balance_mem_weight', "REAL DEFAULT 1.0"),
+                ('balance_io_weight', "REAL DEFAULT 1.0"),
+                ('cpu_baseline', "TEXT DEFAULT ''"),
+                ('vnc_tunnel', "INTEGER DEFAULT 0"),
+                # MK Sep 2026 (#941) — an operator-facing off switch for SSH to this
+                # cluster's nodes. A cluster with no usable SSH credential is already
+                # refused without this; the flag is for the site that HAS a key stored
+                # and still wants no SSH from the PegaProx host at all.
+                ('ssh_disabled', "INTEGER DEFAULT 0"),
+                ('backup_sla_max_age_hours', "INTEGER DEFAULT 0"),
+                # MK May 2026 — Proxmox API port override (default 8006). Direct
+                # TLS only — we don't support reverse-proxied PVE by design.
+                ('api_port', "INTEGER DEFAULT 8006"),
+                # MK May 2026 — worldmap location (per-cluster). NULL lat/lon
+                # means "not configured" → cluster won't be plotted on the map.
+                # location_label is a human-readable hint ("Frankfurt DC1").
+                ('latitude', "REAL DEFAULT NULL"),
+                ('longitude', "REAL DEFAULT NULL"),
+                ('location_label', "TEXT DEFAULT ''"),
+                # MK Aug 2026 (#689) — optional FQDN suffix for "Open in Proxmox" node links.
+                # e.g. "example.local" turns pve01 → https://pve01.example.local:8006. Empty = off.
+                ('node_ui_suffix', "TEXT DEFAULT ''"),
+                # seconds the balancer leaves a guest alone after moving it (was a fixed 900)
+                ('migration_cooldown', "INTEGER DEFAULT 900"),
+                # MK Oct 2026 - CIDR the remote migrations into this cluster dial its nodes in.
+                # Empty = off, the management host as before (core/transfer_net.py)
+                ('transfer_network', "TEXT DEFAULT ''"),
+            ]:
+                if col_name not in cluster_columns:
+                    try:
+                        cursor.execute(f"ALTER TABLE clusters ADD COLUMN {col_name} {col_def}")
+                        logging.info(f"Added {col_name} column to clusters table")
+                    except Exception as e:
+                        logging.error(f"Failed to add {col_name} column: {e}")
+
+        except Exception as e:
+            logging.error(f"Error checking clusters schema: {e}")
+
+        # NS Apr 2026: SSH creds for PBS — needed for running apt-get upgrade on PBS host
+        try:
+            cursor.execute("PRAGMA table_info(pbs_servers)")
+            pbs_cols = [c[1] for c in cursor.fetchall()]
+            for col_name, col_def in [
+                ('ssh_user', 'TEXT DEFAULT \'\''),
+                ('ssh_port', 'INTEGER DEFAULT 22'),
+                ('ssh_key_encrypted', 'TEXT DEFAULT \'\''),
+            ]:
+                if col_name not in pbs_cols:
+                    try:
+                        cursor.execute(f"ALTER TABLE pbs_servers ADD COLUMN {col_name} {col_def}")
+                        logging.info(f"Added {col_name} column to pbs_servers")
+                    except Exception as e:
+                        logging.debug(f"Could not add {col_name}: {e}")
+        except Exception as e:
+            logging.debug(f"PBS schema migration skipped: {e}")
+        
+        # Add HMAC signature column to audit_log for integrity verification (Jan 2026)
+        try:
+            cursor.execute("PRAGMA table_info(audit_log)")
+            audit_columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'hmac_signature' not in audit_columns:
+                logging.info("Adding hmac_signature column to audit_log table for integrity verification...")
+                try:
+                    cursor.execute("ALTER TABLE audit_log ADD COLUMN hmac_signature TEXT DEFAULT ''")
+                    logging.info("Added hmac_signature column to audit_log table")
+                except Exception as e:
+                    logging.error(f"Failed to add hmac_signature column: {e}")
+        except Exception as e:
+            logging.error(f"Error checking audit_log schema: {e}")
+        
+        # MK: enforce was never persisted, value got lost on every restart
+        try:
+            cursor.execute("PRAGMA table_info(affinity_rules)")
+            affinity_columns = [col[1] for col in cursor.fetchall()]
+
+            if 'enforce' not in affinity_columns:
+                logging.info("Adding enforce column to affinity_rules table...")
+                try:
+                    cursor.execute("ALTER TABLE affinity_rules ADD COLUMN enforce INTEGER DEFAULT 0")
+                    logging.info("Added enforce column to affinity_rules table")
+                except Exception as e:
+                    logging.error(f"Failed to add enforce column: {e}")
+        except Exception as e:
+            logging.error(f"Error checking affinity_rules schema: {e}")
+
+        # what started a move (the balancer, and which of its rules) and the
+        # numbers behind the reason, so the history can be filtered and worded in the UI
+        try:
+            cursor.execute("PRAGMA table_info(migration_history)")
+            mh_columns = [col[1] for col in cursor.fetchall()]
+            for col_name in ('trigger_kind', 'details'):
+                if col_name not in mh_columns:
+                    cursor.execute(f"ALTER TABLE migration_history ADD COLUMN {col_name} TEXT")
+        except Exception as e:
+            logging.error(f"Error checking migration_history schema: {e}")
+
+        # MK: Migration - create balancing_excluded_vms table if not exists
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS balancing_excluded_vms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    reason TEXT,
+                    created_by TEXT,
+                    created_at TEXT,
+                    UNIQUE(cluster_id, vmid)
+                )
+            ''')
+            logging.info("Ensured balancing_excluded_vms table exists")
+        except Exception as e:
+            logging.error(f"Error creating balancing_excluded_vms table: {e}")
+        
+        # NS: Pool exclusion from auto-balancing
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS balancing_excluded_pools (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    pool_name TEXT NOT NULL,
+                    reason TEXT,
+                    created_by TEXT,
+                    created_at TEXT,
+                    UNIQUE(cluster_id, pool_name)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating balancing_excluded_pools table: {e}")
+
+        # MK: Migration - create update_schedules table if not exists
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS update_schedules (
+                    cluster_id TEXT PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    schedule_type TEXT DEFAULT 'recurring',
+                    day TEXT DEFAULT 'sunday',
+                    time TEXT DEFAULT '03:00',
+                    include_reboot INTEGER DEFAULT 1,
+                    skip_evacuation INTEGER DEFAULT 0,
+                    skip_up_to_date INTEGER DEFAULT 1,
+                    evacuation_timeout INTEGER DEFAULT 1800,
+                    reboot_timeout INTEGER DEFAULT 600,
+                    last_run TEXT,
+                    next_run TEXT,
+                    created_by TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    migrate_templates INTEGER DEFAULT 0,
+                    relax_anti_affinity INTEGER DEFAULT 0
+                )
+            ''')
+            try:
+                cursor.execute("PRAGMA table_info(update_schedules)")
+                _us_cols2 = {r[1] for r in cursor.fetchall()}
+                if 'reboot_timeout' not in _us_cols2:
+                    cursor.execute("ALTER TABLE update_schedules ADD COLUMN reboot_timeout INTEGER DEFAULT 600")
+                for _col in ('migrate_templates', 'relax_anti_affinity'):   # #763, #954
+                    if _col not in _us_cols2:
+                        cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} INTEGER DEFAULT 0")
+                for _col, _decl in UPDATE_SCHEDULE_RUN_COLUMNS:
+                    if _col not in _us_cols2:
+                        cursor.execute(f"ALTER TABLE update_schedules ADD COLUMN {_col} {_decl}")
+            except Exception as _e2:
+                logging.warning(f"update_schedules reboot_timeout migration skipped: {_e2}")
+            logging.info("Ensured update_schedules table exists")
+        except Exception as e:
+            logging.error(f"Error creating update_schedules table: {e}")
+
+        # NS: Feb 2026 - cross-cluster LB settings for cluster groups
+        # allows automatic VM migration between clusters in the same group
+        try:
+            cursor.execute("PRAGMA table_info(cluster_groups)")
+            group_cols = [col[1] for col in cursor.fetchall()]
+
+            if 'cross_cluster_lb_enabled' not in group_cols:
+                logging.info("Adding cross-cluster LB columns to cluster_groups...")
+                for col_def in [
+                    "cross_cluster_lb_enabled INTEGER DEFAULT 0",
+                    "cross_cluster_threshold INTEGER DEFAULT 30",
+                    "cross_cluster_interval INTEGER DEFAULT 600",
+                    "cross_cluster_dry_run INTEGER DEFAULT 1",
+                    "cross_cluster_target_storage TEXT DEFAULT ''",
+                    "cross_cluster_target_bridge TEXT DEFAULT 'vmbr0'",
+                    "cross_cluster_max_migrations INTEGER DEFAULT 1",
+                    "cross_cluster_last_run TEXT DEFAULT ''",
+                ]:
+                    try:
+                        cursor.execute(f"ALTER TABLE cluster_groups ADD COLUMN {col_def}")
+                    except:
+                        pass  # column might already exist from partial migration
+                logging.info("Added cross-cluster LB columns to cluster_groups")
+
+            # NS: Feb 2026 - container balancing toggle for cross-cluster LB
+            if 'cross_cluster_include_containers' not in group_cols:
+                try:
+                    cursor.execute("ALTER TABLE cluster_groups ADD COLUMN cross_cluster_include_containers INTEGER DEFAULT 0")
+                    logging.info("Added cross_cluster_include_containers column to cluster_groups")
+                except:
+                    pass
+        except Exception as e:
+            logging.error(f"Error adding cross-cluster LB columns: {e}")
+
+        # MK: Feb 2026 - cross-cluster replication jobs (snapshot-based DR)
+        # native Proxmox replication only works within a cluster, this bridges clusters
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cross_cluster_replications (
+                    id TEXT PRIMARY KEY,
+                    source_cluster TEXT NOT NULL,
+                    target_cluster TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    vm_type TEXT DEFAULT 'qemu',
+                    schedule TEXT DEFAULT '0 */6 * * *',
+                    retention INTEGER DEFAULT 3,
+                    target_storage TEXT DEFAULT '',
+                    target_bridge TEXT DEFAULT 'vmbr0',
+                    target_node TEXT DEFAULT '',
+                    enabled INTEGER DEFAULT 1,
+                    last_run TEXT,
+                    last_status TEXT DEFAULT '',
+                    last_error TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            logging.info("Ensured cross_cluster_replications table exists")
+        except Exception as e:
+            logging.error(f"Error creating cross_cluster_replications table: {e}")
+
+        # NS: Mar 2026 - add target_node col for same-cluster snapshot replication (#103)
+        try:
+            cols = [row[1] for row in cursor.execute("PRAGMA table_info(cross_cluster_replications)").fetchall()]
+            if 'target_node' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_node TEXT DEFAULT ''")
+                logging.info("Added target_node column to cross_cluster_replications")
+            # MK Jun 2026 (#552 @helppp) — let the operator pin the replica's VMID
+            # (keeps src/replica IDs in sync) and optionally tear the replica VM down
+            # when the job is removed, instead of orphaning a fresh VMID every recreate.
+            if 'target_vmid' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN target_vmid INTEGER")
+                logging.info("Added target_vmid column to cross_cluster_replications")
+            if 'delete_target' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN delete_target INTEGER DEFAULT 0")
+                logging.info("Added delete_target column to cross_cluster_replications")
+            # NS Jul 2026 (#174 aderumier) — opt-in incremental replication for
+            # RBD/ZFS. `mode`='full' keeps the clone+remote-migrate flow; 'incremental'
+            # ships only the snapshot delta when the VM's disks are rbd/zfspool on both
+            # sides. `last_snapshot` is the common base snapshot the next delta diffs from.
+            if 'mode' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN mode TEXT DEFAULT 'full'")
+                logging.info("Added mode column to cross_cluster_replications")
+            if 'last_snapshot' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_snapshot TEXT DEFAULT ''")
+                logging.info("Added last_snapshot column to cross_cluster_replications")
+            # MK Oct 2026 - last_run is written by every run, a failed one too; the RPO alert
+            # needs the last one that went through. What is known of it so far: last_run of
+            # a job whose last run was fine, else the newest 'succeeded' in the audit log
+            if 'last_ok_at' not in cols:
+                cursor.execute("ALTER TABLE cross_cluster_replications ADD COLUMN last_ok_at TEXT")
+                cursor.execute("UPDATE cross_cluster_replications SET last_ok_at = last_run "
+                               "WHERE last_status = 'ok' AND last_run IS NOT NULL")
+                pending = [r[0] for r in cursor.execute(
+                    "SELECT id FROM cross_cluster_replications WHERE last_ok_at IS NULL").fetchall()]
+                if pending:
+                    found = {}
+                    head, tail = 'xcrepl job ', ' succeeded'
+                    for details, at in cursor.execute(
+                            "SELECT details, MAX(timestamp) FROM audit_log "
+                            "WHERE action = 'replication.completed' GROUP BY details").fetchall():
+                        details = str(details or '')
+                        if details.startswith(head) and details.endswith(tail):
+                            found[details[len(head):-len(tail)]] = at
+                    cursor.executemany("UPDATE cross_cluster_replications SET last_ok_at = ? WHERE id = ?",
+                                       [(found[j], j) for j in pending if j in found])
+                logging.info("Added last_ok_at column to cross_cluster_replications")
+        except Exception:
+            pass
+
+        # NS: Feb 2026 - Space-efficient LVM COW snapshots managed by PegaProx
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS efficient_snapshots (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    vm_type TEXT NOT NULL DEFAULT 'qemu',
+                    snapname TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    vg_name TEXT NOT NULL,
+                    disks TEXT NOT NULL DEFAULT '[]',
+                    total_disk_size_gb REAL DEFAULT 0,
+                    total_snap_alloc_gb REAL DEFAULT 0,
+                    fs_frozen INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'active',
+                    error_message TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT,
+                    UNIQUE(cluster_id, vmid, snapname)
+                )
+            ''')
+            logging.info("Ensured efficient_snapshots table exists")
+        except Exception as e:
+            logging.error(f"Error creating efficient_snapshots table: {e}")
+
+        # MK: Mar 2026 - XCP-ng synthetic VMID mapping
+        # XCP-ng uses UUIDs but our frontend expects integer VMIDs
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS xcpng_vmid_map (
+                    cluster_id TEXT NOT NULL,
+                    uuid TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    PRIMARY KEY (cluster_id, uuid)
+                )
+            ''')
+            cursor.execute('''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_xcpng_vmid ON xcpng_vmid_map(cluster_id, vmid)
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating xcpng_vmid_map table: {e}")
+
+        # LW Mar 2026 - resource pools for XCP-ng (DB-backed, XAPI has no equivalent)
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS xcpng_pools (
+                    cluster_id TEXT NOT NULL,
+                    poolid TEXT NOT NULL,
+                    comment TEXT DEFAULT '',
+                    PRIMARY KEY (cluster_id, poolid)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS xcpng_pool_members (
+                    cluster_id TEXT NOT NULL,
+                    poolid TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    PRIMARY KEY (cluster_id, poolid, vmid)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating xcpng_pools tables: {e}")
+
+        # NS: Mar 2026 - Site Recovery Plans (#150)
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_plans (
+                    id TEXT PRIMARY KEY,
+                    group_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    source_cluster TEXT NOT NULL,
+                    target_cluster TEXT NOT NULL,
+                    network_mappings TEXT DEFAULT '{}',
+                    storage_mappings TEXT DEFAULT '{}',
+                    auto_failover INTEGER DEFAULT 0,
+                    failover_timeout INTEGER DEFAULT 120,
+                    pre_failover_webhook TEXT DEFAULT '',
+                    post_failover_webhook TEXT DEFAULT '',
+                    test_disconnect_nics INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'ready',
+                    last_test TEXT,
+                    last_failover TEXT,
+                    last_readiness_check TEXT,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_vms (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    vm_name TEXT DEFAULT '',
+                    vm_type TEXT DEFAULT 'qemu',
+                    boot_group INTEGER DEFAULT 0,
+                    boot_delay INTEGER DEFAULT 30,
+                    replication_job_id TEXT DEFAULT '',
+                    target_vmid INTEGER,
+                    notes TEXT DEFAULT '',
+                    failed_over TEXT DEFAULT '',
+                    failed_over_at TEXT DEFAULT '',
+                    failed_over_vmid INTEGER
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_events (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    started_at TEXT,
+                    completed_at TEXT,
+                    details TEXT DEFAULT '{}',
+                    triggered_by TEXT DEFAULT ''
+                )
+            ''')
+            # indexes for common queries
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_plan ON site_recovery_vms(plan_id, vmid)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_events_plan ON site_recovery_events(plan_id, started_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_plans_status ON site_recovery_plans(status)')
+            # the replication scheduler asks per job whether a plan has its guest failed over
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_vmid ON site_recovery_vms(vmid)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_vms_repl ON site_recovery_vms(replication_job_id)')
+            # MK Oct 2026 - one console frame per guest a test failover booted, the evidence
+            # that it came up. The event's details say what was taken and how long it took;
+            # the pictures live here so the event list stays small. Size-capped and pruned in
+            # background/sr_boot_shots.py
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS site_recovery_screenshots (
+                    event_id TEXT NOT NULL,
+                    plan_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    test_vmid INTEGER,
+                    captured_at TEXT,
+                    duration_ms INTEGER DEFAULT 0,
+                    image BLOB NOT NULL,
+                    PRIMARY KEY (event_id, vmid)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sr_shots_plan ON site_recovery_screenshots(plan_id)')
+            # MK Jul 2026 (#413) — per-plan option: bring Test-Failover clones up with
+            # NICs disconnected (link_down) so a DR test can't collide with production
+            # IPs on the network. Migrate existing DBs that predate the column.
+            try:
+                sr_cols = [row[1] for row in cursor.execute("PRAGMA table_info(site_recovery_plans)").fetchall()]
+                if 'test_disconnect_nics' not in sr_cols:
+                    cursor.execute("ALTER TABLE site_recovery_plans ADD COLUMN test_disconnect_nics INTEGER DEFAULT 0")
+                    logging.info("Added test_disconnect_nics column to site_recovery_plans")
+            except Exception as e:
+                logging.error(f"Failed to add test_disconnect_nics column: {e}")
+            # MK Oct 2026 - where each guest of a plan is: '' at the source, else the kind of
+            # failover that moved it ('planned' / 'emergency'). A plan can be failed over guest
+            # by guest, so the plan's status alone no longer says it. A database from before
+            # gets it replayed from its failover events once - by the instance that acts,
+            # when it may (replay_sr_failover_state): the events are per instance (#625)
+            try:
+                vm_cols = [row[1] for row in cursor.execute("PRAGMA table_info(site_recovery_vms)").fetchall()]
+                if 'failed_over' not in vm_cols:
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over TEXT DEFAULT ''")
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_at TEXT DEFAULT ''")
+                    self._sr_replay_owed = True
+                    logging.info("Added failed_over columns to site_recovery_vms, their state is "
+                                 "replayed from the failover events once this instance acts")
+                # MK Nov 2026 - the VMID a failed-over guest has on the DR site: its replica's
+                # after an emergency failover. NULL on a mark from before, whose run used the
+                # guest's own
+                if 'failed_over_vmid' not in vm_cols:
+                    cursor.execute("ALTER TABLE site_recovery_vms ADD COLUMN failed_over_vmid INTEGER")
+            except Exception as e:
+                logging.error(f"Failed to add failed_over columns: {e}")
+            logging.info("Ensured site_recovery tables exist")
+        except Exception as e:
+            logging.error(f"Error creating site_recovery tables: {e}")
+
+        # cve history - MK Mar 2026
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cve_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    cve_id TEXT NOT NULL,
+                    package TEXT,
+                    severity TEXT,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    resolved_at TEXT,
+                    UNIQUE(cluster_id, node, cve_id)
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_cve_history_cluster_node ON cve_history(cluster_id, node)')
+            logging.info("Ensured cve_history table exists")
+        except Exception as e:
+            logging.error(f"Error creating cve_history table: {e}")
+
+        # Plugin state tracking
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS plugin_state (
+                    plugin_id TEXT PRIMARY KEY,
+                    enabled INTEGER DEFAULT 0,
+                    loaded_at TEXT,
+                    error TEXT DEFAULT ''
+                )
+            ''')
+            logging.info("Ensured plugin_state table exists")
+        except Exception as e:
+            logging.error(f"Error creating plugin_state table: {e}")
+
+        # MK: Sep 2026 (#642) - which clusters a plugin applies to, comma separated.
+        # Empty means every cluster, which is what every install had before this.
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(plugin_state)").fetchall()]
+            if 'clusters' not in cols:
+                cursor.execute("ALTER TABLE plugin_state ADD COLUMN clusters TEXT DEFAULT ''")
+                logging.info("Added clusters column to plugin_state table")
+        except Exception as e:
+            logging.error(f"Error adding clusters column to plugin_state: {e}")
+
+        # NS: Apr 2026 - Backup verification results
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS backup_verifications (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    pbs_id TEXT,
+                    vmid INTEGER NOT NULL,
+                    vm_name TEXT DEFAULT '',
+                    backup_time TEXT,
+                    node TEXT,
+                    test_vmid INTEGER,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    status TEXT DEFAULT 'running',
+                    phase TEXT DEFAULT 'init',
+                    restore_ok INTEGER DEFAULT 0,
+                    boot_ok INTEGER DEFAULT 0,
+                    agent_ok INTEGER DEFAULT 0,
+                    cleanup_ok INTEGER DEFAULT 0,
+                    duration_seconds REAL DEFAULT 0,
+                    error TEXT DEFAULT '',
+                    details TEXT DEFAULT '{}'
+                )
+            ''')
+            logging.info("Ensured backup_verifications table exists")
+        except Exception as e:
+            logging.error(f"Error creating backup_verifications table: {e}")
+
+        # MK Oct 2026 - restore tests: what each cluster, guest and tag is held to, and the
+        # last result per guest. Both are shared with the standbys (core/ha.py SYNC_TABLES):
+        # the history above stays per host, a new active needs to know what was tested.
+        try:
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_backup_verifications_guest '
+                           'ON backup_verifications(cluster_id, vmid, started_at)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS recovery_targets (
+                    cluster_id TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    scope_key TEXT NOT NULL DEFAULT '',
+                    rto_minutes INTEGER,
+                    agent TEXT,
+                    ports TEXT,
+                    command TEXT,
+                    isolation TEXT,
+                    test_bridge TEXT,
+                    test_storage TEXT,
+                    boot_timeout INTEGER,
+                    updated_at TEXT,
+                    updated_by TEXT,
+                    PRIMARY KEY (cluster_id, scope, scope_key)
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS restore_test_marks (
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    last_at REAL,
+                    last_result TEXT,
+                    last_task TEXT,
+                    ok_at REAL,
+                    ok_backup_ts INTEGER,
+                    ok_seconds REAL,
+                    ok_rto_seconds INTEGER,
+                    ok_checks TEXT,
+                    fail_at REAL,
+                    fail_cause TEXT,
+                    PRIMARY KEY (cluster_id, vmid)
+                )
+            ''')
+            # MK Oct 2026 - the tags that make a guest critical, on the cluster row; and the
+            # manual confirmations an admin records beside the automatic facts
+            cols = [r[1] for r in cursor.execute('PRAGMA table_info(recovery_targets)').fetchall()]
+            if 'critical_tags' not in cols:
+                cursor.execute('ALTER TABLE recovery_targets ADD COLUMN critical_tags TEXT')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS recovery_confirmations (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    vmid INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    confirmed_by TEXT,
+                    confirmed_at REAL,
+                    expires_at REAL,
+                    revoked_at REAL,
+                    revoked_by TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_recovery_conf_guest '
+                           'ON recovery_confirmations(cluster_id, vmid)')
+        except Exception as e:
+            logging.error(f"Error creating the restore test tables: {e}")
+
+        # NS: Apr 2026 - portal_only column for client portal
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(users)").fetchall()]
+            if 'portal_only' not in cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN portal_only INTEGER DEFAULT 0")
+                logging.info("Added portal_only column to users table")
+        except: pass
+        # NS: Jul 2026 - opt-in "show VMIDs in the corporate sidebar" user preference
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(users)").fetchall()]
+            if 'sidebar_show_vmid' not in cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN sidebar_show_vmid INTEGER DEFAULT 0")
+                logging.info("Added sidebar_show_vmid column to users table")
+        except: pass
+
+        # MK: Apr 2026 - status page incident tracking + uptime history
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS status_incidents (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    status TEXT DEFAULT 'investigating',
+                    severity TEXT DEFAULT 'minor',
+                    message TEXT DEFAULT '',
+                    components TEXT DEFAULT '[]',
+                    started_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    created_by TEXT DEFAULT 'system',
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS status_uptime (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    nodes_online INTEGER DEFAULT 0,
+                    nodes_total INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_uptime_cluster ON status_uptime(cluster_id, timestamp DESC)')
+            logging.info("Ensured status_incidents + status_uptime tables exist")
+        except Exception as e:
+            logging.error(f"Error creating status tables: {e}")
+
+        # LW: Apr 2026 - user folders for organizing users in the management UI
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_folders (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    color TEXT DEFAULT '#6b7280',
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TEXT
+                )
+            ''')
+            logging.info("Ensured user_folders table exists")
+        except Exception as e:
+            logging.error(f"Error creating user_folders table: {e}")
+
+        # add user_folder column to users if missing
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(users)").fetchall()]
+            if 'user_folder' not in cols:
+                cursor.execute("ALTER TABLE users ADD COLUMN user_folder TEXT DEFAULT ''")
+                logging.info("Added user_folder column to users table")
+        except: pass
+
+        # NS May 2026 — cloud-init template library deployments
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cloud_init_deployments (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    template_id TEXT NOT NULL,
+                    template_name TEXT,
+                    vmid INTEGER,
+                    storage TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress INTEGER DEFAULT 0,
+                    log TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_ci_dep_cluster ON cloud_init_deployments(cluster_id, started_at DESC)')
+            logging.info("Ensured cloud_init_deployments table exists")
+        except Exception as e:
+            logging.error(f"Error creating cloud_init_deployments table: {e}")
+
+        # NS May 2026 — user-defined cloud-init templates added on top of the
+        # curated catalog in api/templates_lib.py
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS custom_cloud_templates (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    distro TEXT DEFAULT 'custom',
+                    version TEXT DEFAULT '',
+                    image_url TEXT NOT NULL,
+                    default_user TEXT DEFAULT 'root',
+                    cores INTEGER DEFAULT 2,
+                    memory INTEGER DEFAULT 2048,
+                    disk_gb INTEGER DEFAULT 10,
+                    tags TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_custom_tpl_created ON custom_cloud_templates(created_at DESC)')
+            logging.info("Ensured custom_cloud_templates table exists")
+        except Exception as e:
+            logging.error(f"Error creating custom_cloud_templates table: {e}")
+
+        # MK Nov 2026 (#1220) - blueprints: a library image plus the hardware and Cloud-Init
+        # a VM from it gets (api/blueprints.py), and the deploys made from them
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS vm_blueprints (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    template_id TEXT NOT NULL,
+                    cores INTEGER DEFAULT 2,
+                    memory INTEGER DEFAULT 2048,
+                    disk_gb INTEGER DEFAULT 0,
+                    cpu TEXT DEFAULT '',
+                    nics TEXT DEFAULT '[]',
+                    ciuser TEXT DEFAULT '',
+                    sshkeys TEXT DEFAULT '',
+                    ip_mode TEXT DEFAULT 'dhcp',
+                    nameserver TEXT DEFAULT '',
+                    searchdomain TEXT DEFAULT '',
+                    ciupgrade INTEGER DEFAULT 1,
+                    tags TEXT DEFAULT '',
+                    start INTEGER DEFAULT 0,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS blueprint_deployments (
+                    id TEXT PRIMARY KEY,
+                    blueprint_id TEXT NOT NULL,
+                    blueprint_name TEXT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    vmid INTEGER,
+                    name TEXT,
+                    template_vmid INTEGER,
+                    build_dep_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    step TEXT DEFAULT '',
+                    progress INTEGER DEFAULT 0,
+                    log TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    started_at TEXT,
+                    finished_at TEXT
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_bp_dep_cluster ON blueprint_deployments(cluster_id, started_at DESC)')
+        except Exception as e:
+            logging.error(f"Error creating blueprint tables: {e}")
+
+        # MK May 2026 — extend audit_log with cluster + severity columns for richer filtering
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_log)").fetchall()]
+            if 'cluster' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN cluster TEXT DEFAULT ''")
+                logging.info("Added cluster column to audit_log")
+            if 'severity' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN severity TEXT DEFAULT 'info'")
+                logging.info("Added severity column to audit_log")
+            # NS Oct 2026 - `cluster` holds the display name, which a cluster.config holder can
+            # set to anyone else's. Who may read a row is decided on the id (#1121).
+            if 'cluster_id' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN cluster_id TEXT DEFAULT ''")
+                logging.info("Added cluster_id column to audit_log")
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cluster ON audit_log(cluster)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cluster_id ON audit_log(cluster_id)')
+        except Exception as e:
+            logging.error(f"Error extending audit_log schema: {e}")
+
+        # MK Oct 2026 - the HMAC on each row catches an edit, never a row that is gone. Every
+        # row from now on carries its place in a chain and the hash of the row before it, and
+        # signed checkpoints say how far the chain went (and how far retention cut it). Rows
+        # from before keep chain_seq NULL; the genesis checkpoint takes their digest.
+        try:
+            cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_log)").fetchall()]
+            if 'chain_seq' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN chain_seq INTEGER")
+                logging.info("Added chain_seq column to audit_log")
+            if 'prev_hash' not in cols:
+                cursor.execute("ALTER TABLE audit_log ADD COLUMN prev_hash TEXT DEFAULT ''")
+            cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_chain_seq ON audit_log(chain_seq)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS audit_checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    chain_seq INTEGER NOT NULL,
+                    row_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    pruned_rows INTEGER DEFAULT 0,
+                    legacy_count INTEGER DEFAULT 0,
+                    legacy_digest TEXT DEFAULT '',
+                    hmac_signature TEXT DEFAULT '',
+                    cp_seq INTEGER,
+                    prev_cp_hash TEXT DEFAULT '',
+                    cutoff TEXT DEFAULT '',
+                    legacy_changed INTEGER DEFAULT 0,
+                    instance TEXT DEFAULT ''
+                )
+            ''')
+            # the checkpoints are numbered and linked too, so one that goes leaves a hole
+            cp_cols = [r[1] for r in cursor.execute("PRAGMA table_info(audit_checkpoints)").fetchall()]
+            for col, ddl in (('cp_seq', 'INTEGER'), ('prev_cp_hash', "TEXT DEFAULT ''"),
+                             ('cutoff', "TEXT DEFAULT ''"), ('legacy_changed', 'INTEGER DEFAULT 0'),
+                             ('instance', "TEXT DEFAULT ''")):
+                if col not in cp_cols:
+                    cursor.execute(f"ALTER TABLE audit_checkpoints ADD COLUMN {col} {ddl}")
+            # every audit write asks for the newest checkpoint
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cp_seq ON audit_checkpoints(chain_seq)')
+            cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_cp_num ON audit_checkpoints(cp_seq)')
+        except Exception as e:
+            logging.error(f"Error adding the audit chain: {e}")
+
+        # MK May 2026 — SIEM forwarder targets
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS siem_targets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    endpoint TEXT NOT NULL,
+                    format TEXT DEFAULT 'json',
+                    enabled INTEGER DEFAULT 1,
+                    settings TEXT DEFAULT '{}',
+                    last_status TEXT DEFAULT '',
+                    last_ok_at TEXT,
+                    last_error_at TEXT,
+                    last_error TEXT DEFAULT '',
+                    sent_count INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT DEFAULT ''
+                )
+            ''')
+            logging.info("Ensured siem_targets table exists")
+        except Exception as e:
+            logging.error(f"Error creating siem_targets table: {e}")
+
+        # NS May 2026 — DR Drill: structured dry-run of a Site Recovery plan,
+        # produces compliance-ready evidence.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dr_drills (
+                    id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    plan_name TEXT DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT DEFAULT '',
+                    started_by TEXT DEFAULT '',
+                    pass_count INTEGER DEFAULT 0,
+                    warn_count INTEGER DEFAULT 0,
+                    fail_count INTEGER DEFAULT 0,
+                    rpo_breach_seconds INTEGER DEFAULT 0,
+                    estimated_rto_seconds INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dr_drills_plan ON dr_drills(plan_id, started_at DESC)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS dr_drill_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drill_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT DEFAULT '',
+                    detail TEXT DEFAULT '',
+                    duration_ms INTEGER DEFAULT 0,
+                    sequence INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dr_drill_checks_drill ON dr_drill_checks(drill_id, sequence)')
+            logging.info("Ensured dr_drills + dr_drill_checks tables exist")
+        except Exception as e:
+            logging.error(f"Error creating dr_drills tables: {e}")
+
+        # NS May 2026 — Snapshot scheduling policies
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS snapshot_policies (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    target_type TEXT NOT NULL DEFAULT 'tag',
+                    target_value TEXT NOT NULL,
+                    schedule TEXT NOT NULL DEFAULT 'daily',
+                    schedule_at TEXT DEFAULT '03:00',
+                    retention_count INTEGER DEFAULT 7,
+                    retention_days INTEGER DEFAULT 0,
+                    include_ram INTEGER DEFAULT 0,
+                    enabled INTEGER DEFAULT 1,
+                    last_run_at TEXT,
+                    last_run_status TEXT DEFAULT '',
+                    notes TEXT DEFAULT '',
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snap_pol_cluster ON snapshot_policies(cluster_id)')
+            # MK #586 — richer schedules (cron / monthly / once) + prune-only mode.
+            # additive on existing installs, hence the PRAGMA guard.
+            cursor.execute("PRAGMA table_info(snapshot_policies)")
+            _spcols = {row[1] for row in cursor.fetchall()}
+            for _cn, _cd in (
+                ('schedule_cron', "TEXT DEFAULT ''"),
+                ('schedule_day', "INTEGER DEFAULT 1"),
+                ('run_once_at', "TEXT DEFAULT ''"),
+                ('prune_only', "INTEGER DEFAULT 0"),
+                # the role of the API token that wrote the policy, '' for a session (#1073)
+                ('created_role', "TEXT DEFAULT ''"),
+            ):
+                if _cn not in _spcols:
+                    cursor.execute(f"ALTER TABLE snapshot_policies ADD COLUMN {_cn} {_cd}")
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS snapshot_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    policy_id TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    summary TEXT DEFAULT '',
+                    log TEXT DEFAULT '',
+                    snapshots_created INTEGER DEFAULT 0,
+                    snapshots_failed INTEGER DEFAULT 0,
+                    snapshots_pruned INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snap_runs_policy ON snapshot_runs(policy_id, started_at DESC)')
+            logging.info("Ensured snapshot_policies + snapshot_runs tables exist")
+        except Exception as e:
+            logging.error(f"Error creating snapshot_policies tables: {e}")
+
+        # MK May 2026 — Power & Carbon tracking rates
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS power_rates (
+                    cluster_id TEXT PRIMARY KEY,
+                    node_idle_w REAL DEFAULT 80,
+                    node_max_w REAL DEFAULT 300,
+                    mem_w_per_gb REAL DEFAULT 0.3,
+                    pue REAL DEFAULT 1.5,
+                    kwh_price REAL DEFAULT 0.30,
+                    kg_co2_per_kwh REAL DEFAULT 0.4,
+                    currency TEXT DEFAULT 'EUR',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('''
+                INSERT OR IGNORE INTO power_rates (cluster_id, updated_at) VALUES ('__default__', ?)
+            ''', (datetime.now().isoformat(),))
+            logging.info("Ensured power_rates table exists")
+        except Exception as e:
+            logging.error(f"Error creating power_rates table: {e}")
+
+        # #965 - per-host power profile (whole-system idle/max watts). A host without a
+        # row inherits node_idle_w / node_max_w from power_rates.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS power_host_profiles (
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    idle_w REAL NOT NULL,
+                    max_w REAL NOT NULL,
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT '',
+                    PRIMARY KEY (cluster_id, node)
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating power_host_profiles table: {e}")
+
+        # MK May 2026 — Cost dashboard rates (global default + optional per-cluster overrides)
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cost_rates (
+                    cluster_id TEXT PRIMARY KEY,
+                    cpu_per_core_h REAL DEFAULT 0.012,
+                    mem_per_gb_h REAL DEFAULT 0.0035,
+                    storage_per_gb_month REAL DEFAULT 0.10,
+                    currency TEXT DEFAULT 'EUR',
+                    notes TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT ''
+                )
+            ''')
+            # ensure a global default row exists (cluster_id = '__default__')
+            cursor.execute('''
+                INSERT OR IGNORE INTO cost_rates (cluster_id, updated_at) VALUES ('__default__', ?)
+            ''', (datetime.now().isoformat(),))
+            logging.info("Ensured cost_rates table exists")
+        except Exception as e:
+            logging.error(f"Error creating cost_rates table: {e}")
+
+        # NS May 2026 — Config drift detection: store baselines + change events
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS drift_baselines (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    snapshot TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_baseline_lookup ON drift_baselines(cluster_id, kind, scope)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS drift_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    severity TEXT DEFAULT 'info',
+                    summary TEXT DEFAULT '',
+                    diff TEXT NOT NULL,
+                    detected_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    acknowledged_at TEXT,
+                    acknowledged_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_events_cluster ON drift_events(cluster_id, detected_at DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_events_status ON drift_events(status, cluster_id)')
+            # MK Oct 2026 - for the prune of old events (drift._prune_events); made here, before
+            # anything is served, as it takes seconds over a few hundred thousand rows
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_drift_events_age ON drift_events(status, detected_at)')
+            # MK Oct 2026 - what an event is: a deviation from the baseline (default), a policy
+            # violation, or an incident an admin confirmed. Local table, like the rest of the events.
+            _have = {r[1] for r in cursor.execute("PRAGMA table_info(drift_events)").fetchall()}
+            for _cn, _cd in (('category', "TEXT NOT NULL DEFAULT 'deviation'"),
+                             ('confirmed_by', "TEXT DEFAULT ''"),
+                             ('confirmed_at', 'TEXT'),
+                             # NS Oct 2026 - the approved change plan a deviation was planned under
+                             ('change_id', 'TEXT')):
+                if _cn not in _have:
+                    cursor.execute(f"ALTER TABLE drift_events ADD COLUMN {_cn} {_cd}")
+            logging.info("Ensured drift_baselines + drift_events tables exist")
+        except Exception as e:
+            logging.error(f"Error creating drift tables: {e}")
+
+        # NS Oct 2026 - Change Guardian, basic stage: a planned change with a scope and a window,
+        # approved by a second person. Shared with the standbys (core/ha.py SYNC_TABLES); times are UTC ISO.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS change_plans (
+                    id TEXT PRIMARY KEY,
+                    cluster_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT '{}',
+                    window_start TEXT,
+                    window_end TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    requested_by TEXT NOT NULL,
+                    requester_tenant TEXT DEFAULT '',
+                    approved_by TEXT DEFAULT '',
+                    approved_at TEXT,
+                    rejected_by TEXT DEFAULT '',
+                    rejected_at TEXT,
+                    reject_reason TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_change_plans_cluster ON change_plans(cluster_id, status)')
+            logging.info("Ensured change_plans table exists")
+        except Exception as e:
+            logging.error(f"Error creating change_plans table: {e}")
+
+        # MK May 2026 — Web Push subscriptions for browser notifications
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    endpoint TEXT NOT NULL UNIQUE,
+                    p256dh TEXT NOT NULL,
+                    auth TEXT NOT NULL,
+                    user_agent TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_used_at TEXT,
+                    failures INTEGER DEFAULT 0
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscriptions(username)')
+            logging.info("Ensured push_subscriptions table exists")
+        except Exception as e:
+            logging.error(f"Error creating push_subscriptions table: {e}")
+
+        # MK Jul 2026 — #612 Phase 1: cross-cluster EVPN vNets (multi-cluster SDN
+        # orchestration). PVE has no cross-cluster SDN primitive — each cluster's
+        # /etc/pve/sdn is local — so this is the authoritative record (PDM lacks one)
+        # that composes the per-cluster SDN CRUD across N member clusters. JSON columns
+        # follow the site_recovery_plans convention (TEXT + json.dumps/json.loads);
+        # member_clusters/subnets are JSON lists, desired_state/per_cluster_status JSON dicts.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS multi_cluster_vnets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    alias TEXT DEFAULT '',
+                    zone TEXT NOT NULL,
+                    vni INTEGER,
+                    asn INTEGER,
+                    vrf_vxlan INTEGER,
+                    controller TEXT DEFAULT '',
+                    peers TEXT DEFAULT '',
+                    member_clusters TEXT DEFAULT '[]',
+                    subnets TEXT DEFAULT '[]',
+                    desired_state TEXT DEFAULT '{}',
+                    per_cluster_status TEXT DEFAULT '{}',
+                    status TEXT DEFAULT 'pending',
+                    enabled INTEGER DEFAULT 1,
+                    created_by TEXT DEFAULT '',
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            logging.info("Ensured multi_cluster_vnets table exists")
+        except Exception as e:
+            logging.error(f"Error creating multi_cluster_vnets table: {e}")
+
+        # MK Sep 2026 - automated installations: answer files plus the runs the
+        # prepared ISOs report back. The answer file is stored encrypted, it holds
+        # the root password of every machine built from it.
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS auto_install_profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    answer_encrypted TEXT NOT NULL,
+                    target_cluster_id TEXT DEFAULT '',
+                    callback_url TEXT DEFAULT '',
+                    callback_fingerprint TEXT DEFAULT '',
+                    token_hash TEXT NOT NULL,
+                    token_hint TEXT DEFAULT '',
+                    enabled INTEGER DEFAULT 1,
+                    max_uses INTEGER DEFAULT 0,
+                    uses INTEGER DEFAULT 0,
+                    expires_at TEXT DEFAULT '',
+                    created_at TEXT,
+                    created_by TEXT DEFAULT '',
+                    updated_at TEXT,
+                    updated_by TEXT DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_auto_install_token '
+                           'ON auto_install_profiles(token_hash)')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS auto_install_runs (
+                    id TEXT PRIMARY KEY,
+                    profile_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'installing',
+                    fingerprint TEXT DEFAULT '',
+                    hostname TEXT DEFAULT '',
+                    product TEXT DEFAULT '',
+                    version TEXT DEFAULT '',
+                    system_info TEXT DEFAULT '{}',
+                    message TEXT DEFAULT '',
+                    client_ip TEXT DEFAULT '',
+                    callback_token_hash TEXT DEFAULT '',
+                    started_at TEXT,
+                    updated_at TEXT
+                )
+            ''')
+            # the first cut of this table (Testing only) had no callback token
+            run_cols = [r[1] for r in cursor.execute("PRAGMA table_info(auto_install_runs)").fetchall()]
+            if 'callback_token_hash' not in run_cols:
+                cursor.execute("ALTER TABLE auto_install_runs ADD COLUMN callback_token_hash TEXT DEFAULT ''")
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_auto_install_runs_profile '
+                           'ON auto_install_runs(profile_id, started_at DESC)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_auto_install_runs_callback '
+                           'ON auto_install_runs(callback_token_hash)')
+            logging.info("Ensured auto_install tables exist")
+        except Exception as e:
+            logging.error(f"Error creating auto_install tables: {e}")
+
+        # MK Oct 2026 - when a node went offline, came back, entered or left maintenance, and
+        # when the cluster lost or regained quorum (node ''), as the poller saw it
+        # (core/node_history.py). at is UTC with its offset, so the rows sort by it. Per host
+        # (core/ha.py LOCAL_TABLES) like the migration history: what this instance saw.
+        # The other indexes are the windows the timeline reads (api/timeline.py).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS node_state_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cluster_id TEXT NOT NULL,
+                    node TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    previous TEXT NOT NULL DEFAULT '',
+                    at TEXT NOT NULL,
+                    detail TEXT NOT NULL DEFAULT ''
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_node_state_cluster '
+                           'ON node_state_history(cluster_id, at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_node_state_node '
+                           'ON node_state_history(cluster_id, node, at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_cluster_time ON audit_log(cluster_id, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_cluster_fired '
+                           'ON active_alerts(cluster_id, triggered_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_active_alerts_cluster_resolved '
+                           'ON active_alerts(cluster_id, resolved_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_migration_cluster_time '
+                           'ON migration_history(cluster_id, timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_backup_verify_cluster_time '
+                           'ON backup_verifications(cluster_id, started_at)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_status_incidents_started ON status_incidents(started_at)')
+        except Exception as e:
+            logging.error(f"Error creating node_state_history and the timeline indexes: {e}")
+
+        # MK Oct 2026 - custom node hardening profiles: a named pick of the built-in controls
+        # and values for their parameters, never commands of their own (api/reports.py).
+        # controls and params are JSON. Shared with the standbys (core/ha.py SYNC_TABLES).
+        try:
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS hardening_profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    controls TEXT NOT NULL DEFAULT '[]',
+                    params TEXT NOT NULL DEFAULT '{}',
+                    created_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+        except Exception as e:
+            logging.error(f"Error creating hardening_profiles table: {e}")
+
+        conn.commit()
+        logging.info("DB schema initialized")
+    
+    def _encrypt(self, data: str) -> str:
+        """encrypt sensitive stuff"""
+        if not data:
+            return data
+        
+        # try aes256 first (new way)
+        if self.aesgcm:
+            try:
+                nonce = os.urandom(12)
+                ciphertext = self.aesgcm.encrypt(nonce, data.encode('utf-8'), None)
+                encrypted = base64.b64encode(nonce + ciphertext).decode('utf-8')
+                return f"aes256:{encrypted}"
+            except Exception as e:
+                logging.error(f"aes encrypt failed: {e}")
+        
+        # fallback to old fernet
+        if self.fernet:
+            try:
+                return self.fernet.encrypt(data.encode()).decode()
+            except Exception as e:
+                logging.error(f"fernet failed: {e}")
+        
+        # NS Feb 2026 - never store plaintext, fail safely
+        raise RuntimeError("No encryption backend available (neither AES-256-GCM nor Fernet). Cannot store sensitive data.")
+    
+    def _decrypt(self, data: str) -> str:
+        """decrypt - handles both old and new format"""
+        # NS: handles aes256 and old fernet
+        if not data:
+            return data
+        
+        # Check for AES-256-GCM format
+        if data.startswith('aes256:'):
+            if not self.aesgcm:
+                # LW Mar 2026 - don't return ciphertext as if it were plaintext
+                raise RuntimeError("AES-256-GCM data found but encryption not initialized")
+            try:
+                encrypted = base64.b64decode(data[7:])  # Remove "aes256:" prefix
+                nonce = encrypted[:12]  # First 12 bytes are nonce
+                ciphertext = encrypted[12:]  # Rest is ciphertext + tag
+                plaintext = self.aesgcm.decrypt(nonce, ciphertext, None)
+                return plaintext.decode('utf-8')
+            except Exception as e:
+                # NS Mar 2026 - returning garbled aes256: data would be used as a password/secret downstream
+                raise RuntimeError(f"AES-256-GCM decryption failed: {e}")
+        
+        # Try Fernet (legacy)
+        if self.fernet:
+            try:
+                # Fernet tokens start with 'gAAA' when base64 encoded
+                return self.fernet.decrypt(data.encode()).decode()
+            except Exception as e:
+                # Not a valid Fernet token - probably pre-encryption plaintext
+                logging.warning(f"Fernet decryption failed (treating as plaintext): {e}")
+                return data
+        
+        # Return as-is (probably plain text)
+        return data
+    
+    def _needs_reencrypt(self, data: str) -> bool:
+        """Check if data needs to be re-encrypted with AES-256-GCM
+        
+        NS: Returns True for legacy Fernet data
+        """
+        if not data or not self.aesgcm:
+            return False
+        # If it's not AES-256-GCM, it needs re-encryption
+        return not data.startswith('aes256:')
+
+    # --- #609 phase 3: per-node BMC (Redfish) endpoint store ------------------
+    # Passwords are always stored encrypted (_encrypt -> aes256:) and only ever
+    # decrypted server-side for an outbound Redfish read; API responses mask them.
+    def save_bmc_endpoint(self, cluster_id, node, host, user, password_plain,
+                          verify_ssl=False, enabled=True):
+        """Upsert a node's BMC endpoint. password_plain is encrypted at rest."""
+        cur = self.conn.cursor()
+        now = datetime.now().isoformat()
+        enc = self._encrypt(password_plain) if password_plain else ''
+        cur.execute('''
+            INSERT INTO node_bmc_endpoints
+              (cluster_id, node, bmc_host, bmc_user, bmc_password_encrypted, bmc_verify_ssl, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id, node) DO UPDATE SET
+              bmc_host=excluded.bmc_host, bmc_user=excluded.bmc_user,
+              bmc_password_encrypted=excluded.bmc_password_encrypted,
+              bmc_verify_ssl=excluded.bmc_verify_ssl, enabled=excluded.enabled,
+              updated_at=excluded.updated_at
+        ''', (cluster_id, node, host, user or '', enc,
+              1 if verify_ssl else 0, 1 if enabled else 0, now, now))
+        self.conn.commit()
+
+    def get_bmc_endpoint(self, cluster_id, node, decrypt=True):
+        """One node's BMC endpoint or None. decrypt=True returns the plaintext
+        password (server-side use); decrypt=False leaves it out (never leak)."""
+        cur = self.conn.cursor()
+        cur.execute('SELECT * FROM node_bmc_endpoints WHERE cluster_id=? AND node=?',
+                    (cluster_id, node))
+        row = cur.fetchone()
+        if not row:
+            return None
+        out = {
+            'cluster_id': row['cluster_id'], 'node': row['node'],
+            'host': row['bmc_host'], 'user': row['bmc_user'],
+            'verify_ssl': bool(row['bmc_verify_ssl']),
+            'enabled': bool(row['enabled']),
+            'has_password': bool(row['bmc_password_encrypted']),
+        }
+        if decrypt:
+            try:
+                out['password'] = self._decrypt(row['bmc_password_encrypted']) if row['bmc_password_encrypted'] else ''
+            except Exception:
+                out['password'] = ''
+        return out
+
+    def list_bmc_endpoints(self, cluster_id):
+        """All configured BMC endpoints for a cluster (NEVER includes passwords)."""
+        cur = self.conn.cursor()
+        cur.execute('SELECT cluster_id, node, bmc_host, bmc_user, bmc_verify_ssl, enabled '
+                    'FROM node_bmc_endpoints WHERE cluster_id=?', (cluster_id,))
+        return [{
+            'cluster_id': r['cluster_id'], 'node': r['node'], 'host': r['bmc_host'],
+            'user': r['bmc_user'], 'verify_ssl': bool(r['bmc_verify_ssl']),
+            'enabled': bool(r['enabled']),
+        } for r in cur.fetchall()]
+
+    def delete_bmc_endpoint(self, cluster_id, node):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM node_bmc_endpoints WHERE cluster_id=? AND node=?',
+                    (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- #1136: per-node root passwords (core/node_creds.py) -------------------
+    _NODE_CRED_STATE = ('node', 'password_encrypted', 'updated_by', 'updated_at', 'address',
+                        'check_status', 'check_detail', 'check_credential', 'checked_at')
+
+    def list_node_credentials(self, cluster_id):
+        """Every row of one cluster, the password reduced to has_password."""
+        cur = self.conn.cursor()
+        cur.execute(f"SELECT {', '.join(self._NODE_CRED_STATE)} FROM cluster_node_credentials "
+                    "WHERE cluster_id = ? ORDER BY node", (cluster_id,))
+        out = []
+        for r in cur.fetchall():
+            row = dict(r)
+            row['has_password'] = bool(row.pop('password_encrypted'))
+            out.append(row)
+        return out
+
+    def node_credential_secrets(self, cluster_id, with_addresses=False):
+        """{node: password} of one cluster, opened. Server side only, never into a response.
+        A value that does not open is left out: that node gets the cluster's password.
+        with_addresses: ({node: password}, {node: last address the manager placed it at})."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT node, password_encrypted, address FROM cluster_node_credentials "
+                    "WHERE cluster_id = ? AND password_encrypted IS NOT NULL "
+                    "AND password_encrypted != ''", (cluster_id,))
+        out, where = {}, {}
+        for r in cur.fetchall():
+            try:
+                plain = self._decrypt(r['password_encrypted'])
+            except Exception:
+                logging.warning(f"[NodeCreds] the password of node {r['node']} does not open "
+                                "with this key - that node gets the cluster password")
+                continue
+            if plain:
+                out[r['node']] = plain
+                if r['address']:
+                    where[r['node']] = r['address']
+        return (out, where) if with_addresses else out
+
+    def set_node_credential_address(self, cluster_id, node, address):
+        """Where the manager last placed a node that has a password of its own."""
+        cur = self.conn.cursor()
+        cur.execute("UPDATE cluster_node_credentials SET address = ? WHERE cluster_id = ? AND node = ?",
+                    (address or '', cluster_id, node))
+        self.conn.commit()
+
+    def save_node_credential(self, cluster_id, node, password_plain, updated_by):
+        """Set (or with '' clear) the password of one node. Either way the last check
+        went with the old credential and is dropped; a clear drops the kept address too,
+        so a password set later does not start from an address nobody placed it at since."""
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')  # with its offset, like the check answer
+        sealed = self._encrypt(password_plain) if password_plain else ''
+        cur.execute('''
+            INSERT INTO cluster_node_credentials
+              (cluster_id, node, password_encrypted, updated_by, updated_at,
+               check_status, check_detail, check_credential, checked_at)
+            VALUES (?, ?, ?, ?, ?, '', '', '', NULL)
+            ON CONFLICT(cluster_id, node) DO UPDATE SET
+              password_encrypted = excluded.password_encrypted,
+              updated_by = excluded.updated_by, updated_at = excluded.updated_at,
+              address = CASE WHEN excluded.password_encrypted = '' THEN '' ELSE address END,
+              check_status = '', check_detail = '', check_credential = '', checked_at = NULL
+        ''', (cluster_id, node, sealed, updated_by or '', now))
+        self.conn.commit()
+
+    def record_node_credential_checks(self, cluster_id, results):
+        """results: {node: (status, detail, credential)}; one transaction for all of them."""
+        cur = self.conn.cursor()
+        now = datetime.now().astimezone().isoformat(timespec='seconds')
+        for node, (status, detail, credential) in results.items():
+            cur.execute('''
+                INSERT INTO cluster_node_credentials
+                  (cluster_id, node, password_encrypted, check_status, check_detail,
+                   check_credential, checked_at)
+                VALUES (?, ?, '', ?, ?, ?, ?)
+                ON CONFLICT(cluster_id, node) DO UPDATE SET
+                  check_status = excluded.check_status, check_detail = excluded.check_detail,
+                  check_credential = excluded.check_credential, checked_at = excluded.checked_at
+            ''', (cluster_id, node, status or '', (detail or '')[:300], credential or '', now))
+        self.conn.commit()
+
+    def delete_node_credential(self, cluster_id, node):
+        cur = self.conn.cursor()
+        cur.execute('DELETE FROM cluster_node_credentials WHERE cluster_id = ? AND node = ?',
+                    (cluster_id, node))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def _migrate_from_legacy(self):
+        """Migrate data from legacy JSON/encrypted files to SQLite"""
+        migrated_any = False
+        
+        # Check if already migrated
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM clusters")
+        cluster_count = cursor.fetchone()[0]
+        
+        # Check if users have proper password_salt (fix for schema migration)
+        needs_user_remigration = getattr(self, '_force_remigrate_users', False)
+        
+        if not needs_user_remigration:
+            try:
+                # #224: only check local users — OIDC/LDAP users have no salt by design
+                cursor.execute("SELECT username, password_salt FROM users WHERE auth_source = 'local' OR auth_source IS NULL LIMIT 1")
+                row = cursor.fetchone()
+                if row:
+                    salt = row[1] if len(row) > 1 else None
+                    if not salt or salt == '':  # password_salt is empty or missing
+                        logging.warning("Users have empty password_salt - will re-migrate from legacy files")
+                        needs_user_remigration = True
+            except dbcrypto.OperationalError as e:
+                # Column might not exist
+                logging.warning(f"Could not check password_salt: {e} - will re-migrate")
+                needs_user_remigration = True
+            except Exception as e:
+                logging.error(f"Error checking users: {e}")
+        
+        if cluster_count > 0 and not needs_user_remigration:
+            logging.info("Database already has data, skipping legacy migration")
+            cursor.execute("SELECT COUNT(*) FROM users")
+            if cursor.fetchone()[0]:
+                self._retire_legacy_users_file()
+            return
+        
+        # Migrate clusters (only if no clusters exist)
+        if cluster_count == 0:
+            if self._migrate_clusters():
+                # commit here so the user rollback further down cannot discard them
+                self.conn.commit()
+                migrated_any = True
+
+        if needs_user_remigration and not self._read_legacy_users():
+            # MK: the DELETE below used to run unconditionally, and _migrate_users() writes
+            # nothing when the legacy file is gone or no longer decrypts — which is every
+            # install past the migration era. So one local row with an empty password_salt
+            # emptied the entire users table, admins included, with nothing to restore from,
+            # and the next request landed in first-run setup. Never clear what we can't put back.
+            logging.error("Users need re-migration but the legacy user file is unavailable — "
+                          "keeping the existing accounts")
+            needs_user_remigration = False
+
+        # MK Sep 2026 - `cluster_count == 0` is not a "never migrated" signal. A fresh
+        # install has no clusters, and neither does one whose last cluster was removed, so
+        # this branch ran on ordinary restarts and _migrate_users() wrote the legacy file
+        # over the live table: a rotated password fell back to the old one, a demoted
+        # account regained its role, a disabled one came back enabled, a deleted one
+        # reappeared. Import only into an empty table. Re-migration clears the table first
+        # and is the one case allowed to write over what is there.
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+
+        if needs_user_remigration:
+            # The clear and the refill are one unit. Committing the DELETE on its own meant
+            # a refill that wrote nothing left an empty users table with nothing to restore
+            # from, and the next request landed in the first-run setup wizard.
+            try:
+                cursor.execute("DELETE FROM users")
+                if self._migrate_users():
+                    self.conn.commit()
+                    migrated_any = True
+                    logging.info("Re-migrated users from the legacy store")
+                    self._retire_legacy_users_file()
+                else:
+                    self.conn.rollback()
+                    logging.error("Re-migration wrote no users - kept the existing accounts")
+            except Exception as e:
+                self.conn.rollback()
+                logging.error(f"Error re-migrating users: {e}")
+        elif user_count == 0:
+            if self._migrate_users():
+                self.conn.commit()
+                migrated_any = True
+                self._retire_legacy_users_file()
+        else:
+            # the table already holds the accounts: the file is a stale copy
+            self._retire_legacy_users_file()
+
+        # Migrate sessions
+        if self._migrate_sessions():
+            migrated_any = True
+        
+        # Migrate audit log
+        if self._migrate_audit_log():
+            migrated_any = True
+        
+        # Migrate alerts
+        if self._migrate_alerts():
+            migrated_any = True
+        
+        # Migrate VM ACLs
+        if self._migrate_vm_acls():
+            migrated_any = True
+        
+        # Migrate affinity rules
+        if self._migrate_affinity_rules():
+            migrated_any = True
+        
+        # Migrate tenants
+        if self._migrate_tenants():
+            migrated_any = True
+        
+        # Migrate scheduled tasks
+        if self._migrate_scheduled_tasks():
+            migrated_any = True
+        
+        # Migrate VM tags
+        if self._migrate_vm_tags():
+            migrated_any = True
+        
+        # Migrate migration history
+        if self._migrate_migration_history():
+            migrated_any = True
+        
+        # Migrate server settings
+        if self._migrate_server_settings():
+            migrated_any = True
+        
+        # Migrate custom roles
+        if self._migrate_custom_roles():
+            migrated_any = True
+        
+        # NS: Migrate remaining JSON files - these were scattered everywhere lol
+        # MK: should have done this from the start but hindsight is 20/20
+        if self._migrate_cluster_alerts():
+            migrated_any = True
+        
+        if self._migrate_esxi_storages():
+            migrated_any = True
+        
+        if self._migrate_storage_clusters():
+            migrated_any = True
+        
+        if self._migrate_cluster_affinity_rules():
+            migrated_any = True
+        
+        # TODO: delete old json files after a few versions? or keep as backup idk - NS
+        if migrated_any:
+            logging.info("✓ Legacy data migration completed!")
+            self.conn.commit()
+    
+    def _migrate_clusters(self) -> bool:
+        """Migrate clusters from encrypted JSON"""
+        from pegaprox.core.config import get_fernet
+        fernet = get_fernet()
+        data = None
+        
+        # Try encrypted file first
+        if fernet and os.path.exists(CONFIG_FILE_ENCRYPTED):
+            try:
+                with open(CONFIG_FILE_ENCRYPTED, 'rb') as f:
+                    encrypted_data = f.read()
+                decrypted = fernet.decrypt(encrypted_data)
+                data = json.loads(decrypted.decode('utf-8'))
+            except Exception as e:
+                logging.error(f"Failed to load encrypted clusters: {e}")
+        
+        # Try unencrypted
+        if not data and os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    data = json.load(f)
+            except Exception as e:
+                logging.error(f"Failed to load clusters.json: {e}")
+        
+        if not data:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for cluster_id, cluster in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO clusters 
+                    (id, name, host, user, pass_encrypted, ssl_verification, 
+                     migration_threshold, check_interval, auto_migrate, 
+                     balance_containers, balance_local_disks, dry_run, enabled, 
+                     ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted, 
+                     ssh_port, ha_settings, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    cluster_id,
+                    cluster.get('name', ''),
+                    cluster.get('host', ''),
+                    cluster.get('user', ''),
+                    self._encrypt(cluster.get('pass', '')),
+                    1 if cluster.get('ssl_verification', True) else 0,
+                    cluster.get('migration_threshold', 30),
+                    cluster.get('check_interval', 300),
+                    1 if cluster.get('auto_migrate', False) else 0,
+                    1 if cluster.get('balance_containers', False) else 0,
+                    1 if cluster.get('balance_local_disks', False) else 0,
+                    1 if cluster.get('dry_run', True) else 0,
+                    1 if cluster.get('enabled', True) else 0,
+                    1 if cluster.get('ha_enabled', False) else 0,
+                    json.dumps(cluster.get('fallback_hosts', [])),
+                    cluster.get('ssh_user', ''),
+                    self._encrypt(cluster.get('ssh_key', '')),
+                    cluster.get('ssh_port', 22),
+                    self._encrypt(json.dumps(cluster.get('ha_settings', {}))),
+                    now, now
+                ))
+            except Exception as e:
+                logging.error(f"Failed to migrate cluster {cluster_id}: {e}")
+        
+        logging.info(f"Migrated {len(data)} clusters to SQLite")
+        return True
+    
+    def _read_legacy_users(self):
+        """The legacy encrypted user file as a dict, or None when it isn't there or won't
+        decrypt. Split out of _migrate_users so the re-migration path can find out whether it
+        has anything to restore BEFORE it clears the table."""
+        from pegaprox.core.config import get_fernet
+        fernet = get_fernet()
+        if not fernet or not os.path.exists(USERS_FILE_ENCRYPTED):
+            return None
+
+        try:
+            with open(USERS_FILE_ENCRYPTED, 'rb') as f:
+                encrypted_data = f.read()
+            return json.loads(fernet.decrypt(encrypted_data).decode('utf-8'))
+        except Exception as e:
+            logging.error(f"Failed to load users: {e}")
+            return None
+
+    def _retire_legacy_users_file(self):
+        """NS Oct 2026 (#1053) - users.enc was never retired after the import. Once the users
+        table holds the accounts it is a stale copy, and the salt-repair re-migration above
+        would bring its old passwords, roles and deleted accounts back over the live ones.
+        Moved aside, so it stays as a backup that nothing reads."""
+        if not os.path.exists(USERS_FILE_ENCRYPTED):
+            return
+        retired = USERS_FILE_ENCRYPTED + '.migrated'
+        try:
+            os.replace(USERS_FILE_ENCRYPTED, retired)
+            logging.info(f"Legacy user file moved to {retired}, the database holds the accounts")
+        except OSError as e:
+            logging.warning(f"Could not move the legacy user file aside ({e}) - "
+                            f"remove {USERS_FILE_ENCRYPTED} by hand")
+
+    def _migrate_users(self) -> bool:
+        """Migrate users from encrypted file"""
+        data = self._read_legacy_users()
+        if not data:
+            return False
+
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        written = 0
+
+        for username, user in data.items():
+            try:
+                # OR IGNORE, not OR REPLACE: importing the legacy store must never write
+                # over an account that already exists here. The caller clears the table
+                # first when it really does mean to replace everything.
+                cursor.execute('''
+                    INSERT OR IGNORE INTO users
+                    (username, password_salt, password_hash, role, permissions, tenant, 
+                     created_at, last_login, password_expiry, 
+                     totp_secret_encrypted, totp_enabled, force_password_change, enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    username,
+                    user.get('password_salt', ''),
+                    user.get('password_hash', user.get('password', '')),
+                    user.get('role', 'viewer'),
+                    json.dumps(user.get('permissions', [])),
+                    user.get('tenant'),
+                    user.get('created_at', now),
+                    user.get('last_login'),
+                    user.get('password_expiry'),
+                    self._encrypt(user.get('totp_secret', '')),
+                    1 if user.get('totp_enabled', False) else 0,
+                    1 if user.get('force_password_change', False) else 0,
+                    # the column defaults to 1, so leaving it out brought a disabled
+                    # legacy account back enabled. Truthiness, not `is False`: the JSON
+                    # store wrote this as 0/1 as often as true/false.
+                    1 if user.get('enabled', True) else 0
+                ))
+                if cursor.rowcount > 0:
+                    written += 1
+            except Exception as e:
+                logging.error(f"Failed to migrate user {username}: {e}")
+
+        logging.info(f"Migrated {written}/{len(data)} users to SQLite")
+        return written > 0
+    
+    def _migrate_sessions(self) -> bool:
+        """Migrate sessions from encrypted file"""
+        from pegaprox.core.config import get_fernet
+        fernet = get_fernet()
+        data = None
+        
+        if fernet and os.path.exists(SESSIONS_FILE_ENCRYPTED):
+            try:
+                with open(SESSIONS_FILE_ENCRYPTED, 'rb') as f:
+                    encrypted_data = f.read()
+                decrypted = fernet.decrypt(encrypted_data)
+                data = json.loads(decrypted.decode('utf-8'))
+            except:
+                pass
+        
+        if not data and os.path.exists(SESSIONS_FILE):
+            try:
+                with open(SESSIONS_FILE, 'r') as f:
+                    data = json.load(f)
+            except:
+                pass
+        
+        if not data:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for token, session in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO sessions
+                    (token, username, created_at, expires_at, ip_address, user_agent)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    token,
+                    session.get('user', ''),
+                    session.get('created', ''),
+                    session.get('expires', ''),
+                    session.get('ip', ''),
+                    session.get('user_agent', '')
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} sessions to SQLite")
+        return True
+    
+    def _migrate_audit_log(self) -> bool:
+        """Migrate audit log from encrypted file"""
+        from pegaprox.core.config import get_fernet
+        fernet = get_fernet()
+        data = None
+        
+        if fernet and os.path.exists(AUDIT_LOG_FILE_ENCRYPTED):
+            try:
+                with open(AUDIT_LOG_FILE_ENCRYPTED, 'rb') as f:
+                    encrypted_data = f.read()
+                decrypted = fernet.decrypt(encrypted_data)
+                data = json.loads(decrypted.decode('utf-8'))
+            except:
+                pass
+        
+        if not data and os.path.exists(AUDIT_LOG_FILE):
+            try:
+                with open(AUDIT_LOG_FILE, 'r') as f:
+                    data = json.load(f)
+            except:
+                pass
+        
+        if not data:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for entry in data:
+            try:
+                cursor.execute('''
+                    INSERT INTO audit_log (timestamp, user, action, details, ip_address)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    entry.get('timestamp', ''),
+                    entry.get('user', ''),
+                    entry.get('action', ''),
+                    entry.get('details', ''),
+                    entry.get('ip', '')
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} audit entries to SQLite")
+        return True
+    
+    def _migrate_alerts(self) -> bool:
+        """Migrate alerts from JSON"""
+        if not os.path.exists(ALERTS_CONFIG_FILE):
+            return False
+        
+        try:
+            with open(ALERTS_CONFIG_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for alert_id, alert in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO alerts
+                    (id, cluster_id, node, vmid, type, threshold, enabled, 
+                     notify_methods, cooldown, last_triggered, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    alert_id,
+                    alert.get('cluster_id'),
+                    alert.get('node'),
+                    alert.get('vmid'),
+                    alert.get('type', ''),
+                    alert.get('threshold'),
+                    1 if alert.get('enabled', True) else 0,
+                    json.dumps(alert.get('notify_methods', [])),
+                    alert.get('cooldown', 300),
+                    alert.get('last_triggered'),
+                    now
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} alerts to SQLite")
+        return True
+    
+    def _migrate_vm_acls(self) -> bool:
+        """Migrate VM ACLs from JSON"""
+        vm_acls_file = os.path.join(CONFIG_DIR, 'vm_acls.json')
+        if not os.path.exists(vm_acls_file):
+            return False
+        
+        try:
+            with open(vm_acls_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for cluster_id, vms in data.items():
+            for vmid, acl in vms.items():
+                try:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions, inherit_role)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (
+                        cluster_id,
+                        vmid,
+                        json.dumps(acl.get('users', [])),
+                        json.dumps(acl.get('permissions', [])),
+                        (0 if str(acl.get('inherit_role', True)).strip().lower() in ('false', '0', 'no', 'off', 'none', '') else 1)
+                    ))
+                except:
+                    pass
+        
+        logging.info(f"Migrated VM ACLs to SQLite")
+        return True
+    
+    def _migrate_affinity_rules(self) -> bool:
+        """Migrate affinity rules from JSON"""
+        if not os.path.exists(AFFINITY_RULES_FILE):
+            return False
+        
+        try:
+            with open(AFFINITY_RULES_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for cluster_id, rules in data.items():
+            for rule in rules:
+                try:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO affinity_rules
+                        (id, cluster_id, name, type, vms, enabled, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        rule.get('id', str(uuid.uuid4())[:8]),
+                        cluster_id,
+                        rule.get('name', ''),
+                        rule.get('type', 'affinity'),
+                        json.dumps(rule.get('vms', [])),
+                        1 if rule.get('enabled', True) else 0,
+                        now
+                    ))
+                except:
+                    pass
+        
+        logging.info(f"Migrated affinity rules to SQLite")
+        return True
+    
+    def _migrate_tenants(self) -> bool:
+        """Migrate tenants from JSON"""
+        tenants_file = os.path.join(CONFIG_DIR, 'tenants.json')
+        if not os.path.exists(tenants_file):
+            return False
+        
+        try:
+            with open(tenants_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for tenant in data:
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO tenants (id, name, clusters, created_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    tenant.get('id', str(uuid.uuid4())[:8]),
+                    tenant.get('name', ''),
+                    json.dumps(tenant.get('clusters', [])),
+                    now
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} tenants to SQLite")
+        return True
+    
+    def _migrate_scheduled_tasks(self) -> bool:
+        """Migrate scheduled tasks from JSON"""
+        if not os.path.exists(SCHEDULED_TASKS_FILE):
+            return False
+        
+        try:
+            with open(SCHEDULED_TASKS_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for task_id, task in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO scheduled_tasks
+                    (id, cluster_id, name, task_type, schedule, config, 
+                     enabled, last_run, next_run, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    task_id,
+                    task.get('cluster_id'),
+                    task.get('name', ''),
+                    task.get('task_type', ''),
+                    task.get('schedule', ''),
+                    json.dumps(task.get('config', {})),
+                    1 if task.get('enabled', True) else 0,
+                    task.get('last_run'),
+                    task.get('next_run'),
+                    now
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} scheduled tasks to SQLite")
+        return True
+    
+    def _migrate_vm_tags(self) -> bool:
+        """Migrate VM tags from JSON"""
+        if not os.path.exists(VM_TAGS_FILE):
+            return False
+        
+        try:
+            with open(VM_TAGS_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for key, tags in data.items():
+            try:
+                parts = key.split(':')
+                if len(parts) == 2:
+                    cluster_id, vmid = parts
+                    for tag in tags:
+                        tag_name = tag if isinstance(tag, str) else tag.get('name', '')
+                        tag_color = tag.get('color', '') if isinstance(tag, dict) else ''
+                        cursor.execute('''
+                            INSERT OR IGNORE INTO vm_tags (cluster_id, vmid, tag_name, tag_color)
+                            VALUES (?, ?, ?, ?)
+                        ''', (cluster_id, int(vmid), tag_name, tag_color))
+            except:
+                pass
+        
+        logging.info(f"Migrated VM tags to SQLite")
+        return True
+    
+    def _migrate_migration_history(self) -> bool:
+        """Migrate migration history from JSON"""
+        if not os.path.exists(MIGRATION_HISTORY_FILE):
+            return False
+        
+        try:
+            with open(MIGRATION_HISTORY_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for entry in data:
+            try:
+                cursor.execute('''
+                    INSERT INTO migration_history
+                    (cluster_id, vmid, vm_name, source_node, target_node, 
+                     reason, status, duration_seconds, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    entry.get('cluster_id', ''),
+                    entry.get('vmid', 0),
+                    entry.get('vm_name', ''),
+                    entry.get('source_node', ''),
+                    entry.get('target_node', ''),
+                    entry.get('reason', ''),
+                    entry.get('status', ''),
+                    entry.get('duration', 0),
+                    entry.get('timestamp', '')
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated {len(data)} migration history entries to SQLite")
+        return True
+    
+    def _migrate_server_settings(self) -> bool:
+        """Migrate server settings from JSON"""
+        if not os.path.exists(SERVER_SETTINGS_FILE):
+            return False
+        
+        try:
+            with open(SERVER_SETTINGS_FILE, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        for key, value in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO server_settings (key, value)
+                    VALUES (?, ?)
+                ''', (key, json.dumps(value) if not isinstance(value, str) else value))
+            except:
+                pass
+        
+        logging.info(f"Migrated server settings to SQLite")
+        return True
+    
+    def _migrate_custom_roles(self) -> bool:
+        """Migrate custom roles from JSON"""
+        roles_file = os.path.join(CONFIG_DIR, 'custom_roles.json')
+        if not os.path.exists(roles_file):
+            return False
+        
+        try:
+            with open(roles_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        for role_name, role_data in data.items():
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO custom_roles (name, permissions, description, created_at)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    role_name,
+                    json.dumps(role_data.get('permissions', [])),
+                    role_data.get('description', ''),
+                    now
+                ))
+            except:
+                pass
+        
+        logging.info(f"Migrated custom roles to SQLite")
+        return True
+    
+    def _migrate_cluster_alerts(self) -> bool:
+        """Migrate cluster alerts from JSON to SQLite
+        
+        NS: These were in cluster_alerts.json before, now in db
+        MK: handles both old dict format and new list format
+        """
+        alerts_file = os.path.join(CONFIG_DIR, 'cluster_alerts.json')
+        if not os.path.exists(alerts_file):
+            return False
+        
+        try:
+            with open(alerts_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        migrated = 0
+        
+        for cluster_id, alerts in data.items():
+            # Handle list format (new style)
+            if isinstance(alerts, list):
+                for alert in alerts:
+                    try:
+                        alert_id = alert.get('id', str(uuid.uuid4())[:8])
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO cluster_alerts 
+                            (cluster_id, alert_type, config, enabled, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            cluster_id,
+                            alert_id,
+                            json.dumps(alert),
+                            1 if alert.get('enabled', True) else 0,
+                            now,
+                            now
+                        ))
+                        migrated += 1
+                    except:
+                        pass
+            # Handle dict format (old style)
+            elif isinstance(alerts, dict):
+                for alert_type, config in alerts.items():
+                    try:
+                        cursor.execute('''
+                            INSERT OR REPLACE INTO cluster_alerts 
+                            (cluster_id, alert_type, config, enabled, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            cluster_id,
+                            alert_type,
+                            json.dumps(config) if isinstance(config, dict) else str(config),
+                            1,
+                            now,
+                            now
+                        ))
+                        migrated += 1
+                    except:
+                        pass
+        
+        logging.info(f"Migrated {migrated} cluster alerts to SQLite")
+        return True
+    
+    def _migrate_esxi_storages(self) -> bool:
+        """Migrate ESXi storage config from JSON to SQLite
+        
+        LW: this esxi stuff was added for vmware migration support
+        but those who do really need it for vmware migrations
+        """
+        esxi_file = os.path.join(CONFIG_DIR, 'esxi_storages.json')
+        if not os.path.exists(esxi_file):
+            return False
+        
+        try:
+            with open(esxi_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        
+        storages = data.get('storages', [])
+        for storage in storages:
+            try:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO esxi_storages 
+                    (name, host, username, password_encrypted, datastore, enabled, config)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    storage.get('name', ''),
+                    storage.get('host', ''),
+                    storage.get('username', ''),
+                    storage.get('password', ''),  # Already encrypted in JSON
+                    storage.get('datastore', ''),
+                    1 if storage.get('enabled', True) else 0,
+                    json.dumps(storage.get('config', {}))
+                ))
+            except:
+                pass  # old configs might have weird formats
+        
+        logging.info(f"Migrated {len(storages)} ESXi storages to SQLite")
+        return True
+    
+    def _migrate_storage_clusters(self) -> bool:
+        """Migrate storage clusters from JSON to SQLite
+        
+        NS: this file was in the wrong place for a while (root dir instead of config)
+        so we check both locations just in case
+        """
+        storage_file = os.path.join(CONFIG_DIR, 'storage_clusters.json')
+        if not os.path.exists(storage_file):
+            storage_file = 'storage_clusters.json'  # Legacy location oops
+        if not os.path.exists(storage_file):
+            return False
+        
+        try:
+            with open(storage_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        migrated = 0
+        
+        for cluster_id, config in data.items():
+            clusters = config.get('clusters', [])
+            for sc in clusters:
+                try:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO storage_clusters 
+                        (cluster_id, name, storage_type, nodes, config, enabled)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        cluster_id,
+                        sc.get('name', ''),
+                        sc.get('type', 'ceph'),
+                        json.dumps(sc.get('nodes', [])),
+                        json.dumps(sc.get('config', {})),
+                        1 if sc.get('enabled', True) else 0
+                    ))
+                    migrated += 1
+                except:
+                    pass
+        
+        logging.info(f"Migrated {migrated} storage clusters to SQLite")
+        return True
+    
+    def _migrate_cluster_affinity_rules(self) -> bool:
+        """Migrate cluster affinity rules from JSON to SQLite
+        
+        MK: affinity rules keep VMs together or apart on hosts
+        useful for HA setups where you dont want both replicas on same node
+        """
+        rules_file = os.path.join(CONFIG_DIR, 'cluster_affinity_rules.json')
+        if not os.path.exists(rules_file):
+            return False
+        
+        try:
+            with open(rules_file, 'r') as f:
+                data = json.load(f)
+        except:
+            return False
+        
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        migrated = 0
+        
+        for cluster_id, rules in data.items():
+            for rule in rules:
+                try:
+                    # some old rules might not have an id, generate one
+                    rule_id = rule.get('id', str(uuid.uuid4()))
+                    # NS: handle both 'vms' and 'vm_ids' field names
+                    vms_data = rule.get('vms') or rule.get('vm_ids') or []
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO affinity_rules 
+                        (id, cluster_id, name, type, vms, enabled, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        rule_id,
+                        cluster_id,
+                        rule.get('name', ''),
+                        rule.get('type', 'affinity'),
+                        json.dumps(vms_data),
+                        1 if rule.get('enabled', True) else 0,
+                        rule.get('created_at', now)
+                    ))
+                    migrated += 1
+                except:
+                    pass
+        
+        logging.info(f"Migrated {migrated} cluster affinity rules to SQLite")
+        return True
+    
+    # ========================================
+    # CLUSTER OPERATIONS
+    # ========================================
+    
+    def get_all_clusters(self) -> dict:
+        """Get all clusters (returns dict like legacy format)"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM clusters')
+        
+        clusters = {}
+        for row in cursor.fetchall():
+            clusters[row['id']] = {
+                'name': row['name'],
+                'host': row['host'],
+                'user': row['user'],
+                'pass': self._decrypt(row['pass_encrypted']),
+                'ssl_verification': bool(row['ssl_verification']),
+                'migration_threshold': row['migration_threshold'],
+                'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
+                'migration_cooldown': balancer_cooldown(row['migration_cooldown']) if 'migration_cooldown' in row.keys() else BALANCER_COOLDOWN_DEFAULT,
+                'check_interval': row['check_interval'],
+                'auto_migrate': bool(row['auto_migrate']),
+                'balance_containers': bool(row['balance_containers']),
+                'balance_local_disks': bool(row['balance_local_disks']),
+                'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+                'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
+                'proxlb_pins_strict': bool(row['proxlb_pins_strict']) if 'proxlb_pins_strict' in row.keys() else False,
+                'dry_run': bool(row['dry_run']),
+                'enabled': bool(row['enabled']),
+                'ha_enabled': bool(row['ha_enabled']),
+                'fallback_hosts': json.loads(row['fallback_hosts'] or '[]'),
+                'ssh_user': row['ssh_user'] or '',
+                'ssh_key': self._decrypt(row['ssh_key_encrypted'] or ''),
+                'ssh_port': row['ssh_port'] or 22,
+                'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
+                'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
+                'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
+                'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
+                'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
+                'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
+                'predictive_balancing': bool(row['predictive_balancing']) if 'predictive_balancing' in row.keys() else False,
+                'predictive_threshold': row['predictive_threshold'] if 'predictive_threshold' in row.keys() else 0.0,
+                'balance_cpu_weight': row['balance_cpu_weight'] if 'balance_cpu_weight' in row.keys() else 1.0,
+                'balance_mem_weight': row['balance_mem_weight'] if 'balance_mem_weight' in row.keys() else 1.0,
+                'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
+                'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
+                'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+                'ssh_disabled': bool(row['ssh_disabled']) if 'ssh_disabled' in row.keys() else False,
+                'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
+                'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+                # MK May 2026 — worldmap fields (per-cluster)
+                'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
+                'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
+                'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
+                'node_ui_suffix': row['node_ui_suffix'] if 'node_ui_suffix' in row.keys() and row['node_ui_suffix'] else '',
+                'transfer_network': row['transfer_network'] if 'transfer_network' in row.keys() and row['transfer_network'] else '',
+            }
+
+        return clusters
+
+    def get_cluster(self, cluster_id: str) -> dict:
+        """Get single cluster"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM clusters WHERE id = ?', (cluster_id,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        # NS: Auto-migrate encrypted fields to AES-256-GCM if needed - Jan 2026
+        pass_encrypted = row['pass_encrypted']
+        ssh_key_encrypted = row['ssh_key_encrypted'] or ''
+        needs_migration = False
+        
+        if self._needs_reencrypt(pass_encrypted):
+            needs_migration = True
+        if ssh_key_encrypted and self._needs_reencrypt(ssh_key_encrypted):
+            needs_migration = True
+        
+        # Decrypt values
+        decrypted_pass = self._decrypt(pass_encrypted)
+        decrypted_ssh_key = self._decrypt(ssh_key_encrypted) if ssh_key_encrypted else ''
+        
+        # If migration needed, re-encrypt and save
+        if needs_migration and self.aesgcm:
+            try:
+                cursor.execute('''
+                    UPDATE clusters SET 
+                        pass_encrypted = ?,
+                        ssh_key_encrypted = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                ''', (
+                    self._encrypt(decrypted_pass),
+                    self._encrypt(decrypted_ssh_key) if decrypted_ssh_key else '',
+                    datetime.now().isoformat(),
+                    cluster_id
+                ))
+                self.conn.commit()
+                logging.info(f"Migrated cluster '{cluster_id}' encryption to AES-256-GCM (Military Grade)")
+            except Exception as e:
+                logging.warning(f"Failed to migrate cluster encryption: {e}")
+        
+        return {
+            'name': row['name'],
+            'host': row['host'],
+            'user': row['user'],
+            'pass': decrypted_pass,
+            'ssl_verification': bool(row['ssl_verification']),
+            'migration_threshold': row['migration_threshold'],
+            'migration_tolerance': row['migration_tolerance'] if 'migration_tolerance' in row.keys() else 10,
+            'migration_cooldown': balancer_cooldown(row['migration_cooldown']) if 'migration_cooldown' in row.keys() else BALANCER_COOLDOWN_DEFAULT,
+            'check_interval': row['check_interval'],
+            'auto_migrate': bool(row['auto_migrate']),
+            'balance_containers': bool(row['balance_containers']),
+            'balance_local_disks': bool(row['balance_local_disks']),
+            'proxlb_tags_enabled': bool(row['proxlb_tags_enabled']) if 'proxlb_tags_enabled' in row.keys() else False,
+            'proxlb_pins_auto_migrate': bool(row['proxlb_pins_auto_migrate']) if 'proxlb_pins_auto_migrate' in row.keys() else False,
+            'proxlb_pins_strict': bool(row['proxlb_pins_strict']) if 'proxlb_pins_strict' in row.keys() else False,
+            'dry_run': bool(row['dry_run']),
+            'enabled': bool(row['enabled']),
+            'ha_enabled': bool(row['ha_enabled']),
+            'fallback_hosts': json.loads(row['fallback_hosts'] or '[]'),
+            'ssh_user': row['ssh_user'] or '',
+            'ssh_key': decrypted_ssh_key,
+            'ssh_port': row['ssh_port'] or 22,
+            'ha_settings': json.loads(self._decrypt(row['ha_settings'] or '') or '{}'),
+            'excluded_nodes': json.loads(row['excluded_nodes'] or '[]'),
+            'smbios_autoconfig': json.loads(row['smbios_autoconfig'] or '{}'),
+            'api_token_user': row['api_token_user'] if 'api_token_user' in row.keys() else '',
+            'api_token_secret': self._decrypt(row['api_token_secret_encrypted']) if 'api_token_secret_encrypted' in row.keys() and row['api_token_secret_encrypted'] else '',
+            'cluster_type': row['cluster_type'] if 'cluster_type' in row.keys() else 'proxmox',
+            'predictive_balancing': bool(row['predictive_balancing']) if 'predictive_balancing' in row.keys() else False,
+            'predictive_threshold': row['predictive_threshold'] if 'predictive_threshold' in row.keys() else 0.0,
+            'balance_cpu_weight': row['balance_cpu_weight'] if 'balance_cpu_weight' in row.keys() else 1.0,
+            'balance_mem_weight': row['balance_mem_weight'] if 'balance_mem_weight' in row.keys() else 1.0,
+            'balance_io_weight': row['balance_io_weight'] if 'balance_io_weight' in row.keys() else 1.0,
+            'cpu_baseline': row['cpu_baseline'] if 'cpu_baseline' in row.keys() else '',
+            'vnc_tunnel': bool(row['vnc_tunnel']) if 'vnc_tunnel' in row.keys() else False,
+            'ssh_disabled': bool(row['ssh_disabled']) if 'ssh_disabled' in row.keys() else False,
+            'backup_sla_max_age_hours': int(row['backup_sla_max_age_hours']) if 'backup_sla_max_age_hours' in row.keys() and row['backup_sla_max_age_hours'] is not None else 0,
+            # MK May 2026 — Proxmox API port override (default 8006). Direct-TLS only, never proxied.
+            'api_port': int(row['api_port']) if 'api_port' in row.keys() and row['api_port'] is not None else 8006,
+            # MK May 2026 — worldmap fields (per-cluster, NULL = not plotted)
+            'latitude': float(row['latitude']) if 'latitude' in row.keys() and row['latitude'] is not None else None,
+            'longitude': float(row['longitude']) if 'longitude' in row.keys() and row['longitude'] is not None else None,
+            'location_label': row['location_label'] if 'location_label' in row.keys() and row['location_label'] else '',
+            'transfer_network': row['transfer_network'] if 'transfer_network' in row.keys() and row['transfer_network'] else '',
+        }
+
+    def save_cluster(self, cluster_id: str, data: dict):
+        """Save or update cluster"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+
+        # MK: Mar 2026 - preserve group_id/display_name/sort_order that aren't in config data (#111)
+        cursor.execute('SELECT group_id, display_name, sort_order, created_at, '
+                       'proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict, '
+                       'migration_cooldown, transfer_network FROM clusters WHERE id = ?', (cluster_id,))
+        existing = cursor.fetchone()
+
+        # MK May 2026 — preserve previously-set worldmap location across save_cluster
+        # round-trips. The cluster-edit UI only sends location when the operator
+        # actually opens the location panel; without this preserve, every other
+        # edit (rename, password rotation, etc.) would wipe the dot off the map.
+        existing_lat = existing_lon = existing_loc_label = None
+        existing_node_ui_suffix = ''
+        if existing:
+            try:
+                cursor.execute('SELECT latitude, longitude, location_label, node_ui_suffix FROM clusters WHERE id = ?', (cluster_id,))
+                _loc = cursor.fetchone()
+                if _loc:
+                    existing_lat = _loc['latitude']
+                    existing_lon = _loc['longitude']
+                    existing_loc_label = _loc['location_label']
+                    existing_node_ui_suffix = _loc['node_ui_suffix'] if 'node_ui_suffix' in _loc.keys() and _loc['node_ui_suffix'] else ''
+            except Exception:
+                pass
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO clusters
+            (id, name, host, user, pass_encrypted, ssl_verification,
+             migration_threshold, migration_tolerance, migration_cooldown,
+             check_interval, auto_migrate,
+             balance_containers, balance_local_disks, dry_run, enabled,
+             ha_enabled, fallback_hosts, ssh_user, ssh_key_encrypted,
+             ssh_port, ha_settings, excluded_nodes, smbios_autoconfig,
+             api_token_user, api_token_secret_encrypted,
+             group_id, display_name, sort_order,
+             cluster_type,
+             predictive_balancing, predictive_threshold,
+             balance_cpu_weight, balance_mem_weight, balance_io_weight,
+             cpu_baseline, vnc_tunnel, ssh_disabled,
+             backup_sla_max_age_hours,
+             api_port,
+             latitude, longitude, location_label,
+             node_ui_suffix,
+             proxlb_tags_enabled, proxlb_pins_auto_migrate, proxlb_pins_strict,
+             transfer_network,
+             created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?)
+        ''', (
+            cluster_id,
+            data.get('name', ''),
+            data.get('host', ''),
+            data.get('user', ''),
+            self._encrypt(data.get('pass', '')),
+            1 if data.get('ssl_verification', True) else 0,
+            data.get('migration_threshold', 30),
+            data.get('migration_tolerance', 10),
+            # a restore from a backup that predates the field keeps what is stored
+            balancer_cooldown(data.get('migration_cooldown',
+                                       existing['migration_cooldown'] if existing else BALANCER_COOLDOWN_DEFAULT)),
+            data.get('check_interval', 300),
+            1 if data.get('auto_migrate', False) else 0,
+            1 if data.get('balance_containers', False) else 0,
+            1 if data.get('balance_local_disks', False) else 0,
+            1 if data.get('dry_run', True) else 0,
+            1 if data.get('enabled', True) else 0,
+            1 if data.get('ha_enabled', False) else 0,
+            json.dumps(data.get('fallback_hosts', [])),
+            data.get('ssh_user', ''),
+            self._encrypt(data.get('ssh_key', '')),
+            data.get('ssh_port', 22),
+            self._encrypt(json.dumps(data.get('ha_settings', {}))),
+            json.dumps(data.get('excluded_nodes', [])),
+            json.dumps(data.get('smbios_autoconfig', {})),
+            data.get('api_token_user', ''),
+            self._encrypt(data.get('api_token_secret', '')) if data.get('api_token_secret') else '',
+            data.get('group_id', existing['group_id'] if existing else None),
+            data.get('display_name', existing['display_name'] if existing else None),
+            data.get('sort_order', existing['sort_order'] if existing else None),
+            data.get('cluster_type', 'proxmox'),
+            1 if data.get('predictive_balancing', False) else 0,
+            float(data.get('predictive_threshold', 0.0) or 0.0),
+            float(data.get('balance_cpu_weight', 1.0) or 1.0),
+            float(data.get('balance_mem_weight', 1.0) or 1.0),
+            float(data.get('balance_io_weight', 1.0) or 1.0),
+            data.get('cpu_baseline', '') or '',
+            1 if data.get('vnc_tunnel', False) else 0,
+            1 if data.get('ssh_disabled', False) else 0,
+            int(data.get('backup_sla_max_age_hours', 0) or 0),
+            int(data.get('api_port', 8006) or 8006),
+            data.get('latitude', existing_lat),
+            data.get('longitude', existing_lon),
+            data.get('location_label', existing_loc_label) or '',
+            (data.get('node_ui_suffix', existing_node_ui_suffix) or '').strip().lstrip('.'),
+            # INSERT OR REPLACE rewrites every column, so a flag the payload omits
+            # gets forced to 0. A merge-restore from an older backup that predates
+            # these fields would silently switch them off. Fall back to the stored
+            # value when the key is absent. An explicit False still wins.
+            1 if data.get('proxlb_tags_enabled', existing['proxlb_tags_enabled'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_auto_migrate', existing['proxlb_pins_auto_migrate'] if existing else False) else 0,
+            1 if data.get('proxlb_pins_strict', existing['proxlb_pins_strict'] if existing else False) else 0,
+            str(data.get('transfer_network', existing['transfer_network'] if existing else '') or '').strip(),
+            existing['created_at'] if existing else now,
+            now
+        ))
+        self.conn.commit()
+    
+    # MK: whitelist for update_cluster to prevent SQL injection via dict keys
+    _CLUSTER_FIELDS = frozenset({
+        'name', 'host', 'port', 'user', 'password_encrypted', 'cluster_type',
+        'auto_balance', 'balance_threshold', 'balance_local_disks', 'migration_tolerance',
+        'ha_enabled', 'ha_check_interval', 'smbios_autoconfig', 'max_migrations_per_cycle',
+        # MK May 2026 — worldmap (per-cluster location).
+        'latitude', 'longitude', 'location_label',
+    })
+
+    def update_cluster(self, cluster_id: str, fields: dict):
+        """Partial update of cluster fields - MK Feb 2026"""
+        if not fields:
+            return
+        cursor = self.conn.cursor()
+        sets = []
+        vals = []
+        for key, value in fields.items():
+            if key not in self._CLUSTER_FIELDS:
+                logging.warning(f"[DB] update_cluster: rejected unknown field '{key}'")
+                continue
+            sets.append(f"{key} = ?")
+            vals.append(value)
+        if not sets:
+            return
+        sets.append("updated_at = ?")
+        vals.append(datetime.now().isoformat())
+        vals.append(cluster_id)
+        cursor.execute(f"UPDATE clusters SET {', '.join(sets)} WHERE id = ?", vals)
+        self.conn.commit()
+
+    def delete_cluster(self, cluster_id: str):
+        """Delete a cluster and ALL of its cluster-scoped rows.
+
+        #779 (zobsg) — this used to remove only the clusters row + xcpng_vmid_map, leaving orphaned
+        rows in pool_permissions, vm_acls, node_maintenance, migration_history and ~20 other
+        cluster_id-keyed tables (stale UI counts, DB bloat, and a small tail where a reused 8-char
+        cluster id could inherit a stale pool/VM grant). Sweep every table that actually carries a
+        cluster_id column so the delete is exhaustive and stays correct as new cluster-scoped tables
+        are added, instead of a hand-maintained list that silently drifts. tenants.clusters is a JSON
+        array (not a cluster_id column) — the caller prunes that separately.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM clusters WHERE id = ?', (cluster_id,))
+        # table names come from sqlite_master (not user input) → safe to interpolate; cluster_id is bound
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        for (tbl,) in cursor.fetchall():
+            try:
+                cols = [row[1] for row in cursor.execute('PRAGMA table_info("%s")' % tbl).fetchall()]
+            except Exception:
+                continue
+            if 'cluster_id' in cols:
+                cursor.execute('DELETE FROM "%s" WHERE cluster_id = ?' % tbl, (cluster_id,))
+        self.conn.commit()
+
+    # MK Oct 2026 - the moves the balancer made, with why. migration_history is a local
+    # table: the instance whose balancer moved the guest holds the row, a standby asks it.
+    MIGRATION_HISTORY_KEEP = 1000
+    BALANCER_TRIGGERS = ('balance', 'predictive', 'affinity', 'pin')
+
+    def add_migration_event(self, cluster_id, vmid, vm_name, source_node, target_node, status,
+                            reason='', trigger=None, details=None, duration=0.0, timestamp=None):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT INTO migration_history
+            (cluster_id, vmid, vm_name, source_node, target_node, reason, status,
+             duration_seconds, timestamp, trigger_kind, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (cluster_id, int(vmid), vm_name or '', source_node or '', target_node or '',
+              reason or '', status or '', round(float(duration or 0), 1),
+              timestamp or datetime.now().astimezone().isoformat(timespec='seconds'),
+              trigger, json.dumps(details) if details else None))
+        row_id = cursor.lastrowid
+        # the newest rows of each cluster stay, a busy cluster does not push the others out
+        cursor.execute('''
+            DELETE FROM migration_history WHERE cluster_id = ? AND id <= (
+                SELECT id FROM migration_history WHERE cluster_id = ?
+                ORDER BY id DESC LIMIT 1 OFFSET ?)
+        ''', (cluster_id, cluster_id, self.MIGRATION_HISTORY_KEEP))
+        self.conn.commit()
+        return row_id
+
+    def list_balancer_moves(self, cluster_id, triggers=None, status=None, before_id=None, limit=None):
+        """Balancer moves of one cluster, newest first; limit None is every row kept."""
+        kinds = [k for k in (triggers or self.BALANCER_TRIGGERS) if k in self.BALANCER_TRIGGERS]
+        if not kinds:
+            return []
+        sql = ('SELECT id, vmid, vm_name, source_node, target_node, reason, status, '
+               'duration_seconds, timestamp, trigger_kind, details FROM migration_history '
+               'WHERE cluster_id = ? AND trigger_kind IN (%s)' % ','.join('?' * len(kinds)))
+        params = [cluster_id, *kinds]
+        if status:
+            sql += ' AND status = ?'
+            params.append(status)
+        if before_id is not None:
+            sql += ' AND id < ?'
+            params.append(int(before_id))
+        sql += ' ORDER BY id DESC'
+        if limit is not None:
+            sql += ' LIMIT ?'
+            params.append(int(limit))
+        out = []
+        for row in self.query(sql, tuple(params)):
+            try:
+                details = json.loads(row['details']) if row['details'] else {}
+            except (TypeError, ValueError):
+                details = {}
+            out.append({'id': row['id'], 'vmid': row['vmid'], 'vm_name': row['vm_name'] or '',
+                        'source_node': row['source_node'], 'target_node': row['target_node'],
+                        'trigger': row['trigger_kind'], 'reason': row['reason'] or '',
+                        'details': details if isinstance(details, dict) else {},
+                        'status': row['status'], 'duration': row['duration_seconds'],
+                        'timestamp': row['timestamp']})
+        return out
+
+    # MK Oct 2026 - node state changes (core/node_history.py); the newest rows of each cluster stay
+    NODE_STATE_KEEP = 5000
+
+    def add_node_states(self, cluster_id, rows):
+        """rows: [(node, state, previous, at, detail)], one transaction, then the trim."""
+        if not rows:
+            return
+        cursor = self.conn.cursor()
+        cursor.executemany(
+            'INSERT INTO node_state_history (cluster_id, node, state, previous, at, detail) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            [(cluster_id, node or '', state, previous or '', at, (detail or '')[:300])
+             for node, state, previous, at, detail in rows])
+        cursor.execute('''
+            DELETE FROM node_state_history WHERE cluster_id = ? AND id <= (
+                SELECT id FROM node_state_history WHERE cluster_id = ?
+                ORDER BY id DESC LIMIT 1 OFFSET ?)
+        ''', (cluster_id, cluster_id, self.NODE_STATE_KEEP))
+        self.conn.commit()
+
+    def last_node_states(self, cluster_id, states):
+        """{node: newest of `states`} of one cluster: where each node stood when this
+        process last looked, before a restart. Reads the bounded rows of one cluster."""
+        marks = ','.join('?' * len(states))
+        out = {}
+        for row in self.query(
+                f'SELECT node, state FROM node_state_history WHERE id IN ('
+                f'SELECT MAX(id) FROM node_state_history WHERE cluster_id = ? AND state IN ({marks}) '
+                f'GROUP BY node)', (cluster_id, *states)):
+            out[row['node']] = row['state']
+        return out
+
+    def list_node_states(self, cluster_id, since, until, node=None, limit=200):
+        """State changes of one cluster with since <= at < until, newest first. `node`
+        keeps that node's rows; since and until compare as text with the stored UTC."""
+        if node is None:
+            sql = ('SELECT id, node, state, previous, at, detail FROM node_state_history '
+                   'WHERE cluster_id = ? AND at >= ? AND at < ?')
+            params = [cluster_id, since, until]
+        else:
+            sql = ('SELECT id, node, state, previous, at, detail FROM node_state_history '
+                   'WHERE cluster_id = ? AND node = ? AND at >= ? AND at < ?')
+            params = [cluster_id, node, since, until]
+        sql += ' ORDER BY at DESC, id DESC LIMIT ?'
+        params.append(int(limit))
+        return [dict(r) for r in self.query(sql, tuple(params))]
+
+    # XCP-ng VMID mapping helpers - MK Mar 2026
+    #
+    # MK Sep 2026: a retired mapping keeps its row with this in place of the uuid, so the
+    # vmid stays spent and cannot be handed to a new VM (the allocator takes MAX+1 from
+    # this table). NOT NULL and the (cluster_id, uuid) primary key rule out a plain NULL,
+    # and a real XenAPI uuid never looks like this.
+    XCPNG_RETIRED_UUID = 'retired:'
+
+    def xcpng_retire_vmid(self, cluster_id, vmid):
+        """Mark a synthetic vmid as spent without freeing it for reuse."""
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE xcpng_vmid_map SET uuid = ? WHERE cluster_id = ? AND vmid = ?',
+                       (f'{self.XCPNG_RETIRED_UUID}{int(vmid)}', cluster_id, int(vmid)))
+        self.conn.commit()
+        return cursor.rowcount or 0
+
+    def xcpng_get_vmid(self, cluster_id, vm_uuid, create=True):
+        """Get or create synthetic VMID for XCP-ng VM UUID.
+
+        create=False only looks it up and gives None for a UUID without an id. That
+        is what a PegaProx standby does: the map is synced, and an id made up there
+        could differ from the one the active hands the same VM (#625)."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT vmid FROM xcpng_vmid_map WHERE cluster_id = ? AND uuid = ?',
+                       (cluster_id, vm_uuid))
+        row = cursor.fetchone()
+        if row:
+            return row['vmid']
+        if not create:
+            return None
+        # allocate next vmid starting at 100
+        cursor.execute('SELECT MAX(vmid) FROM xcpng_vmid_map WHERE cluster_id = ?', (cluster_id,))
+        max_row = cursor.fetchone()
+        next_id = (max_row[0] or 99) + 1
+        cursor.execute('INSERT INTO xcpng_vmid_map (cluster_id, uuid, vmid) VALUES (?, ?, ?)',
+                       (cluster_id, vm_uuid, next_id))
+        self.conn.commit()
+        return next_id
+
+    def xcpng_resolve_vmid(self, cluster_id, vmid):
+        """Resolve synthetic VMID back to XCP-ng UUID"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT uuid FROM xcpng_vmid_map WHERE cluster_id = ? AND vmid = ?',
+                       (cluster_id, int(vmid)))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        _u = row['uuid'] or ''
+        # a retired row holds the id, not a guest
+        return None if _u.startswith(self.XCPNG_RETIRED_UUID) else _u
+
+    # ========================================
+    # USER OPERATIONS
+    # ========================================
+    
+    # NS Oct 2026 (#991) - rows only somebody signed in can have written: the systems this
+    # install connects to and the credentials it issued. Settings, tenants and the rate
+    # tables are left out on purpose, a fresh install fills those before its setup runs.
+    CONFIGURATION_TABLES = ('clusters', 'pbs_servers', 'vmware_servers', 'xcpng_pools',
+                            'storage_clusters', 'api_tokens', 'webauthn_credentials')
+
+    def holds_configuration(self) -> bool:
+        """True once this database holds anything from CONFIGURATION_TABLES. Raises
+        when it cannot tell."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        present = {row[0] for row in cursor.fetchall()}
+        for table in self.CONFIGURATION_TABLES:
+            if table in present:
+                cursor.execute(f'SELECT 1 FROM "{table}" LIMIT 1')
+                if cursor.fetchone():
+                    return True
+        return False
+
+    def get_all_users(self) -> dict:
+        """Get all users"""
+        cursor = self.conn.cursor()
+        # MK Oct 2026 (#940) - every column but directory_groups. This read runs on every
+        # authorized request, and a directory user's nested memberships run to hundreds of
+        # DNs; the pool lookups read them by username (get_user_directory_groups, cloud_dashboard).
+        cursor.execute('PRAGMA table_info(users)')
+        _cols = ', '.join('"%s"' % r[1] for r in cursor.fetchall() if r[1] != 'directory_groups')
+        cursor.execute(f'SELECT {_cols or "*"} FROM users')
+        
+        def build_avatar_url(row_data: dict) -> str:
+            avatar_mime = row_data.get('avatar_mime', '') or ''
+            avatar_data = row_data.get('avatar_data', '') or ''
+            if avatar_mime and avatar_data:
+                return f"data:{avatar_mime};base64,{avatar_data}"
+            return ''
+
+        users = {}
+        for row in cursor.fetchall():
+            # Handle both old schema (no password_salt) and new schema
+            row_dict = dict(row)
+            password_salt = row_dict.get('password_salt', '')
+            password_hash = row_dict.get('password_hash', '')
+            
+            # If password_salt is missing or empty, check if there's a combined 'password' field
+            # This handles migration edge cases
+            if not password_salt and 'password' in row_dict:
+                # Old format might have combined salt:hash
+                combined = row_dict.get('password', '')
+                if ':' in combined:
+                    password_salt, password_hash = combined.split(':', 1)
+            
+            users[row['username']] = {
+                'password_salt': password_salt,
+                'password_hash': password_hash,
+                'role': row['role'],
+                'permissions': json.loads(row_dict.get('permissions') or '[]'),
+                'tenant_id': row_dict.get('tenant') or DEFAULT_TENANT_ID,  # NS: DB stores 'tenant', code uses 'tenant_id'
+                'created_at': row_dict.get('created_at'),
+                'last_login': row_dict.get('last_login'),
+                'password_expiry': row_dict.get('password_expiry'),
+                'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
+                'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
+                'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
+                'force_password_change': bool(row_dict.get('force_password_change', 0)),
+                'enabled': bool(row_dict.get('enabled', 1)),
+                # NS: User preferences - these were missing!
+                'theme': row_dict.get('theme', ''),
+                'language': row_dict.get('language', ''),
+                'ui_layout': row_dict.get('ui_layout', 'modern'),
+                'taskbar_auto_expand': bool(row_dict.get('taskbar_auto_expand', 1)),
+                # LW: Feb 2026 - LDAP fields
+                'auth_source': row_dict.get('auth_source', 'local'),
+                'display_name': row_dict.get('display_name', ''),
+                'email': row_dict.get('email', ''),
+                'avatar_mime': row_dict.get('avatar_mime', ''),
+                'avatar_data': row_dict.get('avatar_data', ''),
+                'avatar_url': build_avatar_url(row_dict),
+                'ldap_dn': row_dict.get('ldap_dn', ''),
+                'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
+                'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
+                'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+                # NS: Feb 2026 - OIDC and tenant permission fields
+                'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
+                'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
+                'oidc_sub': row_dict.get('oidc_sub', ''),
+                'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+                'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
+                'portal_only': bool(row_dict.get('portal_only', 0)),
+                'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
+                'user_folder': row_dict.get('user_folder', ''),
+                'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                    if row_dict.get('cloud_dashboard') else None),
+            }
+
+        return users
+    
+    def get_user(self, username: str) -> dict:
+        """Get single user"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        # Handle both old schema (no password_salt) and new schema
+        row_dict = dict(row)
+        password_salt = row_dict.get('password_salt', '')
+        password_hash = row_dict.get('password_hash', '')
+        
+        # If password_salt is missing or empty, check if there's a combined 'password' field
+        if not password_salt and 'password' in row_dict:
+            combined = row_dict.get('password', '')
+            if ':' in combined:
+                password_salt, password_hash = combined.split(':', 1)
+        
+        def build_avatar_url(row_data: dict) -> str:
+            avatar_mime = row_data.get('avatar_mime', '') or ''
+            avatar_data = row_data.get('avatar_data', '') or ''
+            if avatar_mime and avatar_data:
+                return f"data:{avatar_mime};base64,{avatar_data}"
+            return ''
+
+        return {
+            'password_salt': password_salt,
+            'password_hash': password_hash,
+            'role': row_dict.get('role', 'viewer'),
+            'permissions': json.loads(row_dict.get('permissions') or '[]'),
+            'tenant_id': row_dict.get('tenant') or DEFAULT_TENANT_ID,  # NS: DB stores 'tenant', code uses 'tenant_id'
+            'created_at': row_dict.get('created_at'),
+            'last_login': row_dict.get('last_login'),
+            'password_expiry': row_dict.get('password_expiry'),
+            'totp_secret': self._decrypt(row_dict.get('totp_secret_encrypted') or ''),
+            'totp_pending_secret': self._decrypt(row_dict.get('totp_pending_secret_encrypted') or ''),  # MK: Load pending 2FA secret
+            'totp_enabled': bool(row_dict.get('totp_enabled', 0)),
+            'force_password_change': bool(row_dict.get('force_password_change', 0)),
+            'enabled': bool(row_dict.get('enabled', 1)),
+            'theme': row_dict.get('theme', ''),
+            'language': row_dict.get('language', ''),
+            'ui_layout': row_dict.get('ui_layout', 'modern'),
+            'taskbar_auto_expand': bool(row_dict.get('taskbar_auto_expand', 1)),  # NS: Feb 2026
+            'auth_source': row_dict.get('auth_source', 'local'),
+            'display_name': row_dict.get('display_name', ''),
+            'email': row_dict.get('email', ''),
+            'avatar_mime': row_dict.get('avatar_mime', ''),
+            'avatar_data': row_dict.get('avatar_data', ''),
+            'avatar_url': build_avatar_url(row_dict),
+            'ldap_dn': row_dict.get('ldap_dn', ''),
+            'last_ldap_sync': row_dict.get('last_ldap_sync', ''),
+            'ldap_permissions': json.loads(row_dict.get('ldap_permissions') or '[]'),
+            'ldap_tenant': row_dict.get('ldap_tenant', '') or '',
+            # NS: Feb 2026 - OIDC and tenant permission fields
+            'tenant_permissions': json.loads(row_dict.get('tenant_permissions') or '{}'),
+            'denied_permissions': json.loads(row_dict.get('denied_permissions') or '[]'),
+            'oidc_sub': row_dict.get('oidc_sub', ''),
+            'last_oidc_sync': row_dict.get('last_oidc_sync', ''),
+            'layout_chosen': bool(row_dict.get('layout_chosen', 0)),
+            'portal_only': bool(row_dict.get('portal_only', 0)),
+            'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
+            'user_folder': row_dict.get('user_folder', ''),
+            'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                if row_dict.get('cloud_dashboard') else None),
+        }
+
+    def save_user(self, username: str, data: dict):
+        """Save or update user"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO users
+            (username, password_salt, password_hash, role, permissions, tenant,
+             created_at, last_login, password_expiry,
+             totp_secret_encrypted, totp_pending_secret_encrypted, totp_enabled, force_password_change,
+            enabled, theme, language, ui_layout, taskbar_auto_expand,
+             auth_source, display_name, email, avatar_mime, avatar_data, ldap_dn, last_ldap_sync,
+             ldap_permissions, ldap_tenant,
+             tenant_permissions, denied_permissions, oidc_sub, last_oidc_sync,
+             layout_chosen, portal_only, sidebar_show_vmid, user_folder,
+             directory_groups)
+            VALUES (?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT created_at FROM users WHERE username = ?), ?),
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]')),
+                    ?)
+        ''', (
+            username,
+            data.get('password_salt', ''),
+            data.get('password_hash', ''),
+            data.get('role', 'viewer'),
+            json.dumps(data.get('permissions', [])),
+            data.get('tenant_id') or data.get('tenant'),  # NS: Accept both key names
+            username, now,
+            data.get('last_login'),
+            data.get('password_expiry'),
+            self._encrypt(data.get('totp_secret', '')),
+            self._encrypt(data.get('totp_pending_secret', '')),  # MK: Save pending 2FA secret
+            1 if data.get('totp_enabled', False) else 0,
+            1 if data.get('force_password_change', False) else 0,
+            1 if data.get('enabled', True) else 0,
+            data.get('theme', ''),
+            data.get('language', ''),
+            data.get('ui_layout', 'modern'),
+            1 if data.get('taskbar_auto_expand', True) else 0,  # NS: Feb 2026
+            data.get('auth_source', 'local'),  # LW: Feb 2026 - LDAP
+            data.get('display_name', ''),
+            data.get('email', ''),
+            data.get('avatar_mime', ''),
+            data.get('avatar_data', ''),
+            data.get('ldap_dn', ''),
+            data.get('last_ldap_sync', ''),
+            json.dumps(list(data.get('ldap_permissions') or [])),
+            data.get('ldap_tenant', '') or '',
+            # NS: Feb 2026 - OIDC and tenant permission fields
+            json.dumps(data.get('tenant_permissions', {})),
+            json.dumps(data.get('denied_permissions', [])),
+            data.get('oidc_sub', ''),
+            data.get('last_oidc_sync', ''),
+            1 if data.get('layout_chosen', False) else 0,
+            1 if data.get('portal_only', False) else 0,
+            1 if data.get('sidebar_show_vmid', False) else 0,
+            data.get('user_folder', ''),
+            # #940 - user dicts from get_all_users carry no groups, and a sign-in writes the
+            # whole table back: without a 'groups' key the stored ones stay as they are
+            (json.dumps(_directory_groups(data.get('auth_source', 'local'), data.get('groups')))
+             if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
+             else None),
+            username,
+            (json.dumps(data['cloud_dashboard'])
+             if isinstance(data.get('cloud_dashboard'), dict) else None),
+        ))
+        self.conn.commit()
+    
+    def save_all_users(self, users: dict):
+        """Save all users (for bulk operations)"""
+        for username, data in users.items():
+            self.save_user(username, data)
+    
+    def purge_user_grants(self, username: str) -> dict:
+        """Drop every per-resource grant tied to this username. Returns what went.
+
+        MK Sep 2026 - deleting an account revoked its sessions, its console tokens and
+        its API tokens, but left its VM-ACL memberships and pool permissions behind.
+        Both are keyed by the bare username, so the next account created under the same
+        name - a rehire, an MSP reusing a customer login, a tenant delegate naming a new
+        user after one another tenant deleted - silently inherited every VM and pool the
+        old account held, with nothing in the UI to show for it.
+
+        A `*` entry in an ACL is a wildcard, not this user, and is left alone.
+        """
+        removed = {'vm_acls': 0, 'pool_permissions': 0}
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("DELETE FROM pool_permissions WHERE subject_type = 'user' "
+                           "AND subject_id = ?", (username,))
+            removed['pool_permissions'] = cursor.rowcount or 0
+        except Exception as e:
+            logging.error(f"Failed to purge pool permissions for '{username}': {e}")
+
+        try:
+            # full scan on purpose: the member list is JSON in a column, so there is no
+            # index to ask, and a LIKE prefilter would quietly miss an escaped name. This
+            # runs on an admin deleting an account, not on a request path.
+            cursor.execute('SELECT id, users FROM vm_acls')
+            rows = cursor.fetchall()
+        except Exception as e:
+            logging.error(f"Failed to read VM ACLs while purging '{username}': {e}")
+            rows = []
+
+        for row in rows:
+            try:
+                members = json.loads(row['users'] or '[]')
+            except Exception:
+                continue
+            if username not in members:
+                continue
+            members = [m for m in members if m != username]
+            try:
+                if members:
+                    cursor.execute('UPDATE vm_acls SET users = ? WHERE id = ?',
+                                   (json.dumps(members), row['id']))
+                else:
+                    # an ACL row with no members grants nobody anything, but it still
+                    # makes the cluster "have ACLs", which narrows what OTHER callers
+                    # are shown. Drop it rather than leave the litter behind.
+                    cursor.execute('DELETE FROM vm_acls WHERE id = ?', (row['id'],))
+                removed['vm_acls'] += 1
+            except Exception as e:
+                logging.error(f"Failed to purge VM ACL {row['id']} for '{username}': {e}")
+
+        self.conn.commit()
+        if removed['vm_acls'] or removed['pool_permissions']:
+            logging.info(f"purged grants for deleted user '{username}': "
+                         f"{removed['vm_acls']} VM ACL(s), "
+                         f"{removed['pool_permissions']} pool permission(s)")
+            # late import: utils.rbac imports this module, so it cannot be at the top
+            try:
+                from pegaprox.utils.rbac import invalidate_vm_acls_cache, invalidate_pool_cache
+                invalidate_vm_acls_cache()
+                invalidate_pool_cache()
+            except Exception as e:
+                logging.warning(f"could not invalidate the authz caches after the purge: {e}")
+        return removed
+
+    def purge_vm_grants(self, cluster_id: str, vmid) -> dict:
+        """Drop every per-resource grant that pointed at one VM. Returns what went.
+
+        A vmid is only unique while the guest exists. Once it is gone the number can
+        come back - PVE reuses freely, and our XCP-ng mapping did too until the id was
+        retired instead of deleted. A VM-ACL row or a scheduled action left pointing at
+        it then applies to whatever takes the number next. The client portal's teardown
+        route has done this for its own deletions since #556; everything else had not.
+        MK Sep 2026
+        """
+        removed = {'vm_acls': 0, 'scheduled_actions': 0, 'favorites': 0}
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('DELETE FROM vm_acls WHERE cluster_id = ? AND vmid = ?',
+                           (cluster_id, str(vmid)))
+            removed['vm_acls'] = cursor.rowcount or 0
+        except Exception as e:
+            logging.error(f"Failed to purge VM ACL for {cluster_id}/{vmid}: {e}")
+        try:
+            cursor.execute('DELETE FROM scheduled_actions WHERE cluster_id = ? AND vmid = ?',
+                           (cluster_id, int(vmid)))
+            removed['scheduled_actions'] = cursor.rowcount or 0
+        except Exception as e:
+            logging.error(f"Failed to purge schedules for {cluster_id}/{vmid}: {e}")
+        try:
+            # a star on the number would light the next guest that takes it, and hold a slot
+            cursor.execute("DELETE FROM user_favorites WHERE cluster_id = ? AND kind = 'vm' AND vmid = ?",
+                           (cluster_id, int(vmid)))
+            removed['favorites'] = cursor.rowcount or 0
+        except Exception as e:
+            logging.error(f"Failed to purge favorites for {cluster_id}/{vmid}: {e}")
+        self.conn.commit()
+        if any(removed.values()):
+            logging.info(f"purged grants for removed VM {cluster_id}/{vmid}: {removed}")
+            try:
+                from pegaprox.utils.rbac import invalidate_vm_acls_cache
+                invalidate_vm_acls_cache()
+            except Exception:
+                pass
+        return removed
+
+    def delete_user(self, username: str):
+        """Delete user"""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM users WHERE username = ?', (username,))
+        # the next account under this name starts without them
+        cursor.execute('DELETE FROM user_favorites WHERE username = ?', (username,))
+        self.conn.commit()
+        # the grants outlive the account otherwise, and the next account with this
+        # name inherits them
+        self.purge_user_grants(username)
+    
+    # ========================================
+    # SESSION OPERATIONS
+    # ========================================
+    
+    def get_all_sessions(self) -> dict:
+        """Get all sessions from database
+        
+        NOTE: Since v0.6.1, session tokens are stored as SHA-256 hashes.
+        This means sessions loaded from DB cannot be validated against
+        plaintext tokens - users must re-login after server restart.
+        This is a SECURITY FEATURE, not a bug!
+        """
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM sessions')
+        
+        # NS: Return empty dict - old hashed sessions can't be used anyway
+        # This forces re-login after restart (more secure)
+        sessions = {}
+        # Note: We could load the hashes, but they're useless for validation
+        # since we can't reverse SHA-256. Just return empty.
+        logging.debug(f"Sessions in DB will be cleared (tokens are hashed, can't validate)")
+        
+        # Clean up old sessions from DB
+        cursor.execute('DELETE FROM sessions')
+        self.conn.commit()
+        
+        return sessions
+    
+    def get_session(self, token: str) -> dict:
+        """Get single session"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM sessions WHERE token = ?', (token,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return None
+        
+        return {
+            'user': row['username'],
+            'created': row['created_at'],
+            'expires': row['expires_at'],
+            'ip': row['ip_address'],
+            'user_agent': row['user_agent'],
+        }
+    
+    def save_session(self, token: str, data: dict):
+        """Save session
+        
+        NS: Session tokens are hashed before storing in DB for security!
+        If someone steals the DB, they can't hijack sessions.
+        Trade-off: Sessions don't survive server restarts (users must re-login)
+        """
+        cursor = self.conn.cursor()
+        
+        # Hash the token - even if DB is stolen, tokens can't be used
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO sessions
+            (token, username, created_at, expires_at, ip_address, user_agent)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            token_hash,  # Store hash, not plaintext token!
+            data.get('user', ''),
+            data.get('created', ''),
+            data.get('expires', ''),
+            data.get('ip', ''),
+            data.get('user_agent', '')
+        ))
+        self.conn.commit()
+    
+    def delete_session(self, token: str):
+        """Delete session"""
+        cursor = self.conn.cursor()
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        cursor.execute('DELETE FROM sessions WHERE token = ?', (token_hash,))
+        self.conn.commit()
+    
+    def delete_expired_sessions(self):
+        """Delete expired sessions"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute('DELETE FROM sessions WHERE expires_at < ?', (now,))
+        self.conn.commit()
+    
+    def save_all_sessions(self, sessions: dict):
+        """Save all sessions"""
+        for token, data in sessions.items():
+            self.save_session(token, data)
+    
+    # ========================================
+    # AUDIT LOG OPERATIONS (with HMAC Integrity)
+    # ========================================
+    
+    def _generate_audit_hmac(self, timestamp: str, user: str, action: str, details: str,
+                             ip: str, cluster: str = '', severity: str = '',
+                             cluster_id: str = '') -> str:
+        """Generate HMAC signature for audit entry (tamper detection).
+
+        MK May 2026 (audit fix M-2) — added cluster + severity to the canonical
+        string. Old entries (signed before May 2026) won't have those fields
+        in their HMAC; the verify path tries the new format first, then
+        falls back to the legacy format for backward compat.
+
+        The cluster id joins the string only when the row has one, so every row
+        written before it existed keeps the signature it had.
+        """
+        if not self.aes_key:
+            return ''
+        # Canonical: timestamp|user|action|details|ip|cluster|severity[|cluster_id]
+        data = f"{timestamp}|{user or ''}|{action}|{details or ''}|{ip or ''}|{cluster or ''}|{severity or ''}"
+        if cluster_id:
+            data += f"|{cluster_id}"
+        signature = hmac.new(self.aes_key, data.encode('utf-8'), hashlib.sha256).hexdigest()
+        return signature
+
+    def _verify_audit_hmac(self, entry: dict) -> bool:
+        """Verify HMAC signature of an audit entry. MK May 2026 — fail-closed:
+        if there's no key we cannot trust the entry, so report unverified
+        rather than 'OK'."""
+        if not self.aes_key:
+            return False  # fail-closed (was: True / fail-open)
+
+        stored_sig = entry.get('hmac_signature', '')
+        if not stored_sig:
+            return False  # No signature = potentially tampered or old entry
+
+        # a row in the chain has one format only; falling back to the older ones would let
+        # its place in the chain change under a signature that never covered it
+        if entry.get('chain_seq') is not None:
+            return hmac.compare_digest(str(stored_sig), self._audit_chain_hmac(entry))
+
+        # Try new format (with cluster + severity).
+        expected_new = self._generate_audit_hmac(
+            entry.get('timestamp', ''),
+            entry.get('user', ''),
+            entry.get('action', ''),
+            entry.get('details', ''),
+            entry.get('ip_address', ''),
+            entry.get('cluster', ''),
+            entry.get('severity', ''),
+            entry.get('cluster_id', ''),
+        )
+        if hmac.compare_digest(stored_sig, expected_new):
+            return True
+
+        # Backward-compat: pre-May-2026 entries didn't include cluster/severity
+        # in the canonical string. Try the legacy 5-field form.
+        legacy_data = (
+            f"{entry.get('timestamp','')}|{entry.get('user','') or ''}|"
+            f"{entry.get('action','')}|{entry.get('details','') or ''}|"
+            f"{entry.get('ip_address','') or ''}"
+        )
+        legacy_sig = hmac.new(self.aes_key, legacy_data.encode('utf-8'), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(stored_sig, legacy_sig)
+    
+    # ---- the hash chain (MK Oct 2026) ----------------------------------------------------
+    # Row n stores chain_seq n and prev_hash = hash of row n-1; its HMAC covers both, so a
+    # row cannot be moved, and a deleted one leaves a hole in the numbers. Checkpoints sign
+    # (seq, hash) of where the chain stood: genesis (the rows from before the chain),
+    # periodic (a later truncation of the tail shows), prune (retention removed rows up to
+    # n, so that hole is no tampering). The hashes are unkeyed sha256, only the HMACs
+    # use the field key, so a key rotation re-signs rows without touching any link.
+
+    @staticmethod
+    def _audit_chain_body(row) -> bytes:
+        return json.dumps([
+            row.get('chain_seq'), row.get('prev_hash') or '', row.get('timestamp') or '',
+            row.get('user') or '', row.get('action') or '', row.get('details') or '',
+            row.get('ip_address') or '', row.get('cluster') or '', row.get('severity') or '',
+            row.get('cluster_id') or '',
+        ], separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+
+    @classmethod
+    def _audit_row_hash(cls, row) -> str:
+        return hashlib.sha256(b'pegaprox-audit-row\x00' + cls._audit_chain_body(row)).hexdigest()
+
+    def _audit_chain_hmac(self, row) -> str:
+        if not self.aes_key:
+            return ''
+        return hmac.new(self.aes_key, b'pegaprox-audit-chain\x00' + self._audit_chain_body(row),
+                        hashlib.sha256).hexdigest()
+
+    # The checkpoints form a chain of their own: cp_seq 1 is the genesis, each later one
+    # carries the hash of the one before, so deleting one (the genesis included) leaves a
+    # hole there too. The newest is also kept in a file beside the field key, outside the
+    # database: whoever can only write the database cannot cut the end of the log together
+    # with the checkpoints over it unseen.
+
+    @staticmethod
+    def _checkpoint_body(cp) -> bytes:
+        return json.dumps([
+            'checkpoint', cp.get('kind') or '', cp.get('chain_seq'), cp.get('row_hash') or '',
+            cp.get('created_at') or '', int(cp.get('pruned_rows') or 0),
+            int(cp.get('legacy_count') or 0), cp.get('legacy_digest') or '',
+            cp.get('cp_seq'), cp.get('prev_cp_hash') or '', cp.get('cutoff') or '',
+            int(cp.get('legacy_changed') or 0), cp.get('instance') or '',
+        ], separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+
+    @classmethod
+    def _checkpoint_hash(cls, cp) -> str:
+        return hashlib.sha256(b'pegaprox-audit-cp\x00' + cls._checkpoint_body(cp)).hexdigest()
+
+    def _checkpoint_hmac(self, cp) -> str:
+        if not self.aes_key:
+            return ''
+        return hmac.new(self.aes_key, self._checkpoint_body(cp), hashlib.sha256).hexdigest()
+
+    def _verify_checkpoint_hmac(self, cp) -> bool:
+        sig = cp.get('hmac_signature') or ''
+        return bool(self.aes_key and sig) and hmac.compare_digest(str(sig), self._checkpoint_hmac(cp))
+
+    @staticmethod
+    def _audit_legacy_digest(cur, since=None):
+        """(count, digest) of the rows from before the chain, in id order; since: only
+        those a prune at that cutoff leaves (a row without a time stays)"""
+        h, n = hashlib.sha256(), 0
+        for r in cur.execute('SELECT id, timestamp, user, action, details, ip_address, cluster, '
+                             'severity, cluster_id, hmac_signature FROM audit_log '
+                             'WHERE chain_seq IS NULL'
+                             + (' AND (timestamp IS NULL OR timestamp >= ?)' if since else '')
+                             + ' ORDER BY id', (since,) if since else ()):
+            h.update(json.dumps([r[0], r[1], r[2] or '', r[3] or '', r[4] or '', r[5] or '',
+                                 r[6] or '', r[7] or '', r[8] or '', r[9] or ''],
+                                separators=(',', ':'), ensure_ascii=False).encode('utf-8') + b'\n')
+            n += 1
+        return n, h.hexdigest()
+
+    def _insert_checkpoint(self, cur, cp):
+        """Number, link and sign cp; called inside the write transaction, so the newest
+        checkpoint read here is the one it follows"""
+        last = cur.execute('SELECT * FROM audit_checkpoints WHERE cp_seq IS NOT NULL '
+                           'ORDER BY cp_seq DESC LIMIT 1').fetchone()
+        cp['cp_seq'] = (int(last['cp_seq']) + 1) if last else 1
+        cp['prev_cp_hash'] = self._checkpoint_hash(dict(last)) if last else ''
+        cp.setdefault('cutoff', '')
+        cp['legacy_changed'] = 1 if cp.get('legacy_changed') else 0
+        if not cp.get('instance'):
+            cp['instance'] = socket.gethostname() or ''
+        cp['hmac_signature'] = self._checkpoint_hmac(cp)
+        cur.execute('INSERT INTO audit_checkpoints (kind, chain_seq, row_hash, created_at, '
+                    'pruned_rows, legacy_count, legacy_digest, hmac_signature, cp_seq, '
+                    'prev_cp_hash, cutoff, legacy_changed, instance) '
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (cp['kind'], cp['chain_seq'], cp['row_hash'], cp['created_at'],
+                     int(cp.get('pruned_rows') or 0), int(cp.get('legacy_count') or 0),
+                     cp.get('legacy_digest') or '', cp['hmac_signature'], cp['cp_seq'],
+                     cp['prev_cp_hash'], cp['cutoff'], cp['legacy_changed'], cp['instance']))
+        cp['id'] = cur.lastrowid
+        return cp
+
+    def _audit_genesis(self, cur):
+        """The checkpoint the chain starts from: seq 0, over every row from before it"""
+        count, digest = self._audit_legacy_digest(cur)
+        created = datetime.now().isoformat()
+        cp = {'kind': 'genesis', 'chain_seq': 0, 'created_at': created, 'pruned_rows': 0,
+              'legacy_count': count, 'legacy_digest': digest,
+              'row_hash': hashlib.sha256(json.dumps(['genesis', count, digest, created])
+                                         .encode('utf-8')).hexdigest()}
+        self._audit_chain_id = None
+        return self._insert_checkpoint(cur, cp)
+
+    def _audit_chain_name(self, cur):
+        """A short name of this chain for the copies outside (SIEM): the start of its
+        genesis hash. An active and its standby each have their own."""
+        cid = getattr(self, '_audit_chain_id', None)
+        if cid is None:
+            g = cur.execute("SELECT row_hash FROM audit_checkpoints WHERE cp_seq = 1 "
+                            "AND kind = 'genesis'").fetchone()
+            cid = self._audit_chain_id = (g['row_hash'][:16] if g else '')
+        return cid
+
+    # ---- the copy of the newest checkpoint outside the database ----------------------------
+
+    def _anchor_sig(self, a, key=None) -> str:
+        k = key or self.aes_key
+        if not k:
+            return ''
+        body = json.dumps([a.get('cp_seq'), a.get('chain_seq'), a.get('cp_hash') or '',
+                           a.get('genesis') or '', a.get('created_at') or ''], separators=(',', ':'))
+        return hmac.new(k, b'pegaprox-audit-anchor\x00' + body.encode('utf-8'), hashlib.sha256).hexdigest()
+
+    def _read_audit_anchor(self, key=None):
+        """The anchor: None when there is none, {'bad': True} when it does not verify"""
+        path = getattr(self, '_audit_anchor_file', None)
+        if not path:
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as fh:
+                a = json.load(fh)
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return {'bad': True}
+        if (not isinstance(a, dict) or not a.get('sig') or not isinstance(a.get('cp_seq'), int)
+                or not hmac.compare_digest(str(a['sig']), self._anchor_sig(a, key))):
+            return {'bad': True}
+        return a
+
+    def _write_audit_anchor(self, a):
+        path = self._audit_anchor_file
+        a = dict(a, sig=self._anchor_sig(a))
+        tmp = f'{path}.tmp'
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(a, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+    def _anchor_checkpoint(self, cp):
+        """Move the anchor to a checkpoint that was just committed. Only forward along the
+        chain it holds: when the checkpoint it names is gone from the database or another
+        one sits in its place, it stays as it is - that is the finding, and a new
+        checkpoint must not paper over it. An anchor over an empty chain (a genesis and
+        nothing after) may follow a new genesis."""
+        if not getattr(self, '_audit_anchor_file', None) or not self.aes_key:
+            return
+        conn = self.conn
+        g = conn.execute("SELECT row_hash FROM audit_checkpoints WHERE cp_seq = 1 "
+                         "AND kind = 'genesis'").fetchone()
+        new = {'cp_seq': int(cp['cp_seq']), 'chain_seq': int(cp['chain_seq']),
+               'cp_hash': self._checkpoint_hash(cp), 'genesis': g['row_hash'] if g else '',
+               'created_at': cp.get('created_at') or ''}
+        old = self._read_audit_anchor()
+        if old and not old.get('bad'):
+            if old.get('genesis') == new['genesis'] and old['cp_seq'] >= new['cp_seq']:
+                return                      # a writer next to us got there first
+            if not (old['cp_seq'] == 1 and int(old.get('chain_seq') or 0) == 0):
+                held = conn.execute('SELECT * FROM audit_checkpoints WHERE cp_seq = ?',
+                                    (old['cp_seq'],)).fetchone()
+                if held is None or self._checkpoint_hash(dict(held)) != old.get('cp_hash'):
+                    logging.error(f"AUDIT LOG CHAIN: checkpoint {old['cp_seq']} (entry "
+                                  f"{old.get('chain_seq')}), kept outside the database, is not in "
+                                  f"it any more; {self._audit_anchor_file} stays as it is. Remove "
+                                  f"that file only once the gap is accounted for.")
+                    return
+        elif old:
+            logging.warning(f"audit anchor {self._audit_anchor_file} failed its signature, replaced")
+        self._write_audit_anchor(new)
+
+    def _after_checkpoint(self, cp, forward=True):
+        """What follows a committed checkpoint: the copy beside the key, the SIEM targets"""
+        try:
+            self._anchor_checkpoint(cp)
+        except Exception as e:
+            logging.warning(f"audit anchor not written: {e}")
+        if forward:
+            self._forward_checkpoint(cp)
+
+    def _audit_chain_tail(self, cur):
+        """(seq, hash) the next row links to: the last row, or a checkpoint past it (the tail
+        was pruned, or cut off after the checkpoint), None before the genesis"""
+        row = cur.execute('SELECT * FROM audit_log WHERE chain_seq IS NOT NULL '
+                          'ORDER BY chain_seq DESC LIMIT 1').fetchone()
+        cp = cur.execute('SELECT chain_seq, row_hash FROM audit_checkpoints '
+                         'ORDER BY chain_seq DESC, id DESC LIMIT 1').fetchone()
+        if row is not None and (cp is None or row['chain_seq'] >= cp['chain_seq']):
+            return row['chain_seq'], self._audit_row_hash(dict(row))
+        if cp is not None:
+            return cp['chain_seq'], cp['row_hash']
+        return None
+
+    def audit_chain_head(self):
+        """{'chain_seq', 'hash'} the audit chain of this host stands at, None when it has no
+        chain yet or cannot be read. MK Oct 2026"""
+        try:
+            tail = self._audit_chain_tail(self.conn.cursor())
+        except Exception:
+            return None
+        return {'chain_seq': tail[0], 'hash': tail[1]} if tail else None
+
+    def audit_chain_has(self, seq, row_hash):
+        """True when the chain holds `row_hash` at `seq`: as a row, or as the checkpoint of
+        a pruned stretch. MK Oct 2026"""
+        try:
+            cur = self.conn.cursor()
+            row = cur.execute('SELECT * FROM audit_log WHERE chain_seq = ?', (int(seq),)).fetchone()
+            if row is not None:
+                return hmac.compare_digest(self._audit_row_hash(dict(row)), str(row_hash))
+            cp = cur.execute('SELECT row_hash FROM audit_checkpoints WHERE chain_seq = ? '
+                             'ORDER BY id DESC LIMIT 1', (int(seq),)).fetchone()
+            return bool(cp) and hmac.compare_digest(str(cp['row_hash']), str(row_hash))
+        except Exception:
+            return False
+
+    def _audit_chain_txn(self, conn, work):
+        """work(cursor) with the chain held. The one lock is the database's write lock, taken
+        up front by BEGIN IMMEDIATE: every greenlet and thread writes on a connection of its
+        own (self._local), and nothing in here yields, so a Python lock would add nothing but
+        a hub that waits on an OS thread (a gevent lock across threads hangs outright). A
+        write the caller has pending on this connection already holds that lock, and is
+        committed with ours, as before."""
+        began = not conn.in_transaction
+        if began:
+            conn.execute('BEGIN IMMEDIATE')
+        try:
+            out = work(conn.cursor())
+            conn.commit()
+            return out
+        except Exception:
+            if began:
+                conn.rollback()
+            raise
+
+    def _ensure_audit_genesis(self):
+        try:
+            conn = self.conn
+            if conn.execute('SELECT 1 FROM audit_checkpoints LIMIT 1').fetchone():
+                return
+            def _work(cur):
+                if cur.execute('SELECT 1 FROM audit_checkpoints LIMIT 1').fetchone():
+                    return None
+                # chained rows without any checkpoint: the start was deleted. A new one
+                # signed now would vouch for rows it never saw, so the check reports it
+                if cur.execute('SELECT 1 FROM audit_log WHERE chain_seq IS NOT NULL LIMIT 1').fetchone():
+                    logging.error("AUDIT LOG CHAIN: entries are chained but no checkpoint is left; "
+                                  "not starting a new chain over them")
+                    return None
+                cp = self._audit_genesis(cur)
+                logging.info(f"Audit chain starts here, over {cp['legacy_count']} earlier entries")
+                return cp
+            cp = self._audit_chain_txn(conn, _work)
+            if cp:
+                # not to the SIEM targets: this runs while the database is still being set up
+                self._after_checkpoint(cp, forward=False)
+        except Exception as e:
+            logging.error(f"Could not start the audit chain: {e}")
+
+    def add_audit_entry(self, user: str, action: str, details: str = '', ip: str = '',
+                        cluster: str = '', severity: str = None, cluster_id: str = ''):
+        """Add audit log entry with HMAC signature for integrity verification.
+
+        cluster/severity added MK May 2026 — keep optional so existing callers
+        keep working unchanged. cluster is the name shown, cluster_id the cluster
+        the row belongs to (#1121).
+        """
+        # Auto-derive severity from action prefix when caller didn't pass one
+        if severity is None:
+            a = (action or '').lower()
+            if 'delete' in a or 'remove' in a or 'destroy' in a:
+                severity = 'warning'
+            elif 'fail' in a or 'denied' in a or 'tampered' in a or 'security' in a:
+                severity = 'critical'
+            elif 'login' in a or 'logout' in a:
+                severity = 'info'
+            else:
+                severity = 'info'
+
+        # stored as text whatever came in, so the row reads back as it was hashed.
+        # NS Nov 2026 - a lone surrogate ("\ud800" in a client's JSON) has no UTF-8 form: the
+        # chain hash raised on it and the entry was lost. It is replaced before the hash.
+        def _txt(v):
+            return None if v is None else _LONE_SURROGATE.sub('\ufffd', str(v))
+        row = {'user': _txt(user), 'action': _txt(action) or '', 'details': _txt(details),
+               'ip_address': _txt(ip), 'cluster': _txt(cluster) or '', 'severity': severity,
+               'cluster_id': _txt(cluster_id) or ''}
+
+        started = []
+
+        def _append(cur):
+            tail = self._audit_chain_tail(cur)
+            if tail is None:
+                cp = self._audit_genesis(cur)
+                started.append(cp)
+                tail = (cp['chain_seq'], cp['row_hash'])
+            row['chain_id'] = self._audit_chain_name(cur)
+            # the time is taken in the lock too, so it never runs backwards along the chain
+            row.update(timestamp=datetime.now().isoformat(), chain_seq=tail[0] + 1,
+                       prev_hash=tail[1])
+            cur.execute('''
+                INSERT INTO audit_log (timestamp, user, action, details, ip_address,
+                                       hmac_signature, cluster, severity, cluster_id,
+                                       chain_seq, prev_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (row['timestamp'], row['user'], row['action'], row['details'], row['ip_address'],
+                  self._audit_chain_hmac(row), row['cluster'], severity, row['cluster_id'],
+                  row['chain_seq'], row['prev_hash']))
+            return cur.lastrowid
+
+        last_id = self._audit_chain_txn(self.conn, _append)
+        for cp in started:
+            self._after_checkpoint(cp)
+
+        # Hand off to SIEM forwarder if anyone has plugged into the queue.
+        # Late import to avoid import cycles at module load.
+        try:
+            from pegaprox.api import siem as _siem_mod
+            _siem_mod.enqueue({
+                'id': last_id, 'timestamp': row['timestamp'], 'user': row['user'],
+                'action': row['action'], 'details': row['details'], 'ip_address': row['ip_address'],
+                'cluster': row['cluster'], 'severity': severity,
+                'chain_seq': row['chain_seq'], 'chain_hash': self._audit_row_hash(row),
+                'chain_id': row['chain_id'],
+            })
+        except Exception:
+            # silently swallow — SIEM is optional and shouldn't break audit writes
+            pass
+
+    def search_audit_log(self, q='', user='', action='', cluster='', severity='',
+                         ip='', date_from='', date_to='', offset=0, limit=100):
+        """Search audit log with rich filters + pagination.
+        Returns (entries, total) where total is the un-paginated row count."""
+        cursor = self.conn.cursor()
+        conds = []
+        params = []
+        if q:
+            # search across user, action, details, cluster
+            conds.append('(user LIKE ? OR action LIKE ? OR details LIKE ? OR cluster LIKE ?)')
+            wild = f'%{q}%'
+            params.extend([wild, wild, wild, wild])
+        if user:
+            conds.append('user = ?')
+            params.append(user)
+        if action:
+            conds.append('action LIKE ?')
+            params.append(f'%{action}%')
+        if cluster:
+            conds.append('cluster = ?')
+            params.append(cluster)
+        if severity:
+            conds.append('severity = ?')
+            params.append(severity)
+        if ip:
+            conds.append('ip_address LIKE ?')
+            params.append(f'%{ip}%')
+        if date_from:
+            conds.append('timestamp >= ?')
+            params.append(date_from)
+        if date_to:
+            conds.append('timestamp <= ?')
+            params.append(date_to)
+        where = (' WHERE ' + ' AND '.join(conds)) if conds else ''
+
+        # total
+        cursor.execute(f'SELECT COUNT(*) AS n FROM audit_log{where}', params)
+        total = cursor.fetchone()['n']
+
+        # page
+        cursor.execute(
+            f'SELECT * FROM audit_log{where} ORDER BY timestamp DESC LIMIT ? OFFSET ?',
+            params + [int(limit), int(offset)]
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows, total
+
+    def audit_facets(self, days=7):
+        """Return top users/actions for the audit search UI dropdowns."""
+        cursor = self.conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        out = {'users': [], 'actions': [], 'clusters': []}
+        try:
+            cursor.execute('SELECT user, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND user != "" GROUP BY user ORDER BY n DESC LIMIT 30', (cutoff,))
+            out['users'] = [{'user': r['user'], 'count': r['n']} for r in cursor.fetchall()]
+            cursor.execute('SELECT action, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? GROUP BY action ORDER BY n DESC LIMIT 50', (cutoff,))
+            out['actions'] = [{'action': r['action'], 'count': r['n']} for r in cursor.fetchall()]
+            cursor.execute('SELECT cluster, COUNT(*) AS n FROM audit_log WHERE timestamp >= ? AND cluster != "" GROUP BY cluster ORDER BY n DESC LIMIT 30', (cutoff,))
+            out['clusters'] = [{'cluster': r['cluster'], 'count': r['n']} for r in cursor.fetchall()]
+        except Exception as e:
+            logging.warning(f"audit_facets failed: {e}")
+        return out
+    
+    def get_audit_log(self, limit: int = 1000, user: str = None, action: str = None, verify_integrity: bool = False,
+                      scope: tuple = None) -> list:
+        """Get audit log entries, optionally verifying HMAC integrity.
+
+        scope=(cluster_ids, username) keeps the rows of those clusters plus the user's own,
+        in the query so the limit still counts what the caller gets (#1044)."""
+        cursor = self.conn.cursor()
+
+        query = 'SELECT * FROM audit_log'
+        params = []
+        conditions = []
+
+        if user:
+            conditions.append('user = ?')
+            params.append(user)
+        if action:
+            conditions.append('action LIKE ?')
+            params.append(f'%{action}%')
+        if scope is not None:
+            cids, own = list(scope[0] or []), scope[1] or ''
+            parts = []
+            if cids:
+                parts.append(f"cluster_id IN ({','.join('?' * len(cids))})")
+                params.extend(cids)
+            if own:
+                parts.append('user = ?')
+                params.append(own)
+            conditions.append(f"({' OR '.join(parts)})" if parts else '1 = 0')
+
+        if conditions:
+            query += ' WHERE ' + ' AND '.join(conditions)
+        
+        query += ' ORDER BY timestamp DESC LIMIT ?'
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        
+        entries = [dict(row) for row in cursor.fetchall()]
+        
+        # Optionally verify integrity
+        if verify_integrity:
+            for entry in entries:
+                entry['integrity_verified'] = self._verify_audit_hmac(entry)
+        
+        return entries
+    
+    def verify_audit_log_integrity(self, limit: int = None) -> dict:
+        """Verify integrity of the audit log — returns statistics.
+
+        NS Jul 2026 (scale): runs FULLY off the gevent hub - the SELECT *and* the
+        per-row SQLCipher decrypt + HMAC verify happen in a worker thread on a fresh
+        connection, so the UI never freezes even when the audit_log holds hundreds of
+        thousands of rows. The full log is verified by default; limit=N is a bounded
+        spot-check of the newest N chained rows (the legacy part is then left out).
+
+        MK Oct 2026 - walks the hash chain too. An edit was all this ever caught; now a
+        missing number is a deleted row, a prev_hash that does not match the row before
+        is a broken link, a tail below the last signed checkpoint is a cut-off end, and
+        the rows written since that checkpoint are counted (they could still go
+        unnoticed). Rows from before the chain are reported on their own, against the
+        digest the genesis (or the latest prune) took of them.
+
+        The checkpoints are numbered and linked from the genesis on, and the newest one is
+        kept in a file beside the field key as well: with write access to the database
+        alone, deleting the end of the log together with the checkpoints over it, or the
+        whole log and every checkpoint, shows here. What this instance cannot see is an
+        attacker who holds the field key, or who can write the key's directory as well
+        (the copy goes with it): only the checkpoints the SIEM targets received can
+        contradict that log.
+        """
+        lim = int(limit) if limit and int(limit) > 0 else None
+
+        def _walk(conn):
+            return self._audit_integrity_walk(conn, lim)
+
+        try:
+            return dbcrypto.run_off_hub(_walk, self.db_path)
+        except Exception as e:
+            # never off the hub when it cannot open its own connection (CLI, tests on an
+            # odd path): the same walk on this one
+            logging.debug(f"audit integrity: off-hub walk unavailable ({e}), running in-thread")
+            return self._audit_integrity_walk(self.conn, lim)
+
+    _AUDIT_LISTED = 50   # seqs / ranges named per finding; the counts are always whole
+
+    def _audit_integrity_walk(self, conn, lim=None) -> dict:
+        listed = self._AUDIT_LISTED
+        cps = [dict(r) for r in conn.execute('SELECT * FROM audit_checkpoints ORDER BY cp_seq, id')]
+        good = [c for c in cps if self._verify_checkpoint_hmac(c)]
+        good_ids = {c['id'] for c in good}
+        bad_cps = [c['id'] for c in cps if c['id'] not in good_ids]
+
+        # the checkpoints' own chain, numbered from the genesis on: a hole is a deleted
+        # checkpoint, a link that does not match is one put in another's place
+        cp_missing = cp_broken = 0
+        by_num = {}
+        expect, prev_hash, prev_good = 1, '', True
+        for c in cps:
+            n = c.get('cp_seq')
+            if n is None:
+                continue                      # unnumbered: fails its signature, counted there
+            by_num[n] = c
+            if n > expect:
+                cp_missing += n - expect      # the link across the hole is unknowable
+            elif prev_good and (c.get('prev_cp_hash') or '') != prev_hash:
+                cp_broken += 1
+            expect, prev_hash, prev_good = n + 1, self._checkpoint_hash(c), c['id'] in good_ids
+        first = by_num.get(1)
+        genesis = first if (first is not None and first['kind'] == 'genesis'
+                            and first['id'] in good_ids) else None
+
+        # the newest checkpoint as the file beside the key has it
+        anchor = self._read_audit_anchor()
+        anchor_state = 'missing' if anchor is None else ('bad' if anchor.get('bad') else 'ok')
+        restarted, anchor_top = False, 0
+        if anchor_state == 'ok':
+            if genesis is not None and anchor.get('genesis') != genesis['row_hash']:
+                restarted = True              # its numbers belong to a chain that is gone
+            else:
+                a_num, top_num = int(anchor['cp_seq']), max(by_num or [0])
+                if a_num > top_num:
+                    cp_missing += a_num - top_num
+                elif a_num in by_num and self._checkpoint_hash(by_num[a_num]) != anchor.get('cp_hash'):
+                    cp_broken += 1
+                anchor_top = int(anchor.get('chain_seq') or 0)
+
+        prunes = [c for c in good if c['kind'] == 'prune']
+        base = max(prunes, key=lambda c: (c['chain_seq'], c.get('cp_seq') or 0)) if prunes else genesis
+        base_seq = base['chain_seq'] if base else 0
+        base_hash = base['row_hash'] if base else None
+        anchors = {c['chain_seq']: c['row_hash'] for c in good
+                   if c['kind'] == 'periodic' and c['chain_seq'] > base_seq}
+        top = max([c['chain_seq'] for c in good] + [anchor_top])
+        last_cp = max(good, key=lambda c: (c.get('cp_seq') or 0, c['id'])) if good else None
+
+        start = base_seq
+        if lim:
+            hi = conn.execute('SELECT MAX(chain_seq) FROM audit_log').fetchone()[0] or 0
+            if hi - lim > base_seq:
+                start, base_hash = hi - lim, None     # a window: its first link is not judged
+
+        chained = verified = unsigned = 0
+        edited, broken, missing_ranges = [], [], []
+        n_edited = n_broken = n_missing = after_cp = 0
+        expect_seq, expect_prev, first_seq = start + 1, base_hash, None
+        prev_edited = False
+
+        def _gap(a, b):
+            nonlocal n_missing
+            n_missing += b - a + 1
+            if len(missing_ranges) < listed:
+                missing_ranges.append([a, b])
+
+        cur = conn.execute('SELECT * FROM audit_log WHERE chain_seq > ? ORDER BY chain_seq', (start,))
+        for r in cur:
+            e = dict(r)
+            s = e['chain_seq']
+            chained += 1
+            first_seq = s if first_seq is None else first_seq
+            is_edited = False
+            if not e.get('hmac_signature') and not self.aes_key:
+                unsigned += 1                 # an instance without a key signs nothing
+            elif e.get('hmac_signature') and self._verify_audit_hmac(e):
+                verified += 1
+            else:
+                # with a key every chained row is signed: one without was stripped
+                is_edited = True
+                n_edited += 1
+                if len(edited) < listed:
+                    edited.append(s)
+            h = self._audit_row_hash(e)
+            link_ok = True
+            if s > expect_seq:
+                _gap(expect_seq, s - 1)        # deleted; the link across the hole is unknowable
+            elif expect_prev is not None and not prev_edited and e.get('prev_hash') != expect_prev:
+                # after an edited row the link cannot match; that row is the finding
+                link_ok = False
+            if s in anchors and anchors[s] != h:
+                link_ok = False                # not the row the checkpoint signed
+            if not link_ok:
+                n_broken += 1
+                if len(broken) < listed:
+                    broken.append(s)
+            if s > top:
+                after_cp += 1
+            expect_seq, expect_prev, prev_edited = s + 1, h, is_edited
+        last_seq = expect_seq - 1
+        truncated = top > last_seq
+        if truncated:
+            _gap(last_seq + 1, top)            # signed as written once, gone now
+        # rows before the prune point would be rows put back after the prune
+        stale = conn.execute('SELECT COUNT(*) FROM audit_log WHERE chain_seq IS NOT NULL '
+                             'AND chain_seq <= ?', (base_seq,)).fetchone()[0] if not lim else 0
+        n_broken += stale
+
+        ref = max((c for c in good if c['kind'] in ('genesis', 'prune')),
+                  key=lambda c: (c.get('cp_seq') or 0, c['id']), default=None)
+        legacy = None
+        if not lim:
+            lv = lu = lt = 0
+            for r in conn.execute('SELECT * FROM audit_log WHERE chain_seq IS NULL'):
+                e = dict(r)
+                if not e.get('hmac_signature'):
+                    lu += 1
+                elif self._verify_audit_hmac(e):
+                    lv += 1
+                else:
+                    lt += 1
+            count, digest = self._audit_legacy_digest(conn.cursor())
+            changed = None
+            if ref is not None:
+                # a prune carries a difference it found forward, it never signs it away
+                changed = (bool(ref.get('legacy_changed'))
+                           or count != int(ref.get('legacy_count') or 0)
+                           or digest != (ref.get('legacy_digest') or ''))
+            legacy = {'rows': count, 'verified': lv, 'unsigned': lu, 'tampered': lt,
+                      'changed_since_chain_start': changed,
+                      'count_at_last_checkpoint': int(ref.get('legacy_count') or 0) if ref else None}
+
+        total = chained + (legacy['rows'] if legacy else 0)
+        all_verified = verified + (legacy['verified'] if legacy else 0)
+        tampered = n_edited + (legacy['tampered'] if legacy else 0)
+        # chained rows or checkpoints and no signed genesis: the start of the chain is gone
+        no_start = bool(chained or cps) and genesis is None
+        for s in edited:
+            logging.warning(f"AUDIT LOG INTEGRITY VIOLATION: chain entry {s} was changed")
+        if n_missing or n_broken or bad_cps or cp_missing or cp_broken or no_start or restarted:
+            logging.warning(f"AUDIT LOG CHAIN: {n_missing} missing, {n_broken} broken links, "
+                            f"{len(bad_cps)} checkpoints failing their signature, {cp_missing} "
+                            f"checkpoints missing, {cp_broken} out of order"
+                            + (', no signed start' if no_start else '')
+                            + (', started over' if restarted else ''))
+        prune_cp = max(prunes, key=lambda c: (c['chain_seq'], c.get('cp_seq') or 0)) if prunes else None
+        return {
+            'total_entries': total,
+            'verified': all_verified,
+            'unsigned': unsigned + (legacy['unsigned'] if legacy else 0),
+            'potentially_tampered': tampered,
+            'integrity_percentage': round((all_verified / total * 100) if total > 0 else 100, 2),
+            'scanned_limit': lim,   # None = full scan
+            'chain': {
+                'rows': chained, 'first_seq': first_seq, 'last_seq': last_seq if chained else None,
+                'edited': n_edited, 'edited_seqs': edited,
+                'missing': n_missing, 'missing_ranges': missing_ranges,
+                'broken_links': n_broken, 'broken_link_seqs': broken,
+                'truncated': truncated,
+                'after_checkpoint': after_cp,
+                'checkpoints': len(cps), 'bad_checkpoints': len(bad_cps),
+                'checkpoints_missing': cp_missing, 'checkpoints_broken': cp_broken,
+                'last_checkpoint': ({'seq': last_cp['chain_seq'], 'kind': last_cp['kind'],
+                                     'number': last_cp.get('cp_seq'),
+                                     'created_at': last_cp['created_at']} if last_cp else None),
+                'pruned_through': prune_cp['chain_seq'] if prune_cp else 0,
+                'pruned_at': prune_cp['created_at'] if prune_cp else None,
+                'started': genesis is not None,
+                'no_start': no_start,
+                'anchor': anchor_state,
+                'anchor_seq': anchor_top if anchor_state == 'ok' and not restarted else None,
+                'restarted': restarted,
+                'restarted_after': int(anchor.get('chain_seq') or 0) if restarted else None,
+            },
+            'legacy': legacy,
+            'intact': not (tampered or n_missing or n_broken or bad_cps or cp_missing or cp_broken
+                           or no_start or restarted or anchor_state == 'bad'
+                           or (legacy and legacy['changed_since_chain_start'])),
+        }
+
+    def audit_checkpoint(self, kind: str = 'periodic'):
+        """Sign where the chain stands now. None when it has not moved since the last
+        checkpoint. Goes to the SIEM targets as an event of its own."""
+        def _work(cur):
+            last = cur.execute('SELECT MAX(chain_seq) FROM audit_checkpoints').fetchone()[0]
+            row = cur.execute('SELECT * FROM audit_log WHERE chain_seq IS NOT NULL '
+                              'ORDER BY chain_seq DESC LIMIT 1').fetchone()
+            if row is None or (last is not None and row['chain_seq'] <= last):
+                return None
+            return self._insert_checkpoint(cur, {
+                'kind': kind, 'chain_seq': row['chain_seq'],
+                'row_hash': self._audit_row_hash(dict(row)),
+                'created_at': datetime.now().isoformat()})
+        cp = self._audit_chain_txn(self.conn, _work)
+        if cp:
+            self._after_checkpoint(cp)
+        return cp
+
+    def _forward_checkpoint(self, cp):
+        try:
+            from pegaprox.api import siem as _siem_mod
+            _siem_mod.enqueue_checkpoint(dict(cp, chain_id=getattr(self, '_audit_chain_id', None) or ''))
+        except Exception as e:
+            logging.debug(f"audit checkpoint not forwarded: {e}")
+
+    def prune_audit_log(self, cutoff_iso: str) -> dict:
+        """Delete what retention lets go of (rows older than cutoff_iso) and sign 'pruned
+        up to N, whose hash was H, at this cutoff' in the same transaction, so the hole it
+        leaves is not read as tampering. Off the hub on its own connection, like the prune
+        it replaces. None when nothing went, or when there is no signed base to cut from.
+
+        MK Oct 2026 - a row's time is not what decides on its own: an attacker without the
+        key can set it into the past, and one entry written while the clock was wrong
+        would take every row before it. Retention walks up from the last signed base and
+        takes the unbroken run of rows that are older than the cutoff, carry a signature
+        that verifies and link to the row before; the first row that is newer, unsigned,
+        changed or out of place ends the run, and nothing past it goes. The rows from
+        before the chain are compared with the base first: a difference is carried into
+        the new checkpoint (legacy_changed), never signed away. The reads come first,
+        outside the write lock (in WAL a reader holds no writer up): the walk and the
+        digest can take a while on a big log, and every audit write would wait on them."""
+        def _work(conn):
+            cur = conn.cursor()
+            bases = [dict(r) for r in cur.execute(
+                "SELECT * FROM audit_checkpoints WHERE kind IN ('genesis', 'prune') ORDER BY cp_seq, id")]
+            ref = next((c for c in reversed(bases) if self._verify_checkpoint_hmac(c)), None)
+            if ref is None:
+                logging.warning("Audit retention skipped: no signed base of the chain to cut from "
+                                "(see the integrity check under Settings > Compliance)")
+                return None
+            seq, h, held = int(ref['chain_seq']), ref['row_hash'], None
+            for r in cur.execute('SELECT * FROM audit_log WHERE chain_seq > ? ORDER BY chain_seq', (seq,)):
+                e = dict(r)
+                if not (e.get('timestamp') or '') < cutoff_iso:
+                    break
+                if (e['chain_seq'] != seq + 1 or (e.get('prev_hash') or '') != h
+                        or not e.get('hmac_signature') or not self._verify_audit_hmac(e)):
+                    held = e['chain_seq']
+                    break
+                seq, h = e['chain_seq'], self._audit_row_hash(e)
+            if held is not None:
+                logging.warning(f"Audit retention stops before entry {held}: it is missing, "
+                                f"out of place or fails its signature, and nothing past it is deleted")
+            legacy_old = cur.execute('SELECT COUNT(*) FROM audit_log WHERE chain_seq IS NULL '
+                                     'AND timestamp < ?', (cutoff_iso,)).fetchone()[0]
+            if seq == int(ref['chain_seq']) and not legacy_old:
+                return None
+            count, digest = self._audit_legacy_digest(cur)
+            changed = (bool(ref.get('legacy_changed')) or count != int(ref.get('legacy_count') or 0)
+                       or digest != (ref.get('legacy_digest') or ''))
+            if changed and not ref.get('legacy_changed'):
+                logging.warning("AUDIT LOG CHAIN: entries from before the chain changed since its "
+                                "last base; the prune records that and does not sign it away")
+            if legacy_old:
+                count, digest = self._audit_legacy_digest(cur, since=cutoff_iso)
+            # the write transaction starts with the first DELETE
+            cur.execute('DELETE FROM audit_log WHERE chain_seq IS NULL AND timestamp < ?', (cutoff_iso,))
+            gone = cur.rowcount or 0
+            if seq > int(ref['chain_seq']):
+                cur.execute('DELETE FROM audit_log WHERE chain_seq IS NOT NULL AND chain_seq <= ?', (seq,))
+                gone += cur.rowcount or 0
+            return self._insert_checkpoint(cur, {
+                'kind': 'prune', 'chain_seq': seq, 'row_hash': h,
+                'created_at': datetime.now().isoformat(), 'pruned_rows': gone,
+                'legacy_count': count, 'legacy_digest': digest, 'legacy_changed': changed,
+                'cutoff': cutoff_iso})
+        cp = dbcrypto.run_off_hub(_work, self.db_path, commit=True)
+        if cp:
+            self._after_checkpoint(cp)
+        return cp
+
+    def cleanup_audit_log(self, days: int = 90):
+        """Remove audit entries older than specified days (through prune_audit_log, which
+        signs what it removed). Returns how many rows went."""
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cp = self.prune_audit_log(cutoff)
+        return int(cp['pruned_rows']) if cp else 0
+
+    # ========================================
+    # ALERT OPERATIONS
+    # ========================================
+    
+    def get_all_alerts(self) -> dict:
+        """Get all alerts"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM alerts')
+        
+        alerts = {}
+        for row in cursor.fetchall():
+            alerts[row['id']] = {
+                'id': row['id'],
+                'cluster_id': row['cluster_id'],
+                'node': row['node'],
+                'vmid': row['vmid'],
+                'type': row['type'],
+                'threshold': row['threshold'],
+                'enabled': bool(row['enabled']),
+                'notify_methods': json.loads(row['notify_methods'] or '[]'),
+                'cooldown': row['cooldown'],
+                'last_triggered': row['last_triggered'],
+            }
+        
+        return alerts
+    
+    def save_alert(self, alert_id: str, data: dict):
+        """Save alert"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO alerts
+            (id, cluster_id, node, vmid, type, threshold, enabled, 
+             notify_methods, cooldown, last_triggered, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                    COALESCE((SELECT created_at FROM alerts WHERE id = ?), ?))
+        ''', (
+            alert_id,
+            data.get('cluster_id'),
+            data.get('node'),
+            data.get('vmid'),
+            data.get('type', ''),
+            data.get('threshold'),
+            1 if data.get('enabled', True) else 0,
+            json.dumps(data.get('notify_methods', [])),
+            data.get('cooldown', 300),
+            data.get('last_triggered'),
+            alert_id, now
+        ))
+        self.conn.commit()
+    
+    def delete_alert(self, alert_id: str):
+        """Delete alert"""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM alerts WHERE id = ?', (alert_id,))
+        self.conn.commit()
+    
+    def save_all_alerts(self, alerts: dict):
+        """Save all alerts"""
+        for alert_id, data in alerts.items():
+            self.save_alert(alert_id, data)
+    
+    # ========================================
+    # VM ACL OPERATIONS
+    # ========================================
+    
+    def get_all_vm_acls(self) -> dict:
+        """Get all VM ACLs"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM vm_acls')
+        
+        acls = {}
+        for row in cursor.fetchall():
+            cluster_id = row['cluster_id']
+            if cluster_id not in acls:
+                acls[cluster_id] = {}
+            acls[cluster_id][row['vmid']] = {
+                'users': json.loads(row['users'] or '[]'),
+                'permissions': json.loads(row['permissions'] or '[]'),
+                # default True for legacy rows (pre-column) to preserve behaviour
+                'inherit_role': bool(row['inherit_role']) if 'inherit_role' in row.keys() else True,
+            }
+        
+        return acls
+    
+    def save_vm_acl(self, cluster_id: str, vmid: str, data: dict):
+        """Save VM ACL"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO vm_acls (cluster_id, vmid, users, permissions, inherit_role)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            cluster_id,
+            vmid,
+            json.dumps(data.get('users', [])),
+            json.dumps(data.get('permissions', [])),
+            (0 if str(data.get('inherit_role', True)).strip().lower() in ('false', '0', 'no', 'off', 'none', '') else 1)
+        ))
+        self.conn.commit()
+    
+    def save_all_vm_acls(self, acls: dict):
+        """Save all VM ACLs"""
+        for cluster_id, vms in acls.items():
+            for vmid, data in vms.items():
+                self.save_vm_acl(cluster_id, vmid, data)
+    
+    def delete_vm_acl(self, cluster_id: str, vmid: int) -> bool:
+        """Delete a VM ACL entry from the database
+        
+        NS: This was missing! save_all_vm_acls only adds/updates, never deletes.
+
+        NS Oct 2026 - a failed DELETE raises. It used to log and answer False, which reads
+        as "there was no grant": the VM delete route took that as done and the grant stayed
+        for the next guest on that VMID, and the ACL route answered success.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('DELETE FROM vm_acls WHERE cluster_id = ? AND vmid = ?',
+                          (cluster_id, str(vmid)))
+            self.conn.commit()
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            raise
+        return cursor.rowcount > 0
+    
+    # ========================================
+    # POOL PERMISSIONS - MK Jan 2026
+    # ========================================
+    
+    def get_pool_permissions(self, cluster_id: str, pool_id: str = None) -> List[Dict]:
+        """Get pool permissions, optionally filtered by pool_id"""
+        cursor = self.conn.cursor()
+        if pool_id:
+            cursor.execute('''
+                SELECT * FROM pool_permissions 
+                WHERE cluster_id = ? AND pool_id = ?
+            ''', (cluster_id, pool_id))
+        else:
+            cursor.execute('''
+                SELECT * FROM pool_permissions WHERE cluster_id = ?
+            ''', (cluster_id,))
+        
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                'id': row[0],
+                'cluster_id': row[1],
+                'pool_id': row[2],
+                'subject_type': row[3],  # 'user' or 'group'
+                'subject_id': row[4],    # username or group name
+                'permissions': json.loads(row[5]) if row[5] else [],
+                'created_at': row[6],
+                'updated_at': row[7]
+            })
+        return result
+    
+    def save_pool_permission(self, cluster_id: str, pool_id: str, subject_type: str, 
+                            subject_id: str, permissions: List[str]) -> bool:
+        """Save or update pool permission"""
+        try:
+            cursor = self.conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute('''
+                INSERT INTO pool_permissions (cluster_id, pool_id, subject_type, subject_id, permissions, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cluster_id, pool_id, subject_type, subject_id) 
+                DO UPDATE SET permissions = ?, updated_at = ?
+            ''', (cluster_id, pool_id, subject_type, subject_id, json.dumps(permissions), now, now,
+                  json.dumps(permissions), now))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to save pool permission: {e}")
+            return False
+    
+    def delete_pool_permission(self, cluster_id: str, pool_id: str, subject_type: str, subject_id: str) -> bool:
+        """Delete a pool permission"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                DELETE FROM pool_permissions 
+                WHERE cluster_id = ? AND pool_id = ? AND subject_type = ? AND subject_id = ?
+            ''', (cluster_id, pool_id, subject_type, subject_id))
+            self.conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logging.error(f"Failed to delete pool permission: {e}")
+            return False
+    
+    def get_user_pool_permissions(self, cluster_id: str, username: str, groups: List[str] = None) -> Dict[str, List[str]]:
+        """Get all pool permissions for a user (including via group membership)
+        Returns: {pool_id: [permissions]}
+        """
+        cursor = self.conn.cursor()
+        
+        # Get direct user permissions
+        cursor.execute('''
+            SELECT pool_id, permissions FROM pool_permissions 
+            WHERE cluster_id = ? AND subject_type = 'user' AND subject_id = ?
+        ''', (cluster_id, username))
+        
+        result = {}
+        for row in cursor.fetchall():
+            pool_id = row[0]
+            perms = json.loads(row[1]) if row[1] else []
+            result[pool_id] = perms
+        
+        # Get group permissions.
+        # MK #555 — match the group name case-INSENSITIVELY. LDAP/AD (and PVE realms)
+        # hand group names back in varying case vs how the grant was typed in the UI, so
+        # an exact match silently missed and the pool user saw zero VMs. User grants stay
+        # case-sensitive (usernames are). Caveat: two groups differing only by case would
+        # collide here — realm group names are unique case-wise in practice.
+        # #940 - match the DN as stored AND its bare group name, because the dialog that
+        # writes these grants asks for a name while the login stores a DN.
+        # One read of this cluster's group grants, matched here: a query per group was
+        # free while `groups` was always empty, but a directory user now brings every
+        # group the login saw, nested AD memberships included - easily a few hundred.
+        # The stored groups are read only when a group grant exists, and by username,
+        # so callers need not carry them (get_all_users leaves them out).
+        cursor.execute('''
+            SELECT pool_id, subject_id, permissions FROM pool_permissions
+            WHERE cluster_id = ? AND subject_type = 'group'
+        ''', (cluster_id,))
+        _grants = cursor.fetchall()
+        _want = self._group_keys_of(username, groups) if _grants else set()
+        if _want:
+            for row in _grants:
+                if (row[1] or '').lower() not in _want:
+                    continue
+                pool_id = row[0]
+                perms = json.loads(row[2]) if row[2] else []
+                if pool_id in result:
+                    # Merge permissions (union)
+                    result[pool_id] = list(set(result[pool_id] + perms))
+                else:
+                    result[pool_id] = perms
+
+        return result
+
+    def get_user_pool_clusters(self, username: str, groups: List[str] = None) -> List[str]:
+        """#555 — distinct cluster_ids where this user (or their groups) holds ANY pool
+        permission. Cheap: one SELECT for the user and one for all of their groups on
+        pool_permissions. Used by the cluster-list + get_user_clusters gates."""
+        cursor = self.conn.cursor()
+        out = set()
+        cursor.execute(
+            "SELECT DISTINCT cluster_id FROM pool_permissions "
+            "WHERE subject_type = 'user' AND subject_id = ?" + _NON_EMPTY_GRANT,
+            (username,))
+        for row in cursor.fetchall():
+            out.add(row[0])
+        # MK #555 - group names match case-insensitively (see get_user_pool_permissions),
+        # users stay exact.
+        # #940 - same two spellings as get_user_pool_permissions. This one gates whether
+        # the cluster is visible at all, so missing it left the pool user without even the
+        # cluster the grant was on. One read for all groups, as there.
+        cursor.execute(
+            "SELECT cluster_id, subject_id FROM pool_permissions "
+            "WHERE subject_type = 'group'" + _NON_EMPTY_GRANT)
+        _grants = cursor.fetchall()
+        _want = self._group_keys_of(username, groups) if _grants else set()
+        for row in _grants:
+            if (row[1] or '').lower() in _want:
+                out.add(row[0])
+        return list(out)
+
+    def get_user_directory_groups(self, username: str) -> List[str]:
+        """The directory / IdP groups the account's last sign-in stored (#940), none for a
+        local account. One indexed row, so the users-table read on every request does not
+        have to carry hundreds of DNs per directory user."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT auth_source, directory_groups FROM users WHERE username = ?',
+                       (username,))
+        row = cursor.fetchone()
+        return _directory_groups(row[0], row[1]) if row else []
+
+    def _group_keys_of(self, username, groups=None):
+        # what the caller passed (tests, an in-flight row) plus what is stored
+        return _group_grant_keys(list(groups or []) + self.get_user_directory_groups(username))
+
+    def group_grants_lost(self, held: List[str], kept: List[str]) -> bool:
+        """Whether going from groups `held` to `kept` drops a spelling that a pool grant
+        with permissions names (#625 standby check, #940).
+
+        Not every dropped group: nested AD memberships churn (distribution lists, an OU
+        move that keeps the CN) without touching anything a grant reads. MK Oct 2026"""
+        lost = _group_grant_keys(held) - _group_grant_keys(kept)
+        if not lost:
+            return False
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT subject_id FROM pool_permissions WHERE subject_type = 'group'"
+                       + _NON_EMPTY_GRANT)
+        return any((row[0] or '').lower() in lost for row in cursor.fetchall())
+
+    # ========================================
+    # KEY ROTATION (HIPAA/ISO Compliance)
+    # ========================================
+    
+    def rotate_encryption_key(self, new_key: bytes = None) -> dict:
+        """Rotate the AES-256 encryption key and re-encrypt all data
+
+        This is required for HIPAA/ISO 27001 compliance (periodic key rotation).
+        Process:
+        1. Generate new AES-256 key
+        2. Decrypt all encrypted data with old key
+        3. Re-encrypt with new key
+        4. Replace old key file
+
+        MK Sep 2026 (#625) - new_key: take this key instead of a fresh one. A standby
+        adopting its active's key needs exactly what a rotation does for what stays
+        local (the acme_* secrets, the audit signatures); the synced rows are replaced
+        by the first sync anyway.
+
+        Returns statistics about the rotation.
+        """
+        if not ENCRYPTION_AVAILABLE or not self.aesgcm:
+            return {'error': 'Encryption not available'}
+        if new_key is not None and (not isinstance(new_key, (bytes, bytearray)) or len(new_key) != 32):
+            return {'error': 'The new key must be 32 bytes'}
+        
+        aes_key_file = os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
+        
+        # Load old key
+        with open(aes_key_file, 'rb') as f:
+            old_key = f.read()
+        old_aesgcm = AESGCM(old_key)
+        
+        # Generate new key
+        new_key = bytes(new_key) if new_key is not None else os.urandom(32)  # 256 bits
+        new_aesgcm = AESGCM(new_key)
+        
+        stats = {
+            'users_rotated': 0,
+            'clusters_rotated': 0,
+            'sessions_rotated': 0,
+            'errors': []
+        }
+        
+        try:
+            cursor = self.conn.cursor()
+            
+            # 1. Rotate user secrets (totp_secret_encrypted)
+            cursor.execute('SELECT username, totp_secret_encrypted FROM users WHERE totp_secret_encrypted IS NOT NULL AND totp_secret_encrypted != ""')
+            for row in cursor.fetchall():
+                try:
+                    encrypted = row['totp_secret_encrypted']
+                    if encrypted and encrypted.startswith('aes256:'):
+                        # Decrypt with old key
+                        decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
+                        # Re-encrypt with new key
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        # Update
+                        cursor.execute('UPDATE users SET totp_secret_encrypted = ? WHERE username = ?',
+                                     (new_encrypted, row['username']))
+                        stats['users_rotated'] += 1
+                except Exception as e:
+                    stats['errors'].append(f"User {row['username']}: {str(e)}")
+            
+            # 2. Rotate cluster credentials
+            # MK May 2026 (#446 @hugobugomugo) — column was named
+            # `password_encrypted` in an early schema, renamed to
+            # `pass_encrypted` later, but this rotation code never got the
+            # memo and 500'd at the first SELECT with
+            # "no such column: password_encrypted". That tanked the entire
+            # rotation. Same story for the API-token-secret column.
+            cursor.execute('SELECT id, pass_encrypted FROM clusters WHERE pass_encrypted IS NOT NULL AND pass_encrypted != ""')
+            for row in cursor.fetchall():
+                try:
+                    encrypted = row['pass_encrypted']
+                    if encrypted and encrypted.startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE clusters SET pass_encrypted = ? WHERE id = ?',
+                                     (new_encrypted, row['id']))
+                        stats['clusters_rotated'] += 1
+                except Exception as e:
+                    stats['errors'].append(f"Cluster {row['id']}: {str(e)}")
+
+            # Also rotate SSH keys and API token secrets if present.
+            # NOTE: ha_settings has no _encrypted suffix but IS encrypted (save_cluster stores
+            # _encrypt(json.dumps(...)) and both read paths _decrypt it). It was missed here, and
+            # _decrypt RAISES on a key mismatch — so rotating the key, a compliance feature, made
+            # get_all_clusters throw and every cluster vanish from the UI. Rotate it too.
+            cursor.execute('SELECT id, ssh_key_encrypted, api_token_secret_encrypted, ha_settings '
+                           'FROM clusters')
+            for row in cursor.fetchall():
+                try:
+                    ssh_key = row['ssh_key_encrypted']
+                    api_token = row['api_token_secret_encrypted']
+                    ha_settings = row['ha_settings']
+
+                    if ha_settings and str(ha_settings).startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(ha_settings, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE clusters SET ha_settings = ? WHERE id = ?',
+                                     (new_encrypted, row['id']))
+
+                    if ssh_key and ssh_key.startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(ssh_key, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE clusters SET ssh_key_encrypted = ? WHERE id = ?',
+                                     (new_encrypted, row['id']))
+
+                    if api_token and api_token.startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(api_token, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE clusters SET api_token_secret_encrypted = ? WHERE id = ?',
+                                     (new_encrypted, row['id']))
+                except Exception as e:
+                    stats['errors'].append(f"Cluster secrets {row['id']}: {str(e)}")
+
+            # 3. Rotate pending TOTP secrets — mid-enrollment users (clicked
+            # "Setup 2FA" but haven't confirmed) had their column missed by
+            # the original rotation. Same shape as the live secret.
+            cursor.execute('SELECT username, totp_pending_secret_encrypted FROM users WHERE totp_pending_secret_encrypted IS NOT NULL AND totp_pending_secret_encrypted != ""')
+            for row in cursor.fetchall():
+                try:
+                    encrypted = row['totp_pending_secret_encrypted']
+                    if encrypted and encrypted.startswith('aes256:'):
+                        decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
+                        new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                        cursor.execute('UPDATE users SET totp_pending_secret_encrypted = ? WHERE username = ?',
+                                     (new_encrypted, row['username']))
+                        stats['users_rotated'] += 1
+                except Exception as e:
+                    stats['errors'].append(f"User {row['username']} (pending TOTP): {str(e)}")
+
+            # 4. Rotate ESXi storage passwords if any registered. Column on
+            # esxi_storages is in fact named `password_encrypted` (cf. schema
+            # at db.py:619) — that name matches its own table, unlike the
+            # mis-named cluster column above. Table may not exist on older
+            # installs, so swallow the OperationalError quietly.
+            try:
+                cursor.execute('SELECT id, password_encrypted FROM esxi_storages WHERE password_encrypted IS NOT NULL AND password_encrypted != ""')
+                for row in cursor.fetchall():
+                    try:
+                        encrypted = row['password_encrypted']
+                        if encrypted and encrypted.startswith('aes256:'):
+                            decrypted = self._decrypt_with_key(encrypted, old_aesgcm)
+                            new_encrypted = self._encrypt_with_key(decrypted, new_aesgcm)
+                            cursor.execute('UPDATE esxi_storages SET password_encrypted = ? WHERE id = ?',
+                                         (new_encrypted, row['id']))
+                    except Exception as e:
+                        stats['errors'].append(f"ESXi storage {row['id']}: {str(e)}")
+            except Exception:
+                # esxi_storages may not exist on older installs
+                pass
+
+            # Sessions block removed — the `sessions` table tracks
+            # (token, username, created_at, expires_at, ip_address, user_agent)
+            # and has no encrypted data column on the current schema. The old
+            # `data_encrypted` SELECT would also have failed with "no such
+            # column" if rotation had ever reached that step (it never did
+            # because clusters failed first). stats['sessions_rotated'] stays
+            # at 0 for backwards-compat with the UI counter.
+            
+            # 3a2. Rotate the remaining encrypted stores.
+            # sec (audit): the loop above only covers columns whose NAME ends in _encrypted,
+            # so BMC endpoint passwords and every secret living in server_settings were left on
+            # the old key. _decrypt RAISES, so after a rotation ldap_bind_password broke every
+            # LDAP login, smtp_password broke all alert mail, and the ACME DNS secrets broke
+            # renewals — silently, on a feature run FOR compliance.
+            try:
+                cursor.execute("SELECT cluster_id, node, bmc_password_encrypted "
+                               "FROM node_bmc_endpoints "
+                               "WHERE bmc_password_encrypted IS NOT NULL "
+                               "AND bmc_password_encrypted != ''")
+                for _r in cursor.fetchall():
+                    _v = _r['bmc_password_encrypted']
+                    if _v and str(_v).startswith('aes256:'):
+                        _p = self._decrypt_with_key(_v, old_aesgcm)
+                        cursor.execute('UPDATE node_bmc_endpoints SET bmc_password_encrypted = ? '
+                                       'WHERE cluster_id = ? AND node = ?',
+                                       (self._encrypt_with_key(_p, new_aesgcm), _r['cluster_id'], _r['node']))
+            except Exception as e:
+                stats['errors'].append(f"BMC secrets: {e}")
+
+            # sec (audit): the loop above walks clusters/users/esxi/bmc, but PBS and ESXi server
+            # credentials live in their own tables and were never rotated — and _decrypt RAISES,
+            # so a rotation silently broke every PBS backup and every ESXi connection until
+            # someone re-entered the passwords. Same shape as the server_settings gap below.
+            for _tbl, _cols in (('pbs_servers', ('pass_encrypted', 'api_token_secret_encrypted',
+                                                 'ssh_key_encrypted')),
+                                ('vmware_servers', ('pass_encrypted',)),
+                                # MK Sep 2026 - an auto-install answer file holds the root
+                                # password of the host it builds. Missing here would mean a
+                                # rotation leaves every stored profile unreadable and the
+                                # next ISO fetch answering 500.
+                                ('auto_install_profiles', ('answer_encrypted',)),
+                                # the root passwords of single nodes (#1136)
+                                ('cluster_node_credentials', ('password_encrypted',))):
+                try:
+                    cursor.execute(f"SELECT id, {', '.join(_cols)} FROM {_tbl}")
+                    for _r in cursor.fetchall():
+                        for _c in _cols:
+                            _v = _r[_c]
+                            if _v and str(_v).startswith('aes256:'):
+                                cursor.execute(f'UPDATE {_tbl} SET {_c} = ? WHERE id = ?',
+                                               (self._encrypt_with_key(
+                                                   self._decrypt_with_key(_v, old_aesgcm), new_aesgcm),
+                                                _r['id']))
+                except Exception as e:
+                    stats['errors'].append(f"{_tbl} secrets: {e}")
+
+            try:
+                _ss = self.get_server_settings() or {}
+                _SECRET_KEYS = ('smtp_password', 'ldap_bind_password', 'oidc_client_secret',
+                                'acme_dns_rfc2136_secret', 'acme_dns_cloudflare_token')
+                for _k in _SECRET_KEYS:
+                    _v = _ss.get(_k)
+                    if _v and isinstance(_v, str) and _v.startswith('aes256:'):
+                        # write through our own cursor, NOT save_server_settings — that helper
+                        # commits per key, which would land every re-encrypted row above while
+                        # the new key is still only in memory, and leave step 4's rollback with
+                        # nothing to undo. Everything here has to reach the same transaction.
+                        # MK Sep 2026 (#625) - one try per key: a value that does not open
+                        # used to abort the loop and leave every key after it behind
+                        try:
+                            cursor.execute('INSERT OR REPLACE INTO server_settings (key, value) '
+                                           'VALUES (?, ?)',
+                                           (_k, json.dumps(self._encrypt_with_key(
+                                               self._decrypt_with_key(_v, old_aesgcm), new_aesgcm))))
+                        except Exception as e:
+                            stats['errors'].append(f"Server setting {_k}: {e}")
+
+                # the VAPID private key is a setting too, but nested one level down inside the
+                # keypair object, so the loop above walks straight past it. Left behind it fails
+                # to decrypt, and _load_vapid answers that by generating a fresh keypair — which
+                # silently invalidates every existing push subscription.
+                _vk = _ss.get('webpush_vapid_keypair')
+                if isinstance(_vk, dict) and str(_vk.get('private_pem', '')).startswith('aes256:'):
+                    cursor.execute('INSERT OR REPLACE INTO server_settings (key, value) '
+                                   'VALUES (?, ?)',
+                                   ('webpush_vapid_keypair', json.dumps({
+                                       **_vk,
+                                       'private_pem': self._encrypt_with_key(
+                                           self._decrypt_with_key(_vk['private_pem'], old_aesgcm),
+                                           new_aesgcm)})))
+            except Exception as e:
+                stats['errors'].append(f"Server settings secrets: {e}")
+
+            # 3b. Re-sign the audit log.
+            # sec (audit): _audit_hmac signs with self.aes_key, so after a rotation every
+            # historical row verifies against a key that no longer exists and the whole trail
+            # reads as tampered — on a feature offered FOR compliance, where an intact audit
+            # trail is the other half of the requirement. Verify each row with the OLD key
+            # first: anything that already failed stays failed and is counted, so rotation
+            # cannot be used to launder a tampered entry.
+            stats['audit_resigned'] = 0
+            stats['audit_unverifiable'] = 0
+            _anchor_old = None
+            try:
+                _saved_key = self.aes_key
+                cursor.execute('SELECT id, timestamp, user, action, details, ip_address, '
+                               'cluster, severity, cluster_id, hmac_signature, chain_seq, '
+                               'prev_hash FROM audit_log '
+                               'WHERE hmac_signature IS NOT NULL AND hmac_signature != ""')
+                _rows = cursor.fetchall()
+                for _r in _rows:
+                    _entry = {
+                        'timestamp': _r['timestamp'], 'user': _r['user'], 'action': _r['action'],
+                        'details': _r['details'], 'ip_address': _r['ip_address'],
+                        'cluster': _r['cluster'], 'severity': _r['severity'],
+                        'cluster_id': _r['cluster_id'], 'hmac_signature': _r['hmac_signature'],
+                        'chain_seq': _r['chain_seq'], 'prev_hash': _r['prev_hash'],
+                    }
+                    self.aes_key = old_key
+                    _ok = self._verify_audit_hmac(_entry)
+                    if not _ok:
+                        stats['audit_unverifiable'] += 1
+                        continue                     # leave it as-is; it was already broken
+                    self.aes_key = new_key
+                    if _entry['chain_seq'] is not None:
+                        # the links are unkeyed hashes and stay; only the signature moves
+                        _new_sig = self._audit_chain_hmac(_entry)
+                    else:
+                        _new_sig = self._generate_audit_hmac(
+                            _r['timestamp'], _r['user'], _r['action'], _r['details'],
+                            _r['ip_address'], _r['cluster'], _r['severity'], _r['cluster_id'])
+                    cursor.execute('UPDATE audit_log SET hmac_signature = ? WHERE id = ?',
+                                   (_new_sig, _r['id']))
+                    stats['audit_resigned'] += 1
+                # the checkpoints, by the same rule: one that fails under the old key stays failed
+                cursor.execute('SELECT * FROM audit_checkpoints')
+                for _c in [dict(r) for r in cursor.fetchall()]:
+                    self.aes_key = old_key
+                    if not self._verify_checkpoint_hmac(_c):
+                        stats['audit_unverifiable'] += 1
+                        continue
+                    self.aes_key = new_key
+                    cursor.execute('UPDATE audit_checkpoints SET hmac_signature = ? WHERE id = ?',
+                                   (self._checkpoint_hmac(_c), _c['id']))
+                self.aes_key = _saved_key
+                # and the copy beside the key, re-signed once the new key is in place (step 5)
+                _anchor_old = self._read_audit_anchor(key=old_key)
+            except Exception as e:
+                self.aes_key = _saved_key
+                stats['errors'].append(f"Audit re-sign: {e}")
+
+            # 4. Persist the new key BEFORE committing the re-encrypted rows.
+            # sec (audit): this used to commit first and write the key afterwards, so a failure
+            # in the file step (full disk, permissions, read-only mount) left a database
+            # encrypted with a key that existed only in this process's memory — unreadable
+            # after the next restart, with no way back. Write the key first, fsync it, and roll
+            # the transaction back if anything about the file step fails; the rows are still
+            # readable with the old key in that case.
+            # MK Oct 2026 (#625) - the name goes by the second and the file was opened with
+            # 'wb': a second rotation within that second wrote over the backup of the
+            # first, and the key from before it was gone. A name that is taken gets a
+            # counter, as ha._install_field_key does for .pre-ha.
+            backup_base = aes_key_file + f'.backup.{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+            backup_file, _taken = backup_base, 0
+            try:
+                while True:
+                    try:
+                        _fd = os.open(backup_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        break
+                    except FileExistsError:
+                        _taken += 1
+                        backup_file = f'{backup_base}.{_taken}'
+                with os.fdopen(_fd, 'wb') as f:
+                    f.write(old_key)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(backup_file, 0o600)
+
+                with open(aes_key_file, 'wb') as f:
+                    f.write(new_key)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(aes_key_file, 0o600)
+            except Exception as e:
+                self.conn.rollback()
+                logging.error(f"Key rotation aborted while persisting the new key: {e}")
+                stats['errors'].append(f"Could not persist the new key: {e}")
+                stats['success'] = False
+                return stats
+
+            try:
+                self.conn.commit()
+            except Exception as e:
+                # the rows did not land — put the old key back so the database stays readable
+                try:
+                    with open(aes_key_file, 'wb') as f:
+                        f.write(old_key)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(aes_key_file, 0o600)
+                except Exception:
+                    logging.critical("Key rotation: commit failed AND the old key could not be "
+                                     f"restored — recover it from {backup_file}")
+                stats['errors'].append(f"Commit failed, rotation rolled back: {e}")
+                stats['success'] = False
+                return stats
+
+            # 5. Update in-memory key
+            self.aes_key = new_key
+            self.aesgcm = new_aesgcm
+            # an anchor that failed under the old key stays as it is, like a row would
+            if _anchor_old and not _anchor_old.get('bad'):
+                try:
+                    self._write_audit_anchor({k: v for k, v in _anchor_old.items() if k != 'sig'})
+                except Exception as e:
+                    stats['errors'].append(f"Audit anchor re-sign: {e}")
+
+            stats['success'] = True
+            stats['key_backup'] = backup_file
+            stats['rotated_at'] = datetime.now().isoformat()
+            
+            logging.info(f"Key rotation completed: {stats['users_rotated']} users, {stats['clusters_rotated']} clusters, {stats['sessions_rotated']} sessions")
+            
+        except Exception as e:
+            stats['success'] = False
+            stats['error'] = str(e)
+            logging.error(f"Key rotation failed: {e}")
+            self.conn.rollback()
+        
+        return stats
+    
+    def _encrypt_with_key(self, data: str, aesgcm) -> str:
+        """Encrypt data with specific AESGCM key"""
+        if not data:
+            return data
+        nonce = os.urandom(12)
+        ciphertext = aesgcm.encrypt(nonce, data.encode('utf-8'), None)
+        encrypted = base64.b64encode(nonce + ciphertext).decode('utf-8')
+        return f"aes256:{encrypted}"
+    
+    def _decrypt_with_key(self, data: str, aesgcm) -> str:
+        """Decrypt data with specific AESGCM key"""
+        if not data:
+            return data
+        if data.startswith('aes256:'):
+            encrypted_data = base64.b64decode(data[7:])
+            nonce = encrypted_data[:12]
+            ciphertext = encrypted_data[12:]
+            return aesgcm.decrypt(nonce, ciphertext, None).decode('utf-8')
+        return data
+    
+    def get_key_info(self) -> dict:
+        """Get information about the current encryption key"""
+        aes_key_file = os.path.join(CONFIG_DIR, '.pegaprox_aes256.key')
+        
+        if not os.path.exists(aes_key_file):
+            return {'exists': False}
+        
+        stat = os.stat(aes_key_file)
+        
+        # Find backup files
+        backups = []
+        for f in os.listdir(CONFIG_DIR):
+            if f.startswith('.pegaprox_aes256.key.backup'):
+                backup_path = os.path.join(CONFIG_DIR, f)
+                backup_stat = os.stat(backup_path)
+                backups.append({
+                    'filename': f,
+                    'created': datetime.fromtimestamp(backup_stat.st_mtime).isoformat()
+                })
+        
+        return {
+            'exists': True,
+            'created': datetime.fromtimestamp(stat.st_ctime).isoformat(),
+            'last_modified': datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            'algorithm': 'AES-256-GCM',
+            'key_size_bits': 256,
+            'backups': sorted(backups, key=lambda x: x['created'], reverse=True)
+        }
+    
+    # ========================================
+    # AFFINITY RULES OPERATIONS
+    # ========================================
+    
+    def save_node_maintenance(self, cluster_id: str, node: str, native_ha: bool = False):
+        """#720 — persist a node-maintenance entry so it survives a PegaProx restart.
+
+        native_ha records whether PVE also holds the node in HA maintenance, so a restored
+        entry can still clear the upstream flag when the user exits maintenance.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO node_maintenance (cluster_id, node, entered_at, native_ha) '
+            'VALUES (?, ?, '
+            'COALESCE((SELECT entered_at FROM node_maintenance WHERE cluster_id=? AND node=?), ?), ?)',
+            (cluster_id, node, cluster_id, node, datetime.now().isoformat(), 1 if native_ha else 0))
+        self.conn.commit()
+
+    def remove_node_maintenance(self, cluster_id: str, node: str):
+        """#720 — drop a persisted maintenance entry on exit."""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM node_maintenance WHERE cluster_id=? AND node=?', (cluster_id, node))
+        self.conn.commit()
+
+    def get_node_maintenance(self, cluster_id: str) -> list:
+        """#720 — [(node, entered_at, native_ha), ...] of a cluster's persisted maintenance."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT node, entered_at, native_ha FROM node_maintenance WHERE cluster_id=?',
+                       (cluster_id,))
+        return [(r['node'], r['entered_at'], bool(r['native_ha'])) for r in cursor.fetchall()]
+
+    def save_suspended_ha_rules(self, cluster_id: str, rules: list, rule_type: str = 'resource-affinity',
+                                owner: str = 'rolling'):
+        """#954 - remember HA rules before they are switched off, for `owner` (a rolling update,
+        or 'maintenance:<node>'). A rule this owner already holds keeps its first timestamp."""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        for rule in rules:
+            cursor.execute('INSERT OR IGNORE INTO suspended_ha_rules (cluster_id, rule, rule_type, suspended_at, owner) '
+                           'VALUES (?, ?, ?, ?, ?)', (cluster_id, rule, rule_type, now, owner))
+        self.conn.commit()
+
+    def remove_suspended_ha_rule(self, cluster_id: str, rule: str, owners=None):
+        """The rows of `rule`: of every owner, or only of those in `owners`."""
+        cursor = self.conn.cursor()
+        if owners is None:
+            cursor.execute('DELETE FROM suspended_ha_rules WHERE cluster_id=? AND rule=?', (cluster_id, rule))
+        else:
+            for owner in ([owners] if isinstance(owners, str) else owners):
+                cursor.execute('DELETE FROM suspended_ha_rules WHERE cluster_id=? AND rule=? AND owner=?',
+                               (cluster_id, rule, owner))
+        self.conn.commit()
+
+    def get_suspended_ha_rules(self, cluster_id: str) -> list:
+        """#954 - [(rule, rule_type, suspended_at, owner), ...] still waiting to be switched on
+        again; a rule held by two owners comes twice."""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT rule, rule_type, suspended_at, owner FROM suspended_ha_rules WHERE cluster_id=? '
+                       'ORDER BY rule, owner', (cluster_id,))
+        return [(r['rule'], r['rule_type'], r['suspended_at'], r['owner']) for r in cursor.fetchall()]
+
+    def insert_rolling_run(self, run_id, cluster_id, status, state, logs, started_by, started_at):
+        """A new rolling update run; state and logs are JSON text."""
+        self.conn.cursor().execute(
+            'INSERT INTO rolling_update_runs (id, cluster_id, status, state, logs, started_by, started_at, '
+            'updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            (run_id, cluster_id, status, state, logs, started_by, started_at, started_at))
+        self.conn.commit()
+
+    def update_rolling_run(self, run_id, status, state, logs, updated_at, completed_at=None):
+        """Only a run that has its row: a worker of a run whose row is gone writes nothing."""
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE rolling_update_runs SET status = ?, state = ?, logs = ?, updated_at = ?, '
+                       'completed_at = ? WHERE id = ?',
+                       (status, state, logs, updated_at, completed_at, run_id))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def update_rolling_run_logs(self, run_id, logs, updated_at):
+        cursor = self.conn.cursor()
+        cursor.execute('UPDATE rolling_update_runs SET logs = ?, updated_at = ? WHERE id = ?',
+                       (logs, updated_at, run_id))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_rolling_runs(self, cluster_id, statuses=None, limit=None):
+        """Runs of a cluster, newest first: [{id, cluster_id, status, state, logs, started_by,
+        started_at, updated_at, completed_at}] with state and logs as text."""
+        sql = 'SELECT * FROM rolling_update_runs WHERE cluster_id = ?'
+        params = [cluster_id]
+        if statuses:
+            sql += ' AND status IN (%s)' % ','.join('?' * len(statuses))
+            params += list(statuses)
+        sql += ' ORDER BY started_at DESC, rowid DESC'
+        if limit:
+            sql += ' LIMIT ?'
+            params.append(int(limit))
+        cursor = self.conn.cursor()
+        cursor.execute(sql, params)
+        return [dict(r) for r in cursor.fetchall()]
+
+    def prune_rolling_runs(self, cluster_id, keep, finished):
+        """The newest `keep` finished runs of a cluster stay; a run still open always does."""
+        marks = ','.join('?' * len(finished))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            f'DELETE FROM rolling_update_runs WHERE cluster_id = ? AND status IN ({marks}) AND id NOT IN '
+            f'(SELECT id FROM rolling_update_runs WHERE cluster_id = ? AND status IN ({marks}) '
+            f'ORDER BY started_at DESC, rowid DESC LIMIT ?)',
+            (cluster_id, *finished, cluster_id, *finished, int(keep)))
+        self.conn.commit()
+        return cursor.rowcount
+
+    def get_affinity_rules(self, cluster_id: str = None) -> dict:
+        """Get affinity rules"""
+        cursor = self.conn.cursor()
+        
+        if cluster_id:
+            cursor.execute('SELECT * FROM affinity_rules WHERE cluster_id = ?', (cluster_id,))
+        else:
+            cursor.execute('SELECT * FROM affinity_rules')
+        
+        rules = {}
+        for row in cursor.fetchall():
+            cid = row['cluster_id']
+            if cid not in rules:
+                rules[cid] = []
+            vms_list = json.loads(row['vms'] or '[]')
+            rules[cid].append({
+                'id': row['id'],
+                'name': row['name'],
+                'type': row['type'],
+                'vms': vms_list,
+                'vm_ids': vms_list,  # MK: frontend expects vm_ids
+                'enabled': bool(row['enabled']),
+                'enforce': bool(row['enforce']) if 'enforce' in row.keys() else False,
+            })
+
+        return rules
+    
+    def save_affinity_rule(self, rule_id: str, cluster_id: str, data: dict):
+        """Save affinity rule"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+
+        vms_data = data.get('vms') or data.get('vm_ids', [])  # handle both field names
+
+        cursor.execute('''
+            INSERT OR REPLACE INTO affinity_rules
+            (id, cluster_id, name, type, vms, enabled, enforce, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM affinity_rules WHERE id = ?), ?))
+        ''', (
+            rule_id,
+            cluster_id,
+            data.get('name', ''),
+            data.get('type', 'affinity'),
+            json.dumps(vms_data),
+            1 if data.get('enabled', True) else 0,
+            1 if data.get('enforce', False) else 0,
+            rule_id, now
+        ))
+        self.conn.commit()
+    
+    def delete_affinity_rule(self, rule_id: str):
+        """Delete affinity rule"""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM affinity_rules WHERE id = ?', (rule_id,))
+        self.conn.commit()
+    
+    def save_all_affinity_rules(self, rules: dict):
+        """Save all affinity rules"""
+        for cluster_id, cluster_rules in rules.items():
+            for rule in cluster_rules:
+                self.save_affinity_rule(rule.get('id', str(uuid.uuid4())[:8]), cluster_id, rule)
+    
+    # ========================================
+    # SERVER SETTINGS OPERATIONS
+    # ========================================
+    
+    def get_server_settings(self) -> dict:
+        """Get all server settings"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM server_settings')
+        
+        settings = {}
+        for row in cursor.fetchall():
+            try:
+                settings[row['key']] = json.loads(row['value'])
+            except:
+                settings[row['key']] = row['value']
+        
+        return settings
+    
+    def get_server_setting(self, key: str, default=None):
+        """Get single server setting"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT value FROM server_settings WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        
+        if not row:
+            return default
+        
+        try:
+            return json.loads(row['value'])
+        except:
+            return row['value']
+    
+    def save_server_setting(self, key: str, value):
+        """Save server setting - always JSON encode to ensure consistent retrieval"""
+        cursor = self.conn.cursor()
+        if key in ('acme_dns_rfc2136_secret', 'acme_dns_cloudflare_token') and value and value != '********':
+            value = str(value)
+            if not value.startswith(('aes256:', 'gAAAA')):
+                value = self._encrypt(value)
+        # Always JSON encode the value for consistent storage and retrieval
+        json_value = json.dumps(value)
+        cursor.execute('''
+            INSERT OR REPLACE INTO server_settings (key, value)
+            VALUES (?, ?)
+        ''', (key, json_value))
+        self.conn.commit()
+    
+    def save_server_settings(self, settings: dict):
+        """Save all server settings"""
+        for key, value in settings.items():
+            self.save_server_setting(key, value)
+    
+    # ========================================
+    # TENANTS OPERATIONS
+    # ========================================
+    
+    def get_all_tenants(self) -> list:
+        """Get all tenants"""
+        cursor = self.conn.cursor()
+        cursor.execute('SELECT * FROM tenants')
+        
+        def _q(row, k, d):
+            try:
+                v = row[k]
+                return v if v is not None else d
+            except (IndexError, KeyError):
+                return d
+        return [{
+            'id': row['id'],
+            'name': row['name'],
+            'clusters': json.loads(row['clusters'] or '[]'),
+            'quota_max_vms': _q(row, 'quota_max_vms', 0),
+            'quota_max_cores': _q(row, 'quota_max_cores', 0),
+            'quota_max_memory_gb': _q(row, 'quota_max_memory_gb', 0),
+            'quota_max_disk_gb': _q(row, 'quota_max_disk_gb', 0),
+            'quota_enforcement': _q(row, 'quota_enforcement', 'block') or 'block',
+            'vmid_range_start': _q(row, 'vmid_range_start', 0),
+            'vmid_range_end': _q(row, 'vmid_range_end', 0),
+        } for row in cursor.fetchall()]
+    
+    def save_tenant(self, tenant_id: str, data: dict):
+        """Save tenant"""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO tenants (id, name, clusters, created_at,
+                quota_max_vms, quota_max_cores, quota_max_memory_gb, quota_max_disk_gb,
+                quota_enforcement, vmid_range_start, vmid_range_end)
+            VALUES (?, ?, ?, COALESCE((SELECT created_at FROM tenants WHERE id = ?), ?),
+                ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            tenant_id,
+            data.get('name', ''),
+            json.dumps(data.get('clusters', [])),
+            tenant_id, now,
+            int(data.get('quota_max_vms', 0) or 0),
+            int(data.get('quota_max_cores', 0) or 0),
+            int(data.get('quota_max_memory_gb', 0) or 0),
+            int(data.get('quota_max_disk_gb', 0) or 0),
+            (data.get('quota_enforcement') or 'block'),
+            int(data.get('vmid_range_start', 0) or 0),
+            int(data.get('vmid_range_end', 0) or 0),
+        ))
+        self.conn.commit()
+    
+    def delete_tenant(self, tenant_id: str):
+        """Delete tenant"""
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM tenants WHERE id = ?', (tenant_id,))
+        self.conn.commit()
+    
+    def save_all_tenants(self, tenants: list):
+        """Save all tenants"""
+        for tenant in tenants:
+            self.save_tenant(tenant.get('id', str(uuid.uuid4())[:8]), tenant)
+    
+    def replay_sr_failover_state(self):
+        """The replay the failed_over columns owe since this process added them: the marks
+        of the guests from this instance's failover events, once. Returns how many it
+        marked, None when nothing is owed.
+
+        #625 - the events are a LOCAL table, the marks a synced one. Only the instance that
+        acts runs this (background/site_recovery.py replay_failover_state); a member takes
+        the active's marks with the sync. A member's process never acts, and the one that
+        acts after its promotion is a new process that owes nothing."""
+        with self._sr_replay_lock:
+            if not self._sr_replay_owed:
+                return None
+            cursor = self.conn.cursor()
+            marked = _replay_sr_failover_state(cursor)
+            self.conn.commit()
+            self._sr_replay_owed = False
+        logging.info(f"site_recovery_vms: {marked} guest(s) failed over, replayed from the failover events")
+        return marked
+
+    # Generic query methods for custom tables like scripts
+    def execute(self, sql: str, params: tuple = ()):
+        """Execute SQL statement (CREATE, INSERT, UPDATE, DELETE)"""
+        cursor = self.conn.cursor()
+        cursor.execute(sql, params)
+        self.conn.commit()
+    
+    def query(self, sql: str, params: tuple = ()) -> list:
+        """Execute SQL query and return all results as list of Row objects"""
+        cursor = self.conn.cursor()
+        cursor.row_factory = dbcrypto.Row
+        cursor.execute(sql, params)
+        return cursor.fetchall()
+    
+    def query_one(self, sql: str, params: tuple = ()):
+        """Execute SQL query and return first result or None"""
+        cursor = self.conn.cursor()
+        cursor.row_factory = dbcrypto.Row
+        cursor.execute(sql, params)
+        return cursor.fetchone()
+
+    # NS: Feb 2026 - efficient snapshot CRUD (was part of the manager before the split)
+    def save_efficient_snapshot(self, snap_data: dict):
+        """Save a new efficient snapshot record to the database."""
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute('''
+            INSERT INTO efficient_snapshots
+            (id, cluster_id, node, vmid, vm_type, snapname, description, vg_name,
+             disks, total_disk_size_gb, total_snap_alloc_gb, fs_frozen, status,
+             error_message, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            snap_data['id'],
+            snap_data['cluster_id'],
+            snap_data['node'],
+            snap_data['vmid'],
+            snap_data.get('vm_type', 'qemu'),
+            snap_data['snapname'],
+            snap_data.get('description', ''),
+            snap_data['vg_name'],
+            json.dumps(snap_data.get('disks', [])),
+            snap_data.get('total_disk_size_gb', 0),
+            snap_data.get('total_snap_alloc_gb', 0),
+            1 if snap_data.get('fs_frozen') else 0,
+            snap_data.get('status', 'active'),
+            snap_data.get('error_message', ''),
+            snap_data.get('created_by', ''),
+            now,
+            now
+        ))
+        self.conn.commit()
+
+    def get_efficient_snapshots(self, cluster_id: str, vmid: int) -> list:
+        cursor = self.conn.cursor()
+        cursor.row_factory = dbcrypto.Row
+        cursor.execute(
+            'SELECT * FROM efficient_snapshots WHERE cluster_id = ? AND vmid = ? ORDER BY created_at DESC',
+            (cluster_id, vmid)
+        )
+        rows = cursor.fetchall()
+        return [self._row_to_efficient_snapshot(row) for row in rows]
+
+    def get_efficient_snapshot(self, snap_id: str) -> dict:
+        # MK: returns None if not found
+        cursor = self.conn.cursor()
+        cursor.row_factory = dbcrypto.Row
+        cursor.execute('SELECT * FROM efficient_snapshots WHERE id = ?', (snap_id,))
+        row = cursor.fetchone()
+        return self._row_to_efficient_snapshot(row) if row else None
+
+    def delete_efficient_snapshot(self, snap_id: str):
+        cursor = self.conn.cursor()
+        cursor.execute('DELETE FROM efficient_snapshots WHERE id = ?', (snap_id,))
+        self.conn.commit()
+
+    def update_efficient_snapshot_status(self, snap_id: str, status: str, error_message: str = ''):
+        # NS: status can be active/merging/invalidated/error
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        cursor.execute(
+            'UPDATE efficient_snapshots SET status = ?, error_message = ?, updated_at = ? WHERE id = ?',
+            (status, error_message, now, snap_id)
+        )
+        self.conn.commit()
+
+    def update_efficient_snapshot_disks(self, snap_id: str, disks: list, total_snap_alloc_gb: float = None):
+        cursor = self.conn.cursor()
+        now = datetime.now().isoformat()
+        if total_snap_alloc_gb is not None:
+            cursor.execute(
+                'UPDATE efficient_snapshots SET disks = ?, total_snap_alloc_gb = ?, updated_at = ? WHERE id = ?',
+                (json.dumps(disks), total_snap_alloc_gb, now, snap_id)
+            )
+        else:
+            cursor.execute(
+                'UPDATE efficient_snapshots SET disks = ?, updated_at = ? WHERE id = ?',
+                (json.dumps(disks), now, snap_id)
+            )
+        self.conn.commit()
+
+    def get_all_efficient_snapshots(self, cluster_id: str) -> list:
+        """Get all efficient snapshots for a given cluster, ordered by creation date."""
+        cursor = self.conn.cursor()
+        cursor.row_factory = dbcrypto.Row
+        cursor.execute(
+            'SELECT * FROM efficient_snapshots WHERE cluster_id = ? ORDER BY created_at DESC',
+            (cluster_id,)
+        )
+        rows = cursor.fetchall()
+        return [self._row_to_efficient_snapshot(row) for row in rows]
+
+    # MK Mar 2026 - CVE tracking for scanner improvements
+    def upsert_cve(self, cluster_id, node, cve_id, package, severity):
+        now = datetime.now().isoformat()
+        self.execute('''INSERT INTO cve_history (cluster_id, node, cve_id, package, severity, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cluster_id, node, cve_id) DO UPDATE SET
+            last_seen = ?, package = ?, severity = ?''',
+            (cluster_id, node, cve_id, package, severity, now, now, now, package, severity))
+
+    def get_cve_first_seen(self, cluster_id, node, cve_id):
+        row = self.query_one('SELECT first_seen FROM cve_history WHERE cluster_id = ? AND node = ? AND cve_id = ?',
+            (cluster_id, node, cve_id))
+        return row['first_seen'] if row else None
+
+    def mark_cves_resolved(self, cluster_id, node, active_cve_ids):
+        """Mark CVEs as resolved if they no longer show up in scan."""
+        now = datetime.now().isoformat()
+        if active_cve_ids:
+            placeholders = ','.join(['?'] * len(active_cve_ids))
+            self.execute(f'''UPDATE cve_history SET resolved_at = ?
+                WHERE cluster_id = ? AND node = ? AND resolved_at IS NULL
+                AND cve_id NOT IN ({placeholders})''',
+                [now, cluster_id, node] + list(active_cve_ids))
+        else:
+            self.execute('UPDATE cve_history SET resolved_at = ? WHERE cluster_id = ? AND node = ? AND resolved_at IS NULL',
+                (now, cluster_id, node))
+
+    def _row_to_efficient_snapshot(self, row) -> dict:
+        return {
+            'id': row['id'],
+            'cluster_id': row['cluster_id'],
+            'node': row['node'],
+            'vmid': row['vmid'],
+            'vm_type': row['vm_type'],
+            'snapname': row['snapname'],
+            'description': row['description'],
+            'vg_name': row['vg_name'],
+            'disks': json.loads(row['disks'] or '[]'),
+            'total_disk_size_gb': row['total_disk_size_gb'],
+            'total_snap_alloc_gb': row['total_snap_alloc_gb'],
+            'fs_frozen': bool(row['fs_frozen']),
+            'status': row['status'],
+            'error_message': row['error_message'],
+            'created_by': row['created_by'],
+            'created_at': row['created_at'],
+            'updated_at': row['updated_at'],
+        }
+
+
+# Global database instance
+_db = None
+
+def get_db() -> PegaProxDB:
+    """Get database instance (singleton)"""
+    global _db
+    if _db is None:
+        _db = PegaProxDB()
+    return _db

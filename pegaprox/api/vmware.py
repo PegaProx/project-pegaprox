@@ -1,0 +1,1496 @@
+# -*- coding: utf-8 -*-
+"""vmware + v2p migration routes - split from monolith dec 2025, NS"""
+
+import logging
+import time
+import threading
+import uuid
+from flask import Blueprint, jsonify, request
+
+from pegaprox.constants import *
+from pegaprox.globals import *
+from pegaprox.models.permissions import *
+from pegaprox.core.db import get_db
+
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user, resolve_authz_user
+from pegaprox.utils.audit import log_audit
+# MK 2026-06-04 (CWE-117): mgr.name is from cluster-config (admin-controlled),
+# vmware_id from URL. Sanitise both before logging for consistency.
+from pegaprox.utils.sanitization import sanitize_log_message as _sl
+from pegaprox.utils.rbac import user_can_access_vmware_vm, acts_as_admin
+from pegaprox.api.helpers import (check_cluster_access, check_vmware_access, caller_is_scoped,
+                                  acting_user, vmware_server_reach, upstream_failure,
+                                  UPSTREAM_AUTH_STATUSES, caller_acts_as_admin)
+from pegaprox.core.vmware import VMwareManager, load_vmware_servers, save_vmware_server, esxi_target_refusal
+from pegaprox.core.v2p import V2PMigrationTask, _run_v2p_migration
+from pegaprox.background.broadcast import broadcast_resources_loop
+
+bp = Blueprint('vmware', __name__)
+
+# V2P migration tracking
+_vmware_migrations = {}
+_migration_lock_v2p = threading.Lock()
+
+
+def _esxi_failed(result):
+    """The answer for a failed call to an ESXi server.
+
+    MK Oct 2026 (#1142) - this was jsonify(result) with the server's own status, so wrong
+    stored credentials came back as a 401 and the browser signed the user off on every click
+    on the server, with no way left to fix or remove it. Its 401/403 is a 502 UPSTREAM_AUTH
+    now, its 5xx a 502; a 400/404 of the server keeps its status.
+    """
+    status = result.get('status_code')
+    if status in UPSTREAM_AUTH_STATUSES:
+        return upstream_failure(status, system='The ESXi server', detail=result.get('error'))
+    if isinstance(status, int) and status >= 500:
+        return jsonify(result), 502
+    return jsonify(result), status or 500
+
+
+def _target_refusal(host):
+    """esxi_target_refusal for the caller of this request: loopback for a global admin only."""
+    return esxi_target_refusal(host, allow_loopback=caller_acts_as_admin())
+
+# =============================================================================
+
+@bp.route('/api/vmware', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def list_vmware_servers():
+    """List the ESXi servers the caller may reach"""
+    # NS Oct 2026 - this handed every tenant's servers to any vmware.view holder; each row
+    # now has to pass the rule check_vmware_access applies to the server it names
+    user = acting_user()
+    if not user:
+        return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
+    reaches = vmware_server_reach(user)
+    result = []
+    for vmware_id, mgr in list(vmware_managers.items()):
+        if reaches(getattr(mgr, 'linked_clusters', None)):
+            result.append(mgr.to_dict())
+    
+    # Also include disabled servers from DB
+    try:
+        import json as _json
+        db = get_db()
+        cursor = db.conn.cursor()
+        cursor.execute("SELECT id, name, host, port, enabled, server_type, linked_clusters "
+                       "FROM vmware_servers")
+        for row in cursor.fetchall():
+            row_dict = dict(row)
+            if row_dict['id'] not in vmware_managers:
+                try:
+                    _linked = _json.loads(row_dict.get('linked_clusters') or '[]')
+                except (TypeError, ValueError):
+                    _linked = False
+                # a linkage we cannot read shows the row to an admin and nobody else
+                if not isinstance(_linked, (list, type(None))):
+                    if not acts_as_admin(user):
+                        continue
+                    _linked = []
+                if not reaches(_linked):
+                    continue
+                result.append({
+                    'id': row_dict['id'],
+                    'name': row_dict['name'],
+                    'host': row_dict['host'],
+                    'port': row_dict['port'],
+                    'server_type': row_dict.get('server_type', 'vcenter'),
+                    'enabled': bool(row_dict['enabled']),
+                    'connected': False,
+                })
+    except Exception:
+        pass
+    
+    return jsonify(result)
+
+
+@bp.route('/api/vmware', methods=['POST'])
+@require_auth(perms=['vmware.config'])
+def add_vmware_server():
+    """Add a new VMware/vCenter server"""
+    data = request.json or {}
+    
+    if not data.get('name') or not data.get('host'):
+        return jsonify({'error': 'Name and host are required'}), 400
+    if not data.get('username'):
+        return jsonify({'error': 'Username is required'}), 400
+    if not data.get('password'):
+        return jsonify({'error': 'Password is required'}), 400
+    _why = _target_refusal(data.get('host'))
+    if _why:
+        return jsonify({'error': _why}), 400
+    
+    vmware_id = str(uuid.uuid4())[:8]
+    
+    mgr = VMwareManager(vmware_id, data)
+    if not mgr.connect():
+        return jsonify({'error': f'Connection failed: {mgr.last_error}'}), 400
+    
+    save_vmware_server(vmware_id, data)
+    vmware_managers[vmware_id] = mgr
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.added',
+              f"Added VMware server: {data['name']} ({data['host']}, type={data.get('server_type', 'vcenter')})")
+    
+    return jsonify({'id': vmware_id, 'message': 'VMware server added successfully', **mgr.to_dict()}), 201
+
+
+@bp.route('/api/vmware/<vmware_id>', methods=['PUT'])
+@require_auth(perms=['vmware.config'])
+def update_vmware_server(vmware_id):
+    """Update a VMware server config"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on write
+    if not ok:
+        return err
+    data = request.json or {}
+
+    # NS Oct 2026 (#981) - linked_clusters is the list check_vmware_access reads, and an
+    # empty one opens the server to everybody. Same rule as the PBS twin: a non-admin may
+    # only narrow it, to clusters they reach themselves.
+    if 'linked_clusters' in data:
+        _lc = data.get('linked_clusters')
+        # a string was stored as its characters and kept raw on the live manager
+        if _lc is not None and not (isinstance(_lc, list) and all(isinstance(c, str) for c in _lc)):
+            return jsonify({'error': 'linked_clusters must be a list of cluster ids'}), 400
+        from pegaprox.utils.rbac import get_user_clusters, acts_as_admin
+        _caller = build_authz_user(request.session.get('user', ''), request.session)
+        if not acts_as_admin(_caller):
+            _new_links = list(data.get('linked_clusters') or [])
+            if not _new_links:
+                return jsonify({'error': 'Access denied: only a global admin may unlink an ESXi '
+                                         'server from every cluster'}), 403
+            _reachable = get_user_clusters(_caller, include_pools=False)
+            if _reachable is not None:
+                _beyond = [c for c in _new_links if c not in set(_reachable)]
+                if _beyond:
+                    return jsonify({'error': 'Access denied: cannot link this ESXi server to '
+                                             + ', '.join(_beyond)}), 403
+
+    if vmware_id not in vmware_managers:
+        db = get_db()
+        row = db.conn.cursor().execute("SELECT * FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+        if not row:
+            return jsonify({'error': 'VMware server not found'}), 404
+    
+    # MK May 2026 (#469 port) — cred-exfil guard. If host changes WHILE the
+    # password is preserved (came in as ********), don't auto-connect — that
+    # would ship the saved credential to a potentially attacker-controlled host.
+    #
+    # NS Aug 2026 (Aikido pentest) — never persist the preserved password against a CHANGED
+    # host: the saved row is reused verbatim by diagnose / Test Connection / the boot-time
+    # auto-connect, any of which would ship the secret to the new (possibly attacker-chosen)
+    # host. Require a full password whenever the host changes.
+    credentials_preserved = False
+    host_changed = False
+
+    # MK Sep 2026 (Aikido 700489023) — two ways past that guard, both closed here.
+    #
+    # First, it hung off vmware_managers, and load_vmware_servers only loads `enabled = 1`.
+    # A DISABLED server is therefore absent from that dict and the whole block was skipped:
+    # disable, repoint the host, re-enable, and the boot-time auto-connect hands the saved
+    # credential to the new destination. The stored ROW is the authority for what gets
+    # reused, so compare against it.
+    _row = get_db().conn.cursor().execute(
+        "SELECT host, port FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+    if _row is None:
+        # MK Sep 2026 — no stored row means we cannot tell what the destination is today,
+        # so we cannot tell whether this request moves it. The guard below only refuses a
+        # preserved credential when host_changed is True, so leaving it False on a failed
+        # read would wave an UNKNOWN destination through with the stored secret attached.
+        # "Cannot tell" has to mean "changed" here; the cost is re-typing the password.
+        # The 404 above only runs when the id is absent from vmware_managers, so a manager
+        # without a row reaches this line.
+        host_changed = True
+    elif (data.get('host') and data.get('host') != _row['host']) or \
+         (data.get('port') and int(data.get('port', 443)) != int(_row['port'] or 443)):
+        host_changed = True
+    if host_changed:
+        # a new port on the old host is a new target as well
+        _host = data.get('host')
+        if not _host:
+            _host = _row['host'] if _row is not None else getattr(vmware_managers.get(vmware_id), 'host', '')
+        _why = _target_refusal(_host)
+        if _why:
+            return jsonify({'error': _why}), 400
+
+    # Second, "keep the password" has three spellings and the guard knew one.
+    # save_vmware_server writes `pass_encrypted or <the stored one>`, so an OMITTED or an
+    # EMPTY password preserves the credential exactly as the UI's ******** sentinel does —
+    # and only the sentinel was checked. Leaving the field out walked straight past it and
+    # the row ended up holding the real credential against the caller's new host.
+    _pw = data.get('password')
+    if _pw is None or _pw == '' or _pw == '********':
+        if host_changed:
+            return jsonify({
+                'error': 'Re-enter the password when changing the VMware host or port.'}), 400
+        credentials_preserved = True
+        # Hand the in-memory manager the credential it is keeping. save_vmware_server
+        # falls back to the stored row either way, but VMwareManager is rebuilt from
+        # `data` a few lines down and then reconnected — without this it comes up with an
+        # empty password and the live connection stays broken until a restart, while the
+        # row it was built from still holds the secret. Pre-dates the omitted/empty arm;
+        # it only ever hydrated the ******** spelling. Host changes returned 400 above,
+        # so this can only ever re-supply a credential to the destination it already had.
+        if vmware_id in vmware_managers:
+            data['password'] = vmware_managers[vmware_id].password
+
+    save_vmware_server(vmware_id, data)
+
+    # an update that leaves linked_clusters out keeps them (the row already does); the
+    # live manager below is built from `data` and came up unlinked, open to everybody (#981)
+    if 'linked_clusters' not in data:
+        if vmware_id in vmware_managers:
+            data['linked_clusters'] = list(getattr(vmware_managers[vmware_id], 'linked_clusters', None) or [])
+        else:
+            import json as _json
+            _lr = get_db().conn.cursor().execute(
+                "SELECT linked_clusters FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+            data['linked_clusters'] = _json.loads(_lr['linked_clusters'] or '[]') if _lr else []
+
+    mgr = VMwareManager(vmware_id, data)
+    if data.get('enabled', True):
+        if host_changed and credentials_preserved:
+            try:
+                mgr.connected = False
+                mgr.last_error = 'Host changed — auto-connect skipped for security (preserved credentials). Use Test Connection manually after verifying the new host.'
+            except Exception:
+                pass
+            logging.warning(f"[VMware:{_sl(getattr(mgr, 'name', vmware_id))}] Skipped auto-connect after host change with preserved credentials (cred-exfil guard)")
+        else:
+            mgr.connect()
+    vmware_managers[vmware_id] = mgr
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.updated', f"Updated VMware server: {data.get('name', vmware_id)}")
+    
+    return jsonify(mgr.to_dict())
+
+
+@bp.route('/api/vmware/<vmware_id>', methods=['DELETE'])
+@require_auth(perms=['vmware.config'])
+def delete_vmware_server(vmware_id):
+    """Delete a VMware server"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on delete
+    if not ok:
+        return err
+    name = vmware_managers[vmware_id].name if vmware_id in vmware_managers else vmware_id
+    if vmware_id in vmware_managers:
+        del vmware_managers[vmware_id]
+    
+    db = get_db()
+    db.conn.cursor().execute("DELETE FROM vmware_servers WHERE id = ?", (vmware_id,))
+    db.conn.commit()
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.deleted', f"Deleted VMware server: {name}")
+    return jsonify({'message': f'VMware server {name} deleted'})
+
+
+@bp.route('/api/vmware/test-connection', methods=['POST'])
+@require_auth(perms=['vmware.config'])
+def test_vmware_connection():
+    """Test VMware connection with provided credentials"""
+    data = request.json or {}
+    if not data.get('host') or not data.get('username') or not data.get('password'):
+        return jsonify({'error': 'Host, username and password required'}), 400
+    _why = _target_refusal(data.get('host'))
+    if _why:
+        return jsonify({'error': _why}), 400
+    
+    mgr = VMwareManager('test', data)
+    if mgr.connect():
+        return jsonify({'success': True, 'server_info': mgr.server_info, 'api_version': mgr.api_version,
+                        'connection_type': mgr._connection_type})
+    return jsonify({'success': False, 'error': mgr.last_error}), 400
+
+
+@bp.route('/api/vmware/<vmware_id>/diagnose', methods=['GET'])
+@require_auth(perms=['vmware.config'])
+def diagnose_vmware_connection(vmware_id):
+    """diagnose connection issues -- compares stored vs. fresh credentials"""
+    ok, err = check_vmware_access(vmware_id)  # NS Aug 2026 (Aikido) — object-level authz on diagnose
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    
+    # Get stored encrypted password from DB
+    db = get_db()
+    row = db.conn.cursor().execute(
+        "SELECT pass_encrypted, username, host, port FROM vmware_servers WHERE id = ?", (vmware_id,)).fetchone()
+    if not row:
+        return jsonify({'error': 'Not found in DB'}), 404
+    
+    row_d = dict(row)
+    stored_enc = row_d.get('pass_encrypted', '')
+    
+    # Try decrypt
+    decrypted = ''
+    decrypt_ok = False
+    try:
+        decrypted = db._decrypt(stored_enc)
+        decrypt_ok = True
+    except Exception as e:
+        decrypted = f'DECRYPT_FAILED: {e}'
+    
+    # NS: Feb 2026 - SECURITY: no password chars in API response, only boolean indicators
+    result = {
+        'vmware_id': vmware_id,
+        'host': mgr.host,
+        'port': mgr.port,
+        'username_in_db': row_d.get('username', ''),
+        'username_in_mgr': mgr.username,
+        'password_encrypted_present': bool(stored_enc),
+        'password_decrypted_ok': decrypt_ok,
+        'password_matches_mgr': decrypted == mgr.password if decrypt_ok else False,
+        'mgr_connected': mgr.connected,
+        'mgr_connection_type': mgr._connection_type,
+        'mgr_last_error': mgr.last_error,
+    }
+    
+    # Try fresh SOAP connection with stored credentials.
+    # MK 2026-06-04: honour the per-cluster `ssl_verify` flag instead of
+    # hard-disabling. Default is False because ESXi/vCenter ship with
+    # self-signed certs in most labs; admins flip it on via cluster settings
+    # once they've installed a real CA-signed cert + uploaded the CA. When
+    # opt-out is in effect we log it so the cert posture is observable in
+    # the audit/SIEM forward.
+    try:
+        from pyVim.connect import SmartConnect
+        import ssl
+        verify_tls = bool(getattr(mgr, 'ssl_verify', False))
+        if verify_tls:
+            ctx = ssl.create_default_context()
+        else:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            logging.warning(
+                f"[VMware:{getattr(mgr, 'name', vmware_id)}] fresh-SOAP-test TLS verify DISABLED "
+                f"(cluster ssl_verify=false). Set ssl_verify=true once a CA-signed cert is in place."
+            )
+        si = SmartConnect(host=mgr.host, user=mgr.username, pwd=mgr.password,
+                         port=mgr.port, sslContext=ctx,
+                         disableSslCertValidation=not verify_tls)
+        if si:
+            result['fresh_soap_test'] = 'SUCCESS'
+            from pyVim.connect import Disconnect
+            Disconnect(si)
+        else:
+            result['fresh_soap_test'] = 'FAILED: SmartConnect returned None'
+    except Exception as e:
+        err = str(e)
+        if 'InvalidLogin' in err:
+            result['fresh_soap_test'] = f'FAILED: InvalidLogin (password wrong or locked)'
+        else:
+            result['fresh_soap_test'] = f'FAILED: {err[:150]}'
+    
+    return jsonify(result)
+
+
+@bp.route('/api/vmware/<vmware_id>/vms', methods=['GET'])
+@require_auth(perms=['vmware.vm.view'])
+def get_vmware_vms(vmware_id):
+    """List all VMs from vCenter/ESXi"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_vms()
+    if 'error' in result:
+        if mgr.connect():
+            result = mgr.get_vms()
+        if 'error' in result and result.get('status_code') == 400:
+            mgr._try_soap_fallback()
+            if mgr._connection_type == 'soap':
+                result = mgr.get_vms()
+    if 'error' in result:
+        return _esxi_failed(result)
+    # sec (private disclosure Sep 2026 — audit H2): the list returned the FULL ESXi inventory gated
+    # only by server reach (check_vmware_access admits a tenant caller, and returns True when the
+    # server has no linked_clusters — the common single-ESXi case). Every sibling per-VM route calls
+    # user_can_access_vmware_vm; the list didn't → the ESXi analog of the #773 /resources leak. Filter
+    # per-VM so an ACL-scoped caller sees only their VMs; admins/plain operators pass the helper.
+    _vmw_user = build_authz_user(request.session.get('user', ''), request.session)
+    _vms = result.get('data', []) or []
+    _scoped = [v for v in _vms
+               if user_can_access_vmware_vm(_vmw_user, vmware_id, str(v.get('vm', '')), 'vmware.vm.view')]
+    return jsonify(_scoped)
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>', methods=['GET'])
+@require_auth(perms=['vmware.vm.view'])
+def get_vmware_vm_detail(vmware_id, vm_id):
+    """Get detailed VM info with guest and performance data"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_vm(vm_id)
+    if 'error' in result and mgr.connect():
+        result = mgr.get_vm(vm_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    data = result.get('data', {})
+    # Guest info
+    guest = mgr.get_vm_guest_info(vm_id)
+    if 'error' not in guest:
+        data['guest_info'] = guest.get('data', {})
+    # Performance
+    perf = mgr.get_vm_performance(vm_id)
+    if 'error' not in perf:
+        data['performance'] = perf.get('data', {})
+    
+    return jsonify(data)
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/power/<action>', methods=['POST'])
+@require_auth(perms=['vmware.vm.power'])
+def vmware_vm_power(vmware_id, vm_id, action):
+    """VM power actions: start, stop, suspend, reset"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    if action not in ('start', 'stop', 'suspend', 'reset'):
+        return jsonify({'error': f'Invalid action: {action}'}), 400
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.power'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.vm_power_action(vm_id, action)
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), f'vmware.vm.{action}',
+              f"VM power {action} on {vm_id} @ {mgr.name}")
+    return jsonify({'message': f'VM {action} successful'})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/snapshots', methods=['GET'])
+@require_auth(perms=['vmware.vm.snapshot'])
+def get_vmware_snapshots(vmware_id, vm_id):
+    """List VM snapshots"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_snapshots(vm_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/snapshots', methods=['POST'])
+@require_auth(perms=['vmware.vm.snapshot'])
+def create_vmware_snapshot(vmware_id, vm_id):
+    """Create a VM snapshot"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    data = request.json or {}
+    if not data.get('name'):
+        return jsonify({'error': 'Snapshot name required'}), 400
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.create_snapshot(vm_id, data['name'], data.get('description', ''),
+                                  data.get('memory', False), data.get('quiesce', True))
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.snapshot.created',
+              f"Snapshot '{data['name']}' created for VM {vm_id} @ {mgr.name}")
+    return jsonify({'message': f'Snapshot created', 'data': result.get('data')}), 201
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/snapshots/<snapshot_id>', methods=['DELETE'])
+@require_auth(perms=['vmware.vm.snapshot'])
+def delete_vmware_snapshot(vmware_id, vm_id, snapshot_id):
+    """Delete a VM snapshot"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.snapshot'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.delete_snapshot(vm_id, snapshot_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.snapshot.deleted',
+              f"Snapshot {snapshot_id} deleted from VM {vm_id} @ {mgr.name}")
+    return jsonify({'message': 'Snapshot deleted'})
+
+
+@bp.route('/api/vmware/<vmware_id>/hosts', methods=['GET'])
+@require_auth(perms=['vmware.host.view'])
+def get_vmware_hosts(vmware_id):
+    """List ESXi hosts"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_hosts()
+    if 'error' in result:
+        # Reconnect and retry
+        if mgr.connect():
+            result = mgr.get_hosts()
+        # If still failing with 400, try SOAP fallback
+        if 'error' in result and result.get('status_code') == 400:
+            mgr._try_soap_fallback()
+            if mgr._connection_type == 'soap':
+                result = mgr.get_hosts()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/datastores', methods=['GET'])
+@require_auth(perms=['vmware.datastore.view'])
+def get_vmware_datastores(vmware_id):
+    """List VMware datastores"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_datastores()
+    if 'error' in result:
+        if mgr.connect():
+            result = mgr.get_datastores()
+        if 'error' in result and result.get('status_code') == 400:
+            mgr._try_soap_fallback()
+            if mgr._connection_type == 'soap':
+                result = mgr.get_datastores()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/datastores/<ds_id>', methods=['GET'])
+@require_auth(perms=['vmware.datastore.view'])
+def get_vmware_datastore_detail(vmware_id, ds_id):
+    """Get detailed datastore info"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_datastore_detail(ds_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/networks', methods=['GET'])
+@require_auth(perms=['vmware.network.view'])
+def get_vmware_networks(vmware_id):
+    """List VMware networks"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_networks()
+    if 'error' in result:
+        if mgr.connect():
+            result = mgr.get_networks()
+        if 'error' in result and result.get('status_code') == 400:
+            mgr._try_soap_fallback()
+            if mgr._connection_type == 'soap':
+                result = mgr.get_networks()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/clusters', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_vcenter_clusters(vmware_id):
+    """List vCenter compute clusters with DRS/HA status"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_vcenter_clusters_detailed()
+    if 'error' in result:
+        # Fallback to basic list
+        result = mgr.get_vcenter_clusters()
+    if 'error' in result and result.get('status_code') == 400:
+        mgr._try_soap_fallback()
+        if mgr._connection_type == 'soap':
+            result = mgr.get_vcenter_clusters_detailed()
+            if 'error' in result:
+                result = mgr.get_vcenter_clusters()
+    if 'error' in result:
+        # For standalone ESXi (no clusters), return empty list instead of error
+        if result.get('status_code') in (400, 404):
+            return jsonify([])
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/clusters/<cluster_id>', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_cluster_detail(vmware_id, cluster_id):
+    """Get cluster detail with DRS/HA config"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_cluster_detail(cluster_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/clusters/<cluster_id>/drs', methods=['POST'])
+@require_auth(perms=['vmware.cluster.manage'])
+def set_vmware_cluster_drs(vmware_id, cluster_id):
+    """Toggle DRS on a cluster"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    data = request.json or {}
+    enabled = data.get('enabled', False)
+    automation = data.get('automation')
+    mgr = vmware_managers[vmware_id]
+    result = mgr.set_cluster_drs(cluster_id, enabled, automation)
+    if 'error' in result:
+        return jsonify(result), 500
+    log_audit(request.session.get('user', 'admin'), 'vmware.cluster.drs',
+              f"DRS {'enabled' if enabled else 'disabled'} on cluster {cluster_id} @ {mgr.name}")
+    return jsonify({'message': f"DRS {'enabled' if enabled else 'disabled'}"})
+
+
+@bp.route('/api/vmware/<vmware_id>/clusters/<cluster_id>/ha', methods=['POST'])
+@require_auth(perms=['vmware.cluster.manage'])
+def set_vmware_cluster_ha(vmware_id, cluster_id):
+    """Toggle HA on a cluster"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    data = request.json or {}
+    enabled = data.get('enabled', False)
+    mgr = vmware_managers[vmware_id]
+    result = mgr.set_cluster_ha(cluster_id, enabled)
+    if 'error' in result:
+        return jsonify(result), 500
+    log_audit(request.session.get('user', 'admin'), 'vmware.cluster.ha',
+              f"HA {'enabled' if enabled else 'disabled'} on cluster {cluster_id} @ {mgr.name}")
+    return jsonify({'message': f"HA {'enabled' if enabled else 'disabled'}"})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/performance', methods=['GET'])
+@require_auth(perms=['vmware.vm.view'])
+def get_vmware_vm_performance(vmware_id, vm_id):
+    """Get VM performance metrics"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    # NS Aug 2026 (BOLA audit 2026-08-17) — per-VM ACL scope, not just server reach
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_vm_performance(vm_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/watch', methods=['POST'])
+@require_auth(perms=['vmware.vm.view'])
+def watch_vmware_vm(vmware_id, vm_id):
+    """register interest in a VM -- SSE will push detail data every 5s.
+    Call again to renew the 120s watch window. POST with empty body."""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if not hasattr(broadcast_resources_loop, '_vmw_watched'):
+        broadcast_resources_loop._vmw_watched = {}
+    _w = broadcast_resources_loop._vmw_watched
+    # sec (audit): this dict is keyed on a caller-supplied vm_id and had no bound, while the
+    # detail push walks EVERY entry every 5s and issues three ESXi calls per entry. A caller
+    # holding vmware.vm.view — a builtin viewer permission — could enqueue unlimited ids and
+    # keep a worker thread busy indefinitely. Expire stale entries and cap the registry.
+    _now = time.time()
+    for _k in [k for k, t in list(_w.items()) if _now - t > 120]:
+        _w.pop(_k, None)
+    _MAX_WATCHED = 200
+    if (vmware_id, vm_id) not in _w and len(_w) >= _MAX_WATCHED:
+        for _k, _ in sorted(_w.items(), key=lambda kv: kv[1])[:max(1, len(_w) - _MAX_WATCHED + 1)]:
+            _w.pop(_k, None)
+    _w[(vmware_id, vm_id)] = _now
+    return jsonify({'ok': True, 'watching': vm_id, 'ttl': 120})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/watch', methods=['DELETE'])
+@require_auth(perms=['vmware.vm.view'])
+def unwatch_vmware_vm(vmware_id, vm_id):
+    """Stop watching a VM"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    watched = getattr(broadcast_resources_loop, '_vmw_watched', {})
+    watched.pop((vmware_id, vm_id), None)
+    return jsonify({'ok': True})
+
+
+@bp.route('/api/vmware/<vmware_id>/datacenters', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_datacenters(vmware_id):
+    """List vCenter datacenters"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    result = mgr.get_datacenters()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+
+@bp.route('/api/vmware/<vmware_id>/summary', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_summary(vmware_id):
+    """Get environment summary (VM counts, host counts, health)"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_summary()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/health', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_health(vmware_id):
+    """Get vCenter appliance health"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_appliance_health()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/folders', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_folders(vmware_id):
+    """List folders"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    folder_type = request.args.get('type')
+    result = mgr.get_folders(folder_type)
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/resource-pools', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_resource_pools(vmware_id):
+    """List resource pools"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_resource_pools()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/storage-policies', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_storage_policies(vmware_id):
+    """List storage policies"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_storage_policies()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/content-libraries', methods=['GET'])
+@require_auth(perms=['vmware.view'])
+def get_vmware_content_libraries(vmware_id):
+    """List content libraries"""
+    # NS Jul 2026 (CodeAnt re-scan IDOR) — per-server tenant gate (was role-perm only)
+    ok, err = check_vmware_access(vmware_id)
+    if not ok:
+        return err
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    mgr = vmware_managers[vmware_id]
+    result = mgr.get_content_libraries()
+    if 'error' in result:
+        return _esxi_failed(result)
+    return jsonify(result.get('data', []))
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/console', methods=['POST'])
+@require_auth(perms=['vmware.vm.view'])
+def get_vmware_console(vmware_id, vm_id):
+    """get console ticket -- tries WebMKS, MKS, direct URL"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+
+    # Security fix: Check VM-level authorization
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    # NS Oct 2026 (#1101) - read by the account's own row. This route has no cluster gate of
+    # its own, so the {} a failed whole-table read answers (default tenant, every cluster)
+    # passed the tenant check in user_can_access_vmware_vm for any ESXi server.
+    user = resolve_authz_user(request.session)
+    if not user:
+        return jsonify({'error': 'Unauthorized', 'code': 'AUTH_REQUIRED'}), 401
+
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.view'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+
+    # Security: Verify VM exists on this VMware server before issuing console ticket
+    # This prevents users from requesting console tickets for arbitrary VM IDs
+    vm_check = mgr.get_vm(vm_id)
+    if 'error' in vm_check:
+        log_audit(request.session.get('user', 'admin'), 'vmware.console.denied',
+                  f"Console access denied for VM {vm_id} @ {mgr.name}: VM not found")
+        return jsonify({'error': 'VM not found or access denied'}), 404
+    
+    result = mgr.get_vm_console_ticket(vm_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.console.accessed',
+              f"Console ticket issued for VM {vm_id} @ {mgr.name}")
+    return jsonify(result.get('data', {}))
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/config', methods=['PUT'])
+@require_auth(perms=['vmware.vm.manage'])
+def update_vmware_vm_config(vmware_id, vm_id):
+    """Update VM configuration (CPU, RAM, notes, hot-add, etc)"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    mgr.ensure_connected()
+    data = request.json or {}
+    result = mgr.update_vm_config(vm_id, data)
+    if 'error' in result:
+        return jsonify(result), 500
+    log_audit(request.session.get('user', 'admin'), 'vmware.vm.config',
+              f"Updated config on VM {vm_id} @ {mgr.name}: {list(data.keys())}")
+    return jsonify({'message': 'VM configuration updated'})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/network', methods=['PUT'])
+@require_auth(perms=['vmware.vm.manage'])
+def update_vmware_vm_network(vmware_id, vm_id):
+    """Change VM network adapter"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    data = request.json or {}
+    nic_key = int(data.get('nic_key', 0))
+    network = data.get('network', '')
+    if not network:
+        return jsonify({'error': 'Network name required'}), 400
+    result = mgr.update_vm_network(vm_id, nic_key, network)
+    if 'error' in result:
+        return jsonify(result), 500
+    log_audit(request.session.get('user', 'admin'), 'vmware.vm.network',
+              f"Changed network on VM {vm_id} to '{network}' @ {mgr.name}")
+    return jsonify({'message': f"Network changed to '{network}'"})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/boot-order', methods=['PUT'])
+@require_auth(perms=['vmware.vm.manage'])
+def update_vmware_vm_boot_order(vmware_id, vm_id):
+    """Change VM boot order"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    data = request.json or {}
+    boot_order = data.get('boot_order', ['disk', 'cdrom', 'net'])
+    result = mgr.update_vm_boot_order(vm_id, boot_order)
+    if 'error' in result:
+        return jsonify(result), 500
+    return jsonify({'message': 'Boot order updated'})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/clone', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def clone_vmware_vm(vmware_id, vm_id):
+    """Clone a VM"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    data = request.json or {}
+    if not data.get('name'):
+        return jsonify({'error': 'Clone name is required'}), 400
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.clone_vm(vm_id, data['name'], data.get('folder'), data.get('resource_pool'), data.get('datastore'))
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.vm.cloned',
+              f"Cloned VM {vm_id} as '{data['name']}' @ {mgr.name}")
+    return jsonify({'message': f"VM cloned as '{data['name']}'", 'data': result.get('data')}), 201
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>', methods=['DELETE'])
+# MK Sep 2026 - was vmware.vm.power on both the route and the per-VM check, so anyone
+# allowed to switch a guest on and off could DELETE it. Power and destruction are not the
+# same authority; vmware.vm.manage is the one that already means "may change this guest".
+@require_auth(perms=['vmware.vm.manage'])
+def delete_vmware_vm(vmware_id, vm_id):
+    """Delete a VM (must be powered off)"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.delete_vm(vm_id)
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.vm.deleted',
+              f"Deleted VM {vm_id} @ {mgr.name}")
+    return jsonify({'message': 'VM deleted'})
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/rename', methods=['POST'])
+@require_auth(perms=['vmware.vm.manage'])   # renaming is a config change, not a power one
+def rename_vmware_vm(vmware_id, vm_id):
+    """Rename a VM"""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    data = request.json or {}
+    if not data.get('name'):
+        return jsonify({'error': 'New name is required'}), 400
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    result = mgr.rename_vm(vm_id, data['name'])
+    if 'error' in result:
+        return _esxi_failed(result)
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.vm.renamed',
+              f"Renamed VM {vm_id} to '{data['name']}' @ {mgr.name}")
+    return jsonify({'message': f"VM renamed to '{data['name']}'"})
+
+
+
+# ===========================================================================
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/migration-plan', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def get_vmware_migration_plan(vmware_id, vm_id):
+    """Analyze source VM and return migration plan with available Proxmox targets.
+    Also detects ESXi host and datastore for SSHFS access."""
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    mgr = vmware_managers[vmware_id]
+    # NS Aug 2026 — refresh a stale ESXi REST/CIS session before the read, exactly like the
+    # VM-list/detail routes do (get_vmware_vms:270, single-VM GET:295). Without it, a server
+    # that's been up long enough for the ESXi session to expire returns "VM not found" here and
+    # the migration wizard dies at the planning step even though the VM plainly exists.
+    mgr.ensure_connected()
+    result = mgr.get_vm_disks_for_export(vm_id)
+    if 'error' in result:
+        return jsonify(result), 400
+    vm_data = result['data']
+    
+    # Available Proxmox targets — only clusters the caller may reach (don't leak others' topology)
+    targets = []
+    for cid, cmgr in list(cluster_managers.items()):
+        if cmgr.is_connected:
+            allowed, _ = check_cluster_access(cid)
+            if not allowed:
+                continue
+            nodes = list(cmgr.nodes.keys()) if cmgr.nodes else []
+            node_storages = {}
+            for n in nodes:
+                try:
+                    sr = cmgr._api_get(f"https://{cmgr.host}:{cmgr.api_port}/api2/json/nodes/{n}/storage")
+                    if sr.status_code == 200:
+                        node_storages[n] = [s['storage'] for s in sr.json().get('data', [])
+                                            if s.get('active') and 'images' in s.get('content', '')]
+                except:
+                    node_storages[n] = []
+            targets.append({
+                'cluster_id': cid, 'cluster_name': cmgr.config.name,
+                'nodes': nodes, 'storages': node_storages
+            })
+    
+    return jsonify({
+        'source': vm_data,
+        'targets': targets,
+        'esxi_host': mgr.host,
+        'esxi_user': 'root',
+        'estimated_downtime_seconds': max(10, int(vm_data.get('total_disk_gb', 10) * 0.3)),
+        'requirements': [
+            'SSH must be enabled on ESXi host',
+            'sshfs must be installed on target Proxmox node (apt install sshfs)',
+            'ESXi root password is required for SSHFS access',
+            'Sufficient temp space on Proxmox node for disk conversion',
+        ],
+        'method': 'SSHFS + qm importdisk (works on VMFS 5, VMFS 6, vSAN, NFS)',
+    })
+
+
+@bp.route('/api/vmware/<vmware_id>/vms/<vm_id>/migrate', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def start_vmware_migration(vmware_id, vm_id):
+    """Start near-zero-downtime migration from VMware to Proxmox.
+    
+    Required body:
+    - target_cluster, target_node, target_storage
+    - esxi_password: Root password for ESXi SSH access
+    
+    Optional:
+    - esxi_host: ESXi host IP (default: from VMware server config)
+    - esxi_user: SSH username (default: root)
+    - esxi_datastore: Datastore name (auto-detected if not set)
+    - esxi_vm_dir: VM directory name on datastore (default: VM name)
+    - network_bridge, start_after, remove_source
+    - wait_for_confirmation (#562): hold before the final switchover and wait for an
+      explicit POST .../confirm-cutover (or .../cancel-cutover). Default false.
+    - confirmation_timeout: seconds to wait at that gate before auto-aborting (default 86400).
+    """
+    if vmware_id not in vmware_managers:
+        return jsonify({'error': 'VMware server not found'}), 404
+    
+    # Security fix: Check VM-level authorization
+    from pegaprox.utils.auth import load_users
+    # #491 — token-scoped identity so an admin-owned viewer/user API token can't reach a VM
+    # outside its token scope (user_can_access_vmware_vm honors effective_role).
+    user = build_authz_user(request.session.get('user', ''), request.session)
+    
+    if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.migrate'):
+        return jsonify({'error': 'Permission denied: You do not have access to this VM'}), 403
+    
+    data = request.json or {}
+
+    for field in ('target_cluster', 'target_node', 'target_storage'):
+        if not data.get(field):
+            return jsonify({'error': f'{field} is required'}), 400
+
+    # MK Sep 2026 - same rule as the XHM path: remove_source destroys the source guest
+    # when the copy lands, and destruction is vmware.vm.manage, not vmware.vm.migrate.
+    if data.get('remove_source'):
+        if not user_can_access_vmware_vm(user, vmware_id, vm_id, 'vmware.vm.manage'):
+            return jsonify({'error': 'Permission denied: removing the source guest needs '
+                                     'vmware.vm.manage on it'}), 403
+
+    # MK May 2026 (#481 port) — target_storage flows into `pvesm` calls on the
+    # PVE node. Validate at the api boundary before the shell touches it.
+    from pegaprox.utils.sanitization import validate_storage_name, validate_esxi_path_component
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+
+    # NS 2026-06-05 (audit C-2/M-2): esxi_datastore / esxi_vm_dir are user-supplied
+    # and get interpolated into root shell commands on the PVE node. Empty = let
+    # the task auto-detect from the VM config; non-empty must be a safe single
+    # component name (no slashes, no shell metacharacters). Reject at the door.
+    for _f in ('esxi_datastore', 'esxi_vm_dir'):
+        _v = (data.get(_f) or '').strip()
+        if _v and not validate_esxi_path_component(_v):
+            return jsonify({'error': f'Invalid {_f}: only letters, digits, space and ._()+- are allowed (single name, no path).'}), 400
+
+    # #598 — aio_mode is interpolated into the root `qm set` / conf line that
+    # attaches the migrated disk. V2PMigrationTask.__init__ already whitelists it,
+    # but reject a bad value at the door too (matches the boundary-validation
+    # style above); empty = unset = PVE default.
+    _aio = (data.get('aio_mode') or '').strip().lower()
+    if _aio and _aio not in ('threads', 'native', 'io_uring'):
+        return jsonify({'error': 'Invalid aio_mode: must be threads, native or io_uring.'}), 400
+
+    # NS Oct 2026 (#1090) - root loop-mounts this on the node; empty = the default places
+    from pegaprox.utils.sanitization import validate_node_iso_path
+    _iso = data.get('virtio_iso_path')
+    if data.get('install_virtio_drivers') and _iso not in (None, '') and not validate_node_iso_path(_iso):
+        return jsonify({'error': 'Invalid virtio_iso_path: an absolute path to an .iso file '
+                                 'on the node'}), 400
+
+    # NS Oct 2026 (#1106) - esxi_host decides which host the PVE node SSHes/sshfs-mounts and
+    # reads disks from as root. Left to the caller it could aim the node at an attacker's SSH
+    # server serving a crafted descriptor. It is the configured server's host; pin it there.
+    # The wizard never sends it (it defaults to the server host); an explicit mismatch is refused.
+    _reg_host = vmware_managers[vmware_id].host
+    _req_host = data.get('esxi_host')
+    if _req_host not in (None, '') and str(_req_host).strip().lower() != str(_reg_host or '').lower():
+        return jsonify({'error': 'esxi_host must match the registered ESXi server'}), 400
+    # the task reads data['esxi_host'] as is, so hand it the registered value, not the
+    # spelling that passed the compare
+    data['esxi_host'] = _reg_host
+    # NS Oct 2026 - user and host go onto the local sshpass/ssh argv and into the ssh, scp,
+    # sshfs and ssh_config text the node runs as root. A user starting with '-' is an
+    # OpenSSH option there, a newline in the host a new ssh_config line.
+    from pegaprox.utils.sanitization import validate_ssh_user, validate_host_address
+    _esxi_user = data.get('esxi_user')
+    if _esxi_user not in (None, '') and not validate_ssh_user(_esxi_user):
+        return jsonify({'error': 'Invalid esxi_user: letters, digits and ._- only, '
+                                 'not starting with - or .'}), 400
+    if not validate_host_address(data['esxi_host']):
+        return jsonify({'error': 'Invalid esxi_host: a host name or an IP address'}), 400
+
+    if not data.get('esxi_password'):
+        return jsonify({'error': 'esxi_password is required for SSHFS-based migration'}), 400
+    if data['target_cluster'] not in cluster_managers:
+        return jsonify({'error': 'Target cluster not found'}), 404
+
+    # gate the migration target on cluster access
+    # sec (audit): reachability only — but this CREATES a guest on the target, and a new vmid
+    # matches no per-object grant, so a pool-scoped caller admitted by the #555 fallback could
+    # land a VM on a cluster they do not own. The XHM twin (api/xhm.py) already asks the
+    # confinement question about its target; ask it here too.
+    _v2p_u = build_authz_user(request.session.get('user', ''), request.session)
+    if caller_is_scoped(_v2p_u, data['target_cluster']):
+        return jsonify({'error': 'Access denied to the target cluster'}), 403
+    allowed, err_response = check_cluster_access(data['target_cluster'])
+    if not allowed:
+        return err_response
+    # MK Nov 2026 (#1224) - the planning step runs commands on target_node over SSH with the
+    # target cluster's key or password: one of its nodes, nothing else
+    try:
+        _tn = data['target_node']
+        _member = isinstance(_tn, str) and _tn in (cluster_managers[data['target_cluster']].nodes or {})
+    except Exception:
+        _member = False
+    if not _member:
+        return jsonify({'error': 'target_node is not a node of the target cluster'}), 400
+
+    mgr = vmware_managers[vmware_id]
+    # NS Aug 2026 — same stale-session guard as the migration-plan + VM-list routes: a long-lived
+    # server whose ESXi session has expired would otherwise read "VM not found" here and the
+    # migration would abort before it even started.
+    mgr.ensure_connected()
+    vm_detail = mgr.get_vm(vm_id)
+    vm_name = vm_detail.get('data', {}).get('name', vm_id) if 'data' in vm_detail else vm_id
+
+    # MK Oct 2026 - the guest lands on the target as a new one, sized as core/v2p.py builds
+    # it (the wizard's sockets, cores and memory over what ESXi reports): the tenant quota
+    # counts it like a create
+    def _v2p_adds():
+        from pegaprox.utils.rbac import landing_adds, quota_tenant
+        vd = (vm_detail.get('data') or {}) if isinstance(vm_detail, dict) else {}
+        cpu = vd.get('cpu') or {}
+        sockets = int(data.get('sockets') or cpu.get('sockets') or 0)
+        per = int(data.get('cores_per_socket') or cpu.get('cores_per_socket') or 0)
+        cores = sockets * per if sockets and per else int(cpu.get('count') or 1)
+        mem_mb = float(data.get('memory') or (vd.get('memory') or {}).get('size_MiB') or 0)
+        disks = vd.get('disks') or {}
+        disk_b = sum(float((d or {}).get('capacity') or 0) for d in
+                     (disks.values() if isinstance(disks, dict) else disks))
+        return landing_adds(quota_tenant(_v2p_u), data['target_cluster'],
+                            {'cores': cores, 'memory_gb': mem_mb / 1024.0, 'disk_gb': disk_b / 1024.0 ** 3},
+                            source_cluster=vmware_id, source_removed=bool(data.get('remove_source')))
+    from pegaprox.api.helpers import tenant_quota_gate, quota_hold_alive
+    _qerr, _qwarn = tenant_quota_gate(_v2p_u, f'ESXi migration of {vm_name}', _v2p_adds,
+                                      cluster=data['target_cluster'],
+                                      hold={'cluster_id': data['target_cluster']})
+    if _qerr:
+        return _qerr
+
+    # NS: pass all NICs from VMware to migration task so multi-NIC + MAC works
+    if 'selected_nics' not in data and 'data' in vm_detail:
+        nics = vm_detail['data'].get('nics', [])
+        if nics:
+            data['selected_nics'] = nics
+
+    mid = str(uuid.uuid4())[:8]
+    task = V2PMigrationTask(mid, vmware_id, vm_id, data['target_cluster'],
+                            data['target_node'], data['target_storage'], vm_name, data)
+    
+    with _migration_lock_v2p:
+        _vmware_migrations[mid] = task
+    # the quota holds the new guest while the task runs (MK Oct 2026)
+    quota_hold_alive(alive=lambda: task.status == 'running')
+
+    # a user job: in an automatic group each call it sends asks for the lease (#625)
+    from pegaprox.core import ha
+    thread = threading.Thread(target=ha.as_job(_run_v2p_migration, 'ESXi migration'), args=(task,),
+                              daemon=True)
+    thread.start()
+    
+    log_audit(request.session.get('user', 'admin'), 'vmware.migration.started',
+              f"V2P migration: {vm_name} @ {data.get('esxi_host', mgr.host)} -> "
+              f"{data['target_cluster']}/{data['target_node']}/{data['target_storage']}")
+    
+    return jsonify({
+        'migration_id': mid,
+        'message': f'Migration started for {vm_name}',
+        'task': task.to_dict(),
+        **({'quota_warning': _qwarn} if _qwarn else {}),
+    }), 202
+
+
+def _migration_reachable(t):
+    # NS Jul 2026 (CodeAnt IDOR) — a caller may see a migration only if they can reach one of the
+    # clusters it touches (source or target). Tasks with no determinable cluster are shown.
+    cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
+    if cids and not any(check_cluster_access(c)[0] for c in cids):
+        return False
+    # sec (audit): reaching the TARGET cluster was the whole gate, so anyone who could migrate
+    # into a shared target could read another tenant's V2P run — and drive its cutover. The XHM
+    # twin (_xhm_reachable) already checks the source VM; mirror it on the ESXi source here.
+    vmw, vid = getattr(t, 'vmware_id', None), getattr(t, 'vm_id', None)
+    if vmw and vid:
+        try:
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            return user_can_access_vmware_vm(_u, vmw, str(vid), 'vmware.vm.migrate')
+        except Exception:
+            return False
+    return True
+
+
+# NS Aug 2026 (#654) — the route + auth decorators were stuck on the _migration_reachable helper
+# above (a copy-paste slip when the IDOR helper was inserted between them and this handler), so
+# GET /api/vmware/migrations called the helper with no args -> TypeError 500 and ESXi migration
+# blew up immediately, while the real handler below was never routed. Put the decorators back here.
+@bp.route('/api/vmware/migrations', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def list_vmware_migrations():
+    """List all active and recent migrations"""
+    return jsonify([t.to_dict() for t in _vmware_migrations.values() if _migration_reachable(t)])
+
+
+@bp.route('/api/vmware/migrations/<mid>', methods=['GET'])
+@require_auth(perms=['vmware.vm.migrate'])
+def get_vmware_migration_status(mid):
+    """Get detailed status of a specific migration"""
+    if mid not in _vmware_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    if not _migration_reachable(_vmware_migrations[mid]):
+        return jsonify({'error': 'Migration not found'}), 404
+    return jsonify(_vmware_migrations[mid].to_dict())
+
+
+@bp.route('/api/vmware/migrations/<mid>/confirm-cutover', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def confirm_vmware_cutover(mid):
+    """#562 — commit the final switchover for a migration that is holding at the
+    optional pre-cutover confirmation gate. Only valid while the task is parked in
+    'awaiting_confirmation'; the migration thread picks the flag up within ~2s."""
+    if mid not in _vmware_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    task = _vmware_migrations[mid]
+    if not _migration_reachable(task):
+        return jsonify({'error': 'Migration not found'}), 404
+    if getattr(task, 'phase', None) != 'awaiting_confirmation':
+        return jsonify({'error': 'Migration is not waiting for cutover confirmation',
+                        'phase': getattr(task, 'phase', None)}), 409
+    # NS Oct 2026 (#984) - on a run started with remove_source this click is what sets the
+    # source deletion off, so it asks the same right the start asked for that
+    if getattr(task, 'remove_source', False):
+        _cu = build_authz_user(request.session.get('user', ''), request.session)
+        if not user_can_access_vmware_vm(_cu, task.vmware_id, str(task.vm_id), 'vmware.vm.manage'):
+            return jsonify({'error': 'Permission denied: this cutover removes the source guest, '
+                                     'which needs vmware.vm.manage on it'}), 403
+    task._cutover_confirmed = True
+    log_audit(request.session.get('user', 'admin'), 'vmware.migration.cutover_confirmed',
+              f"V2P cutover confirmed for {getattr(task, 'vm_name', mid)} (migration {mid})")
+    return jsonify({'message': 'Cutover confirmed — switchover proceeding', 'task': task.to_dict()})
+
+
+@bp.route('/api/vmware/migrations/<mid>/cancel-cutover', methods=['POST'])
+@require_auth(perms=['vmware.vm.migrate'])
+def cancel_vmware_cutover(mid):
+    """#562 — abort a migration that is holding at the confirmation gate. The source
+    VM is left running (it was never suspended); the migration thread tears down the
+    staging mount + migration snapshot and marks the run 'cancelled'. Only valid while
+    the task is parked in 'awaiting_confirmation'."""
+    if mid not in _vmware_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    task = _vmware_migrations[mid]
+    if not _migration_reachable(task):
+        return jsonify({'error': 'Migration not found'}), 404
+    if getattr(task, 'phase', None) != 'awaiting_confirmation':
+        return jsonify({'error': 'Migration is not waiting for cutover confirmation',
+                        'phase': getattr(task, 'phase', None)}), 409
+    task._cutover_cancelled = True
+    log_audit(request.session.get('user', 'admin'), 'vmware.migration.cutover_cancelled',
+              f"V2P cutover cancelled for {getattr(task, 'vm_name', mid)} (migration {mid}) — source left running")
+    return jsonify({'message': 'Cutover cancelled — source VM left running', 'task': task.to_dict()})
+
+
+# End VMware API endpoints
+# ============================================================================
+

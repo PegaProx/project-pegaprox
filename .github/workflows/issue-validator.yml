@@ -1,0 +1,147 @@
+name: Issue Validator
+
+on:
+  issues:
+    types: [opened, edited]
+
+# NS Apr 2026 — CodeQL alert: pin GITHUB_TOKEN scope. We only need to read the
+# issue body and potentially comment/label — no code, no packages, no PRs.
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check issue body
+        # NS 2026-05-30 — pinned to commit SHA so a moving-tag compromise can't
+        # smuggle malicious script into the issue-validator step.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const labels = issue.labels.map(l => l.name.toLowerCase());
+            const title = issue.title.toLowerCase();
+
+            let isInvalid = false;
+            let message = '';
+
+            // NS Aug 2026 — maintainers/bots know the drill; only gate external reporters, and
+            // never re-close something a maintainer already touched.
+            const assoc = issue.author_association || '';
+            const login = (issue.user && issue.user.login) || '';
+            const isMaintainer = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(assoc) || login.endsWith('[bot]');
+
+            // === TEMPLATE GUTTED / DELETED (any issue, labelled or not) ===
+            // A wave of low-effort / AI-generated issues opens with the whole template deleted (or
+            // opens outside the templates entirely, e.g. #749 had no [Bug] prefix + no template at
+            // all), which slipped past the label-scoped checks below. blank_issues_enabled is false,
+            // so a real reporter always starts FROM a template — an issue with none of the template's
+            // section headings has had it stripped out. Strip HTML comment scaffold first, then count
+            // the template markers actually present as markdown headings.
+            if (!isMaintainer) {
+              const noComments = body.replace(/<!--[\s\S]*?-->/g, '');
+              const TEMPLATE_HEADINGS = [
+                // bug_report.md
+                'Describe the bug', 'Steps to Reproduce', 'Expected behavior',
+                'Environment', 'Logs', 'Screenshots',
+                // feature_request.md
+                'Describe the feature', 'Use Case', 'Alternatives considered',
+                'How important is this for you',
+              ];
+              const headingRe = new RegExp(
+                '^#{1,6}\\s*[^\\n]*(' + TEMPLATE_HEADINGS.map(h => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')',
+                'im');
+              const presentCount = TEMPLATE_HEADINGS.filter(h =>
+                new RegExp('^#{1,6}\\s*[^\\n]*' + h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'im').test(noComments)
+              ).length;
+              // crossing the headings out with ~~strikethrough~~ doesn't count as using them.
+              const struckOut = /~~[^~\n]*(Describe the bug|Steps to Reproduce|Environment|Describe the feature|Use Case)[^~\n]*~~/i.test(body);
+
+              if (presentCount === 0 || struckOut) {
+                isInvalid = true;
+                message = '👋 Thanks for opening an issue!\n\n' +
+                  'It looks like the **issue template was removed** (or this was opened outside the ' +
+                  'templates). We rely on the Bug / Feature template so we can actually act on reports — ' +
+                  'a description-only issue with the template deleted almost always misses the details ' +
+                  'we need (version, repro, environment).\n\n' +
+                  '**Please open a fresh issue using one of the templates** (New issue → 🐛 Bug Report ' +
+                  'or ✨ Feature Request) and fill in the sections. 🐾\n\n' +
+                  '*This is an automated message — closing for now; reopen with a completed template.*';
+              }
+            }
+
+            // === BUG REPORT ===
+            if (!isInvalid && !isMaintainer &&
+                (labels.includes('bug') || title.includes('[bug]'))) {
+              
+              const requiredFields = [
+                { name: 'Describe the bug', check: /describe the bug\s*\n+\s*\S+/i },
+                { name: 'Steps to Reproduce', check: /steps to reproduce\s*\n+\s*\S+/i },
+                { name: 'PegaProx Version', check: /pegaprox version:\s*\S+/i }
+              ];
+              
+              const missing = requiredFields.filter(f => !f.check.test(body));
+              
+              if (missing.length > 0 || body.length < 100) {
+                isInvalid = true;
+                const missingList = missing.map(f => '- [ ] ' + f.name).join('\n');
+                const shortNote = body.length < 100 ? '\n- [ ] More details (current description is too short)' : '';
+                message = '👋 Thanks for reporting a bug!\n\n' +
+                  'Unfortunately, it looks like some required information is missing.\n\n' +
+                  '**Please provide:**\n' + missingList + shortNote + '\n\n' +
+                  '**Why?**\nWe are volunteers maintaining PegaProx in our free time. ' +
+                  'Complete bug reports help us fix issues faster. 🐾\n\n' +
+                  'Closing for now — please reopen with the required details or open a new issue.\n\n' +
+                  '*This is an automated message.*';
+              }
+            }
+            
+            // === FEATURE REQUEST ===
+            if (!isInvalid && !isMaintainer &&
+                (labels.includes('enhancement') || labels.includes('feature') || title.includes('[feature]'))) {
+              
+              const hasDescription = body.length > 50;
+              
+              if (!hasDescription) {
+                isInvalid = true;
+                message = '👋 Thanks for the feature request!\n\n' +
+                  'Unfortunately, we need a bit more detail to understand your idea.\n\n' +
+                  '**Please describe:**\n' +
+                  '- [ ] What feature would you like?\n' +
+                  '- [ ] Why? What problem does it solve?\n' +
+                  '- [ ] Any ideas how it could work?\n\n' +
+                  'Closing for now — please reopen with more details. 🐾\n\n' +
+                  '*This is an automated message.*';
+              }
+            }
+            
+            // === CLOSE IF INVALID ===
+            if (isInvalid) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: message
+              });
+              
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                labels: ['incomplete']
+              });
+              
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+              
+              console.log('Issue closed: incomplete template');
+            } else {
+              console.log('Issue valid');
+            }

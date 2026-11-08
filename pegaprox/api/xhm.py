@@ -1,0 +1,314 @@
+# -*- coding: utf-8 -*-
+"""Cross-Hypervisor Migration API - LW Mar 2026
+Endpoints for Proxmox <-> XCP-ng <-> ESXi migration.
+"""
+
+import threading
+import uuid
+from datetime import datetime, timedelta
+from flask import Blueprint, jsonify, request
+
+from pegaprox.globals import cluster_managers, _xhm_migrations
+from pegaprox.utils.auth import require_auth, load_users, build_authz_user
+from pegaprox.utils.audit import log_audit
+from pegaprox.utils.rbac import user_can_access_vm
+from pegaprox.api.helpers import check_cluster_access, caller_is_scoped
+from pegaprox.core.xhm import (
+    XHMigrationTask, plan_xcpng_to_pve, plan_pve_to_xcpng,
+    _run_xcpng_to_pve, _run_pve_to_xcpng,
+    plan_esxi_to_pve, plan_esxi_to_xcpng,
+    _run_esxi_to_pve, _run_esxi_to_xcpng,
+)
+
+bp = Blueprint('xhm', __name__)
+
+_xhm_lock = threading.Lock()
+
+# How long a finished migration stays in the in-memory registry, and how many we keep at all.
+# The UI reads the list to show recent results, so this is a retention window, not a cleanup.
+_XHM_RETENTION_SECONDS = 6 * 3600
+_XHM_MAX_FINISHED = 100
+
+
+# NS Oct 2026 (#1039) - a standalone ESXi host sits in cluster_managers under its vmware_id,
+# and the Proxmox check found no ACL there and fell through to the role. Its guests are
+# governed by the vmware:<id> ACLs and the vmware.vm.* permissions instead.
+_ESXI_PERMS = {'vm.migrate': 'vmware.vm.migrate', 'vm.delete': 'vmware.vm.manage'}
+
+
+def _may_migrate_source(user, cluster_id, vmid, perm='vm.migrate'):
+    from pegaprox.globals import vmware_managers
+    from pegaprox.utils.rbac import user_can_access_vmware_vm
+    mgr = cluster_managers.get(cluster_id)
+    if getattr(mgr, 'cluster_type', '') == 'esxi' or cluster_id in vmware_managers:
+        return user_can_access_vmware_vm(user, cluster_id, str(vmid), _ESXI_PERMS[perm])
+    return user_can_access_vm(user, cluster_id, int(vmid), perm)
+
+
+def _prune_finished_migrations():
+    """Drop old finished migrations. Call with _xhm_lock held.
+
+    Nothing ever removed from this dict, so every migration a server had ever run stayed
+    resident for the process lifetime — each one holding its full log — and the list endpoint
+    re-authorized all of them on every call. Running tasks are never touched."""
+    finished = [(t.completed_at, mid) for mid, t in _xhm_migrations.items()
+                if t.status in ('completed', 'failed') and t.completed_at]
+    if not finished:
+        return
+    cutoff = datetime.now() - timedelta(seconds=_XHM_RETENTION_SECONDS)
+    stale = {mid for ts, mid in finished if ts < cutoff}
+    # plus the oldest beyond the cap, so a burst of migrations can't outrun the window
+    if len(finished) - len(stale) > _XHM_MAX_FINISHED:
+        keep = sorted((f for f in finished if f[1] not in stale), reverse=True)
+        stale.update(mid for _, mid in keep[_XHM_MAX_FINISHED:])
+    for mid in stale:
+        _xhm_migrations.pop(mid, None)
+
+
+@bp.route('/api/xhm/plan', methods=['GET'])
+@require_auth(perms=['vm.migrate'])
+def xhm_plan():
+    """Get migration plan - analyzes source VM and lists available targets."""
+    source_cluster = request.args.get('source_cluster', '')
+    source_vmid = request.args.get('source_vmid', '')
+    target_cluster = request.args.get('target_cluster', '')
+    direction = request.args.get('direction', '')
+
+    if not source_cluster or not source_vmid or not target_cluster:
+        return jsonify({'error': 'source_cluster, source_vmid, and target_cluster are required'}), 400
+
+    # Authorization: check source cluster access
+    ok, err = check_cluster_access(source_cluster)
+    if not ok:
+        return err
+
+    # Authorization: check target cluster access
+    ok, err = check_cluster_access(target_cluster)
+    if not ok:
+        return err
+
+    # Authorization: check source VM access
+    user = build_authz_user(request.session['user'], request.session)
+    try:
+        vmid_int = int(source_vmid)
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid source_vmid'}), 400
+    
+    if not _may_migrate_source(user, source_cluster, vmid_int):
+        return jsonify({'error': 'Access denied to source VM'}), 403
+    # sec (audit): the target got check_cluster_access only — which admits a pool-/ACL-scoped
+    # caller — yet this creates a BRAND-NEW guest there on a caller-chosen node and storage.
+    # A new vmid matches no per-object grant, so confinement is the right question to ask.
+    if caller_is_scoped(user, target_cluster):
+        return jsonify({'error': 'Access denied to target cluster'}), 403
+
+    # auto-detect direction from cluster types
+    src_mgr = cluster_managers.get(source_cluster)
+    tgt_mgr = cluster_managers.get(target_cluster)
+    if not src_mgr:
+        return jsonify({'error': 'Source cluster not found'}), 404
+    if not tgt_mgr:
+        return jsonify({'error': 'Target cluster not found'}), 404
+
+    src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
+    tgt_type = getattr(tgt_mgr, 'cluster_type', 'proxmox')
+
+    if src_type == tgt_type:
+        return jsonify({'error': f'Both clusters are {src_type} - use native migration instead'}), 400
+
+    # route to correct plan function based on cluster types
+    if src_type == 'esxi' and tgt_type == 'proxmox':
+        result = plan_esxi_to_pve(source_cluster, source_vmid, target_cluster)
+    elif src_type == 'esxi' and tgt_type == 'xcpng':
+        result = plan_esxi_to_xcpng(source_cluster, source_vmid, target_cluster)
+    elif src_type == 'xcpng':
+        result = plan_xcpng_to_pve(source_cluster, source_vmid, target_cluster)
+    elif tgt_type == 'xcpng':
+        source_node = request.args.get('source_node', '')
+        if not source_node:
+            return jsonify({'error': 'source_node required for Proxmox source'}), 400
+        result = plan_pve_to_xcpng(source_cluster, source_node, source_vmid, target_cluster)
+    else:
+        return jsonify({'error': f'Unsupported migration: {src_type} -> {tgt_type}'}), 400
+
+    if 'error' in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@bp.route('/api/xhm/migrate', methods=['POST'])
+@require_auth(perms=['vm.migrate'])
+def xhm_start():
+    """Start cross-hypervisor migration."""
+    data = request.json or {}
+    required = ['source_cluster', 'source_vmid', 'target_cluster', 'target_storage']
+    for f in required:
+        if not data.get(f):
+            return jsonify({'error': f'{f} is required'}), 400
+
+    # MK May 2026 (#481 port) — target_storage is embedded in pvesm alloc cmds
+    # in core/xhm.py. Validate at api boundary.
+    from pegaprox.utils.sanitization import validate_storage_name
+    if not validate_storage_name(data['target_storage']):
+        return jsonify({'error': 'Invalid target_storage name. Must be alphanumeric with hyphens, underscores, or dots only.'}), 400
+    # MK Nov 2026 - {source network or NIC index: target network}. Anything else failed the
+    # migration half way, after the guest and its disks were already made on the target
+    _nm = data.get('network_map')
+    if _nm is not None and not (isinstance(_nm, dict) and all(
+            isinstance(k, str) and (v is None or isinstance(v, str)) for k, v in _nm.items())):
+        return jsonify({'error': 'network_map maps a source network or NIC index to a target network name',
+                        'code': 'INVALID_FIELD', 'field': 'network_map'}), 400
+
+    # Authorization: check source cluster access
+    ok, err = check_cluster_access(data['source_cluster'])
+    if not ok:
+        return err
+
+    # Authorization: check target cluster access
+    ok, err = check_cluster_access(data['target_cluster'])
+    if not ok:
+        return err
+
+    # Authorization: check source VM access
+    user = build_authz_user(request.session['user'], request.session)
+    try:
+        vmid_int = int(data['source_vmid'])
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid source_vmid'}), 400
+    
+    if not _may_migrate_source(user, data['source_cluster'], vmid_int):
+        return jsonify({'error': 'Access denied to source VM'}), 403
+    # MK Sep 2026 - remove_source DESTROYS the source guest once the copy lands. That is
+    # vm.delete, not vm.migrate, and the distinction is load-bearing here: vm.delete is
+    # deliberately absent from the inherit_role permission set, so a VM-ACL user holds
+    # vm.migrate and never vm.delete. Without this check the migration path was the way
+    # around that - copy the guest somewhere, tick the box, and the original is gone.
+    if data.get('remove_source'):
+        if not _may_migrate_source(user, data['source_cluster'], vmid_int, 'vm.delete'):
+            return jsonify({'error': 'Access denied: removing the source guest needs '
+                                     'vm.delete on it'}), 403
+    if caller_is_scoped(user, data['target_cluster']):
+        return jsonify({'error': 'Access denied to target cluster'}), 403
+
+    src_mgr = cluster_managers.get(data['source_cluster'])
+    tgt_mgr = cluster_managers.get(data['target_cluster'])
+    if not src_mgr:
+        return jsonify({'error': 'Source cluster not found'}), 404
+    if not tgt_mgr:
+        return jsonify({'error': 'Target cluster not found'}), 404
+
+    src_type = getattr(src_mgr, 'cluster_type', 'proxmox')
+    tgt_type = getattr(tgt_mgr, 'cluster_type', 'proxmox')
+
+    if src_type == 'esxi' and tgt_type == 'proxmox':
+        direction = 'esxi_to_pve'
+    elif src_type == 'esxi' and tgt_type == 'xcpng':
+        direction = 'esxi_to_xcpng'
+    elif src_type == 'xcpng' and tgt_type != 'xcpng':
+        direction = 'xcpng_to_pve'
+    elif src_type != 'xcpng' and tgt_type == 'xcpng':
+        direction = 'pve_to_xcpng'
+    else:
+        return jsonify({'error': 'Invalid cluster combination for cross-hypervisor migration'}), 400
+
+    if direction in ('xcpng_to_pve', 'esxi_to_pve') and not data.get('target_node'):
+        return jsonify({'error': 'target_node is required for migration to Proxmox'}), 400
+
+    # MK Oct 2026 - the copy is a new guest on the target, the size of its source. It counts
+    # for the tenant quota unless it only moves between two clusters the tenant has
+    from pegaprox.api.helpers import tenant_quota_gate, guest_size
+    from pegaprox.utils.rbac import landing_adds, quota_tenant
+    _qerr, _qwarn = tenant_quota_gate(
+        user, f"cross-hypervisor migration of {data['source_vmid']}",
+        lambda: landing_adds(quota_tenant(user), data['target_cluster'],
+                             guest_size(src_mgr, data.get('source_node', ''), 'qemu', vmid_int),
+                             source_cluster=data['source_cluster'],
+                             source_removed=bool(data.get('remove_source'))),
+        cluster=getattr(getattr(tgt_mgr, 'config', None), 'name', '') or data['target_cluster'],
+        hold={'cluster_id': data['target_cluster']})
+    if _qerr:
+        return _qerr
+
+    mid = str(uuid.uuid4())[:8]
+    task = XHMigrationTask(
+        mid=mid,
+        direction=direction,
+        source_cluster=data['source_cluster'],
+        source_node=data.get('source_node', ''),
+        # the id the gates above checked, not the raw one (it reaches qm destroy)
+        source_vmid=str(vmid_int),
+        target_cluster=data['target_cluster'],
+        target_node=data['target_node'],
+        target_storage=data['target_storage'],
+        vm_name=data.get('vm_name', ''),
+        config=data,
+    )
+
+    with _xhm_lock:
+        _prune_finished_migrations()
+        _xhm_migrations[mid] = task
+    # the quota holds the copy while the task runs; once it ended the target shows it, or not
+    from pegaprox.api.helpers import quota_hold_alive
+    quota_hold_alive(alive=lambda: task.status == 'running')
+
+    _runners = {
+        'xcpng_to_pve': _run_xcpng_to_pve,
+        'pve_to_xcpng': _run_pve_to_xcpng,
+        'esxi_to_pve': _run_esxi_to_pve,
+        'esxi_to_xcpng': _run_esxi_to_xcpng,
+    }
+    runner = _runners.get(direction)
+    if not runner:
+        return jsonify({'error': f'No runner for direction {direction}'}), 400
+    # a user job: in an automatic group each call it sends asks for the lease (#625)
+    from pegaprox.core import ha
+    t = threading.Thread(target=ha.as_job(runner, 'cross-hypervisor migration'), args=(task,), daemon=True)
+    t.start()
+
+    user = request.session.get('user', 'admin') if hasattr(request, 'session') else 'admin'
+    log_audit(user, 'xhm.migration.started',
+              f"XHM {direction}: {data.get('vm_name', data['source_vmid'])} -> "
+              f"{data['target_cluster']}/{data['target_node']}")
+
+    return jsonify({
+        'migration_id': mid,
+        'message': f'Migration started ({direction})',
+        'task': task.to_dict(),
+        **({'quota_warning': _qwarn} if _qwarn else {}),
+    }), 202
+
+
+def _xhm_reachable(t):
+    # NS Jul 2026 (CodeAnt IDOR) — show a migration only if the caller reaches one of its clusters.
+    from pegaprox.api.helpers import check_cluster_access
+    cids = [c for c in (getattr(t, 'target_cluster', None), getattr(t, 'source_cluster', None)) if c]
+    if cids and not any(check_cluster_access(c)[0] for c in cids):
+        return False
+    # NS Aug 2026 (Aikido #469089253) — and only if the caller can access the source VM itself,
+    # matching the plan/start gate; cluster reach alone leaked other VMs' migration records.
+    svmid, scluster = getattr(t, 'source_vmid', None), getattr(t, 'source_cluster', None)
+    if svmid and scluster:
+        try:
+            _u = build_authz_user(request.session.get('user', ''), request.session)
+            return _may_migrate_source(_u, scluster, svmid)
+        except Exception:
+            return False
+    return True
+
+
+# NS Aug 2026 (#654) — same slip as the vmware list route: decorators were on _xhm_reachable
+# instead of this handler, so GET /api/xhm/migrations 500'd with a missing-arg TypeError.
+@bp.route('/api/xhm/migrations', methods=['GET'])
+@require_auth(perms=['vm.migrate'])
+def xhm_list():
+    return jsonify([t.to_dict() for t in _xhm_migrations.values() if _xhm_reachable(t)])
+
+
+@bp.route('/api/xhm/migrations/<mid>', methods=['GET'])
+@require_auth(perms=['vm.migrate'])
+def xhm_detail(mid):
+    if mid not in _xhm_migrations:
+        return jsonify({'error': 'Migration not found'}), 404
+    if not _xhm_reachable(_xhm_migrations[mid]):
+        return jsonify({'error': 'Migration not found'}), 404
+    return jsonify(_xhm_migrations[mid].to_dict())

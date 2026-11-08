@@ -1,0 +1,57 @@
+# PegaProx Docker Compose
+# NS: just run: docker compose up -d
+
+services:
+  pegaprox:
+    # MK Sep 2026 - `latest` is a moving target: every `docker compose pull` takes
+    # whatever it points at now, with nothing to compare against. That is fine for a
+    # lab and wrong for anything that manages a production estate, so the tag is a
+    # variable. Default unchanged, and an operator pins with one line:
+    #   PEGAPROX_VERSION=1.4.1 docker compose up -d
+    # Strictest is a digest, which cannot be repointed at all:
+    #   PEGAPROX_VERSION=1.4.1@sha256:<digest from `docker buildx imagetools inspect`>
+    image: ghcr.io/pegaprox/pegaprox:${PEGAPROX_VERSION:-latest}
+    # build: .  # uncomment to build locally
+    container_name: pegaprox
+    ports:
+      - "5000:5000"   # web UI + API
+      - "5001:5001"   # VNC websocket (noVNC console)
+      - "5002:5002"   # SSH websocket (xterm.js)
+    volumes:
+      - pegaprox-config:/app/config
+      - pegaprox-logs:/app/logs
+      # MK 2026-06-01: SSL certs + login-background uploads now live under
+      # config/ssl and config/branding (auto-migrated from legacy ssl/ +
+      # images/login_bg.* on first boot). The separate ssl/ bind-mount is
+      # no longer needed for persistence — left here as a reference only.
+      # - ./ssl:/app/ssl   # legacy path; only mount if you've got an external cert lifecycle
+    restart: unless-stopped
+    # environment:
+    #   PEGAPROX_BEHIND_PROXY: "true"           # behind nginx/haproxy
+    #   PEGAPROX_TRUSTED_PROXIES: "172.16.0.0/12"
+    #   PEGAPROX_ALLOWED_ORIGINS: "https://pegaprox.example.com"
+
+  # MK Oct 2026 (#625) - the witness: the third vote of an automatic group, at a third
+  # site and never on a host that runs PegaProx. Same image, the command `witness`.
+  # "Add witness" on the leader's HA page shows a `docker run` line for it; as a compose
+  # service, put the code from there into the command for the first start (it pairs
+  # once and is left out on every start after), then: docker compose up -d pegaprox-witness
+  # It updates itself from the leader into its volume (docs/ha-witness.md). The image of
+  # release 1.2.0 and older has no witness: take the image the docker run line names (a
+  # later release, or ghcr.io/pegaprox/pegaprox-testing:latest for a Testing leader).
+  # pegaprox-witness:
+  #   image: ghcr.io/pegaprox/pegaprox:${PEGAPROX_VERSION:-latest}
+  #   container_name: pegaprox-witness
+  #   command: ["witness", "run", "--join", "<code>", "--url", "https://<this host>:5005"]
+  #   ports:
+  #     - "5005:5005"
+  #   volumes:
+  #     - pegaprox-witness:/app/witness
+  #   healthcheck:
+  #     test: ["CMD", "python3", "pegaprox_multi_cluster.py", "witness", "health"]
+  #   restart: unless-stopped
+
+volumes:
+  pegaprox-config:
+  pegaprox-logs:
+  # pegaprox-witness:

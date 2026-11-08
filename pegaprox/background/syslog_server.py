@@ -1,0 +1,635 @@
+"""
+PegaProx Syslog Server — receives syslog messages via UDP/TCP
+Stores events in SQLite for the integrated log viewer.
+
+NS: Apr 2026 — rewritten for gevent compatibility (no asyncio, no multiprocessing)
+Original PR by gyptazy, adapted to fit PegaProx architecture.
+"""
+import os
+import sys
+import time
+import logging
+import threading
+from datetime import datetime
+
+from pegaprox.constants import CONFIG_DIR
+# MK May 2026 — syslog DB also goes through dbcrypto for SQLCipher unlock.
+from pegaprox.core import dbcrypto
+
+DB_FILE = os.path.join(CONFIG_DIR, 'syslog.db')
+
+SEVERITY_MAP = {
+    0: "emergency", 1: "alert", 2: "critical", 3: "error",
+    4: "warning", 5: "notice", 6: "info", 7: "debug"
+}
+
+_syslog_thread = None
+
+# NS 2026-06-05 (audit N1): the listener used to do a full SQLCipher open+keying
+# + INSERT + commit + close PER PACKET on the gevent hub — an unauthenticated
+# UDP/1514 flood = hundreds of keyings/sec = the whole web process wedges.
+# Now the packet path only enqueues (no DB work) onto a BOUNDED queue (floods
+# drop instead of buffering), and a single drain greenlet writes batches OFF the
+# hub via the gevent threadpool (one keying per batch, ~2/sec max under load).
+import queue as _queue
+_LOG_QUEUE = _queue.Queue(maxsize=20000)
+_DROPPED = 0
+
+# MK Sep 2026 - a 20000-entry cap is a cap on COUNT, and the receiver is unauthenticated,
+# so the sender picks the size. _MAX_LINE is 64 KB, which makes the honest worst case
+# 20000 x 64 KB = about 1.2 GB of resident memory that anyone able to reach :1514 can
+# demand, on a box whose job is to keep clusters running. Count the bytes as well and stop
+# at whichever bound is reached first. 64 MB is roomy for the real traffic (a syslog line
+# is a couple of hundred bytes, so this is ~300k of them) and survivable on a small VM.
+_QUEUE_MAX_BYTES = int(os.environ.get('PEGAPROX_SYSLOG_QUEUE_MB', '64')) * 1024 * 1024
+_QUEUE_BYTES = 0
+_QUEUE_BYTES_LOCK = threading.Lock()
+
+
+def _entry_bytes(entry):
+    """Rough resident size of one queued entry, the row tuple the listeners build for
+    _flush_batch. Its text dominates; the rest is small fixed fields, so a flat allowance
+    beats sizing every one of them.
+
+    NS Oct 2026 (#1015) - this asked the tuple for entry.get('message'), which raised, so
+    every entry was charged the flat 200 bytes and the byte ceiling never came close. And
+    len() counts characters: text outside ASCII is two or four bytes each in memory, so
+    that is charged by its real size (sys.getsizeof, constant time like len)."""
+    try:
+        return sum(len(f) if f.isascii() else sys.getsizeof(f)
+                   for f in entry if isinstance(f, str)) + 200
+    except TypeError:
+        return 200
+
+# Runtime start/stop so the Settings → Syslog toggle can open/close the port live
+# (not only on restart). The listeners track their socket here so stop can close it.
+_stop_event = threading.Event()
+_udp_sock = None
+_tcp_sock = None
+
+
+def _enqueue_log(entry):
+    global _DROPPED, _QUEUE_BYTES
+    _sz = _entry_bytes(entry)
+    if _QUEUE_MAX_BYTES > 0:
+        with _QUEUE_BYTES_LOCK:
+            if _QUEUE_BYTES + _sz > _QUEUE_MAX_BYTES:
+                _DROPPED += 1
+                if _DROPPED % 1000 == 1:
+                    logging.warning(f"[Syslog] ingest queue at its byte ceiling "
+                                    f"({_QUEUE_MAX_BYTES // (1024*1024)}MB) - dropped "
+                                    f"{_DROPPED} messages (flood?)")
+                return
+            _QUEUE_BYTES += _sz
+    try:
+        _LOG_QUEUE.put_nowait(entry)
+    except _queue.Full:
+        if _QUEUE_MAX_BYTES > 0:
+            with _QUEUE_BYTES_LOCK:
+                _QUEUE_BYTES -= _sz          # never queued, so give the budget back
+        _DROPPED += 1
+        if _DROPPED % 1000 == 1:
+            logging.warning(f"[Syslog] ingest queue full — dropped {_DROPPED} messages (flood / slow disk?)")
+
+
+def _release_queue_bytes(entries):
+    """Hand the budget back once a batch has left the queue."""
+    global _QUEUE_BYTES
+    if _QUEUE_MAX_BYTES <= 0:
+        return
+    _freed = sum(_entry_bytes(e) for e in entries)
+    with _QUEUE_BYTES_LOCK:
+        _QUEUE_BYTES = max(0, _QUEUE_BYTES - _freed)
+
+
+def _flush_batch(batch):
+    """Write a batch on a fresh syslog.db connection. Runs inside the gevent
+    threadpool (see _drain_loop) so the encrypt+insert stays off the hub."""
+    conn = _open_db(timeout=30)
+    try:
+        conn.executemany(
+            "INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", batch)
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _prune_old_logs():
+    """S1: delete syslog rows older than the retention window (off-hub). The
+    receiver only ever INSERTs, so without this syslog.db grows unbounded on the
+    same volume as the main encrypted DB. The fts5 logs_ad trigger keeps the FTS
+    index in sync. timestamp is indexed (idx_logs_timestamp_id). NS 2026-06-05."""
+    try:
+        days = 30
+        try:
+            from pegaprox.api.helpers import load_server_settings
+            days = max(1, min(3650, int(load_server_settings().get('syslog_retention_days', 30) or 30)))
+        except Exception:
+            pass
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        conn = _open_db(timeout=30)
+        try:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM logs WHERE timestamp < ?", (cutoff,))
+            n = cur.rowcount
+            conn.commit()
+            if n and n > 0:
+                logging.info(f"[Syslog] retention prune: deleted {n} rows older than {days}d")
+
+            # MK Sep 2026 - the retention window is the ONLY bound on this file, and the
+            # receiver is unauthenticated: anyone who can reach :1514 decides how much
+            # arrives inside those 30 days. syslog.db sits in config/, beside the main
+            # encrypted database and the master key, so filling that volume takes the
+            # whole installation down, not just the log viewer. Cap the size too, and
+            # drop the oldest rows until it fits.
+            #
+            # No VACUUM: reclaiming the pages would mean copying a multi-gigabyte file
+            # on a server that is by then short of disk, which is the worst possible
+            # moment. The freed pages are reused, so the file stops GROWING, which is
+            # what actually matters here.
+            try:
+                from pegaprox.api.helpers import load_server_settings as _lss
+                _max_mb = int(_lss().get('syslog_max_db_mb', 2048) or 2048)
+            except Exception:
+                _max_mb = 2048
+            if _max_mb > 0:
+                _limit = _max_mb * 1024 * 1024
+                for _round in range(12):
+                    try:
+                        _size = os.path.getsize(DB_FILE)
+                    except OSError:
+                        break
+                    if _size <= _limit:
+                        break
+                    # oldest 10% by id, which is insertion order
+                    cur.execute("SELECT COUNT(*) FROM logs")
+                    _total = cur.fetchone()[0] or 0
+                    if _total < 1000:
+                        break          # nothing left worth deleting; the file is bloat
+                    cur.execute("DELETE FROM logs WHERE id IN "
+                                "(SELECT id FROM logs ORDER BY id LIMIT ?)",
+                                (max(1000, _total // 10),))
+                    _gone = cur.rowcount
+                    conn.commit()
+                    logging.warning(
+                        f"[Syslog] size cap: {_size // (1024*1024)}MB exceeds "
+                        f"{_max_mb}MB, dropped the {_gone} oldest rows")
+                    if not _gone:
+                        break
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as e:
+        logging.debug(f"[Syslog] retention prune failed: {e}")
+
+
+def _drain_loop():
+    """Batch queued syslog entries + flush them off the hub. Stop-aware (S5) so it
+    exits within ~1s of stop_syslog_server (no leaked greenlet per OFF→ON toggle),
+    and runs a periodic retention prune (S1)."""
+    try:
+        from gevent import get_hub
+    except Exception:
+        get_hub = None
+
+    def _offhub(fn, args=()):
+        if get_hub is not None:
+            get_hub().threadpool.apply(fn, args)
+        else:
+            fn(*args)
+
+    last_prune = 0.0   # 0 → prune shortly after start, then hourly
+    while not _stop_event.is_set():
+        batch = []
+        try:
+            try:
+                batch = [_LOG_QUEUE.get(timeout=1.0)]   # timed so we can notice _stop_event
+            except _queue.Empty:
+                batch = []
+            if batch:
+                for _ in range(999):
+                    try:
+                        batch.append(_LOG_QUEUE.get_nowait())
+                    except _queue.Empty:
+                        break
+                # give the byte budget back the moment the batch leaves the queue -
+                # NOT after the write. The write runs off-hub and can be slow or fail;
+                # tying the budget to it would let one stuck flush stall ingestion.
+                _release_queue_bytes(batch)
+                _offhub(_flush_batch, (batch,))
+            if time.monotonic() - last_prune > 3600:
+                last_prune = time.monotonic()
+                _offhub(_prune_old_logs)
+        except Exception as e:
+            logging.debug(f"[Syslog] drain error: {e}")
+            time.sleep(0.5)
+        if batch:
+            time.sleep(0.5)                              # coalesce under load → ~2 writes/sec
+
+
+def _open_db(timeout=30):
+    # MK May 2026: dbcrypto.connect() unlocks SQLCipher transparently when active.
+    conn = dbcrypto.connect(DB_FILE, timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA temp_store=MEMORY;")
+    return conn
+
+
+def _init_indexes(cur):
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_timestamp_id
+        ON logs(timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_severity_timestamp_id
+        ON logs(severity, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_protocol_timestamp_id
+        ON logs(protocol, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_facility_timestamp_id
+        ON logs(facility, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_hostname_timestamp_id
+        ON logs(hostname COLLATE NOCASE, timestamp DESC, id DESC)
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_logs_source_ip_timestamp_id
+        ON logs(source_ip COLLATE NOCASE, timestamp DESC, id DESC)
+    """)
+
+
+def _init_fts(cur):
+    try:
+        cur.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
+                timestamp,
+                source_ip,
+                hostname,
+                severity_text,
+                message,
+                protocol,
+                content='logs',
+                content_rowid='id'
+            )
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_ai AFTER INSERT ON logs BEGIN
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES (new.id, new.timestamp, new.source_ip, new.hostname, new.severity_text, new.message, new.protocol);
+            END
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_ad AFTER DELETE ON logs BEGIN
+                INSERT INTO logs_fts(logs_fts, rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES ('delete', old.id, old.timestamp, old.source_ip, old.hostname, old.severity_text, old.message, old.protocol);
+            END
+        """)
+        cur.execute("""
+            CREATE TRIGGER IF NOT EXISTS logs_au AFTER UPDATE ON logs BEGIN
+                INSERT INTO logs_fts(logs_fts, rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES ('delete', old.id, old.timestamp, old.source_ip, old.hostname, old.severity_text, old.message, old.protocol);
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                VALUES (new.id, new.timestamp, new.source_ip, new.hostname, new.severity_text, new.message, new.protocol);
+            END
+        """)
+        has_rows = cur.execute("SELECT 1 FROM logs_fts LIMIT 1").fetchone()
+        if has_rows is None:
+            cur.execute("""
+                INSERT INTO logs_fts(rowid, timestamp, source_ip, hostname, severity_text, message, protocol)
+                SELECT id, timestamp, source_ip, hostname, severity_text, message, protocol
+                FROM logs
+            """)
+        return True
+    # dbcrypto's, not sqlite3's — _open_db() goes through dbcrypto.connect() and the
+    # sqlcipher3 build raises its own OperationalError, so the sqlite3 one matched
+    # nothing and this fallback couldn't fall back on the installs that have SQLCipher.
+    except dbcrypto.OperationalError as exc:
+        logging.info(f"[Syslog] FTS disabled for syslog DB: {exc}")
+        return False
+
+
+def _init_db():
+    conn = _open_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                source_ip TEXT,
+                hostname TEXT,
+                facility INTEGER,
+                severity INTEGER,
+                severity_text TEXT,
+                message TEXT,
+                protocol TEXT
+            )
+        """)
+        _init_indexes(cur)
+        _init_fts(cur)
+        conn.commit()
+    finally:
+        conn.close()
+    logging.info(f"[Syslog] Database initialized: {DB_FILE}")
+
+
+def _insert_log(entry):
+    try:
+        conn = _open_db(timeout=5)
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO logs (timestamp, source_ip, hostname, facility, severity, severity_text, message, protocol)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, entry)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.debug(f"[Syslog] Insert failed: {e}")
+
+
+def parse_syslog(message):
+    hostname = "unknown"
+    facility = None
+    severity = None
+    severity_text = "unknown"
+    msg = message
+
+    try:
+        if message.startswith("<"):
+            pri_end = message.find(">")
+            pri = int(message[1:pri_end])
+            facility = pri // 8
+            severity = pri % 8
+            severity_text = SEVERITY_MAP.get(severity, "unknown")
+            rest = message[pri_end + 1:].strip()
+            parts = rest.split()
+            if len(parts) >= 4:
+                hostname = parts[3]
+                msg = " ".join(parts[4:])
+            else:
+                msg = rest
+    except Exception:
+        pass
+
+    return hostname, facility, severity, severity_text, msg
+
+
+def _udp_listener(host, port):
+    """UDP syslog listener using plain sockets (gevent-compatible)"""
+    import socket
+    global _udp_sock
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    # no SO_REUSEADDR: on UDP it lets a second process bind the same port and take the
+    # datagrams, where the bind should fail (a restart needs no reuse on UDP)
+    try:
+        sock.bind((host, port))
+        _udp_sock = sock
+        logging.info(f"[Syslog] UDP listening on {host}:{port}")
+    except OSError as e:
+        logging.warning(f"[Syslog] UDP bind failed on {host}:{port}: {e}")
+        return
+
+    while not _stop_event.is_set():
+        try:
+            data, addr = sock.recvfrom(8192)
+            message = data.decode(errors="ignore").strip()
+            if not message:
+                continue
+            hostname, facility, severity, severity_text, msg = parse_syslog(message)
+            entry = (
+                datetime.now().isoformat(),
+                addr[0], hostname, facility, severity, severity_text, msg, "UDP"
+            )
+            _enqueue_log(entry)
+        except Exception as e:
+            if _stop_event.is_set():
+                break  # socket closed by stop_syslog_server
+            logging.debug(f"[Syslog] UDP error: {e}")
+            time.sleep(0.1)
+
+
+def _tcp_listener(host, port):
+    """TCP syslog listener using plain sockets (gevent-compatible)"""
+    import socket
+    import gevent
+    from gevent import socket as gsocket
+
+    global _tcp_sock
+    srv = gsocket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind((host, port))
+        srv.listen(256)  # NS Jul 2026: larger accept backlog for reconnect bursts at scale
+        _tcp_sock = srv
+        logging.info(f"[Syslog] TCP listening on {host}:{port}")
+    except OSError as e:
+        logging.warning(f"[Syslog] TCP bind failed on {host}:{port}: {e}")
+        return
+
+    def handle_client(client_sock, addr):
+        # sec (audit): the accumulator had no bound, so a peer that sends bytes and never a
+        # newline grows it forever — and this listener takes unauthenticated connections off
+        # the network. RFC 5424 allows long messages but nothing near this; past the cap the
+        # peer is not speaking syslog, so drop it rather than keep buying memory.
+        _MAX_LINE = 64 * 1024
+        try:
+            buf = b""
+            while True:
+                data = client_sock.recv(4096)
+                if not data:
+                    break
+                buf += data
+                if len(buf) > _MAX_LINE and b"\n" not in buf:
+                    logging.warning(f"[Syslog] {addr[0]} sent {len(buf)} bytes with no line "
+                                    f"terminator — dropping the connection")
+                    break
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    # MK Sep 2026 - the guard above only fires while no terminator has
+                    # arrived, so a peer could still frame one oversized line and have it
+                    # parsed and queued. The queue's byte budget bounds the damage either
+                    # way, but a 64 KB "syslog line" is not syslog; drop it here too so
+                    # the cap means the same thing on both paths.
+                    if len(line) > _MAX_LINE:
+                        logging.warning(f"[Syslog] {addr[0]} sent a {len(line)}-byte line - "
+                                        f"over the {_MAX_LINE}-byte cap, dropping it")
+                        continue
+                    message = line.decode(errors="ignore").strip()
+                    if message:
+                        hostname, facility, severity, severity_text, msg = parse_syslog(message)
+                        entry = (
+                            datetime.now().isoformat(),
+                            addr[0], hostname, facility, severity, severity_text, msg, "TCP"
+                        )
+                        _enqueue_log(entry)
+        except Exception:
+            pass
+        finally:
+            client_sock.close()
+            _tcp_conns['n'] -= 1
+
+    # NS Jul 2026 (scale/DoS): cap concurrent TCP handler greenlets. Without this
+    # a remote peer could open unbounded connections and spawn one greenlet each,
+    # exhausting the hub. Cooperative-safe counter (gevent has no preemption between
+    # the check and the increment). Env-tunable; excess connections are dropped.
+    _tcp_conns = {'n': 0}
+    try:
+        # Generous default for large estates (100+ nodes, plus per-app forwarders):
+        # 1024 concurrent handlers still bounds the greenlet explosion but never
+        # throttles legitimate senders. Tune up further via the env var if needed.
+        _tcp_max = int(os.environ.get('PEGAPROX_SYSLOG_TCP_MAX', '1024'))
+    except (TypeError, ValueError):
+        _tcp_max = 1024
+
+    while not _stop_event.is_set():
+        try:
+            client, addr = srv.accept()
+            if _tcp_conns['n'] >= _tcp_max:
+                logging.warning(f"[Syslog] TCP connection cap ({_tcp_max}) reached — dropping {addr[0]}")
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                continue
+            _tcp_conns['n'] += 1
+            gevent.spawn(handle_client, client, addr)
+        except Exception as e:
+            if _stop_event.is_set():
+                break  # socket closed by stop_syslog_server
+            logging.debug(f"[Syslog] TCP accept error: {e}")
+            time.sleep(0.1)
+
+
+SYSLOG_SETTINGS_ATTEMPTS = 10      # 10 x 30s = 5 min, dann bleibt der Port zu
+SYSLOG_SETTINGS_RETRY_S = 30
+
+
+def _settings_store_readable():
+    """Can the settings table actually be read right now? Raises if it cannot.
+
+    MK Sep 2026 - this exists because load_server_settings() answers the wrong question.
+    It catches its own database errors, logs them, and returns its DEFAULTS, and the
+    default for syslog_enabled is True. So the gate below could not tell "the operator
+    wants the receiver" from "the store is not answering" - both arrive as True, and the
+    permissive one is the guess. Wrapping the call in try/except cannot see it either,
+    because nothing is ever raised.
+
+    A cheap SELECT against the same table, with the exception left alone, is the missing
+    half. It deliberately does not read or parse syslog_enabled: the value still comes
+    from load_server_settings so there is one place that knows how settings decode. All
+    this decides is whether that value was an answer or a shrug.
+    """
+    from pegaprox.core.db import get_db
+    cur = get_db().conn.cursor()
+    cur.execute("SELECT 1 FROM server_settings LIMIT 1")
+    cur.fetchone()
+    return True
+
+
+def _syslog_loop():
+    """Main syslog server loop — runs UDP + TCP in gevent greenlets"""
+    import gevent
+
+    # NS 2026-06-05 (audit N1): only open the network port when the feature is
+    # enabled. Default True keeps existing behaviour (the receiver has always
+    # been on); operators who don't ingest syslog can close the port. The
+    # per-packet DoS is fixed regardless by the queue+batched-drain above.
+    # MK Sep 2026 - the old version swallowed a failed settings read and fell through to
+    # default-on, which binds an UNAUTHENTICATED port on a box whose operator may have
+    # switched it off on purpose. An error must not overrule an explicit choice. The
+    # default-on only applies when we actually managed to read and found nothing, so on a
+    # read failure keep retrying rather than guessing - a transient problem at boot heals
+    # itself within a few minutes, and a persistent one leaves the port closed and says so.
+    # MK Sep 2026 (follow-up) - the first version of this gate wrapped
+    # load_server_settings() in try/except, which looks right and is not: that helper
+    # swallows its own database errors and hands back its defaults, so the except branch
+    # only ever caught a failed IMPORT. A locked or missing database went straight through
+    # it as syslog_enabled=True. Confirm the store answers BEFORE trusting the value.
+    _settings = None
+    for _attempt in range(SYSLOG_SETTINGS_ATTEMPTS):
+        try:
+            from pegaprox.api.helpers import load_server_settings
+            _settings_store_readable()
+            _settings = load_server_settings()
+            break
+        except Exception as _e:
+            logging.warning(
+                "[Syslog] cannot read server settings (attempt %d/%d): %s - not binding "
+                "1514 until we know whether it is wanted",
+                _attempt + 1, SYSLOG_SETTINGS_ATTEMPTS, _e)
+            if _attempt + 1 < SYSLOG_SETTINGS_ATTEMPTS:
+                gevent.sleep(SYSLOG_SETTINGS_RETRY_S)
+
+    if _settings is None:
+        logging.error(
+            "[Syslog] server settings still unreadable after %ds - receiver stays down. "
+            "It is not starting an unauthenticated listener it cannot confirm is wanted; "
+            "fix the settings store and restart.",
+            SYSLOG_SETTINGS_ATTEMPTS * SYSLOG_SETTINGS_RETRY_S)
+        return
+
+    if not _settings.get('syslog_enabled', True):
+        logging.info("[Syslog] disabled (syslog_enabled=false) — not binding 1514")
+        return
+
+    _init_db()
+
+    port = 1514
+    host = "0.0.0.0"
+
+    gevent.spawn(_drain_loop)                       # off-hub batched writer
+    udp = gevent.spawn(_udp_listener, host, port)
+    tcp = gevent.spawn(_tcp_listener, host, port)
+
+    logging.info(f"[Syslog] Server started on port {port} (UDP+TCP)")
+    gevent.joinall([udp, tcp])
+
+
+def start_syslog_server():
+    """Start syslog server in a background thread"""
+    global _syslog_thread
+    if _syslog_thread is not None:
+        return
+    _stop_event.clear()  # in case we were stopped earlier via the settings toggle
+    _syslog_thread = threading.Thread(target=_syslog_loop, daemon=True, name='syslog-server')
+    _syslog_thread.start()
+    logging.info("[Syslog] Background thread started")
+
+
+def stop_syslog_server():
+    """Stop the syslog receiver and free port 1514 (Settings → Syslog toggle off).
+
+    Sets the stop flag and closes the listening sockets, which unblocks the
+    recvfrom()/accept() loops so they exit. Idempotent. NS 2026-06-05."""
+    global _syslog_thread, _udp_sock, _tcp_sock
+    if _syslog_thread is None:
+        return
+    _stop_event.set()
+    for s in (_udp_sock, _tcp_sock):
+        try:
+            if s is not None:
+                s.close()
+        except Exception:
+            pass
+    _udp_sock = None
+    _tcp_sock = None
+    _syslog_thread = None
+    logging.info("[Syslog] receiver stopped — port 1514 released (syslog_enabled=false)")
+
+
+def is_syslog_running():
+    return _syslog_thread is not None

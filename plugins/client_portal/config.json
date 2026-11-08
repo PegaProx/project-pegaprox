@@ -1,0 +1,26 @@
+{
+    "portal_title": "Client Portal",
+    "allowed_actions": ["vm.view", "vm.start", "vm.stop", "vm.console"],
+    "show_resource_usage": true,
+    "show_ip_addresses": true,
+    "allow_password_change": true,
+    "allow_snapshots": true,
+    "max_snapshots_per_vm": 5,
+    "custom_logo_url": "",
+    "theme_color": "#e57000",
+    "allow_iso_mount": false,
+    "iso_storage": "",
+    "allowed_isos": [],
+    "allow_ct_create": false,
+    "allow_destroy": false,
+    "ct_create": {
+        "cluster_id": "",
+        "node": "",
+        "storage": "local-lvm",
+        "bridge": "vmbr0",
+        "templates": [],
+        "max_cores": 2,
+        "max_memory_mb": 2048,
+        "max_disk_gb": 16
+    }
+}
