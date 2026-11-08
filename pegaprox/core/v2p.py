@@ -4020,15 +4020,16 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                 if elapsed < 10:
                     all_near_100 = False
                     continue
+                # JB Nov 2026 - nothing completed this job yet, so it ended by a cancel or an
+                # error and its copy is not the disk. Counting it ready let a one-disk mirror
+                # report the pivot as done and the config point at the unfinished copy.
                 rc_log, out_log, _ = _pve_node_exec(pve_mgr, node,
                     f"tail -5 /var/log/pve/qemu-server/{vmid}.log 2>/dev/null | "
                     f"grep -i 'mirror\\|error\\|block\\|job' | tail -2", timeout=5)
                 qlog = str(out_log or '').strip()
-                if qlog and 'error' in qlog.lower():
-                    task.log(f"  {drive_id}: mirror job failed - {qlog[:150]}")
-                    return False
-                ready_drives.add(drive_id)
-                continue
+                task.log(f"  {drive_id}: the mirror job ended without a pivot"
+                         + (f" - {qlog[:150]}" if qlog else ''))
+                return False
             
             # Check if this specific drive is ready
             for job_line in jobs.split('\n'):
