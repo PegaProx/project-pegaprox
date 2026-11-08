@@ -4059,18 +4059,25 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
             oldest_100 = min(at_100_since.values()) if at_100_since else time.time()
             if time.time() - oldest_100 > PAUSE_PIVOT_AFTER:
                 task.log(f"  All disks at 100% but not 'ready' - using pause-pivot-resume...")
+                # a mirror job ends only by complete, cancel or an error, and nothing completed
+                # one yet: a disk whose job is gone has no copy to pivot to (#1250)
+                gone = [d for d, _, _ in mirrors if not re.search(rf'device {re.escape(d)}:', jobs)]
+                if gone:
+                    task.log(f"  {', '.join(gone)}: the mirror job ended without a pivot - not pausing")
+                    return False
                 task.log(f"  Pausing VM for atomic pivot...")
-                
+
                 # Step 1: Pause VM (HMP "stop" = freeze CPUs, NOT qm stop!)
                 _qm_monitor_cmd(pve_mgr, node, vmid, "stop", timeout=10)
                 paused_at = time.monotonic()
-                
-                # Step 2+3: pivot every drive whose job still runs.
+
+                # Step 2+3: pivot every drive.
                 # JB Nov 2026 (#1250) - HMP `info block-jobs` never says whether a job is ready, so
                 # waiting for that word kept the guest stopped for the whole 10 s window, and the
                 # refusal QEMU gives is not worded "not ready". QEMU refuses complete until the job
                 # is ready, so ask it again until it takes it; it answers nothing when it does.
-                pending = [d for d, _, _ in mirrors if re.search(rf'device {re.escape(d)}:', jobs)]
+                pending = [d for d, _, _ in mirrors]
+                taken = []
                 pivot_ok = True
                 last_out = {}
                 while pending:
@@ -4078,8 +4085,9 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                         ok_p, out_p = _qm_block_job(pve_mgr, node, vmid,
                             'complete', drive_id, timeout=30)
                         low = str(out_p or '').lower()
-                        if ok_p and 'error' not in low:
+                        if ok_p and 'error' not in low and 'unknown command' not in low:
                             pending.remove(drive_id)
+                            taken.append(drive_id)
                         elif ok_p and 'not found' in low:
                             # a mirror job ends only by complete, cancel or an error: this one
                             # is gone without its pivot, so its copy is not the disk
@@ -4095,12 +4103,13 @@ def _poll_drive_mirrors(pve_mgr, task, node, vmid, mirrors, timeout=7200):
                     task.log(f"  {drive_id}: QEMU did not take the pivot: {last_out.get(drive_id, '')[:150]}")
                     pivot_ok = False
                 
-                # Step 4: Wait for pivots to complete
-                remaining = list(drive_ids)
-                while pivot_ok:
+                # Step 4: Wait for the taken pivots to complete, also when another disk failed:
+                # the caller cancels every job after a failure, a pivot in flight included
+                remaining = list(taken)
+                while remaining:
                     ok3, jobs3 = _qm_monitor_cmd(pve_mgr, node, vmid, "info block-jobs")
                     if ok3:
-                        remaining = [d for d in drive_ids if re.search(rf'device {re.escape(d)}:', jobs3 or '')]
+                        remaining = [d for d in taken if re.search(rf'device {re.escape(d)}:', jobs3 or '')]
                     if not remaining or time.monotonic() - paused_at >= PIVOT_WAIT + 5:
                         break
                     time.sleep(0.5)

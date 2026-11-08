@@ -5,7 +5,8 @@ The pause waited for the word "ready" in HMP `info block-jobs`. QEMU never print
 every pivot sat out the whole 10 s window with the guest stopped, plus fixed sleeps, about
 24 s with the SSH round trips. QEMU refuses complete on a job that is not ready, so the pause
 now asks it until it takes it and resumes the guest once the jobs are gone. A job that is gone
-before QEMU took its pivot ended without one, and that fails the pivot.
+before QEMU took its pivot ended without one, and that fails the pivot; a job gone before the
+pause does not pause the guest at all.
 
 The monitor below answers in QEMU's HMP wording (block/monitor/block-hmp-cmds.c, job.c,
 blockdev.c, hmp_handle_error); every `qm monitor` over SSH costs a second.
@@ -36,10 +37,13 @@ class Clock:
 
 class Qemu:
     """The monitor of the running guest. A job takes complete from `ready_at` on (None:
-    never) and is gone 0.3 s after it took it."""
+    never) and is gone `settle` seconds after it took it."""
 
-    def __init__(self, clock, ready_at, ended=(), dies=()):
+    def __init__(self, clock, ready_at, ended=(), dies=(), settle=0.3, verb_known=True):
         self.clock = clock
+        self.settle = settle
+        self.verb_known = verb_known
+        self.in_flight_at_cont = None
         self.jobs = {d: {'len': 32 * GiB, 'ready_at': r, 'gone_at': None}
                      for d, r in ready_at.items() if d not in ended}
         self.dies = dies
@@ -68,14 +72,17 @@ class Qemu:
             return ''
         if cmd == 'cont':
             self.resumed_at = self.clock.now
+            self.in_flight_at_cont = sorted(d for d, j in self._listed().items() if j['gone_at'] is not None)
             return ''
         if verb == 'block_job_complete':
+            if not self.verb_known:         # monitor/hmp.c
+                return f"unknown command: '{verb}'"
             j = self._listed().get(arg)
             if j is None:
                 return f"Error: Block job '{arg}' not found"
             if not self._ready(j):
                 return f"Error: Job '{arg}' in state 'running' cannot accept command verb 'complete'"
-            j['gone_at'] = self.clock.now + 0.3
+            j['gone_at'] = self.clock.now + self.settle
             return ''
         return ''
 
@@ -107,7 +114,7 @@ class Task:
         self.progress[key] = (done, total)
 
 
-def _pivot(monkeypatch, ready_at, **kw):
+def _pivot(monkeypatch, ready_at, paused=True, **kw):
     clock = Clock()
     q = Qemu(clock, ready_at, **kw)
     monkeypatch.setattr(time, 'sleep', clock.sleep)
@@ -117,7 +124,7 @@ def _pivot(monkeypatch, ready_at, **kw):
     task = Task()
     mirrors = [(d, 32 * GiB, i) for i, d in enumerate(ready_at)]
     ok = v2p._poll_drive_mirrors(object(), task, 'pve1', VMID, mirrors, timeout=600)
-    assert q.stopped_at is not None, task.lines
+    assert (q.stopped_at is not None) == paused, task.lines
     return ok, q, task
 
 
@@ -165,10 +172,12 @@ def test_the_log_says_how_long_the_guest_was_paused(monkeypatch):
     assert done and f'guest paused {q.paused:.1f}s' in done[0], (done, q.paused)
 
 
-def test_a_job_that_ended_before_the_pause_gets_no_pivot(monkeypatch):
-    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0, 'drive-scsi1': 0}, ended=('drive-scsi1',))
-    assert ok is True, task.lines
-    assert q.completes() == ['block_job_complete drive-scsi0']
+def test_a_job_that_ended_before_the_pause_fails_without_pausing(monkeypatch):
+    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0, 'drive-scsi1': 0}, paused=False,
+                         ended=('drive-scsi1',))
+    assert ok is False
+    assert q.completes() == []
+    assert any('drive-scsi1: the mirror job ended without a pivot' in line for line in task.lines), task.lines
 
 
 def test_a_job_gone_without_its_pivot_fails_the_pivot(monkeypatch):
@@ -177,3 +186,18 @@ def test_a_job_gone_without_its_pivot_fails_the_pivot(monkeypatch):
     assert [c for _, c in q.cmds].count('cont') == 1
     assert any('drive-scsi1: the mirror job ended without a pivot' in line for line in task.lines), task.lines
     assert not any('Pause-pivot-resume complete' in line for line in task.lines)
+
+
+def test_a_pivot_qemu_took_is_finished_before_a_failed_one_resumes_the_guest(monkeypatch):
+    # the caller cancels every job after a failure: a pivot still in flight must be done by then
+    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0, 'drive-scsi1': 0}, dies=('drive-scsi1',),
+                         settle=3)
+    assert ok is False
+    assert q.in_flight_at_cont == [], q.cmds
+
+
+def test_an_unknown_complete_verb_is_not_taken_for_a_pivot(monkeypatch):
+    ok, q, task = _pivot(monkeypatch, {'drive-scsi0': 0}, verb_known=False)
+    assert ok is False
+    assert q.paused <= 13, (q.paused, q.cmds)
+    assert any("QEMU did not take the pivot: unknown command" in line for line in task.lines), task.lines
