@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """cluster CRUD, HA & maintenance routes - split from monolith dec 2025, NS"""
 
+import copy
 import json
 import logging
 import re
@@ -296,6 +297,20 @@ def export_cluster_config(cluster_id):
         'vnc_tunnel': bool(getattr(c, 'vnc_tunnel', False)),  # MK Apr 2026
         'ssh_disabled': bool(getattr(c, 'ssh_disabled', False)),  # MK Sep 2026 (#941)
         'transfer_network': getattr(c, 'transfer_network', '') or '',
+        # MK Nov 2026 (#1322) - the dialog fills these from here and sends them back; they
+        # were missing, so a re-save switched the HA off, dropped the API port, the node
+        # link suffix and the predictive settings
+        'api_port': getattr(c, 'api_port', 8006) or 8006,
+        'node_ui_suffix': getattr(c, 'node_ui_suffix', '') or '',
+        'ha_enabled': bool(getattr(c, 'ha_enabled', False)),
+        'predictive_balancing': bool(getattr(c, 'predictive_balancing', False)),
+        'predictive_threshold': getattr(c, 'predictive_threshold', 0.0),
+        'balance_cpu_weight': getattr(c, 'balance_cpu_weight', 1.0),
+        'balance_mem_weight': getattr(c, 'balance_mem_weight', 1.0),
+        'balance_io_weight': getattr(c, 'balance_io_weight', 1.0),
+        'cpu_baseline': getattr(c, 'cpu_baseline', '') or '',
+        'ssh_user': getattr(c, 'ssh_user', '') or '',
+        'has_ssh_key': bool(getattr(c, 'ssh_key', '')),
         # secrets intentionally omitted: pass, ssh_key, api_token_secret
     })
 
@@ -453,6 +468,18 @@ def reconfigure_cluster(cluster_id):
     _sfx_err = _node_ui_suffix_error(data)
     if _sfx_err:
         return _sfx_err
+    # MK Nov 2026 (#1322) - and everything else the body leaves out: the stored SSH key
+    # and user, a custom SSH port, the excluded nodes... went with the old manager on
+    # every re-save. An empty key keeps the stored one. The fallback hosts only while the
+    # cluster stays where it was, the new manager finds its own.
+    old_cfg = old_mgr.config
+    for key in _KEPT_BY_RECONFIGURE:
+        if key not in data and hasattr(old_cfg, key):
+            data[key] = copy.deepcopy(getattr(old_cfg, key))
+    if not data.get('ssh_key'):
+        data['ssh_key'] = getattr(old_cfg, 'ssh_key', '') or ''
+    if 'fallback_hosts' not in data and _host_key(data.get('host')) == _host_key(old_cfg.host):
+        data['fallback_hosts'] = list(getattr(old_cfg, 'fallback_hosts', None) or [])
 
     # Create new config + manager, test connection
     new_config = PegaProxConfig(data)
@@ -497,11 +524,25 @@ def reconfigure_cluster(cluster_id):
     return jsonify(result)
 
 
+# the settings a re-configure body may leave out and the cluster keeps (#1322). Not the
+# credential (user, pass), nor what re-configure handles on its own: ssh_key, the fallback
+# hosts, ha_settings, migration_cooldown, transfer_network, the minted API token.
+_KEPT_BY_RECONFIGURE = (
+    'ssl_verification', 'migration_threshold', 'migration_tolerance', 'check_interval',
+    'auto_migrate', 'balance_containers', 'balance_local_disks', 'proxlb_tags_enabled',
+    'proxlb_pins_auto_migrate', 'proxlb_pins_strict', 'dry_run', 'enabled', 'ha_enabled',
+    'ssh_user', 'ssh_port', 'ssh_disabled', 'api_port', 'excluded_nodes', 'smbios_autoconfig',
+    'vnc_tunnel', 'latitude', 'longitude', 'location_label', 'node_ui_suffix',
+    'predictive_balancing', 'predictive_threshold', 'balance_cpu_weight', 'balance_mem_weight',
+    'balance_io_weight', 'cpu_baseline', 'backup_sla_max_age_hours',
+)
+
+
 def _moved_by_reconfigure(old, new, data):
     """What of host, fallback_hosts, ssh_port and ssl_verification a re-configure moves,
     by the rule of _config_edit_checks: an address not among the old ones, another SSH
-    port, verification switched off. The dialog sends no SSH port; one the body leaves
-    out is the default port 22 of the node itself, no move."""
+    port, verification switched off. The dialog sends no SSH port; the cluster keeps its
+    own then (#1322), no move."""
     known = {_host_key(old.host)} | {_host_key(h) for h in (getattr(old, 'fallback_hosts', None) or [])}
     moved = []
     if _host_key(new.host) not in known:
