@@ -81,8 +81,10 @@ class _ImgServer(_BpServer):
     images, the templates and builds of c1 (builds may be a list of answers handed out in turn),
     the build and the custom image writes, and the reads of All clusters."""
 
-    def __init__(self, images=None, builds=None, existing=None, build_status=200, **kw):
+    def __init__(self, images=None, builds=None, existing=None, build_status=200, fail=(), **kw):
         super().__init__(**kw)
+        # paths that answer 500
+        self.fail = set(fail)
         self.images = copy.deepcopy(IMAGES if images is None else images)
         seq = builds if builds is not None else BUILDS
         self.build_seq = [copy.deepcopy(b) for b in (seq if seq and isinstance(seq[0], list) else [seq])]
@@ -91,6 +93,8 @@ class _ImgServer(_BpServer):
         self.build_reads = []
 
     def img_route(self, method, path, body, url):
+        if path in self.fail:
+            return 500, {'error': 'internal error'}
         if path == '/api/templates/catalog':
             return 200, {'templates': self.images}
         if path == '/api/templates/custom' and method == 'POST':
@@ -137,7 +141,7 @@ class _ImgServer(_BpServer):
 # the bundle with a probe around CrBlueprints: every render notes the prefillTemplate it was given,
 # so New blueprint is checked on this side of the contract whatever the blueprint editor does with it
 _PROBE = ('function CrBlueprints(__props) { (window.__bpPrefill = window.__bpPrefill || []).push(__props && __props.prefillTemplate); '
-          'return CrBlueprintsInner(__props); }\n        function CrBlueprintsInner(')
+          'window.__bpProps = __props; return CrBlueprintsInner(__props); }\n        function CrBlueprintsInner(')
 
 
 def _bundle(probe=False):
@@ -249,6 +253,11 @@ def test_runtime_the_sub_tab_draws_the_images_as_a_table(open_app):
     assert co.locator('[data-cr-img-custom]').count() == 1 and 'internal' in co.inner_text()
     assert co.locator('.cr-img-tags').inner_text().split() == ['internal']
     assert _img_row(page, 'ubuntu-2404').locator('[data-cr-img-custom]').count() == 0
+    # under its name, which keeps the first line
+    assert co.locator('.cr-img-desc [data-cr-img-custom]').count() == 1
+    # at 1600 px every action has its label
+    assert page.locator('[data-cr-img-page]').get_attribute('data-cr-img-room') == 'wide'
+    assert page.locator('[data-cr-img-build="debian-13"]').inner_text().strip() == 'Build template here'
     # the blueprints that name each image (WEB and OTHER name Debian, DB AlmaLinux)
     used = page.evaluate("""() => Object.fromEntries([...document.querySelectorAll('[data-cr-table="img-list"] tbody tr')]
         .filter(tr => tr.querySelector('[data-cr-img-row]'))
@@ -508,6 +517,205 @@ def test_runtime_all_clusters_reads_every_proxmox_cluster_once(open_app):
     assert _wait(page, lambda: len([u for u in app.server.urls if '/api/blueprints/deployments' in u and 'cluster_id=' not in u]) == 2)
 
 
+def _all_reads(app):
+    return len([u for u in app.server.urls if '/api/blueprints/deployments' in u and 'cluster_id=' not in u])
+
+
+def test_runtime_all_clusters_follows_this_cluster_and_says_when_it_was_read(open_app):
+    app = open_app(probe=True, builds=STILL, clusters=[CLUSTER, C2])
+    # web-03 runs on c1; the read of every cluster (ALL_DEPLOYS) is from before it
+    app.server.recent.insert(0, dict(RECENT[0], id='r9', vmid=131, name='web-03', status='running', step='clone', progress=30,
+                                     started_at='2026-11-08T09:50:00', finished_at=None))
+    page = _page(app)
+    page.locator('[data-cr-table="img-recent"]').wait_for(timeout=4000)
+    page.locator('[data-cr-img-scope="all"]').click()
+    assert _wait(page, lambda: page.locator('[data-cr-img-cover="2/2"]').count() == 1)
+    # the rows of this cluster are the page's own: web-03 is there and is read until it ends
+    assert _wait(page, lambda: any('web-03 (131)' in txt and 'Running' in txt for _, txt in _recent(page))), _recent(page)
+    app.server.recent[0].update(status='completed', step='done', progress=100)
+    assert _wait(page, lambda: page.locator('[data-cr-table="img-recent-all"] [data-cr-img-guest="131"]').count() == 1, timeout=10)
+    # the other clusters' rows stay as read, and the list says when that was
+    assert any('web-lab (140)' in txt for _, txt in _recent(page))
+    assert re.fullmatch(r'Template builds of 2 of 2 clusters\. Read at .+\.', page.locator('[data-cr-img-cover]').inner_text().strip())
+    # a deploy onto another cluster reads them again
+    reads = _all_reads(app)
+    page.evaluate("() => window.__bpProps.onDeployed({ deployment_id: 'd7', blueprint_id: 'b1', cluster_id: 'c2', node: 'lab1', vmid: 141, name: 'web-lab2' })")
+    assert _wait(page, lambda: _all_reads(app) == reads + 1)
+
+
+# --- what the blueprints above change ----------------------------------------------------------
+
+def _here_deploy_reads(app):
+    return len([u for u in app.server.urls if '/api/blueprints/deployments?cluster_id=c1' in u])
+
+
+def test_runtime_a_deploy_the_blueprints_started_is_listed_and_read_while_it_runs(open_app):
+    app = open_app(probe=True, builds=STILL)
+    page = _page(app)
+    page.locator('[data-cr-table="img-recent"]').wait_for(timeout=4000)
+    page.wait_for_timeout(300)
+    reads = _here_deploy_reads(app)
+    assert page.evaluate('() => typeof window.__bpProps.onDeployed') == 'function'
+    app.server.recent.insert(0, dict(RECENT[0], id='d1', vmid=130, name='web-02', status='queued', step='clone', progress=0,
+                                     started_at='2026-11-08T10:00:00', finished_at=None))
+    page.evaluate("() => window.__bpProps.onDeployed({ deployment_id: 'd1', blueprint_id: 'b1', cluster_id: 'c1', node: 'pve1', vmid: 130, name: 'web-02' })")
+    assert _wait(page, lambda: _here_deploy_reads(app) == reads + 1)
+    assert _wait(page, lambda: any('web-02 (130)' in txt and 'Queued' in txt for _, txt in _recent(page))), _recent(page)
+    # read again while it runs, so the list says when it is done
+    app.server.recent[0].update(status='completed', step='done', progress=100)
+    assert _wait(page, lambda: page.locator('[data-cr-img-guest="130"]').count() == 1, timeout=10)
+
+
+def test_runtime_a_deploy_in_the_blueprint_dialog_shows_up_under_recent_deploys(open_app):
+    src = open(os.path.join(ROOT, 'web', 'src', 'cr_blueprints.js'), encoding='utf-8').read()
+    if 'onDeployed' not in src:
+        pytest.skip('cr_blueprints.js calls no onDeployed yet (the blueprint side of #1220)')
+    app = open_app(builds=STILL)
+    page = _page(app)
+    page.locator('[data-cr-table="img-recent"]').wait_for(timeout=4000)
+    page.wait_for_timeout(300)
+    reads = _here_deploy_reads(app)
+    page.locator('[data-cr-bp-deploy="b1"]').click()
+    _need(page, '[data-cr-bp-deploy-go]', 'Deploy opens its dialog')
+    page.locator('[data-cr-bp-dep="node"] option[value="pve1"]').wait_for(state='attached', timeout=4000)
+    page.locator('[data-cr-bp-dep="node"]').select_option('pve1')
+    page.wait_for_timeout(400)
+    app.server.recent.insert(0, dict(RECENT[0], id='d1', vmid=105, name='web-small-105', status='queued', step='clone', progress=0,
+                                     started_at='2026-11-08T10:00:00', finished_at=None))
+    page.locator('[data-cr-bp-deploy-go]').click()
+    assert _wait(page, lambda: ('POST', '/api/blueprints/b1/deploy') in app.server.calls)
+    assert _wait(page, lambda: _here_deploy_reads(app) > reads)
+    assert _wait(page, lambda: any('(105)' in txt for _, txt in _recent(page))), _recent(page)
+
+
+def test_runtime_a_blueprint_deleted_above_leaves_used_by(open_app):
+    app = open_app(probe=True, builds=STILL)
+    page = _page(app)
+    used = lambda: _img_row(page, 'debian-13').locator('[data-cr-img-used]').get_attribute('data-cr-img-used')
+    assert _wait(page, lambda: used() == '2')
+    assert page.evaluate('() => typeof window.__bpProps.onDeleted') == 'function'
+    app.server.bps = [b for b in app.server.bps if b['id'] != 'b1']
+    page.evaluate("() => window.__bpProps.onDeleted({ id: 'b1', name: 'web-small' })")
+    assert _wait(page, lambda: used() == '1')
+
+
+def test_runtime_a_delete_in_the_blueprint_table_updates_used_by(open_app):
+    src = open(os.path.join(ROOT, 'web', 'src', 'cr_blueprints.js'), encoding='utf-8').read()
+    if 'onDeleted' not in src:
+        pytest.skip('cr_blueprints.js calls no onDeleted yet (the blueprint side of #1220)')
+    app = open_app(builds=STILL)
+    page = _page(app)
+    used = lambda: _img_row(page, 'debian-13').locator('[data-cr-img-used]').get_attribute('data-cr-img-used')
+    assert _wait(page, lambda: used() == '2')
+    page.locator('[data-cr-bp-delete="b1"]').click()
+    _need(page, '[data-cr-nc-confirm-go="bp-delete"]', 'Delete asks first')
+    page.locator('[data-cr-nc-confirm-go="bp-delete"]').click()
+    assert _wait(page, lambda: ('DELETE', '/api/blueprints/b1') in app.server.calls)
+    assert _wait(page, lambda: used() == '1')
+
+
+def test_runtime_refresh_reads_the_blueprints_above_in_the_same_request(open_app):
+    app = open_app(builds=STILL)
+    page = _page(app)
+    _need(page, '[data-cr-bp-row="b1"]', 'the blueprint table is filled')
+    page.wait_for_timeout(300)
+    reads = _count(app, 'GET', '/api/blueprints')
+    app.server.bps.append(_bp('b9', 'web-large', cores=8))
+    page.locator('[data-cr-img-refresh]').click()
+    # the blueprint table and Used by show the same list
+    assert _wait(page, lambda: page.locator('[data-cr-bp-row="b9"]').count() == 1)
+    assert _wait(page, lambda: _img_row(page, 'debian-13').locator('[data-cr-img-used]').get_attribute('data-cr-img-used') == '3')
+    page.wait_for_timeout(300)
+    assert _count(app, 'GET', '/api/blueprints') == reads + 1
+    # the button says it reads the page
+    assert 'blueprints' in page.locator('[data-cr-img-refresh]').get_attribute('title')
+
+
+# --- the room ----------------------------------------------------------------------------------
+
+def _fit(page, table):
+    """What does not fit in a table: how far it scrolls sideways, the headers, names, tags, states
+    and actions cut off (or beyond the right edge), and the tags that take a second line."""
+    return page.evaluate("""(id) => {
+        const w = document.querySelector(`[data-cr-table="${id}"]`);
+        const sc = w.querySelector('.cr-table-scroll');
+        const right = sc.getBoundingClientRect().right;
+        const cut = [...w.querySelectorAll('thead .cr-th-text, tbody .cr-strong, tbody .cr-img-tags, tbody .cr-img-acts, tbody .cr-img-state, tbody .cr-img-err, tbody .cr-img-what > span')]
+            .filter(e => e.scrollWidth > e.clientWidth + 1 || e.getBoundingClientRect().right > right + 1).map(e => e.textContent.trim());
+        const tall = [...w.querySelectorAll('tbody .cr-img-tags')].filter(e => e.getBoundingClientRect().height > 20).map(e => e.textContent);
+        return { scroll: sc.scrollWidth - sc.clientWidth, cut, tall };
+    }""", table)
+
+
+def test_runtime_at_1280_px_names_reasons_and_actions_fit(open_app):
+    app = open_app(builds=STILL, viewport=(1280, 900))
+    page = _page(app)
+    page.locator('[data-cr-table="img-recent"] [data-cr-img-state="failed"]').first.wait_for(timeout=4000)
+    page.wait_for_timeout(300)
+    assert _fit(page, 'img-list') == {'scroll': 0, 'cut': [], 'tall': []}
+    assert _fit(page, 'img-recent') == {'scroll': 0, 'cut': [], 'tall': []}
+    # Build template here is an icon there, with its name for the reader and the tooltip
+    build = page.locator('[data-cr-img-build="debian-13"]')
+    assert build.inner_text().strip() == ''
+    assert build.get_attribute('aria-label') == 'Build template here' and build.get_attribute('title') == 'Build template here'
+    assert page.locator('[data-cr-img-page]').get_attribute('data-cr-img-room') == 'compact'
+
+
+def test_runtime_on_a_tablet_the_actions_stay_in_view(open_app):
+    app = open_app(builds=STILL, viewport=(1280, 900))
+    page = _page(app)
+    # the drawer layout of a small window cannot be driven here: the open page is made narrower
+    page.set_viewport_size({'width': 820, 'height': 900})
+    assert _wait(page, lambda: _fit(page, 'img-list')['scroll'] == 0)
+    assert _fit(page, 'img-list') == {'scroll': 0, 'cut': [], 'tall': []}
+    heads = page.evaluate("() => [...document.querySelectorAll('[data-cr-table=\"img-list\"] thead th')].map(th => th.dataset.crCol)")
+    assert heads == ['name', 'here', 'act'], heads
+    # Spec, Tags and Used by wait in the column menu
+    page.locator('[data-cr-table="img-list"] [data-cr-colmenu]').click()
+    off = page.evaluate("""() => [...document.querySelectorAll('[data-cr-table="img-list"] .cr-menu input[data-cr-col]')]
+        .filter(i => !i.checked).map(i => i.dataset.crCol)""")
+    assert off == ['spec', 'tags', 'used'], off
+    assert page.locator('[data-cr-img-page]').get_attribute('data-cr-img-room') == 'narrow'
+
+
+def test_runtime_an_xcpng_pool_has_no_library_templates(open_app):
+    app = open_app(builds=STILL, clusters=[X1, CLUSTER])
+    page = app.page
+    page.locator('.corp-tree-item', has_text='Pool1').first.click()
+    page.locator('[data-cr-tab="automation"]').click()
+    page.locator('button', has_text=CR_TAB).first.click()
+    _need(page, '[data-cr-img-row]', 'the image table is filled')
+    page.wait_for_timeout(400)
+    assert set(_here(page).values()) == {'na'}, _here(page)
+    cell = _img_row(page, 'debian-13').locator('[data-cr-img-here]')
+    assert cell.inner_text().strip() == 'Not applicable' and 'Proxmox VE clusters only' in cell.get_attribute('title')
+    build = page.locator('[data-cr-img-build="debian-13"]')
+    assert build.is_disabled() and 'Proxmox VE clusters only' in build.get_attribute('title')
+    # a blueprint of an image deploys to a Proxmox VE cluster: making one is still open
+    assert page.locator('[data-cr-img-new="debian-13"]').is_enabled()
+    # nothing of the library is asked of the pool
+    assert [u for u in app.server.urls if '/api/clusters/x1/templates' in u] == []
+    assert page.locator('[data-cr-img-recent-empty]').count() == 1
+
+
+def test_runtime_an_empty_library_is_a_state_like_the_blueprints(open_app):
+    app = open_app(builds=STILL, images=[])
+    page = _templates(app)
+    _need(page, '[data-cr-img-empty]', 'an empty library says so')
+    assert page.locator('[data-cr-img-empty]').get_attribute('data-cr-nc-state') == 'info'
+    assert page.locator('[data-cr-img-empty]').inner_text().strip() == 'The library has no image.'
+
+
+def test_runtime_a_library_that_could_not_be_read_says_only_that(open_app):
+    app = open_app(builds=STILL, fail={'/api/templates/catalog', '/api/clusters/c1/templates/existing'})
+    page = _templates(app)
+    _need(page, '[data-cr-img-error]', 'a failed library read says so')
+    page.wait_for_timeout(500)
+    # what this cluster has of the images is no news without the images
+    assert page.locator('[data-cr-img] [data-cr-nc-for="img-here"]').count() == 0
+    assert 'internal error' in page.locator('[data-cr-img-error]').inner_text()
+
+
 # --- the ways there ----------------------------------------------------------------------------
 
 def _shown(page):
@@ -521,7 +729,7 @@ def test_runtime_the_resources_button_leads_there(open_app):
     page.locator('[data-cr-tab="resources"]').click()
     btn = page.locator('[data-cr-bp-nav="resources"]')
     btn.wait_for(timeout=8000)
-    assert btn.inner_text().strip() == 'Deploy from blueprint'
+    assert btn.inner_text().strip() == 'Deploy VM from blueprint'
     btn.click()
     _shown(page)
 
@@ -530,11 +738,11 @@ def test_runtime_the_cluster_menu_leads_there(open_app):
     app = open_app(builds=STILL)
     page = app.page
     page.locator('.corp-tree-item', has_text='Testi').first.click(button='right')
-    item = page.get_by_text('New VM from blueprint', exact=True)
+    item = page.get_by_text('Deploy VM from blueprint', exact=True)
     item.first.wait_for(timeout=5000)
-    # right under New VM and New Container
+    # right under New VM and New Container, with the label of the Resources button
     labels = page.evaluate("""() => [...document.querySelectorAll('.corp-ctx-item')].map(b => b.innerText.trim()).slice(0, 4)""")
-    assert labels == ['New VM', 'New Container', 'New VM from blueprint', 'Rename Cluster'], labels
+    assert labels == ['New VM', 'New Container', 'Deploy VM from blueprint', 'Rename Cluster'], labels
     item.first.click()
     _shown(page)
 
@@ -543,8 +751,11 @@ def test_runtime_ctrl_k_leads_there(open_app):
     app = open_app(builds=STILL)
     page = app.page
     page.locator('[data-cr-palette]').first.click()
+    # found by what it does as well as by what it takes
+    page.get_by_placeholder(re.compile('Type to search')).fill('deploy')
+    hit = page.locator('[data-cmdpal-idx]', has_text='Deploy VM from blueprint')
+    hit.first.wait_for(timeout=5000)
     page.get_by_placeholder(re.compile('Type to search')).fill('blueprint')
-    hit = page.locator('[data-cmdpal-idx]', has_text='New VM from blueprint')
     hit.first.wait_for(timeout=5000)
     hit.first.click()
     _shown(page)
@@ -559,7 +770,7 @@ def test_runtime_no_way_there_without_vm_create(open_app):
     page.locator('.corp-tree-item', has_text='Testi').first.click(button='right')
     # the menu is open (its Refresh needs no permission), without the entry
     page.get_by_text('Refresh', exact=True).first.wait_for(timeout=5000)
-    assert page.get_by_text('New VM from blueprint', exact=True).count() == 0
+    assert page.get_by_text('Deploy VM from blueprint', exact=True).count() == 0
 
 
 # --- only in Corporate Redesigned --------------------------------------------------------------
@@ -606,7 +817,9 @@ def _keys():
 
 def test_every_key_is_in_all_nine_languages_ahead_of_the_blueprint_keys():
     used = _keys()
-    assert len(used) > 90 and {'crBpNavTab', 'crBpNavDeploy', 'crBpNavNewVm'} <= used
+    assert len(used) > 90 and {'crBpNavTab', 'crBpNavDeploy'} <= used
+    # one label for the three ways there
+    assert not any('crBpNavNewVm' in b for b in _blocks().values())
     blocks = _blocks()
     assert set(blocks) == {'de', 'en', 'zh', 'pl', 'fr', 'es', 'pt', 'ko', 'it'}
     en = dict(re.findall(r'^                (cr(?:Img|BpNav)[A-Za-z]+): "(.*)",$', blocks['en'], re.M))
@@ -646,7 +859,9 @@ def test_the_module_is_built_shipped_and_plain():
 def test_the_page_hands_the_blueprints_their_props_and_clears_the_image_after():
     src = _read('web', 'src', 'cr_images.js')
     page = src[src.index('function CrBlueprintsTab('):]
-    assert 'prefillTemplate={prefill} onSaved={readBps}' in page
+    assert 'prefillTemplate={prefill}\n' in page and 'onSaved={readBps} onDeleted={readBps} onDeployed={deployed} />' in page
+    # Refresh mounts them again: they read their list when they mount
+    assert '<CrBlueprints key={bpKey} ' in page and 'setBpKey(k => k + 1); };' in page
     assert "useEffect(() => { if (prefill) setPrefill(''); }, [prefill]);" in page
     # the sections share one fetch: the same list asked at the same moment goes out once
     assert 'const shared = useMemo(() => crImgShared(authFetch), [authFetch]);' in page
@@ -676,7 +891,7 @@ def test_the_ways_there_are_corporate_redesigned_only():
     # the cluster menu: the redesign and a Proxmox VE cluster, the entry asks for vm.create
     menu = dash[dash.index('const buildContextMenuItemsRaw = '):dash.index('const buildContextMenuItems = ')]
     assert ("...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [\n"
-            "                            { perm: 'vm.create', label: t('crBpNavNewVm'),") in menu
+            "                            { perm: 'vm.create', label: t('crBpNavDeploy'),") in menu
     # Ctrl+K: an action of the redesign only
     pal = dash[dash.index('<CommandPalette'):]
     pal = pal[:pal.index('/>')]

@@ -20513,7 +20513,7 @@
                         }},
                         // LW Nov 2026 (#1220) - Corporate Redesigned: the blueprints of the Blueprints & Images sub tab
                         ...(isCorpRedesigned && (!cluster.cluster_type || cluster.cluster_type === 'proxmox') ? [
-                            { perm: 'vm.create', label: t('crBpNavNewVm'), icon: <Icons.Template className="w-3.5 h-3.5" />, onClick: () => crTaskNav.openBlueprints(cluster.id) },
+                            { perm: 'vm.create', label: t('crBpNavDeploy'), icon: <Icons.Template className="w-3.5 h-3.5" />, onClick: () => crTaskNav.openBlueprints(cluster.id) },
                         ] : []),
                         { separator: true },
                         { perm: 'cluster.config', label: t('renameCluster') || 'Rename', icon: <Icons.Edit className="w-3.5 h-3.5" />, onClick: () => { setRenamingCluster(cluster); setRenameValue(cluster.display_name || cluster.name || ''); } },
@@ -32643,7 +32643,7 @@
                             authFetch={authFetch}
                             onPickHit={(hit) => { setShowCommandPalette(false); navigateToResult(hit); }}
                             extraActions={isCorpRedesigned && can('vm.create') && clusters.some(c => !c.cluster_type || c.cluster_type === 'proxmox')
-                                ? [['cr-blueprints', t('crBpNavNewVm'), 'Template']] : undefined}
+                                ? [['cr-blueprints', t('crBpNavDeploy'), 'Template']] : undefined}
                             onPickCluster={(c) => { setSelectedCluster(c); setActiveTab('overview'); setShowCommandPalette(false); }}
                             onPickVm={(vm) => {
                                 const c = clusters.find(cl => cl.id === vm._clusterId);
