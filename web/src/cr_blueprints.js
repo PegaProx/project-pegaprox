@@ -567,6 +567,7 @@
             const [server, setServer] = useState(null);
             const [dep, setDep] = useState(null);
             const [row, setRow] = useState(null);
+            const [showPw, setShowPw] = useState(false);
             const seq = useRef({ c: 0, n: 0 });
             const set = (k, v) => { setForm(f => ({ ...f, [k]: v })); setServer(s => (s && s.field === k ? null : s)); };
 
@@ -783,9 +784,13 @@
                                             </CrBpField>
                                         </>
                                     )}
-                                    <CrBpField id="password" label={t('crBpFPassword')} error={err('password')} hint={t(win ? 'crBpFPasswordHintWin' : 'crBpFPasswordHint')}>
-                                        <input id="cr-nc-bp-password" type="password" className="cr-input" value={form.password} autoComplete="new-password"
-                                            required={win} onChange={e => set('password', e.target.value)} data-cr-bp-dep="password" />
+                                    <CrBpField id="password" label={t(win ? 'crBpFPasswordWin' : 'crBpFPassword')} error={err('password')} hint={t(win ? 'crBpFPasswordHintWin' : 'crBpFPasswordHint')}>
+                                        <div className="cr-bp-pw">
+                                            <input id="cr-nc-bp-password" type={showPw ? 'text' : 'password'} className="cr-input" value={form.password} autoComplete="new-password"
+                                                spellCheck={false} required={win} onChange={e => set('password', e.target.value)} data-cr-bp-dep="password" />
+                                            <CrButton icon={<Icons.Eye />} aria-pressed={showPw} title={t('crBpPwShow')} aria-label={t('crBpPwShow')}
+                                                onClick={() => setShowPw(v => !v)} data-cr-bp-pw-show="" />
+                                        </div>
                                     </CrBpField>
                                 </div>
                             )}
@@ -815,8 +820,8 @@
         // (not on a standby). nav: the task center's navigation, for the guest a deploy made.
         // For the page around it: prefillTemplate (a library template_id, or { template_id } so the
         // same image opens the editor again) opens a new blueprint of that image; onSaved(bp, isNew)
-        // follows a save, onDeployed(dep) a deploy the server took
-        function CrBlueprints({ cluster, clusters, authFetch, addToast, canRead, canWrite, nav, prefillTemplate, onSaved, onDeployed }) {
+        // follows a save, onDeleted(bp) a delete, onDeployed(dep) a deploy the server took
+        function CrBlueprints({ cluster, clusters, authFetch, addToast, canRead, canWrite, nav, prefillTemplate, onSaved, onDeleted, onDeployed }) {
             const { t } = useTranslation();
             const { haReadOnly } = useAuth();
             const cid = cluster && cluster.id;
@@ -872,7 +877,13 @@
                 setDelBusy(true);
                 const res = await crBpSend(authFetch, `${API_URL}/blueprints/${encodeURIComponent(del.id)}`, 'DELETE');
                 setDelBusy(false);
-                if (res.ok) { setDel(null); addToast(t('crBpDeleted'), 'success'); loadList(); return; }
+                if (res.ok) {
+                    setDel(null);
+                    addToast(t('crBpDeleted'), 'success');
+                    loadList();
+                    if (typeof onDeleted === 'function') onDeleted(del);
+                    return;
+                }
                 addToast(crBpSendText(res, t), 'error');
             };
 
@@ -939,7 +950,7 @@
                             : list.state === 'error' ? <CrNcState id="bp" kind="error" onRetry={loadList} data-cr-bp-error="">{crFill(t('crBpReadFailed'), { reason: list.why })}</CrNcState>
                             : !list.rows.length ? <CrNcState id="bp-empty" kind="info" data-cr-bp-empty="">{t('crBpEmpty')}</CrNcState>
                             : <CrTable id="bp-list" columns={cols} rows={list.rows} rowKey={r => r.id} ariaLabel={t('crBpTitle')} rowHeight={40}
-                                initialSort={{ key: 'name', dir: 'asc' }} showCount={false} />}
+                                initialSort={{ key: 'name', dir: 'asc' }} showCount={false} columnMenu={false} />}
                     </CrNcSection>
                     {editor && (
                         <CrBpEditor bp={editor.bp} templateId={editor.templateId} authFetch={authFetch} bridges={bridges}

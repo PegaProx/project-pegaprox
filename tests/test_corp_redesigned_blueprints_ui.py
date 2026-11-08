@@ -8,7 +8,8 @@ the deploy dialog (Windows goes this way: no Cloud-Init user, keys, search domai
 password on every deploy). The editor has explicit grids and the defaults of the server, the deploy
 dialog checks the bridges of the target node and shows the notes the server answers with. The
 recent deploys are listed by the page around the section, which hands it a template to start a
-blueprint from (prefillTemplate) and hears of saves (onSaved).
+blueprint from (prefillTemplate) and hears of saves and deletes (onSaved, onDeleted). What the section
+reads itself is told apart from the page's reads by a wrapped mount (_wrapped) that records them.
 
 Only Corporate Redesigned has the section: classic Corporate, Modern and Cloud draw the library as
 before. Runtime tests drive the built bundle in headless Chromium against the guard fake of
@@ -71,7 +72,10 @@ GOLD = _bp('b6', 'rocky-golden', source_kind='template', os='linux', template_id
            nics=[{'bridge': 'vnet7', 'vlan': None, 'model': 'virtio', 'firewall': False}])
 RECENT = [{'id': 'r1', 'blueprint_id': 'b1', 'blueprint_name': 'web-small', 'cluster_id': 'c1', 'node': 'pve1', 'vmid': 120,
            'name': 'web-01', 'template_vmid': 9001, 'build_dep_id': '', 'status': 'completed', 'step': 'done', 'progress': 100,
-           'error': '', 'started_by': 'admin', 'started_at': '2026-11-08T08:40:00.123456', 'finished_at': '2026-11-08T08:42:00'}]
+           'error': '', 'started_by': 'admin', 'started_at': '2026-11-08T08:40:00.123456', 'finished_at': '2026-11-08T08:42:00'},
+          {'id': 'r2', 'blueprint_id': 'b2', 'blueprint_name': 'db-static', 'cluster_id': 'c1', 'node': 'pve2', 'vmid': 121,
+           'name': 'db-01', 'template_vmid': None, 'build_dep_id': 'x9', 'status': 'failed', 'step': 'template', 'progress': 20,
+           'error': 'download failed (rc=8)', 'started_by': 'admin', 'started_at': '2026-11-08T08:50:00', 'finished_at': '2026-11-08T08:51:00'}]
 NODES = [{'node': 'pve1', 'status': 'online'}, {'node': 'pve2', 'status': 'online'}, {'node': 'pve3', 'status': 'offline'}]
 STORES = {'pve1': [{'storage': 'local-lvm', 'content': 'images,rootdir', 'enabled': 1, 'active': 1},
                    {'storage': 'local', 'content': 'iso,vztmpl,backup', 'enabled': 1, 'active': 1},
@@ -282,10 +286,48 @@ def _box(page, selector):
     return page.locator(selector).first.bounding_box()
 
 
+# the mount of CrBlueprints wrapped in a component that hands it prefillTemplate, onSaved and
+# onDeleted the way the page around it does, so the test can set them while the section is
+# mounted, and an authFetch that records what the section reads itself (the page around it may
+# read the same routes for its own lists)
+_WRAP = """() => {
+    window.__crBpSaved = [];
+    window.__crBpDeleted = [];
+    window.__crBpUrls = [];
+    window.__crBpWrap = (C) => window.__crBpW || (window.__crBpW = function CrBpTestMount(p) {
+        const [pre, setPre] = React.useState(null);
+        window.__crBpPrefill = setPre;
+        const fetchSpy = React.useMemo(() => (url, opts) => { window.__crBpUrls.push(String(url)); return p.authFetch(url, opts); }, [p.authFetch]);
+        return React.createElement(C, Object.assign({}, p, { authFetch: fetchSpy, prefillTemplate: pre,
+            onSaved: (bp, isNew) => window.__crBpSaved.push([bp.id, isNew]),
+            onDeleted: (bp) => window.__crBpDeleted.push(bp.id) }));
+    });
+}"""
+
+
+def _wrapped_bundle():
+    html = BUNDLE if BUNDLE is not None else open(os.path.join(ROOT, 'web', 'index.html'), encoding='utf-8').read()
+    mount = 'React.createElement(CrBlueprints,{'
+    assert html.count(mount) == 1
+    return html.replace(mount, 'React.createElement(window.__crBpWrap ? window.__crBpWrap(CrBlueprints) : CrBlueprints,{')
+
+
+def _wrapped(open_app, **kw):
+    app = open_app(bundle=_wrapped_bundle(), **kw)
+    app.page.evaluate(_WRAP)
+    return app
+
+
+def _own_reads(app, path=None):
+    """The paths CrBlueprints read itself through the wrapped mount (only those equal to path)."""
+    paths = [re.sub(r'^https?://[^/]+', '', u).split('?')[0] for u in app.page.evaluate('() => window.__crBpUrls')]
+    return [x for x in paths if path is None or x == path]
+
+
 # --- the list ----------------------------------------------------------------------------------
 
 def test_runtime_the_list_shows_each_blueprint_and_reads_once(open_app):
-    app = open_app()
+    app = _wrapped(open_app)
     page = _page(app)
     page.wait_for_timeout(400)
     rows = page.evaluate("""() => [...document.querySelectorAll('[data-cr-bp-row]')].map(e => e.dataset.crBpRow)""")
@@ -298,9 +340,9 @@ def test_runtime_the_list_shows_each_blueprint_and_reads_once(open_app):
     # an image the library dropped: said, and no deploy
     assert _row(page, 'b4').locator('[data-cr-bp-image="missing"]').count() == 1
     assert page.locator('[data-cr-bp-deploy="b4"]').is_disabled()
-    # one read of the list, nothing per row, and no list of deploys (the page around it has that)
-    assert _count(app, 'GET', '/api/blueprints') == 1
-    assert _count(app, 'GET', '/api/blueprints/deployments') == 0
+    # one read of the list, nothing per row, and no list of deploys (the page around it reads that
+    # once for its own list, the section never)
+    assert _own_reads(app) == ['/api/blueprints']
     # no progress read without an open deploy
     assert app.server.prog_reads == []
     _no_errors(app)
@@ -309,7 +351,7 @@ def test_runtime_the_list_shows_each_blueprint_and_reads_once(open_app):
 def test_runtime_the_list_says_source_network_and_that_it_is_for_all_clusters(open_app):
     page = _page(open_app())
     head = page.locator('[data-cr-nc-sec="bp"] .cr-nc-titleline')
-    assert head.locator('[data-cr-bp-scope="all"]').inner_text().strip() == 'All clusters'
+    assert head.locator('[data-cr-bp-scope="all"]').inner_text().strip() == 'Shared across clusters'
     assert head.locator('.cr-badge', has_text=re.compile(r'^6$')).count() == 1
     # Source: the image of a library blueprint, the kind of template of a template blueprint
     # with the VMID this cluster remembers
@@ -342,13 +384,21 @@ def test_runtime_the_row_actions_leave_primary_to_new_blueprint(open_app):
     assert page.evaluate("() => document.querySelectorAll('[data-cr-table=\"bp-list\"] .cr-btn-primary').length") == 0
 
 
+def test_runtime_the_list_has_no_toolbar_of_its_own(open_app):
+    # a column menu alone would draw an empty strip with an eye icon above the header
+    page = _page(open_app())
+    table = page.locator('[data-cr-table="bp-list"]')
+    assert table.locator('thead th').count() >= 6
+    assert table.locator('.cr-table-toolbar').count() == 0 and table.locator('[data-cr-colmenu]').count() == 0
+
+
 def test_runtime_no_recent_deploys_card_here(open_app):
-    app = open_app()
+    app = _wrapped(open_app)
     page = _page(app)
     page.wait_for_timeout(500)
     assert page.locator('[data-cr-nc-sec="bp-recent"]').count() == 0
     assert page.locator('[data-cr-table="bp-recent"]').count() == 0
-    assert _count(app, 'GET', '/api/blueprints/deployments') == 0
+    assert _own_reads(app, '/api/blueprints/deployments') == []
 
 
 def test_runtime_an_empty_list_is_a_state_with_its_text(open_app):
@@ -379,6 +429,23 @@ def test_runtime_delete_asks_first_and_reads_the_list_again(open_app):
     assert _wait(page, lambda: ('DELETE', '/api/blueprints/b1') in app.server.calls)
     assert _wait(page, lambda: page.locator('[data-cr-bp-row="b1"]').count() == 0)
     assert _count(app, 'GET', '/api/blueprints') == 2
+
+
+def test_runtime_a_delete_is_told_to_the_page_around_it(open_app):
+    app = _wrapped(open_app)
+    page = _page(app)
+    page.locator('[data-cr-bp-delete="b2"]').click()
+    page.locator('[data-cr-nc-confirm-go="bp-delete"]').click()
+    assert _wait(page, lambda: page.evaluate('() => window.__crBpDeleted') == ['b2'])
+    assert page.evaluate('() => window.__crBpSaved') == []
+    # a delete the server refuses is not
+    app.server.bps = [b for b in app.server.bps if b['id'] != 'b1']
+    page.locator('[data-cr-bp-delete="b1"]').click()
+    page.locator('[data-cr-nc-confirm-go="bp-delete"]').click()
+    assert _wait(page, lambda: ('DELETE', '/api/blueprints/b1') in app.server.calls)
+    page.wait_for_timeout(300)
+    assert page.evaluate('() => window.__crBpDeleted') == ['b2']
+    assert page.locator('[data-cr-nc-confirm="bp-delete"]').count() == 1
 
 
 # --- the editor --------------------------------------------------------------------------------
@@ -799,6 +866,44 @@ def test_runtime_a_windows_deploy_picks_a_template_and_needs_a_password(open_app
     assert page.locator('[data-cr-bp-step="template"]').count() == 0
 
 
+def test_runtime_the_template_pick_is_as_wide_as_its_field(open_app):
+    # long names (win2022-golden (9100) · pve1 · win11) are not cut off at the cap of the narrow selects
+    page = _page(open_app())
+    page.locator('[data-cr-bp-deploy="b5"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b5"]', 'the deploy dialog opens')
+    page.locator('[data-cr-bp-dep="template_vmid"] option[value="9100"]').wait_for(state='attached', timeout=4000)
+    field, pick = _box(page, '[data-cr-nc-field="bp-template_vmid"]'), _box(page, '[data-cr-bp-dep="template_vmid"]')
+    assert field['width'] > 500 and abs(pick['width'] - field['width']) < 2, (field, pick)
+    node, cluster = _box(page, '[data-cr-nc-field="bp-node"]'), _box(page, '[data-cr-bp-dep="node"]')
+    assert abs(cluster['width'] - node['width']) < 2 and node['width'] < field['width']
+
+
+def test_runtime_the_windows_password_is_the_administrator_one_and_can_be_shown(open_app):
+    app = open_app()
+    page = _page(app)
+    page.locator('[data-cr-bp-deploy="b5"]').click()
+    _need(page, '[data-cr-bp-deploy-form="b5"]', 'the deploy dialog opens')
+    assert page.locator('label[for="cr-nc-bp-password"]').inner_text() == 'Administrator password'
+    pw, show = page.locator('[data-cr-bp-dep="password"]'), page.locator('[data-cr-bp-pw-show]')
+    pw.fill('Adm1n!pass')
+    assert pw.get_attribute('type') == 'password' and show.get_attribute('aria-pressed') == 'false'
+    assert show.get_attribute('aria-label') == 'Show password'
+    # typed once and never shown again: it can be looked at before the deploy
+    show.click()
+    assert pw.get_attribute('type') == 'text' and pw.input_value() == 'Adm1n!pass' and show.get_attribute('aria-pressed') == 'true'
+    show.click()
+    assert pw.get_attribute('type') == 'password'
+    a, b = _box(page, '[data-cr-bp-dep="password"]'), _box(page, '[data-cr-bp-pw-show]')
+    assert abs((a['y'] + a['height'] / 2) - (b['y'] + b['height'] / 2)) < 2 and b['x'] >= a['x'] + a['width']
+    field = _box(page, '[data-cr-nc-field="bp-password"]')
+    assert b['x'] + b['width'] <= field['x'] + field['width'] + 1
+    # a Linux blueprint keeps the Cloud-Init password
+    page.locator('[data-cr-bp-deploy-cancel]').click()
+    _deploy(page, 'b1')
+    assert page.locator('label[for="cr-nc-bp-password"]').inner_text() == 'Cloud-Init password'
+    assert page.locator('[data-cr-bp-pw-show]').count() == 1
+
+
 def test_runtime_another_node_keeps_only_a_template_it_can_clone(open_app):
     app = open_app()
     page = _page(app)
@@ -930,7 +1035,7 @@ def test_runtime_a_failed_deploy_stops_the_reads_and_says_why(open_app):
 
 
 def test_runtime_closing_the_dialog_stops_the_reads(open_app):
-    app = open_app(progress=[RUNNING])
+    app = _wrapped(open_app, progress=[RUNNING])
     page = _page(app)
     _deploy(page)
     page.locator('[data-cr-bp-deploy-go]').click()
@@ -942,7 +1047,7 @@ def test_runtime_closing_the_dialog_stops_the_reads(open_app):
     page.wait_for_timeout(3500)
     assert len(app.server.prog_reads) == reads
     # no list of deploys here: the page around it reads that
-    assert _count(app, 'GET', '/api/blueprints/deployments') == 0
+    assert _own_reads(app, '/api/blueprints/deployments') == []
 
 
 def test_runtime_a_refused_deploy_stays_in_the_dialog_with_the_reason(open_app):
@@ -958,29 +1063,8 @@ def test_runtime_a_refused_deploy_stays_in_the_dialog_with_the_reason(open_app):
 
 # --- the props for the page around it ---------------------------------------------------------
 
-# the mount of dashboard.js wrapped in a component that hands CrBlueprints prefillTemplate and
-# onSaved the way the page around it does, so the test can set them while the section is mounted
-_WRAP = """() => {
-    window.__crBpSaved = [];
-    window.__crBpWrap = (C) => window.__crBpW || (window.__crBpW = function CrBpTestMount(p) {
-        const [pre, setPre] = React.useState(null);
-        window.__crBpPrefill = setPre;
-        return React.createElement(C, Object.assign({}, p, { prefillTemplate: pre,
-            onSaved: (bp, isNew) => window.__crBpSaved.push([bp.id, isNew]) }));
-    });
-}"""
-
-
-def _wrapped_bundle():
-    html = BUNDLE if BUNDLE is not None else open(os.path.join(ROOT, 'web', 'index.html'), encoding='utf-8').read()
-    mount = 'React.createElement(CrBlueprints,{'
-    assert html.count(mount) == 1
-    return html.replace(mount, 'React.createElement(window.__crBpWrap ? window.__crBpWrap(CrBlueprints) : CrBlueprints,{')
-
-
 def test_runtime_prefill_template_opens_a_new_blueprint_of_that_image(open_app):
-    app = open_app(bundle=_wrapped_bundle())
-    app.page.evaluate(_WRAP)
+    app = _wrapped(open_app)
     page = _page(app)
     assert page.locator('[data-cr-bp-editor]').count() == 0
     page.evaluate("() => window.__crBpPrefill({ template_id: 'almalinux-10' })")
@@ -1044,10 +1128,11 @@ def test_the_props_for_the_page_around_it():
     src = _read('web', 'src', 'cr_blueprints.js')
     sig = re.search(r'function CrBlueprints\(\{([^}]*)\}\)', src).group(1)
     assert [p.strip() for p in sig.split(',')] == ['cluster', 'clusters', 'authFetch', 'addToast', 'canRead', 'canWrite', 'nav',
-                                                   'prefillTemplate', 'onSaved', 'onDeployed']
+                                                   'prefillTemplate', 'onSaved', 'onDeleted', 'onDeployed']
     page = src[src.index('function CrBlueprints'):]
     # the callbacks are optional: the mount of today passes none
-    assert "typeof onSaved === 'function'" in page and "typeof onDeployed === 'function'" in page
+    for cb in ('onSaved', 'onDeleted', 'onDeployed'):
+        assert f"typeof {cb} === 'function'" in page, cb
     assert 'if (prefillId && canRead && write) openEditor(null, prefillId);' in page and '}, [prefillTemplate]);' in page
 
 
@@ -1075,6 +1160,14 @@ def test_every_key_is_in_all_nine_languages_ahead_of_the_pinned_chain():
             assert m.start() < marker, (lang, k)
             assert not any(d in m.group(1) for d in DASHES), (lang, k)
             assert len(re.findall(rf'^                {k}: ', block, re.M)) == 1, (lang, k)
+
+
+def test_no_crbp_key_is_left_unused():
+    src = _read('web', 'src', 'translations.js')
+    keys = set(re.findall(r'^                (crBp[A-Za-z]+): ', src, re.M))
+    code = ''.join(_read('web', 'src', f) for f in sorted(os.listdir(os.path.join(ROOT, 'web', 'src')))
+                   if f.endswith('.js') and f != 'translations.js')
+    assert sorted(k for k in keys if not re.search(rf"['\"`]{k}['\"`]", code)) == []
 
 
 def test_the_placeholders_survive_every_translation():
