@@ -373,7 +373,9 @@ def _job_mgr():
     m.clone_vm.return_value = {'success': True, 'data': 'UPID:pve1:clone'}
     m._wait_for_task.return_value = True
     m._api_post.return_value = _Resp()
-    m.get_vm_config.return_value = {'success': True, 'config': {'scsi0': 'local-lvm:vm-150-disk-0,size=3584M'}}
+    # the shape get_vm_config answers in: parsed, PVE's own keys under 'raw'
+    m.get_vm_config.return_value = {'success': True, 'config': {
+        'disks': [], 'raw': {'scsi0': 'local-lvm:vm-150-disk-0,size=3584M'}}}
     m.resize_vm_disk.return_value = {'success': True}
     m.vm_action.return_value = {'success': True}
     return m
@@ -413,7 +415,7 @@ def test_a_template_on_shared_storage_elsewhere_clones_across(api, db):
 def test_a_larger_image_keeps_its_disk(api, db):
     m, row = _job(api, db, template={'vmid': 9002, 'node': 'pve1', 'storage': 'x', 'shared': False},
                   row=_row(disk_gb=2))
-    assert not m.resize_vm_disk.called and 'stays' in row['log']
+    assert not m.resize_vm_disk.called and 'the image is already 3.5 GB' in row['log']
 
 
 def test_the_job_builds_the_template_first_with_the_library(api, db, monkeypatch):

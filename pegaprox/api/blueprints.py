@@ -647,8 +647,10 @@ def run_deploy(dep_id, cluster_id, bp_row, node, storage, vmid, name, template, 
         want = int(bp_row['disk_gb'] or 0)
         if want:
             _update(dep_id, step='resize')
-            got = mgr.get_vm_config(node, vmid, 'qemu')
-            have = disk_gb_of(((got or {}).get('config') or {}).get('scsi0', '')) if got.get('success') else None
+            got = mgr.get_vm_config(node, vmid, 'qemu') or {}
+            # get_vm_config parses the config and keeps PVE's own keys under 'raw'
+            raw = ((got.get('config') or {}).get('raw') or {}) if got.get('success') else {}
+            have = disk_gb_of(raw.get('scsi0', ''))
             if have is not None and want > have + 0.01:
                 rr = mgr.resize_vm_disk(node, vmid, 'qemu', 'scsi0', f'{want}G')
                 if not rr.get('success'):
