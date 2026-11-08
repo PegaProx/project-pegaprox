@@ -411,7 +411,8 @@ def test_the_managers_ssh_helper_logs_in_as_the_cluster_says(admin, pve, monkeyp
     from pegaprox.core.manager import PegaProxManager
     monkeypatch.setattr(_g, '_ssh_semaphore', threading.BoundedSemaphore(4))
     fake = pve.fake
-    _real_ssh_gate(fake, ssh_user='pegaprox', ssh_port=2222)
+    # pegaprox@pam: its password is the one pegaprox logs in with (#1322)
+    _real_ssh_gate(fake, ssh_user='pegaprox', ssh_port=2222, user='pegaprox@pam')
     for name in ('_ssh_connect', 'ssh_password_to_offer'):
         setattr(fake, name, types.MethodType(getattr(PegaProxManager, name), fake))
     raw = MagicMock(name='SSHClient()')
@@ -436,10 +437,10 @@ def test_the_managers_ssh_helper_logs_in_as_the_cluster_says(admin, pve, monkeyp
 
 
 @pytest.mark.parametrize('ssh_user,user,sudo', [('', 'root@pam', False), ('root', 'pegaprox@pve', False),
-                                                ('pegaprox', 'root@pam', True), ('', 'ops@pam', True)])
+                                                ('pegaprox', 'root@pam', True), ('', 'ops@pam', False)])
 def test_pct_runs_as_root_or_through_sudo(admin, pve, ssh_user, user, sudo):
-    """pct wants root: the login _ssh_connect makes (ssh_user, else the API user's name)
-    decides whether it goes through sudo -n."""
+    """pct wants root: the login _ssh_connect makes (ssh_user, else root - #1322) decides
+    whether it goes through sudo -n."""
     pve.fake.config.ssh_user, pve.fake.config.user = ssh_user, user
     assert _restore(admin, volid=OWN_CT, vm='lxc/101').status_code == 200
     plain = "pct exec 101 -- sh -c 'cat > /etc/hosts'"

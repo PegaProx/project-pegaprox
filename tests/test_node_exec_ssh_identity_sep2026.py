@@ -66,7 +66,8 @@ def test_the_configured_ssh_user_is_used(monkeypatch):
     seen = {}
     monkeypatch.setattr(ssh_mod, '_ssh_exec',
                         lambda host, user, pwd, cmd, **k: seen.update(user=user) or (0, 'ok', ''))
-    mgr = _Mgr(ssh_user='pegaprox')
+    # the password of pegaprox@pam is pegaprox's, so it goes along (#1322)
+    mgr = _Mgr(ssh_user='pegaprox', user='pegaprox@pam')
     ssh_mod._pve_node_exec(mgr, 'n1', 'true')
     assert seen['user'] == 'pegaprox', "still hardcoding root, as core/xhm.py never did"
 

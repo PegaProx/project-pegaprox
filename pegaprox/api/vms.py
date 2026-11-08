@@ -64,7 +64,7 @@ from pegaprox.core import ha, ha_transport
 from pegaprox.core import transfer_net, preflight
 from pegaprox.core.transfer_net import transfer_ssh_address
 from pegaprox.background import guest_index
-from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host
+from pegaprox.utils.ssh import get_paramiko, ssh_password_for, ssh_password_to, ssh_blocked_for, bare_host, node_login
 from pegaprox.utils.sanitization import sanitize_int, validate_snapshot_name
 from urllib.parse import urlencode, quote as url_quote
 import signal
@@ -2222,7 +2222,7 @@ def restore_backup_file(cluster_id, node, vm_type, vmid):
                 # pct wants root: the login _ssh_connect made, when it is not root, asks
                 # sudo, never with a prompt
                 cfg = manager.config
-                if (cfg.ssh_user or (cfg.user or 'root').split('@')[0]) != 'root':
+                if node_login(cfg) != 'root':
                     cmd = 'sudo -n ' + cmd
                 stdin_ch, stdout_ch, stderr_ch = ssh.exec_command(cmd, timeout=60)
                 try:
@@ -4058,10 +4058,7 @@ def remove_node_from_cluster(cluster_id, node_name):
     try:
         # Get cluster credentials for SSH - same pattern as HA
         cluster_config = mgr.config
-        ssh_user = getattr(cluster_config, 'ssh_user', None) or ''
-        if not ssh_user:
-            api_user = cluster_config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+        ssh_user = node_login(cluster_config)
         ssh_key_content = getattr(cluster_config, 'ssh_key', '') or ''
         
         # Find an online node to execute the removal from
@@ -5429,7 +5426,7 @@ def _screenshot_via_rfb(mgr, node, vm_type, vmid, max_width=480, timeout=10):
     try:
         if _vnc_tunnel_wanted(mgr):
             from pegaprox.utils import vnc_tunnel as _vt
-            _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
+            _ssh_user = node_login(mgr.config)
             _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
             tunnel_endpoint = _vt.acquire(
                 cluster_id=getattr(mgr, 'id', ''), pve_host=host,
@@ -5671,7 +5668,7 @@ def vnc_poll(cluster_id, node, vm_type, vmid):
         try:
             if _vnc_tunnel_wanted(mgr):
                 from pegaprox.utils import vnc_tunnel as _vt
-                _ssh_user = getattr(mgr.config, 'ssh_user', None) or (mgr.config.user or 'root').split('@')[0]
+                _ssh_user = node_login(mgr.config)
                 _ssh_port = getattr(mgr.config, 'ssh_port', 22) or 22
                 tunnel_endpoint = _vt.acquire(
                     cluster_id=cluster_id, pve_host=host,
@@ -11793,7 +11790,7 @@ def start_vnc_websocket_server(port=5001, ssl_cert=None, ssl_key=None, host='0.0
             if _use_tunnel:
                 try:
                     from pegaprox.utils import vnc_tunnel as _vt
-                    _ssh_user = getattr(manager.config, 'ssh_user', None) or (manager.config.user or 'root').split('@')[0]
+                    _ssh_user = node_login(manager.config)
                     _ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
                     _ssh_key = getattr(manager.config, 'ssh_key', '') or ''
                     _ssh_pass = ssh_password_to(manager, host)

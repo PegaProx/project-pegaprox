@@ -16,7 +16,7 @@ from datetime import datetime
 
 from pegaprox.globals import cluster_managers, _xhm_migrations
 from pegaprox.core import ha_transport
-from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal
+from pegaprox.utils.ssh import _ssh_exec, _pve_node_exec, ssh_password_for, ssh_password_to, bare_host, is_ipv6_literal, node_login
 from pegaprox.utils.sanitization import validate_ssh_user
 from pegaprox.utils.realtime import broadcast_sse
 from pegaprox.utils.audit import log_audit
@@ -723,7 +723,7 @@ def _run_xcpng_to_pve(task):
                     task.set_phase('failed', f'Cannot resolve IP for PVE node {task.target_node}')
                     return
 
-                pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
+                pve_user = node_login(tgt_mgr.config)
                 pve_pass = ssh_password_to(tgt_mgr, pve_host)
                 pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))
@@ -1239,7 +1239,7 @@ def _run_pve_to_xcpng(task):
 
             # SSH into PVE, stream disk -> PegaProx -> HTTP PUT to XCP-ng
             try:
-                pve_user = getattr(src_mgr.config, 'ssh_user', '') or 'root'
+                pve_user = node_login(src_mgr.config)
                 pve_pass = ssh_password_to(src_mgr, pve_host)
                 pve_key = getattr(src_mgr.config, 'ssh_key', '')
                 pve_port = int(getattr(src_mgr.config, 'ssh_port', 22))
@@ -2035,7 +2035,7 @@ def _run_esxi_to_pve(task):
         if not validate_ssh_user(esxi_user):
             task.set_phase('failed', 'The SSH user of the ESXi source is not a valid user name')
             return
-        pve_user = getattr(tgt_mgr.config, 'ssh_user', '') or 'root'
+        pve_user = node_login(tgt_mgr.config)
         pve_pass = ssh_password_to(tgt_mgr, pve_host)
         pve_key = getattr(tgt_mgr.config, 'ssh_key', '')
         pve_port = int(getattr(tgt_mgr.config, 'ssh_port', 22))

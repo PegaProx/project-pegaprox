@@ -944,7 +944,7 @@ def get_node_credentials(cluster_id):
     if err:
         return err
     from pegaprox.core import node_creds
-    from pegaprox.utils.ssh import ssh_password_for
+    from pegaprox.utils.ssh import ssh_password_for, node_login
     rows = {r['node']: r for r in node_creds.state(cluster_id)}
     members = _cluster_members(mgr)
     nodes = []
@@ -967,7 +967,7 @@ def get_node_credentials(cluster_id):
     return jsonify({
         'cluster_id': cluster_id,
         'nodes': nodes,
-        'ssh_user': getattr(cfg, 'ssh_user', '') or (user or 'root').split('@')[0],
+        'ssh_user': node_login(cfg),
         'ssh_key': bool(getattr(cfg, 'ssh_key', '')),
         'ssh_disabled': bool(getattr(cfg, 'ssh_disabled', False)),
         'token_auth': '!' in user,

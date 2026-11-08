@@ -27,7 +27,7 @@ from pegaprox.utils.rbac import user_can_access_vm
 from pegaprox.core.cache import APIRateLimiter, StorageDataCache
 from pegaprox.api.helpers import get_connected_manager, check_cluster_access, safe_error, parse_pve_error, scope_vm_rows, require_unconfined
 from pegaprox.api.helpers import upstream_failure, require_guest_node
-from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_to, ssh_blocked_for, bare_host
+from pegaprox.utils.ssh import get_paramiko, _ssh_track_connection, ssh_password_to, ssh_blocked_for, bare_host, node_login
 from pegaprox import globals as _g
 from pegaprox.utils.ssh import read_capped as _read_capped
 
@@ -2183,7 +2183,7 @@ def rescan_storage(cluster_id, storage_id):
                             _ssh_track_connection('normal', +1)
                             
                             # Get SSH config from cluster
-                            ssh_user = manager.config.ssh_user if hasattr(manager.config, 'ssh_user') and manager.config.ssh_user else 'root'
+                            ssh_user = node_login(manager.config)
                             ssh_port = getattr(manager.config, 'ssh_port', 22) or 22
                             ssh_key = getattr(manager.config, 'ssh_key', '')
 

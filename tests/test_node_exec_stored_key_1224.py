@@ -486,8 +486,8 @@ def test_a_login_with_the_key_that_went_through_ends_the_refusal_there(db, monke
     _fake_paramiko(monkeypatch, seen, refuse=['Authentication failed.', None, None, None])
     m = _real_manager()
     assert ssh_mod._pve_node_exec(m, 'pve1', 'true', timeout=5)[0] == 1
-    # the connection check's login: ssh_user, else the API user's name - 'ops' here
-    assert m._ssh_connect('10.0.0.7', retries=1, failure={}) is not None
+    # a login as another user, here ops
+    assert m._ssh_connect('10.0.0.7', retries=1, failure={}, login='ops') is not None
     assert ssh_mod._pve_node_exec(m, 'pve1', 'true', timeout=5)[0] == 1
     assert len(seen) == 2, 'a login as ops lifted the refusal of root'
     assert m._ssh_connect('10.0.0.7', retries=1, failure={}, login='root') is not None

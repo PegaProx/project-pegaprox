@@ -495,7 +495,8 @@ def read_node_bmc_inband(mgr, node, timeout=15):
         ip = mgr._get_node_ip(node)
         if not ip:
             return {'available': False, 'reason': f'no SSH-reachable IP for node {node}'}
-        user = getattr(mgr.config, 'ssh_user', None) or 'root'
+        from pegaprox.utils.ssh import node_login
+        user = node_login(mgr.config)
 
         # NS Aug 2026 (#609) — "credential-free" here means no BMC creds, but it still needs a
         # node shell. The read originally tried ONLY _ssh_run_command_output (agent/known-key

@@ -101,7 +101,7 @@ from pegaprox.models.tasks import (MaintenanceTask, PegaProxConfig, balancer_coo
                                    BALANCER_COOLDOWN_DEFAULT)
 from pegaprox.core.config import save_config
 from pegaprox.utils.realtime import broadcast_sse, is_cluster_watched
-from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for
+from pegaprox.utils.ssh import get_ssh_connection_stats, _ssh_track_connection, ssh_password_for, node_login
 from pegaprox.utils.ssh import ssh_login_args, bare_host, is_ipv6_literal
 from pegaprox.utils.concurrent import GEVENT_PATCHED
 from pegaprox.core.db import get_db
@@ -5361,7 +5361,7 @@ class PegaProxManager:
                 self.logger.warning(f"[MAINT] can't resolve {node_name} IP, custom evacuation")
                 return False
 
-            ssh_user = (self.config.user or 'root').split('@')[0]
+            ssh_user = node_login(self.config)
             # non-root PAM users need sudo for ha-manager
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance enable {node_name}"
@@ -5762,7 +5762,7 @@ class PegaProxManager:
     # run it on any other reachable node instead
     def _try_disable_native_ha_maintenance(self, node_name):
         try:
-            ssh_user = (self.config.user or 'root').split('@')[0]
+            ssh_user = node_login(self.config)
             prefix = "sudo " if ssh_user != 'root' else ""
             cmd = f"{prefix}ha-manager crm-command node-maintenance disable {node_name}"
             ssh_key = getattr(self.config, 'ssh_key', '')
@@ -8764,8 +8764,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
             self.logger.info(f"[HA] 🔍 Checking node {node} on ALL networks: {all_ips}")
             
             # Get SSH credentials from cluster config
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
             # Try SSH on ALL IPs (parallel for speed - reduces worst-case from N*30s to 30s)
@@ -8854,8 +8853,7 @@ if ours; then rm -f "$F" && { rmdir "$D" 2>/dev/null; echo "CLAIM_REMOVED"; } ||
                 self.logger.error(f"[HA] No IPs available for node {node}")
                 return False
             
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
             self.logger.warning(f"[HA] ═══════════════════════════════════════════════════════")
@@ -9337,7 +9335,7 @@ WantedBy=multi-user.target
         """One command on a node with the credentials the agent installer uses: the
         configured key, then the password, then whatever ssh finds on its own. None
         when none of them got through."""
-        ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+        ssh_user = node_login(self.config)
         ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
         ssh_password = self.ssh_password_to_offer(node_ip)
         out = None
@@ -10188,7 +10186,7 @@ fi
                 self._ha_persist_fence_strategy(decision, 'detection-skipped: list-nodes failed')
                 return 'quorum'
 
-            ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
 
             import re as _re
@@ -10341,7 +10339,7 @@ fi
                 result['error'] = f'list-nodes HTTP {resp.status_code}'
                 return result
 
-            ssh_user = getattr(self.config, 'ssh_user', None) or 'root'
+            ssh_user = node_login(self.config)
             ssh_key = getattr(self.config, 'ssh_key_path', None) or getattr(self.config, 'ssh_key', None)
 
             # Defense-in-depth: refuse to rm -rf anything that doesn't look
@@ -10763,8 +10761,7 @@ echo "AGENT_INSTALLED_OK"
                 self.logger.error(f"[HA] Cannot get IP for node {node}")
                 return False
             
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')
             
@@ -11652,9 +11649,7 @@ echo "AGENT_INSTALLED_OK"
             self.logger.info(f"[HA] Target node IP: {node_ip}")
             
             # Use cluster credentials - same as Proxmox API login
-            # User format is usually "root@pam" - extract just the username
-            api_user = self.config.user  # e.g. "root@pam"
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')  # SSH private key from cluster config
             
@@ -11739,8 +11734,7 @@ echo "AGENT_INSTALLED_OK"
                 return
             
             # Use cluster credentials
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(node_ip)
             ssh_key = getattr(self.config, 'ssh_key', '')  # SSH key from cluster config
             
@@ -12030,8 +12024,7 @@ echo "AGENT_INSTALLED_OK"
                 return False
             
             # Get SSH credentials
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             
             surviving_ip = self._ha_get_node_ip(surviving_node)
             if not surviving_ip:
@@ -12376,8 +12369,7 @@ echo "AGENT_INSTALLED_OK"
                 target_ip = self.raw_host
             
             # Use cluster credentials for SSH
-            api_user = self.config.user
-            ssh_user = (api_user or 'root').split('@')[0]  # PR #62 (ry-ops): null-safe
+            ssh_user = node_login(self.config)
             ssh_password = self.ssh_password_to_offer(target_ip)
             
             # Build the move command - use mv to atomically move the config
@@ -13563,7 +13555,7 @@ echo "AGENT_INSTALLED_OK"
         user = getattr(self.config, 'user', '') or ''
         if '!' in user or not user.endswith('@pam'):
             return cluster_pw
-        login = getattr(self.config, 'ssh_user', '') or user.split('@')[0]
+        login = node_login(self.config)
         if login != user.split('@')[0]:
             return cluster_pw
         return self._own_password_at(host) or cluster_pw
@@ -13601,7 +13593,7 @@ echo "AGENT_INSTALLED_OK"
         or saved, and without such a pin there is no connection (transfer network).
 
         MK Nov 2026 (#1224) - for _pve_node_exec's key leg: `login` the user to log in as
-        (its rule: ssh_user, else root; default here ssh_user, else the API user's name),
+        (default node_login: ssh_user, else root - #1322),
         `quiet` its connect lines at debug (a polled path), `queue_wait` how long it waits
         for a connection slot, `guard_asked` it asked guard_ssh for its one command before
         connecting.
@@ -13636,7 +13628,7 @@ echo "AGENT_INSTALLED_OK"
             return None
         
         # Get connection parameters
-        username = login or (self.config.ssh_user if self.config.ssh_user else self.config.user.split('@')[0])
+        username = login or node_login(self.config)
         ssh_port = getattr(self.config, 'ssh_port', 22) or 22
         ssh_key = getattr(self.config, 'ssh_key', '')
         _said = self.logger.debug if quiet else self.logger.info
@@ -13904,10 +13896,7 @@ echo "AGENT_INSTALLED_OK"
             ssh = self._ssh_connect(node_ip, failure=failure)
             if not ssh:
                 # Check why SSH failed - get username for hint
-                if self.config.ssh_user:
-                    username = self.config.ssh_user
-                else:
-                    username = self.config.user.split('@')[0]
+                username = node_login(self.config)
                 ssh_port = getattr(self.config, 'ssh_port', 22) or 22
                 
                 if failure.get('kind') == 'auth' and not self.config.ssh_key:
@@ -17901,7 +17890,7 @@ echo "AGENT_INSTALLED_OK"
         src_file = f"{src_path}/{filename}"
         self.logger.info(f"[SYNC] Source: {src_ip}:{src_file}")
 
-        ssh_user = getattr(self.config, 'ssh_user', '') or 'root'
+        ssh_user = node_login(self.config)
 
         for tgt_node in online_nodes:
             # already an intersection with the live online-node list, but resolve it the same
@@ -19639,7 +19628,7 @@ echo "AGENT_INSTALLED_OK"
         ip = self._get_node_ip(node)
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
-        user = getattr(self.config, 'ssh_user', None) or 'root'
+        user = node_login(self.config)
 
         with ha.reading():
             raw = self._ssh_read_output(ip, user, self._SENSORS_PROBE, timeout=8)
@@ -19911,7 +19900,7 @@ echo "AGENT_INSTALLED_OK"
         ip = self._get_node_ip(node)
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
-        user = getattr(self.config, 'ssh_user', None) or 'root'
+        user = node_login(self.config)
 
         from pegaprox.utils.concurrent import run_concurrent_dict
         import shlex
@@ -20031,7 +20020,7 @@ echo "AGENT_INSTALLED_OK"
         if not ip:
             return {'error': f'no SSH-reachable IP for node {node}'}
 
-        user = getattr(self.config, 'ssh_user', None) or 'root'
+        user = node_login(self.config)
         output = self._ssh_read_output(ip, user, 'cat /proc/net/dev', timeout=10)
         if not output:
             return {'error': 'SSH read failed (auth, timeout, or empty)'}
@@ -20763,7 +20752,7 @@ echo "AGENT_INSTALLED_OK"
         if not node_ip:
             return None, f"no reachable IP resolved for node '{node_name}'"
 
-        ssh_user = (self.config.user or 'root').split('@')[0]
+        ssh_user = node_login(self.config)
         # Sudo wrap is handled inside the _ssh_run_command_* helpers so we don't
         # double-wrap when the call chain goes through multiple layers.
 

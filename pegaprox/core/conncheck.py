@@ -386,8 +386,8 @@ def probe_host(mgr, host, authed, node_fps=None):
 
 def _ssh_user(mgr):
     # what _ssh_connect logs in as
-    cfg = mgr.config
-    return cfg.ssh_user if getattr(cfg, 'ssh_user', '') else (cfg.user or 'root').split('@')[0]
+    from pegaprox.utils.ssh import node_login
+    return node_login(mgr.config)
 
 
 def _credential_at(mgr, ip):

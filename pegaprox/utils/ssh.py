@@ -466,6 +466,20 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         return 1, '', f'All SSH methods failed: {last_err}; subprocess: {sub_err}'
 
 
+def node_login(config):
+    """The user every SSH path logs in to this cluster's nodes as: the cluster's SSH user,
+    root when none is set.
+
+    MK Nov 2026 (#1322) - there were two rules. About half the paths took the name of
+    the API user ('pegaprox@pve' -> 'pegaprox') and the other half root, so a cluster
+    with a key for root got failed logins as an account that is not on the node, and one
+    with a sudo account got failed root logins from the sensor and BMC reads every hour.
+    The dialog and the docs always said root unless an SSH user is set.
+    """
+    user = getattr(config, 'ssh_user', '') or ''
+    return (user.strip() if isinstance(user, str) else '') or 'root'
+
+
 def ssh_password_for(config):
     """The password an SSH login to this PVE cluster's nodes may offer - '' for none.
 
@@ -479,10 +493,19 @@ def ssh_password_for(config):
     not take 'user' on its own.
     Use this (or PegaProxManager.ssh_password_to_offer) for every password step,
     never config.pass_ directly.
+
+    MK Nov 2026 (#1322) - and only for the login it belongs to. An @pam account's
+    password is that Linux user's on the node; any other realm's password is no password
+    on the node at all. Offered to a different login it was one more failed login there.
     """
     if bool(getattr(config, 'ssh_disabled', False)):
         return ''
-    if '!' in (getattr(config, 'user', '') or ''):
+    user = getattr(config, 'user', '') or ''
+    user = user if isinstance(user, str) else ''
+    if '!' in user:
+        return ''
+    name, _, realm = user.partition('@')
+    if realm not in ('', 'pam') or (name or 'root') != node_login(config):
         return ''
     return getattr(config, 'pass_', '') or ''
 
@@ -790,7 +813,7 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
         if _diag and _diag[0] in ('SSH_NO_CREDENTIALS', 'SSH_DISABLED'):
             return 1, '', _diag[1]
 
-        _ssh_user = getattr(pve_mgr.config, 'ssh_user', '') or 'root'
+        _ssh_user = node_login(pve_mgr.config)
         # The diagnosis above lets a cluster with a key through, token or not. _ssh_exec
         # is password-only (M3 passes look_for_keys=False, the sshpass leg asks for
         # keyboard-interactive,password), so the key goes first, on its own client: key +
