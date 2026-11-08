@@ -426,7 +426,8 @@ class PegaProxDB:
                 layout_chosen INTEGER DEFAULT 0,
                 -- the user's directory / IdP groups as of the last sign-in, read by
                 -- username in the pool-grant lookups (#940)
-                directory_groups TEXT DEFAULT '[]'
+                directory_groups TEXT DEFAULT '[]',
+                cloud_dashboard TEXT
             )
         ''')
         
@@ -4328,7 +4329,7 @@ class PegaProxDB:
         cursor = self.conn.cursor()
         # MK Oct 2026 (#940) - every column but directory_groups. This read runs on every
         # authorized request, and a directory user's nested memberships run to hundreds of
-        # DNs; the pool lookups read them by username (get_user_directory_groups).
+        # DNs; the pool lookups read them by username (get_user_directory_groups, cloud_dashboard).
         cursor.execute('PRAGMA table_info(users)')
         _cols = ', '.join('"%s"' % r[1] for r in cursor.fetchall() if r[1] != 'directory_groups')
         cursor.execute(f'SELECT {_cols or "*"} FROM users')
@@ -4394,6 +4395,8 @@ class PegaProxDB:
                 'portal_only': bool(row_dict.get('portal_only', 0)),
                 'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
                 'user_folder': row_dict.get('user_folder', ''),
+                'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                    if row_dict.get('cloud_dashboard') else None),
             }
 
         return users
@@ -4462,6 +4465,8 @@ class PegaProxDB:
             'portal_only': bool(row_dict.get('portal_only', 0)),
             'sidebar_show_vmid': bool(row_dict.get('sidebar_show_vmid', 0)),
             'user_folder': row_dict.get('user_folder', ''),
+            'cloud_dashboard': (json.loads(row_dict['cloud_dashboard'])
+                                if row_dict.get('cloud_dashboard') else None),
         }
 
     def save_user(self, username: str, data: dict):
@@ -4487,7 +4492,8 @@ class PegaProxDB:
                     ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]'))
+                    COALESCE(?, (SELECT directory_groups FROM users WHERE username = ?), '[]')),
+                    ?)
         ''', (
             username,
             data.get('password_salt', ''),
@@ -4531,6 +4537,8 @@ class PegaProxDB:
              if 'groups' in data or data.get('auth_source', 'local') not in DIRECTORY_AUTH_SOURCES
              else None),
             username,
+            (json.dumps(data['cloud_dashboard'])
+             if isinstance(data.get('cloud_dashboard'), dict) else None),
         ))
         self.conn.commit()
     

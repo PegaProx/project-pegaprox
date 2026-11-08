@@ -811,7 +811,7 @@
             );
         }
 
-        function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false, initialTab = 'general' }) {
+        function ConfigModal({ vm, clusterId, allClusters = [], dashboardAuthFetch, onClose, addToast, isCorporate = false, variant = 'default', initialTab = 'general' }) {
             const { t } = useTranslation();
             const { getAuthHeaders, haReadOnly, haStandby } = useAuth();
             // LW Nov 2026 - the guest view reads its config again once this dialog is gone
@@ -987,11 +987,25 @@
             // (restart classes, the pending changes panel, the General tab in sections)
             // (a Proxmox VE cluster only: the restart rules are those of qemu-server)
             const { isCorpRedesigned } = useLayout();
+            // NS Nov 2026 — the cloud layout gets its own chrome (third branch below) and
+            // consumes the SAME restart/pending engine read-only: classification for the
+            // change band. The crVc content swap stays corporate-redesign-only.
+            const isCloud = variant === 'cloud';
+            // the modal's raw t() echoes missing keys back — the cloud chrome strings need
+            // real fallbacks until they exist in every language
+            const cT = (k, fb) => { const v = t(k); return v === k ? fb : v; };
             const crVcCluster = allClusters.find(c => c.id === clusterId);
             const crVc = isCorpRedesigned && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
+            const crVcEngine = (crVc || isCloud) && isQemu && !['xcpng', 'esxi'].includes(crVcCluster?.cluster_type);
             // LW Nov 2026 - the redesign's edits of network devices, saved from the review with the classic request
             const [crNets, setCrNets] = useState({});
-            const crv = useCrVc({ on: crVc, vm, clusterId, authFetch, config, changes, nets: crNets });
+            const [advOpen, setAdvOpen] = useState(false);      // cloud: advanced hardware folded by default
+            const [cpuDetOpen, setCpuDetOpen] = useState(false);  // cloud: reported-model/level/flags folded
+            const [cfgResult, setCfgResult] = useState(null);      // cloud: applied/failed after a save
+            const [lastSaveErr, setLastSaveErr] = useState(null);  // cloud: message of the last failed save
+            const [externDirty, setExternDirty] = useState(false); // cloud: config changed underneath (SSE)
+            const [cfgBandOpen, setCfgBandOpen] = useState(false); // cloud: footer change list
+            const crv = useCrVc({ on: crVcEngine, vm, clusterId, authFetch, config, changes, nets: crNets });
 
             // NS Jul 2026 (modal-perf): fire the ~14 open-time fetches ONLY when the
             // target VM/cluster changes. This effect previously ALSO depended on
@@ -1061,6 +1075,9 @@
                         // LW Nov 2026 - the redesign reads what waits for the next start again, the
                         // running config its prediction compares with comes from it
                         if (crVc) crv.refresh();
+                    } else if (eventVmid === vm.vmid && vm_type === vm.type && isCloud && hasChanges && !saving) {
+                        // a parallel edit while ours are unsaved: never overwrite, warn instead
+                        setExternDirty(true);
                     }
                 };
 
@@ -2082,11 +2099,7 @@
             };
 
             // MK: cross-cluster replication handlers
-            // JB Nov 2026 - a second click before the answer made a second job for the same guest, with its own quota hold
-            const creatingXRepl = useRef(false);
             const handleCreateXRepl = async () => {
-                if (creatingXRepl.current) return;
-                creatingXRepl.current = true;
                 try {
                     const srcBridges = [...new Set((config?.networks || []).map(n => n.bridge).filter(Boolean))];
                     const payload = {
@@ -2117,8 +2130,6 @@
                     }
                 } catch (error) {
                     addToast(t('connectionError'), 'error');
-                } finally {
-                    creatingXRepl.current = false;
                 }
             };
 
@@ -2231,13 +2242,16 @@
                         addToast(t('configSaved'), 'success');
                         setChanges({});
                         setHasChanges(false);
+                if (isCloud && crVcEngine && crv && crv.refresh) crv.refresh();   // cloud only: the redesign counts its pending reads
                         await fetchConfig();
                     } else {
                         const err = await response.json();
                         addToast(err.error || t('saveFailed'), 'error');
+                        setLastSaveErr(err.error || t('saveFailed'));
                     }
                 } catch(error) {
                     addToast(t('connectionError'), 'error');
+                    setLastSaveErr(t('connectionError'));
                 }
                 setSaving(false);
                 // LW Nov 2026 - the redesign reads what PVE keeps pending once it knows the outcome
@@ -3039,9 +3053,11 @@
                 <CrVcBadgeOff.Provider value={crVc}>
                 <div className={isCorporate
                     ? 'corp-vm-modal-overlay'
+                    : isCloud ? 'cloud-cfg-overlay cloud-mounted'
                     : 'fixed inset-0 z-50 flex items-center justify-center p-4 modal-backdrop bg-black/80'}>
                     <div className={isCorporate
                         ? 'corp-vm-modal'
+                        : isCloud ? 'cloud-cfg'
                         : 'w-full max-w-4xl max-h-[90vh] bg-proxmox-card border border-proxmox-border rounded-2xl shadow-2xl animate-scale-in overflow-hidden flex flex-col'}>
                         {/* Header */}
                         {isCorporate ? (
@@ -3089,6 +3105,23 @@
                                     </button>
                                 </div>
                             </div>
+                        ) : isCloud ? (
+                            <div className={'cloud-cfg-head is-' + (vm.status || 'unknown')}>
+                                <div className="cloud-cfg-head-left">
+                                    <span className="cloud-cfg-head-ico">{isQemu ? <Icons.Server /> : <Icons.Container />}</span>
+                                    <div className="cloud-cfg-head-title">
+                                        <h2>{vm.name || `${isQemu ? 'VM' : 'CT'} ${vm.vmid}`}</h2>
+                                        <div className="cloud-cfg-head-meta">
+                                            <span className={'cloud-hc-badge ' + (vm.status === 'running' ? 'is-healthy' : vm.status === 'stopped' ? 'is-na' : 'is-unknown')}>{String(vm.status || '—').toUpperCase()}</span>
+                                            <span className="cloud-detail-id">#{vm.vmid} · {isQemu ? 'VM' : 'CT'} · {crVcCluster?.display_name || crVcCluster?.name || clusterId} · {vm.node}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="cloud-cfg-head-actions">
+                                    {hasChanges && <span className="cloud-hc-badge is-warning">{cT('unsavedChanges', 'Unsaved changes')}</span>}
+                                    <button type="button" className="cloud-icon-btn" onClick={onClose} title={t('close') || 'Close'}><Icons.X /></button>
+                                </div>
+                            </div>
                         ) : (
                             <div className="flex items-center justify-between px-6 py-4 border-b border-proxmox-border bg-proxmox-dark">
                                 <div className="flex items-center gap-3">
@@ -3119,7 +3152,30 @@
                         )}
 
                         {/* Tabs */}
-                        {isCorporate ? (
+                        {isCloud ? (
+                            <div className="cloud-cfg-nav">
+                                {[
+                                    ['cloudCfgNavBase', 'General', ['general']],
+                                    ['cloudCfgNavOps', 'Operations', [isQemu ? 'hardware' : 'resources', 'disks', 'network']],
+                                    ['cloudCfgNavProtect', 'Protection', ['snapshots', 'backups', 'replication']],
+                                    ['cloudCfgNavAdmin', 'Administration', ['history', 'firewall', 'options']],
+                                ].map(([gl, glFallback, ids]) => (
+                                    <div key={gl} className="cloud-cfg-nav-group">
+                                        <div className="cloud-cfg-nav-label">{cT(gl, glFallback)}</div>
+                                        {ids.map(id => {
+                                            const tb = tabs.find(x => x.id === id);
+                                            if (!tb) return null;
+                                            const TI = tb.icon;
+                                            return (
+                                                <button type="button" key={id} className={'cloud-cfg-nav-item' + (activeTab === id ? ' is-active' : '')} onClick={() => setActiveTab(id)}>
+                                                    <TI /> {t(tb.labelKey)}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                ))}
+                            </div>
+                        ) : isCorporate ? (
                             <div className="corp-vm-modal-tabs">
                                 {tabs.map(tab => (
                                     <button
@@ -3152,7 +3208,7 @@
                         )}
 
                         {/* Content */}
-                        <div className={isCorporate ? 'corp-vm-modal-body' : 'flex-1 overflow-y-auto p-6'}>
+                        <div className={isCorporate ? 'corp-vm-modal-body' : 'flex-1 overflow-y-auto p-6' + (isCloud ? ' cloud-cfg-body cloud-mounted' : '')}>
                             {loading ? (
                                 isCorporate ? (
                                     <div className="corp-vm-modal-state">
@@ -3206,6 +3262,12 @@
                                             clusterTags={clusterTags} onUnlock={handleUnlockVm} />
                                     ) : (
                                         <div className="space-y-6">
+                                            {isCloud && (
+                                                <div className="cloud-cfg-sec-h">
+                                                    <span className="cloud-cfg-sec-t">{cT('cloudCfgSecConfig', 'Configuration')}</span>
+                                                    <span className="cloud-cfg-sec-s">{cT('cloudCfgSecConfigHint', 'identity and description — saved with the VM')}</span>
+                                                </div>
+                                            )}
                                             <div className="grid grid-cols-2 gap-4">
                                                 <ConfigInputField
                                                     label={isQemu ? t('name') : t('hostname')}
@@ -3322,7 +3384,14 @@
                                                 )}
                                             </div>
                                             {config.status && (
-                                                <div className="grid grid-cols-3 gap-4 p-4 bg-proxmox-dark rounded-lg">
+                                                <div className={'grid grid-cols-3 gap-4 p-4 bg-proxmox-dark rounded-lg' + (isCloud ? ' cfg-status-strip' : '')}>
+                                                    {isCloud && (
+                                                        <div className="col-span-3 cfg-live-head">
+                                                            <span className={'cloud-hc-rail-dot ' + (config.status.status === 'running' ? 'is-healthy' : 'is-na')}></span>
+                                                            <span className="cfg-live-title">{cT('cloudCfgLive', 'Current operation')}</span>
+                                                            <span className="cloud-cell-muted">{cT('cloudCfgLiveHint', 'live values from the host — read-only')}</span>
+                                                        </div>
+                                                    )}
                                                     <div>
                                                         <div className="text-xs text-gray-500">{t('status')}</div>
                                                         <div className={`font-medium ${config.status.status === 'running' ? 'text-green-400' : 'text-red-400'}`}>
@@ -3388,6 +3457,7 @@
                                             } />
                                     ) : (
                                         <div className="space-y-6">
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecCpu', 'CPU')}</span></div>}
                                             <div className="grid grid-cols-2 gap-4">
                                                 <ConfigInputField
                                                     label={t('cpuCores')}
@@ -3415,6 +3485,7 @@
                                                     />
                                                 )}
                                             </div>
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecMem', 'Memory')}</span></div>}
                                             <div className="grid grid-cols-2 gap-4">
                                                 <MemoryInputField
                                                     label={t('memory')}
@@ -3442,6 +3513,7 @@
                                                     />
                                                 )}
                                             </div>
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecVirt', 'Virtualization & Display')}</span></div>}
                                             {isQemu && (
                                                 <>
                                                     {/* NS May 2026 — composite cpu= string parsers. PVE accepts
@@ -3488,7 +3560,15 @@
                                                     </div>
                                                     {/* NS May 2026 — PVE 9.2 cpu sub-options. Splice in/out of the
                                                         composite cpu= string. Empty input = remove the sub-option. */}
-                                                    <div className="grid grid-cols-2 gap-4">
+                                                    {isCloud && (
+                                                        <div className="cloud-cfg-adv">
+                                                            <button type="button" className="cloud-cfg-adv-toggle" onClick={() => setCpuDetOpen(o => !o)}>
+                                                                {cT('cloudCfgCpuDet', 'CPU details & flags')}
+                                                                <span className="cloud-cfg-band-chev">{cpuDetOpen ? '▾' : '▸'}</span>
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                    <div className={'grid grid-cols-2 gap-4' + ((isCloud && !cpuDetOpen) ? ' cfg-hide' : '')}>
                                                         <ConfigInputField
                                                             label="reported-model"
                                                             value={(() => {
@@ -3541,7 +3621,7 @@
                                                         in/out of the composite cpu= string as one semicolon-joined
                                                         flags= segment, preserving type/reported-model/level. Backend
                                                         passes cpu= through untouched, so this rides the delta-save. */}
-                                                    <div className="mt-1">
+                                                    <div className={'mt-1' + ((isCloud && !cpuDetOpen) ? ' cfg-hide' : '')}>
                                                         <label className="block text-sm text-gray-400 mb-2">{t('extraCpuFlags') || 'Extra CPU Flags'}</label>
                                                         <div className="grid grid-cols-3 gap-2">
                                                             {['pcid', 'spec-ctrl', 'ssbd', 'ibpb', 'virt-ssbd', 'amd-ssbd', 'amd-no-ssb', 'pdpe1gb', 'hv-tlbflush', 'hv-evmcs', 'aes', 'md-clear'].map(flag => {
@@ -3584,6 +3664,7 @@
                                                         </div>
                                                         <p className="text-xs text-gray-500 mt-1.5">{t('extraCpuFlagsHint') || 'Click to cycle each flag: default → enabled (+) → disabled (−). Requires a VM restart.'}</p>
                                                     </div>
+                                                    {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecFw', 'Firmware & Controller')}</span></div>}
                                                     <div className="grid grid-cols-2 gap-4">
                                                         <ConfigInputField
                                                             label="BIOS"
@@ -3709,9 +3790,18 @@
                                                         </div>
                                                         <div></div>
                                                     </div>
-                                                    
+
+                                                    {isCloud && (
+                                                        <div className="cloud-cfg-adv">
+                                                            <button type="button" className="cloud-cfg-adv-toggle" onClick={() => setAdvOpen(o => !o)}>
+                                                                {cT('cloudCfgAdvanced', 'Advanced hardware')}
+                                                                <span className="cloud-cfg-band-chev">{advOpen ? '▾' : '▸'}</span>
+                                                            </button>
+                                                            <span className="cloud-cell-muted cloud-cfg-adv-hint">{cT('cloudCfgAdvHint', 'EFI · TPM · Cloud-Init · RNG · VirtioFS · Passthrough')}</span>
+                                                        </div>
+                                                    )}
                                                     {/* EFI Disk & TPM Section - MK: For UEFI and Windows 11 */}
-                                                    {getValue('hardware', 'bios') === 'ovmf' && (
+                                                    {((!isCloud || advOpen) && getValue('hardware', 'bios') === 'ovmf') && (
                                                         <div className="mt-6 pt-6 border-t border-proxmox-border">
                                                             <h3 className="text-white font-medium mb-4 flex items-center gap-2">
                                                                 🔐 {t('efiTpmSettings') || 'EFI & TPM Settings'}
@@ -3809,7 +3899,7 @@
                                                         </div>
                                                     )}
 
-                                                    <div className="mt-6 pt-6 border-t border-proxmox-border">
+                                                    <div className={'mt-6 pt-6 border-t border-proxmox-border' + ((isCloud && !advOpen) ? ' cfg-hide' : '')}>
                                                         <h3 className="text-white font-medium mb-4 flex items-center gap-2">
                                                             <Icons.Cloud className="w-4 h-4 text-cyan-400" />
                                                             {t('cloudInitDrive')}
@@ -3852,7 +3942,7 @@
                                                         })()}
                                                     </div>
                                                     
-                                                    {allClusters.find(c => c.id === clusterId)?.cluster_type !== 'xcpng' && (
+                                                    {(!isCloud || advOpen) && allClusters.find(c => c.id === clusterId)?.cluster_type !== 'xcpng' && (
                                                         <VirtioRngCard
                                                             value={config?.raw?.rng0}
                                                             running={vm.status === 'running'}
@@ -3863,7 +3953,7 @@
                                                         />
                                                     )}
 
-                                                    {!['xcpng', 'esxi'].includes(allClusters.find(c => c.id === clusterId)?.cluster_type) && (
+                                                    {(!isCloud || advOpen) && !['xcpng', 'esxi'].includes(allClusters.find(c => c.id === clusterId)?.cluster_type) && (
                                                         <VirtiofsCard
                                                             raw={config?.raw}
                                                             running={vm.status === 'running'}
@@ -3877,7 +3967,7 @@
                                                     )}
 
                                                     {/* PCI/USB/Serial Passthrough Section */}
-                                                    <div className="mt-6 pt-6 border-t border-proxmox-border">
+                                                    <div className={'mt-6 pt-6 border-t border-proxmox-border' + ((isCloud && !advOpen) ? ' cfg-hide' : '')}>
                                                         <h3 className="text-white font-medium mb-4 flex items-center gap-2">
                                                             🔌 {t('devicePassthrough')}
                                                             {vm.status === 'running' && (
@@ -3999,8 +4089,9 @@
                                                    onRemove: handleRemoveDisk, onReattach: setShowReattachDisk, onDeleteUnused: handleDeleteUnusedDisk }} />
                                     ) : (
                                         <div className="space-y-4">
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecDisks', isQemu ? 'Virtual disks' : 'Root filesystem & mount points')}</span></div>}
                                             <div className="flex justify-between items-center">
-                                                <h3 className="font-medium text-white">{t('disks')}</h3>
+                                                <h3 className="font-medium text-white" style={isCloud ? { display: 'none' } : undefined}>{t('disks')}</h3>
                                                 <div className="flex gap-2">
                                                     {isQemu && (
                                                         <button
@@ -4046,7 +4137,7 @@
                                                     // first-class mount slot instead of hiding it, so users mount/eject media.
                                                     const cdromEmpty = isCdrom && String(disk.value || '').replace(/\s+/g, '').startsWith('none');
                                                     return (
-                                                    <div key={disk.id} className="p-4 bg-proxmox-dark rounded-lg border border-proxmox-border">
+                                                    <div key={disk.id} className={'p-4 bg-proxmox-dark rounded-lg border border-proxmox-border' + (isCloud ? ' cfg-dev-card' : '') + (isCloud && isCdrom ? ' is-cdrom' : '')}>
                                                         <div className="flex items-center justify-between mb-3">
                                                             <div className="flex items-center gap-3">
                                                                 {isCdrom ? <Icons.Disc /> : <Icons.HardDrive />}
@@ -4225,7 +4316,8 @@
                                             onAdd={() => setShowAddNetwork(true)} onToggleLink={handleToggleNetworkLink} onRemove={handleRemoveNetwork} />
                                     ) : (
                                         <div className="space-y-4">
-                                            <div className="flex justify-between items-center">
+
+                                            {isCloud && <div className="cloud-cfg-sec-h"><span className="cloud-cfg-sec-t">{cT('cloudCfgSecNet', 'Network interfaces')}</span></div>}                                            <div className="flex justify-between items-center">
                                                 <h3 className="font-medium text-white">{t('networkInterfaces')}</h3>
                                                 <button
                                                     onClick={() => setShowAddNetwork(true)}
@@ -4238,7 +4330,7 @@
                                             
                                             {config.networks?.length > 0 ? (
                                                 config.networks.map((net) => (
-                                                    <div key={net.id} className={`p-4 bg-proxmox-dark rounded-lg border ${net.link_down ? 'border-red-500/50' : 'border-proxmox-border'}`}>
+                                                    <div key={net.id} className={`p-4 bg-proxmox-dark rounded-lg border ${net.link_down ? 'border-red-500/50' : 'border-proxmox-border'}${isCloud ? ' cfg-dev-card' : ''}`}>
                                                         <div className="flex items-center justify-between mb-3">
                                                             <div className="flex items-center gap-3">
                                                                 <Icons.Network className={net.link_down ? 'text-red-400' : ''} />
@@ -6552,7 +6644,95 @@
                             <CrVcPanel t={t} crv={crv} changesCount={Object.keys(changes).length + Object.keys(crNets).length} saving={saving}
                                 readOnly={haReadOnly} onSave={crVcSave} onRevert={crVcRevert} />
                         )}
-                        {!crVc && (
+                        {!crVc && (isCloud ? (
+                        <div className="cloud-cfg-foot">
+                            <div className="cloud-cfg-band">
+                                {(() => {
+                                    const rows = crv.rows || [];
+                                    const nowN = rows.filter(x => x.cls === 'now').length;
+                                    const nextN = rows.filter(x => x.cls === 'restart' || x.cls === 'next').length;
+                                    const openN = rows.filter(x => x.cls === 'open' || x.cls === 'maybe').length;
+                                    const pendRows = (crv.pend && crv.pend.state === 'ok' ? crv.pend.rows : []).filter(p => p && p.pending);
+                                    if (!rows.length && !pendRows.length) return (
+                                        <div className="cloud-cfg-band-idle">
+                                            <span className="cloud-cell-muted">{cT('cloudCfgIdle', 'Current configuration loaded')}</span>
+                                            {cfgResult && cfgResult.phase === 'applied' && (
+                                                <span className="cloud-cfg-result is-applied">
+                                                    <span className="cloud-hc-badge is-healthy">{cT('cloudCfgApplied', 'APPLIED')}</span>
+                                                    {cfgResult.n} {cT('cloudCfgAppliedN', 'changes taken over')}
+                                                    {pendRows.length > 0 ? ` · ${pendRows.length} ${cT('cloudCfgPending', 'pending at next start')}` : ''}
+                                                </span>
+                                            )}
+                                            {cfgResult && cfgResult.phase === 'failed' && (
+                                                <span className="cloud-cfg-result is-failed">
+                                                    <span className="cloud-hc-badge is-critical">{cT('cloudCfgFailed', 'SAVE FAILED')}</span>
+                                                    {cfgResult.err || ''}
+                                                </span>
+                                            )}
+                                        </div>
+                                    );
+                                    return (<>
+                                        {externDirty && (
+                                            <div className="cloud-cfg-warn">{cT('cloudCfgExtern', 'The configuration changed underneath (another administrator?) — saving may overwrite foreign changes.')}</div>
+                                        )}
+                                        <button type="button" className="cloud-cfg-band-toggle" onClick={() => setCfgBandOpen(o => !o)}>
+                                            <span className="cloud-hc-badge is-warning">{rows.length} {cT('cloudCfgChanged', 'unsaved')}</span>
+                                            {nowN > 0 && <span className="cloud-hc-badge is-healthy">{nowN} {cT('cloudCfgNow', 'immediate')}</span>}
+                                            {nextN > 0 && <span className="cloud-hc-badge is-critical">{nextN} {cT('cloudCfgRestart', 'restart')}</span>}
+                                            {openN > 0 && <span className="cloud-hc-badge is-unknown">{openN} {cT('cloudCfgOpen', 'unclear')}</span>}
+                                            {pendRows.length > 0 && <span className="cloud-hc-badge is-na">{pendRows.length} {cT('cloudCfgPending', 'pending')}</span>}
+                                            <span className="cloud-cfg-band-chev">{cfgBandOpen ? '▾' : '▸'}</span>
+                                        </button>
+                                        {cfgBandOpen && (
+                                            <div className="cloud-cfg-band-list">
+                                                <div className="cloud-cfg-band-sec">{cT('cloudCfgUnsavedSec', 'Unsaved changes (local)')}</div>
+                                                {rows.map(x => (
+                                                    <div key={x.key} className="cloud-cfg-band-row">
+                                                        <span className="cloud-table-mono">{x.key}</span>
+                                                        <span className="cloud-cfg-band-diff">
+                                                            <span className="cloud-cell-muted">{x.old != null ? String(x.old).slice(0, 48) : '—'}</span>
+                                                            <span className="cloud-cfg-band-arrow">→</span>
+                                                            <span>{x.value != null ? String(x.value).slice(0, 48) : <em>({cT('cloudCfgRemoved', 'removed')})</em>}</span>
+                                                        </span>
+                                                        <span className={'cloud-hc-badge ' + (x.cls === 'now' ? 'is-healthy' : (x.cls === 'restart' || x.cls === 'next') ? 'is-critical' : 'is-unknown')}>
+                                                            {x.cls === 'now' ? (cT('cloudCfgNow', 'IMMEDIATE')) : (x.cls === 'restart' || x.cls === 'next') ? (cT('cloudCfgRestart', 'RESTART')) : (cT('cloudCfgOpen', 'UNCLEAR'))}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                                {pendRows.length > 0 && <div className="cloud-cfg-band-sec">{cT('cloudCfgPendingSec', 'Pending in Proxmox (applies at next start)')}</div>}
+                                                {pendRows.map(p => (
+                                                    <div key={'p-' + p.key} className="cloud-cfg-band-row">
+                                                        <span className="cloud-table-mono">{p.key}</span>
+                                                        <span className="cloud-cfg-band-diff"><span className="cloud-cell-muted">{cT('cloudCfgPendingHint', 'applied at next start')}</span></span>
+                                                        <span className="cloud-hc-badge is-na">{cT('cloudCfgPending', 'PENDING')}</span>
+                                                    </div>
+                                                ))}
+                                                <div className="cloud-cfg-band-legend cloud-cell-muted">
+                                                    {cT('cloudCfgNow', 'IMMEDIATE')} = {cT('cloudCfgLegNow', 'applies right away')} · {cT('cloudCfgRestart', 'RESTART')} = {cT('cloudCfgLegRestart', 'applies at the next start')} · {cT('cloudCfgPending', 'PENDING')} = {cT('cloudCfgLegPending', 'already queued by Proxmox')}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </>);
+                                })()}
+                            </div>
+                            <div className="cloud-cfg-foot-actions">
+                                <button type="button" className="cloud-btn" onClick={onClose} disabled={saving}>{t('cancel')}</button>
+                                {!haReadOnly && (
+                                    <button type="button" className="cloud-btn cloud-btn-primary" disabled={!hasChanges || saving}
+                                        onClick={() => {
+                                            const n = Object.keys(changes).length;
+                                            setLastSaveErr(null);
+                                            Promise.resolve(handleSave()).then(ok => {
+                                                setCfgResult(ok ? { phase: 'applied', n, at: Date.now() } : { phase: 'failed', err: lastSaveErr, at: Date.now() });
+                                                if (ok) setExternDirty(false);
+                                            });
+                                        }}>
+                                        {saving ? <Icons.RotateCw /> : <Icons.Save />} {t('save')}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        ) : (
                         <div className="flex items-center justify-between px-6 py-4 border-t border-proxmox-border bg-proxmox-dark">
                             <div className="text-xs text-gray-500">
                                 {vm.status === 'running' && (
@@ -6582,7 +6762,7 @@
                                 </button>}
                             </div>
                         </div>
-                        )}
+                        ))}
                     </div>
 
                     {/* Sub-Modals */}
@@ -8256,32 +8436,31 @@
             );
         }
 
-        // a container NIC defaults to eth<N> of its netN, so a second NIC is not named eth0 again
-        const lxcNicName = (netId) => 'eth' + ((String(netId).match(/(\d+)$/) || [])[1] || '0');
-
         function AddNetworkModal({ isQemu, bridgeList, hardwareOptions, getNextNetId, generateMAC, onAdd, onClose }) {
             const { t } = useTranslation();
-            // the free id is known when the dialog opens: taken here, not in an effect that would overwrite early typing
-            const [netConfig, setNetConfig] = useState(() => {
-                const netId = getNextNetId ? getNextNetId() : 'net1';
-                return {
-                    net_id: netId,
-                    bridge: bridgeList[0]?.iface || 'vmbr0',
-                    model: 'virtio',
-                    macaddr: '',
-                    firewall: true,
-                    tag: '',
-                    rate: '',
-                    mtu: '',
-                    queues: '',
-                    name: lxcNicName(netId),
-                    ip: 'dhcp',
-                    gw: '',
-                    ip6: '',
-                    gw6: '',
-                    hwaddr: '',
-                };
+            const [netConfig, setNetConfig] = useState({
+                net_id: 'net1',
+                bridge: bridgeList[0]?.iface || 'vmbr0',
+                model: 'virtio',
+                macaddr: '',
+                firewall: true,
+                tag: '',
+                rate: '',
+                mtu: '',
+                queues: '',
+                name: 'eth0',
+                ip: 'dhcp',
+                gw: '',
+                ip6: '',
+                gw6: '',
+                hwaddr: '',
             });
+
+            useEffect(() => {
+                if (getNextNetId) {
+                    setNetConfig(prev => ({...prev, net_id: getNextNetId()}));
+                }
+            }, []);
 
             return(
                 <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60">
@@ -8291,8 +8470,7 @@
                             <div className="grid grid-cols-2 gap-4">
                                 <div>
                                     <label className="block text-xs text-gray-400 mb-1">Interface ID</label>
-                                    <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value,
-                                        name: netConfig.name === lxcNicName(netConfig.net_id) ? lxcNicName(e.target.value) : netConfig.name})}
+                                    <input type="text" value={netConfig.net_id} onChange={(e) => setNetConfig({...netConfig, net_id: e.target.value})}
                                         className="w-full px-3 py-2 bg-proxmox-dark border border-proxmox-border rounded-lg text-white text-sm" />
                                 </div>
                                 <div>

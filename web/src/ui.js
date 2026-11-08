@@ -561,6 +561,14 @@
         // thresholds ([{value, label, color}], drawn as dashed lines where they fall on the scale), legend
         // (false when the view toggles the series itself; a dataset can come with hidden and dash),
         // markGaps (shades the slots without any sample) and resize (draws again when the box changes width)
+        // Detect light theme for chart chrome — Corporate light sets data-corp-theme,
+        // the cloud layout sets data-cloud-theme; either means light chart chrome.
+        function chartLightMode() {
+            try {
+                return document.body.dataset.corpTheme === 'light' || document.body.dataset.cloudTheme === 'light';
+            } catch (_) { return false; }
+        }
+
         const LineChart = React.memo(function LineChart({ data, datasets, timestamps, label, color, unit, formatValue, yMin, yMax,
                                                           tension, thresholds, legend, markGaps, resize }) {
             const { t } = useTranslation();
@@ -861,11 +869,11 @@
                                     mode: 'index',
                                     intersect: false,
                                     // NS: adapt tooltip to corp light mode
-                                    backgroundColor: document.body.dataset.corpTheme === 'light' ? 'rgba(255,255,255,0.95)' : 'rgba(30, 30, 40, 0.95)',
-                                    titleColor: document.body.dataset.corpTheme === 'light' ? '#333' : '#e5e7eb',
-                                    bodyColor: document.body.dataset.corpTheme === 'light' ? '#555' : '#fff',
-                                    borderColor: document.body.dataset.corpTheme === 'light' ? '#cfd8dc' : 'rgba(255,255,255,0.1)',
-                                    borderWidth: document.body.dataset.corpTheme === 'light' ? 1 : 0,
+                                    backgroundColor: chartLightMode() ? 'rgba(255,255,255,0.95)' : 'rgba(30, 30, 40, 0.95)',
+                                    titleColor: chartLightMode() ? '#333' : '#e5e7eb',
+                                    bodyColor: chartLightMode() ? '#555' : '#fff',
+                                    borderColor: chartLightMode() ? '#cfd8dc' : 'rgba(255,255,255,0.1)',
+                                    borderWidth: chartLightMode() ? 1 : 0,
                                     callbacks: {
                                         label: function(c) {
                                             var val = c.parsed.y;
@@ -881,19 +889,19 @@
                             scales: {
                                 x: {
                                     ticks: {
-                                        color: document.body.dataset.corpTheme === 'light' ? '#888' : '#6b7280',
+                                        color: chartLightMode() ? '#888' : '#6b7280',
                                         font: { size: 10 },
                                         maxTicksLimit: 8,
                                         maxRotation: 0,
                                     },
-                                    grid: { color: document.body.dataset.corpTheme === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(75, 85, 99, 0.3)' }
+                                    grid: { color: chartLightMode() ? 'rgba(0,0,0,0.08)' : 'rgba(75, 85, 99, 0.3)' }
                                 },
                                 y: {
                                     beginAtZero: true,
                                     min: yMin,
                                     max: yMax,
                                     ticks: {
-                                        color: document.body.dataset.corpTheme === 'light' ? '#888' : '#6b7280',
+                                        color: chartLightMode() ? '#888' : '#6b7280',
                                         font: { size: 10 },
                                         callback: function(value) {
                                             var fn = formatRef.current;
@@ -901,7 +909,7 @@
                                             return value.toFixed(yMax && yMax <= 10 ? 1 : 0) + unitStr;
                                         }
                                     },
-                                    grid: { color: document.body.dataset.corpTheme === 'light' ? 'rgba(0,0,0,0.08)' : 'rgba(75, 85, 99, 0.3)' }
+                                    grid: { color: chartLightMode() ? 'rgba(0,0,0,0.08)' : 'rgba(75, 85, 99, 0.3)' }
                                 }
                             }
                         }

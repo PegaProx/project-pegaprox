@@ -8396,7 +8396,7 @@
         // storage and creates a container from it (a technology preview there, so here too).
         // The server checks each node's version, the storages and the caller; this only
         // offers what it said yes to (api/oci_catalog.py).
-        function OciCatalogTab({ clusters, clusterId, authFetch, addToast, t }) {
+        function OciCatalogTab({ clusters, clusterId, authFetch, addToast, t, variant = 'default' }) {
             const { haReadOnly } = useAuth();
             const pveClusters = (clusters || []).filter(c => c && (c.cluster_type || 'proxmox') === 'proxmox');
             const [cid, setCid] = React.useState(clusterId || (pveClusters[0] && pveClusters[0].id) || '');
@@ -20871,7 +20871,7 @@
                             they surface over the cloud shell. The classic copies live in the main
                             return; the skins are mutually exclusive so only one set ever mounts. */}
                         {configVm && (configVm._clusterId || selectedCluster) && (
-                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} />
+                            <ConfigModal vm={configVm} clusterId={configVm._clusterId || selectedCluster.id} allClusters={clusters} dashboardAuthFetch={authFetch} onClose={handleCloseConfig} addToast={addToast} isCorporate={false} variant="cloud" />
                         )}
                         {cloudBulk && (
                             <GuestBulkActionModal action={cloudBulk.action} guests={cloudBulk.guests} authFetch={authFetch}
