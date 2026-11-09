@@ -79,6 +79,9 @@ def _fake(tmp_path, kind):
             "_sqlite3.cpython-313-x86_64-linux-gnu.so: wrong ELF class: ELFCLASS64')\n")
     elif kind == 'oserror':
         (pkg / '__init__.py').write_text("raise OSError(12, 'Cannot allocate memory')\n")
+    elif kind == 'empty':
+        # what is left of the directory the two packages share once one of them goes
+        (pkg / '__pycache__').mkdir()
     else:
         # the layout of the real package, with a build for another machine or Python
         (pkg / '__init__.py').write_text('from sqlcipher3.dbapi2 import *\n')
@@ -121,6 +124,7 @@ def _bare_import(tmp_path, fake):
             'wrong ELF class: ELFCLASS64'),
     ('other-build', "ModuleNotFoundError: No module named 'sqlcipher3._sqlite3'"),
     ('oserror', 'OSError: [Errno 12] Cannot allocate memory'),
+    ('empty', 'ImportError: the sqlcipher3 found has no driver in it'),
 ])
 def test_an_installed_sqlcipher3_that_does_not_load_is_a_warning(tmp_path, kind, reason):
     out = _probe(tmp_path, _fake(tmp_path, kind))
@@ -152,7 +156,7 @@ def test_one_that_is_not_installed_keeps_its_info_line(tmp_path):
     assert out['ensure'] == {'action': 'no-backend', 'reason': 'sqlcipher3 not installed'}
 
 
-@pytest.mark.parametrize('kind', ['elf', 'other-build'])
+@pytest.mark.parametrize('kind', ['elf', 'other-build', 'empty'])
 def test_the_fallback_is_plain_sqlite_as_before(tmp_path, kind):
     out = _probe(tmp_path, _fake(tmp_path, kind))
     assert out['backend'] == 'sqlite-plain' and out['driver'] == 'sqlite3'
@@ -172,8 +176,9 @@ def test_keystore_status_carries_the_reason(tmp_path):
     assert 'does not load on this machine' in ks['recommendation']
 
 
-def test_without_logging_set_up_the_warning_still_reaches_stderr(tmp_path):
-    said = _bare_import(tmp_path, _fake(tmp_path, 'other-build'))
+@pytest.mark.parametrize('kind', ['other-build', 'empty'])
+def test_without_logging_set_up_the_warning_still_reaches_stderr(tmp_path, kind):
+    said = _bare_import(tmp_path, _fake(tmp_path, kind))
     assert 'is installed but does not load on this machine' in said
     assert _bare_import(tmp_path, None) == ''
 

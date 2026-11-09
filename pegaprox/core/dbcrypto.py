@@ -55,8 +55,13 @@ def _package_dir() -> Optional[str]:
     try:
         import importlib.util
         spec = importlib.util.find_spec('sqlcipher3')
-        origin = spec and spec.origin
-        return os.path.dirname(origin) if origin else None
+        if spec is None:
+            return None
+        if spec.origin:
+            return os.path.dirname(spec.origin)
+        # a directory without __init__.py has no origin, only the places it was found
+        found = list(spec.submodule_search_locations or ())
+        return found[0] if found else None
     except Exception:
         return None
 
@@ -85,6 +90,10 @@ def sqlcipher_problem(encrypted: Optional[str] = None) -> Optional[str]:
 
 try:
     import sqlcipher3 as _sqlite_module  # type: ignore
+    # MK Nov 2026 - an empty sqlcipher3/ directory (left when one of the two packages that
+    # share it goes) imports as a namespace package with nothing in it
+    if not hasattr(_sqlite_module, 'connect'):
+        raise ImportError('the sqlcipher3 found has no driver in it')
     BACKEND = 'sqlcipher'
 except Exception as _e:
     import sqlite3 as _sqlite_module  # type: ignore
