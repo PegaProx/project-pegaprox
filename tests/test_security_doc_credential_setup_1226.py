@@ -5,7 +5,8 @@ Since the Debian package depends on python3-sqlcipher3, its databases are encryp
 generate a NEW key for the credential: the database then did not open ('unknown-key'), the
 check of step 6 still passed because the [KEYSTORE] line is logged before the database is
 opened, and step 7 shredded /etc/pegaprox/secret.key, the one key that opened it, or
-config/.pegaprox.key, which is also the Fernet key of old field values.
+config/.pegaprox.key, which is also the Fernet key of old field values. The hint deploy.sh
+gives for a key still in config/ moved that file away as well.
 
 NS Nov 2026
 """
@@ -77,3 +78,12 @@ def test_a_key_file_is_removed_only_after_the_check_and_never_config_pegaprox_ke
     for cmd in _commands(doc):
         if re.search(r'\b(shred|rm|mv)\b', cmd):
             assert '.pegaprox.key' not in cmd, cmd
+
+
+def test_deploy_sh_tells_to_copy_the_legacy_key_not_to_move_it():
+    """The hint deploy.sh prints for an install that still has its key in config/."""
+    hint = [ln for ln in (ROOT / 'deploy.sh').read_text(encoding='utf-8').splitlines()
+            if 'Migrate with' in ln]
+    assert len(hint) == 1
+    assert 'sudo cp \\"$LEGACY_KEY\\" \\"$SYS_KEY\\"' in hint[0]
+    assert not re.search(r'\b(mv|rm|shred)\b', hint[0])

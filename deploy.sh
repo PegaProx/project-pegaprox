@@ -487,7 +487,9 @@ EOF
     elif [ -f "$LEGACY_KEY" ]; then
         print_warning "Legacy key at $LEGACY_KEY detected"
         print_info "  PegaProx will keep using it but emit a deprecation warning."
-        print_info "  Migrate with:  sudo mv \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 640 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
+        # NS Nov 2026 - a copy, not a move: the file is also the Fernet key of old field values
+        print_info "  Migrate with:  sudo cp \"$LEGACY_KEY\" \"$SYS_KEY\" && sudo chmod 640 \"$SYS_KEY\" && sudo chown root:$SERVICE_GROUP \"$SYS_KEY\""
+        print_info "  Keep $LEGACY_KEY: PegaProx reads old field values with it too (docs/SECURITY.md)."
     else
         # No key anywhere — generate the new default at the secure location.
         mkdir -p "$SYS_KEY_DIR"
