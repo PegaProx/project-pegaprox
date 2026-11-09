@@ -126,7 +126,7 @@ jobs:
           echo "Repo-Poll wird übersprungen. Es wird die aktuell neueste pegaprox-Version installiert."
 
   # ----------------------------------------------------------------------
-  # 2) LXC-Template per distrobuilder (Snap) + Smoke-Test
+  # 2) LXC-Template per distrobuilder + Smoke-Test
   # ----------------------------------------------------------------------
   build-lxc:
     needs: prepare
@@ -161,11 +161,12 @@ jobs:
         run: |
           sudo apt-get update
           # python3-pip for the wheel download of build-sqlcipher3-deb.sh, dpkg-deb is there anyway
+          # NS Nov 2026 - distrobuilder from noble's universe: the snap (3.1) is gone from the
+          # store, "snap install" now ends in 'snap "distrobuilder" not found'
           sudo apt-get install -y \
-            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support python3-pip
+            debootstrap rsync systemd-container curl xz-utils qemu-user-static binfmt-support python3-pip \
+            distrobuilder
           sudo update-binfmts --enable qemu-aarch64 || true
-          sudo snap install distrobuilder --classic
-          export PATH="$PATH:/snap/bin"
           distrobuilder --version
 
       # NS Nov 2026 (#1226) - python3-sqlcipher3 is a C extension, one package per architecture.
@@ -292,7 +293,6 @@ jobs:
 
       - name: rootfs bauen
         run: |
-          export PATH="$PATH:/snap/bin"
           sudo --preserve-env=PATH "$(command -v distrobuilder)" \
             build-lxc packaging/lxc/pegaprox-lxc.yaml \
             -o image.release=${DEBIAN_RELEASE} \
