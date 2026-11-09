@@ -118,7 +118,7 @@ def test_the_refusal_to_move_the_credential_asks_for_it():
     comp = _component()
     assert "d.code === 'CREDENTIAL_REQUIRED'" in comp
     assert "setNeedsSecret(true)" in comp
-    assert "if (secret) body.pass = secret;" in comp
+    assert "if (secret) body[secretField] = secret;" in comp
     # what was typed stays in the draft: no setDraft(saved) on that path
     refusal = comp[comp.index("CREDENTIAL_REQUIRED"):comp.index("addToast(await PegaProxApiErrors.message")]
     assert 'setDraft' not in refusal
@@ -176,3 +176,14 @@ def test_every_node_row_is_given_the_port_of_its_own_node():
     assert len(calls) == 4
     # the name of the node being rendered, never a handler argument of the same name
     assert set(calls) == {'node', 'nodeName'}
+
+
+def test_the_credential_goes_in_the_field_the_server_names():
+    src = _read('web', 'src', 'dashboard.js')
+    assert 'body[secretField] = secret' in src and 'body.pass = secret' not in src
+    assert 'setSecretField(d.credential_field)' in src
+
+
+def test_a_poll_of_the_cluster_list_does_not_wipe_what_is_typed():
+    src = _read('web', 'src', 'dashboard.js')
+    assert '[cluster.id, savedKey]' in src and '[cluster.id, saved]' not in src

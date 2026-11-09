@@ -178,6 +178,18 @@ def test_the_configured_ssh_user_is_the_login_for_the_key_too(monkeypatch):
     assert m.connects[0][1]['login'] == 'pegaprox'
 
 
+def test_the_password_leg_dials_the_port_of_the_node_too(monkeypatch):
+    """Behind a per-node forward the node's address is the forward's, and its port 22 is
+    not the node: the password must go to the node's own port."""
+    seen = []
+    monkeypatch.setattr(ssh_mod, '_ssh_exec', lambda host, user, pw, cmd, **k: seen.append(k.get('port')) or (0, 'ok', ''))
+    m = _Mgr(answers=['auth'], pass_='pw', user='root@pam', ssh_key='')
+    m.config.ssh_port = 22
+    m.config.node_endpoints = {'pve2': {'ssh_port': 2202}}
+    ssh_mod._pve_node_exec(m, 'pve2', 'true')
+    assert seen == [2202]
+
+
 def test_the_key_leg_names_the_node_so_a_port_of_its_own_is_dialled(monkeypatch):
     """node_endpoints: several nodes can sit behind one address on different ports, so
     _ssh_connect needs the node name to pick the port."""

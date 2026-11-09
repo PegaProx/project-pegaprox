@@ -15,6 +15,7 @@ import hashlib
 
 from pegaprox.constants import SSH_MAX_CONCURRENT
 from pegaprox.utils.ssh_security import apply_host_key_policy, persist_host_keys, verify_transport_host_key
+from pegaprox.models.tasks import ssh_port_of
 from pegaprox.globals import (
     _ssh_active_connections, _ssh_connection_lock,
     cluster_managers,
@@ -200,12 +201,15 @@ def _feed_stdin(stdin, data):
 
 
 def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
-              connect_timeout=8, stdin_data=None):
+              connect_timeout=8, stdin_data=None, port=22):
     """Execute command on remote host via SSH.
     Handles ESXi which only allows 'keyboard-interactive' and 'publickey'.
 
     stdin_data: text for the command's stdin, for a secret that must not be part of
     `cmd` (a command line is readable by every local account while it runs).
+
+    port: the SSH port. A node behind a per-node forward (node_endpoints) answers on its
+    own, and its address then belongs to the forward, whose port 22 is not the node.
 
     ESXi SSH quirks:
     - Only allows keyboard-interactive and publickey auth (NOT password)
@@ -249,7 +253,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         """Pre-create socket with explicit connect_timeout — paramiko.Transport
         won't fail-fast on dead hosts otherwise.  IPv4 + IPv6 aware."""
         try:
-            return _socket.create_connection((host, 22), timeout=connect_timeout)
+            return _socket.create_connection((host, port), timeout=connect_timeout)
         except Exception:
             return None
     
@@ -313,13 +317,13 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         try:
             _sock = _make_sock()
             if _sock is None:
-                raise Exception(f'TCP connect to {host}:22 timed out after {connect_timeout}s')
+                raise Exception(f'TCP connect to {host}:{port} timed out after {connect_timeout}s')
             transport = paramiko.Transport(_sock)
             _configure_transport_algorithms(transport)
             transport.connect()
             # verify the server key BEFORE sending credentials (a manual Transport
             # bypasses the SSHClient host-key policy). Raises on changed/unknown key.
-            verify_transport_host_key(transport, host, paramiko)
+            verify_transport_host_key(transport, host, paramiko, port=port)
 
             def _ki_handler(title, instructions, prompt_list):
                 return [password] * len(prompt_list)
@@ -345,11 +349,11 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
                 
                 _sock2 = _make_sock()
                 if _sock2 is None:
-                    raise Exception(f'TCP connect to {host}:22 timed out after {connect_timeout}s')
+                    raise Exception(f'TCP connect to {host}:{port} timed out after {connect_timeout}s')
                 transport2 = paramiko.Transport(_sock2)
                 _configure_transport_algorithms(transport2)
                 transport2.connect()
-                verify_transport_host_key(transport2, host, paramiko)
+                verify_transport_host_key(transport2, host, paramiko, port=port)
 
                 def _ki_handler2(title, instructions, prompt_list):
                     return [password] * len(prompt_list)
@@ -430,7 +434,7 @@ def _ssh_exec(host, user, password, cmd, timeout=30, use_controlmaster=False,
         # standby upgrade to `yes` (reject unknown too). Keeps the system-ssh fallback's
         # host-key behaviour in lock-step with the paramiko paths.
         _hkc = cli_hostkey_opts()[0]
-        ssh_args = ['sshpass', '-e', 'ssh',
+        ssh_args = ['sshpass', '-e', 'ssh', '-p', str(int(port or 22)),
              '-o', f'StrictHostKeyChecking={_hkc}',
              '-o', f'UserKnownHostsFile={_known_hosts}',
              '-o', 'LogLevel=ERROR',
@@ -849,7 +853,7 @@ def _pve_node_exec(pve_mgr, node, cmd, timeout=600, use_controlmaster=True,
             return 1, '', f"cannot run node commands on '{node}': {_why}"
         rc, out, err = _ssh_exec(node_host, _ssh_user, _ssh_pass, cmd,
                                   timeout=timeout, use_controlmaster=use_controlmaster,
-                                  stdin_data=stdin_data)
+                                  stdin_data=stdin_data, port=ssh_port_of(pve_mgr.config, node))
         # SSH error patterns that indicate the node itself is dead, not the cmd
         looks_like_node_down = (
             rc != 0 and any(s in str(err).lower() for s in (

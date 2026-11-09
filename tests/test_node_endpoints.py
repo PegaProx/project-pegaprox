@@ -210,6 +210,39 @@ def test_a_new_endpoint_port_without_the_credential_is_refused(env):
     assert env.mgr.config.node_endpoints == {}
 
 
+def test_taking_a_port_override_away_needs_the_credential_too(env):
+    """The node then answers on the cluster's port, another listener at the same address."""
+    assert env.c.put('/api/clusters/c1', json={'node_endpoints': NAT, 'pass': STORED_PW}).status_code == 200
+    less = {'node01': {'host': PUBLIC, 'api_port': 8006}, 'node02': NAT['node02']}
+    r = env.c.put('/api/clusters/c1', json={'node_endpoints': less})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    assert r.get_json().get('code') == 'CREDENTIAL_REQUIRED'
+    assert env.mgr.config.node_endpoints == NAT
+
+
+def test_the_refusal_names_the_field_the_cluster_logs_in_with(env):
+    r = env.c.put('/api/clusters/c1', json={'node_endpoints': NAT})
+    assert r.get_json().get('credential_field') == 'pass'
+    env.mgr.config.api_token_user = 'root@pam!pegaprox'
+    r = env.c.put('/api/clusters/c1', json={'node_endpoints': NAT})
+    assert r.get_json().get('credential_field') == 'api_token_secret'
+
+
+def test_a_reconfigure_that_moves_a_node_counts_as_a_move():
+    old = PegaProxConfig(_row(node_endpoints=NAT))
+    same = PegaProxConfig(_row(node_endpoints=NAT))
+    moved = PegaProxConfig(_row(node_endpoints={**NAT, 'node02': {'host': '198.51.100.7', 'ssh_port': 2202}}))
+    assert 'node_endpoints' not in clusters_api._moved_by_reconfigure(old, same, {'node_endpoints': NAT})
+    assert 'node_endpoints' in clusters_api._moved_by_reconfigure(old, moved, {'node_endpoints': {}})
+
+
+def test_a_node_asked_for_in_another_case_gets_its_own_entry():
+    cfg = PegaProxConfig(_row(node_endpoints={'Node02': {'ssh_port': 2202}}))
+    from pegaprox.models.tasks import ssh_port_of
+    assert ssh_port_of(cfg, 'node02') == 2202 and ssh_port_of(cfg, 'Node02') == 2202
+    assert ssh_port_of(cfg, 'node03') == 22
+
+
 def test_the_map_is_applied_when_the_credential_is_re_entered(env):
     r = env.c.put('/api/clusters/c1', json={'node_endpoints': NAT, 'pass': STORED_PW})
     assert r.status_code == 200, r.get_data(as_text=True)

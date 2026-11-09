@@ -2121,9 +2121,14 @@
             const [draft, setDraft] = React.useState(saved);
             const [secret, setSecret] = React.useState('');
             const [needsSecret, setNeedsSecret] = React.useState(false);
+            // pass, or api_token_secret on a cluster that logs in with a token: the server says which
+            const [secretField, setSecretField] = React.useState('pass');
             const [saving, setSaving] = React.useState(false);
+            // the cluster list is polled and hands a new object every time; only a map that
+            // really changed may replace what is being typed
+            const savedKey = JSON.stringify(saved);
 
-            React.useEffect(() => { setDraft(saved); setSecret(''); setNeedsSecret(false); }, [cluster.id, saved]);
+            React.useEffect(() => { setDraft(saved); setSecret(''); setNeedsSecret(false); }, [cluster.id, savedKey]);
 
             const clusterSsh = cluster.ssh_port || 22;
             const clusterApi = cluster.api_port || 8006;
@@ -2177,7 +2182,7 @@
                 setSaving(true);
                 try {
                     const body = { node_endpoints: clean };
-                    if (secret) body.pass = secret;
+                    if (secret) body[secretField] = secret;
                     const r = await authFetch(`${API_URL}/clusters/${cluster.id}/config`, {
                         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body),
@@ -2187,6 +2192,7 @@
                         // pointing a node somewhere new sends the cluster's credential there,
                         // so the server asks for it to be typed again (same rule as the host)
                         if (d && d.code === 'CREDENTIAL_REQUIRED') {
+                            if (d.credential_field) setSecretField(d.credential_field);
                             setNeedsSecret(true);
                             addToast(t('nodeEpCredNeeded'), 'error');
                             return;

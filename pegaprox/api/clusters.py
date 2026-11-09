@@ -548,6 +548,20 @@ _KEPT_BY_RECONFIGURE = (
 )
 
 
+def _endpoints_moved(current, new, known):
+    """Whether a replacement node_endpoints map moves where a credential is offered: a
+    host that is none of the cluster's known addresses, or any port that changes, a
+    removed override included (that node falls back to the cluster's port, another
+    listener). Taking a host away is no move, the node goes back to its own address."""
+    for node in set(current) | set(new):
+        old_e, new_e = current.get(node) or {}, new.get(node) or {}
+        if new_e.get('host') and _host_key(new_e['host']) not in known:
+            return True
+        if any(new_e.get(k) != old_e.get(k) for k in ('ssh_port', 'api_port')):
+            return True
+    return False
+
+
 def _moved_by_reconfigure(old, new, data):
     """What of host, fallback_hosts, ssh_port and ssl_verification a re-configure moves,
     by the rule of _config_edit_checks: an address not among the old ones, another SSH
@@ -570,6 +584,12 @@ def _moved_by_reconfigure(old, new, data):
         moved.append('ssh_port')
     if getattr(old, 'ssl_verification', False) and not getattr(new, 'ssl_verification', False):
         moved.append('ssl_verification')
+    # a map the body leaves out is the old one (_KEPT_BY_RECONFIGURE), no move
+    if 'node_endpoints' in data:
+        old_eps = getattr(old, 'node_endpoints', None) or {}
+        known |= {_host_key(e.get('host')) for e in old_eps.values() if e.get('host')}
+        if _endpoints_moved(old_eps, getattr(new, 'node_endpoints', None) or {}, known):
+            moved.append('node_endpoints')
     return moved
 
 
@@ -2286,20 +2306,13 @@ def _config_edit_checks(mgr, data):
     # same rule -- type the credential again. _node_endpoints_error has already
     # normalised the map by the time this runs.
     if 'node_endpoints' in data:
-        current = getattr(cfg, 'node_endpoints', None) or {}
         for node, spec in (data.get('node_endpoints') or {}).items():
             host = spec.get('host')
-            if host and _host_key(host) not in known:
-                if not validate_host_address(host):
-                    return bad(f"node_endpoints[{node}]: host must be a host name or an IP address")
-                moved.append('node_endpoints')
-                break
-            if spec.get('ssh_port') and spec['ssh_port'] != current.get(node, {}).get('ssh_port'):
-                moved.append('node_endpoints')
-                break
-            if spec.get('api_port') and spec['api_port'] != current.get(node, {}).get('api_port'):
-                moved.append('node_endpoints')
-                break
+            if host and _host_key(host) not in known and not validate_host_address(host):
+                return bad(f"node_endpoints[{node}]: host must be a host name or an IP address")
+        if _endpoints_moved(getattr(cfg, 'node_endpoints', None) or {}, data.get('node_endpoints') or {},
+                            known):
+            moved.append('node_endpoints')
     if 'ssl_verification' in data and getattr(cfg, 'ssl_verification', False) \
             and not data.get('ssl_verification'):
         moved.append('ssl_verification')
@@ -2317,7 +2330,10 @@ def _config_edit_checks(mgr, data):
     if not creds['pass_'] and not creds['api_token_secret']:
         return (jsonify({'error': 'Re-enter the cluster password (pass) or the API token secret '
                                   '(api_token_secret) to change ' + ', '.join(moved) + '.',
-                         'code': 'CREDENTIAL_REQUIRED'}), 400), None
+                         'code': 'CREDENTIAL_REQUIRED',
+                         # which one this cluster logs in with, for a form that asks for
+                         # one secret: a token secret sent as pass replaces the token
+                         'credential_field': 'api_token_secret' if token_user else 'pass'}), 400), None
     return None, {'creds': creds, 'moved': moved}
 
 

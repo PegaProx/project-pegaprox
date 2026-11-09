@@ -102,6 +102,11 @@ def node_endpoint_of(config, node_name) -> dict:
         return {}
     endpoints = getattr(config, 'node_endpoints', None) or {}
     entry = endpoints.get(node_name)
+    if entry is None and endpoints and isinstance(node_name, str):
+        # the console context also lists a node under its lowercase alias, and an alias
+        # must get the node's own entry, not the cluster's ports
+        low = node_name.lower()
+        entry = next((e for n, e in endpoints.items() if isinstance(n, str) and n.lower() == low), None)
     return entry if isinstance(entry, dict) else {}
 
 
