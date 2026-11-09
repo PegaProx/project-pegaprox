@@ -178,6 +178,7 @@
     "pegaprox/utils/auth.py",
     "pegaprox/utils/concurrent.py",
     "pegaprox/utils/email.py",
+    "pegaprox/utils/index_page.py",
     "pegaprox/utils/ldap.py",
     "pegaprox/utils/log_handler.py",
     "pegaprox/utils/oidc.py",
